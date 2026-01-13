@@ -1,0 +1,191 @@
+openapi: 3.0.3
+info:
+  title: Hospital Order System API
+  version: 0.1.0
+  description: API contracts for ingest, review, confirmation, master data, and outputs.
+servers:
+  - url: https://api.example.com
+paths:
+  /ingest/email:
+    post:
+      summary: Ingest email with PDF attachment
+      description: Accepts metadata and storage reference to an incoming email/PDF for processing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_id, pdf_uri, received_at]
+              properties:
+                message_id: { type: string }
+                pdf_uri: { type: string, format: uri }
+                received_at: { type: string, format: date-time }
+      responses:
+        '202':
+          description: Accepted for processing with created OrderDocument id.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document_id: { type: string }
+  /orders:
+    get:
+      summary: List orders by week/status/facility
+      parameters:
+        - in: query
+          name: week_id
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string, enum: [未着, 要確認, 確定, エラー] }
+        - in: query
+          name: facility_id
+          schema: { type: string }
+      responses:
+        '200':
+          description: Orders with status and summary.
+  /orders/{order_id}:
+    get:
+      summary: Get order details and lines
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Order with lines, statuses, and related document.
+  /orders/{order_id}/document:
+    get:
+      summary: Download PDF document
+      parameters:
+        - in: path
+          name: order_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: PDF stream
+          content:
+            application/pdf: {}
+  /orders/{order_id}/lines:
+    put:
+      summary: Update extracted lines inline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lines:
+                  type: array
+                  items:
+                    type: object
+                    required: [line_id, quantity_corrected]
+                    properties:
+                      line_id: { type: string }
+                      quantity_corrected: { type: number }
+                      change_note: { type: string }
+      responses:
+        '200':
+          description: Lines updated (still 要確認 until confirm).
+  /orders/{order_id}/confirm:
+    post:
+      summary: Confirm order and trigger outputs
+      responses:
+        '202':
+          description: Confirmation accepted; outputs regeneration started.
+  /weekly-menus:
+    post:
+      summary: Upload weekly menu file and create menu items
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                week_id: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        '201':
+          description: Menu created and items available for editing.
+  /weekly-menus/{week_id}/items/{item_id}:
+    put:
+      summary: Update menu item attributes
+      responses:
+        '200':
+          description: Updated and saved.
+  /facilities:
+    post:
+      summary: Create facility and areas
+      responses:
+        '201':
+          description: Facility created.
+  /facilities/{facility_id}/config:
+    put:
+      summary: Update facility master config (templates/rules/label/invoice)
+      responses:
+        '200':
+          description: Config saved; will apply to next processing run.
+  /outputs/labels:
+    get:
+      summary: Download label CSV for confirmed order
+      parameters:
+        - in: query
+          name: order_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Label CSV (CP932-compatible).
+  /outputs/delivery-notes:
+    get:
+      summary: Download delivery note Excel for facility/day
+      parameters:
+        - in: query
+          name: order_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Excel file per facility/day.
+  /outputs/manufacturing-aggregate:
+    get:
+      summary: Download manufacturing aggregate CSV by week/facility
+      parameters:
+        - in: query
+          name: week_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Aggregate CSV.
+  /health/backlog:
+    get:
+      summary: Backlog status for ingestion/exports
+      responses:
+        '200':
+          description: Queue depth, oldest pending timestamp, recovery ETA.
+components:
+  securitySchemes:
+    admin_auth:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.example.com/authorize
+          tokenUrl: https://auth.example.com/token
+          scopes: {}
+    operator_auth:
+      type: http
+      scheme: basic
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [未着, 要確認, 確定, エラー]
+security:
+  - admin_auth: []
+  - operator_auth: []

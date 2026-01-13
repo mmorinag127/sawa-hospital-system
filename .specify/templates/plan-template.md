@@ -31,7 +31,15 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- Master-data-driven design (facility templates, mappings, label/invoice rules) — no
+  hard-coded facility logic.
+- Required tests identified for ingest -> facility resolution -> menu mapping -> outputs
+  (label CSV, delivery note Excel, manufacturing totals), including OCR retry/duplicate
+  replacement/zero suppression/change-column precedence/backlog recovery.
+- UX constraints upheld: PC browser only, PDF viewer available, inline edits commit only on
+  a single confirm action, status vocabulary = 未着/要確認/確定/エラー with direct-to-fix cues.
+- Performance/reliability plan: immediate ingest on email receipt (JST), safe requeue on
+  failure, backlog catch-up after downtime, capacity for ~100 facilities/day.
 
 ## Project Structure
 

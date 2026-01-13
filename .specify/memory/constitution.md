@@ -1,50 +1,80 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+Sync Impact Report
+- Version change: 0.0.0 -> 1.0.0
+- Modified principles: n/a -> Code Quality & Safety; Testing Discipline & Data Fidelity; User Experience Consistency; Performance & Reliability
+- Added sections: Core Principles, Operational Standards, Development Workflow, Governance
+- Removed sections: Placeholder principles (5), unused template sections
+- Templates requiring updates: ✅ .specify/templates/plan-template.md, ✅ .specify/templates/tasks-template.md, ⚠ pending none
+- Follow-up TODOs: none
+-->
+
+# hospital-order-system Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Code Quality & Safety
+Build for readability, debuggability, and configuration-first behavior. Domain logic must be
+driven by facility master data (templates, mappings, policies) rather than hard-coded rules.
+Error handling MUST surface actionable guidance to operators, and logging MUST capture every
+ingest, edit, and configuration change with traceable IDs (FAC/WEK).
+Rationale: Frequent facility-specific variance demands maintainable, auditable code paths
+that can adapt without deployments.
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. Testing Discipline & Data Fidelity
+Contract and integration tests MUST guard PDF ingestion, facility resolution, menu mapping,
+and output generation (label CSV, delivery note Excel, manufacturing totals). Tests MUST
+cover OCR retry logic, duplicate facility-week replacement, zero-quantity suppression, and
+change-column precedence. Red/green refactors are required before feature completion.
+Rationale: Data correctness is critical when OCR is imperfect; regressions directly impact
+production labels and invoices.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. User Experience Consistency
+The operator UX MUST be consistent: PC browser only, PDF viewer always available, inline
+edits deferred until a single “確定” commit, and status vocabulary limited to 未着/要確認/
+確定/エラー. Filters and error cues must take operators directly to the fix location.
+Rationale: Operators rely on repeatable flows to reconcile imperfect OCR quickly and safely.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. Performance & Reliability
+Ingestion MUST be immediate on email receipt in JST. The system MUST clear backlog after
+downtime and sustain at least 100 facilities per day without manual triage. Output updates
+must be triggered automatically on every確定, and failures must requeue safely without data
+loss.
+Rationale: Production depends on timely labels, invoices, and aggregates; lag breaks
+downstream manufacturing and delivery.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+## Operational Standards
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+- Security and auditing: Authenticate admins via Google accounts and operators via ID/password
+  (expandable per plan); log all uploads, edits, and configuration changes with retention of
+  at least 1–2 months.
+- Configuration over code: Facility differences (templates, label rules, invoice mappings)
+  MUST remain in master data to avoid code forks for new facilities.
+- Data retention: Store inbound email + PDF for the configurable retention window (initial
+  1–2 months) with recoverable history for disputes.
+- Observability: Structured logs for ingest, OCR attempts, retries, and output generation
+  must include facility/week IDs to trace issues quickly.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+## Development Workflow
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
-
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- Planning must document the chosen project structure and testing approach before coding.
+- Every change must pass Constitution Check gates: code quality rules enforced, required
+  contract/integration tests identified and executed, UX behaviors (status terms, inline
+  confirmation) preserved, and performance/backlog recovery scenarios covered.
+- Code review is mandatory for all changes; reviewers verify master-data-driven design,
+  test coverage of ingest/output flows, and adherence to UX/performance commitments.
+- Deployments require evidence of passing tests for ingest, facility resolution, output
+  generation, and backlog recovery where impacted.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+- This constitution supersedes other practice docs for scope it covers.
+- Amendments require consensus from project maintainers, an explicit changelog entry,
+  migration/operational impact notes, and version bump per semantic rules (MAJOR for
+  removals or incompatible rewrites, MINOR for new principles/sections, PATCH for clarifying
+  edits).
+- Compliance reviews occur during planning (Constitution Check), code review, and pre-release
+  verification; violations need a documented risk acceptance and mitigation plan.
+- Store ratification/amendment dates and version in this file; all downstream templates must
+  stay in sync.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2025-12-23 | **Last Amended**: 2025-12-23

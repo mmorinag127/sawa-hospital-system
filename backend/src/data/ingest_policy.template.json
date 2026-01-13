@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.1",
+  "updated_at": "2025-12-25",
+  "timezone": "Asia/Tokyo",
+  "ocr_retry_limit": 3,
+  "retry_policy": {
+    "base_delay_seconds": 10,
+    "max_delay_seconds": 60
+  },
+  "backlog_policy": {
+    "skip_ocr_for_stale": false,
+    "max_age_days": 14
+  },
+  "retention_days": 60,
+  "menu_match_min_ratio": 0.72,
+  "quantity_rules": {
+    "zero_as_empty": true,
+    "use_change_column_if_present": true
+  },
+  "week_id_policy": {
+    "source": "earliest_date",
+    "date_format": "MM/DD",
+    "week_format": "WEK%GW%V",
+    "week_start": "iso"
+  }
+}

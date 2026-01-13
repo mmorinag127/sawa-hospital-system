@@ -1,0 +1,225 @@
+version: "3"
+
+vars:
+  PROJECT_ID: "mythic-lattice-483204-t8"
+  GCP_SA_KEY: "/Users/mmorinag/Sawa/2025.12/MythicLatticeData.json"
+  FAX_PDF: "/Users/mmorinag/Sawa/2025.12/input_example/11.fax000312975 1214~.pdf"
+  CLOUDRUN_REGION: "asia-northeast1"
+  CLOUDRUN_WEB_SERVICE: "web-dev"
+  CLOUDRUN_WEB_URL: "https://web-dev-m3j47i2tgq-an.a.run.app"
+  LOCAL_DB_URI: "sqlite:////Users/mmorinag/Sawa/2025.12/workspace/dev.db"
+
+tasks:
+  backend_setup:
+    desc: Create venv and install backend dependencies.
+    cmds:
+      - 'python3.11 -m venv backend/.venv'
+      - 'backend/.venv/bin/pip install -U pip setuptools wheel'
+      - 'backend/.venv/bin/pip install -r backend/requirements.txt'
+
+  backend_setup_dev:
+    desc: Install backend dev/test dependencies.
+    deps:
+      - backend_setup
+    cmds:
+      - 'backend/.venv/bin/pip install -e backend[dev] --no-build-isolation'
+
+  backend_clean_venv:
+    desc: Remove backend venv (use before recreating).
+    cmds:
+      - 'rm -rf backend/.venv'
+
+  backend_run:
+    desc: Run FastAPI backend with local env vars.
+    dir: backend
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: "{{.GCP_SA_KEY}}"
+      GCP_PROJECT_ID: "{{.PROJECT_ID}}"
+      FACILITY_MASTER_PATH: "src/data/facility_master.test.json"
+      OCR_DEBUG_DUMP_DIR: "tmp"
+      DB_URI: "{{.LOCAL_DB_URI}}"
+    cmds:
+      - './.venv/bin/uvicorn src.main:app --reload'
+
+  backend_start:
+    desc: Setup backend venv and run the API.
+    deps:
+      - backend_setup
+    cmds:
+      - task: backend_run
+
+  ocr_test:
+    desc: Send OCR ingest request for the Fureai test PDF.
+    env:
+      FAX_PDF: "{{.FAX_PDF}}"
+    cmds:
+      - |
+        curl -X POST http://localhost:8000/ingest/email \
+          -H "Content-Type: application/json" \
+          -d '{
+            "message_id": "test-001",
+            "pdf_uri": "file://{{.FAX_PDF}}",
+            "received_at": "2025-12-28T10:00:00"
+          }'
+
+  ocr_test_cloud:
+    desc: Send OCR ingest request via Pub/Sub + GCS (Cloud Run path).
+    env:
+      PROJECT_ID: "{{.PROJECT_ID}}"
+      TOPIC: "orders-dev"
+      RAW_BUCKET: "{{.PROJECT_ID}}-dev-raw"
+      PDF_PATH: "{{.FAX_PDF}}"
+    cmds:
+      - 'bash infra/terraform/tests/push_ingest.sh'
+
+  ocr_pipeline_trigger:
+    desc: Upload PDF to OCR pipeline bucket and optionally trigger pipeline endpoint.
+    env:
+      OCR_PIPELINE_BUCKET: "{{.PROJECT_ID}}-dev-raw"
+      OCR_PIPELINE_INPUT_PREFIX: "input/"
+      OCR_PIPELINE_URL: ""
+      OCR_PIPELINE_FACILITY_ID: "FAC00002"
+      OCR_PIPELINE_TEMPLATE_ID: "fax_fac00002_v1"
+      OCR_PIPELINE_PDF: "{{.FAX_PDF}}"
+    cmds:
+      - |
+        object_name="${OCR_PIPELINE_INPUT_PREFIX}yomitoku-$(date +%Y%m%d_%H%M%S).pdf"
+        gsutil -h "x-goog-meta-facility_id:${OCR_PIPELINE_FACILITY_ID}" \
+          -h "x-goog-meta-template_id:${OCR_PIPELINE_TEMPLATE_ID}" \
+          cp "${OCR_PIPELINE_PDF}" "gs://${OCR_PIPELINE_BUCKET}/${object_name}"
+        if [ -n "${OCR_PIPELINE_URL}" ]; then
+          curl -sS -X POST "${OCR_PIPELINE_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{\"bucket\":\"${OCR_PIPELINE_BUCKET}\",\"name\":\"${object_name}\"}"
+        else
+          echo "uploaded: gs://${OCR_PIPELINE_BUCKET}/${object_name}"
+        fi
+
+  backend_test_us1:
+    desc: Run US1 contract/integration tests for ingest + supersede + facility unresolved.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - './.venv/bin/python -m pytest tests/contract/test_ingest.py tests/integration/test_ingest_supersede.py tests/integration/test_facility_unresolved.py'
+
+  backend_test_us2:
+    desc: Run US2 integration tests for line corrections + status flow.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - './.venv/bin/python -m pytest tests/integration/test_line_corrections.py tests/integration/test_status_flow.py'
+
+  backend_test_us3:
+    desc: Run US3 integration tests for menu upload/edit/override.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - './.venv/bin/python -m pytest tests/integration/test_menu_upload.py tests/integration/test_menu_edits_output.py tests/integration/test_menu_override.py'
+
+  backend_test_us4:
+    desc: Run US4 contract/integration tests for facility config.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - './.venv/bin/python -m pytest tests/contract/test_facility_config.py tests/integration/test_facility_config_apply.py'
+
+  backend_test_us_all:
+    desc: Run US1-4 targeted test suites.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - >-
+        ./.venv/bin/python -m pytest
+        tests/contract/test_ingest.py
+        tests/integration/test_ingest_supersede.py
+        tests/integration/test_facility_unresolved.py
+        tests/integration/test_line_corrections.py
+        tests/integration/test_status_flow.py
+        tests/integration/test_menu_upload.py
+        tests/integration/test_menu_edits_output.py
+        tests/integration/test_menu_override.py
+        tests/contract/test_facility_config.py
+        tests/integration/test_facility_config_apply.py
+
+  backend_test:
+    desc: Run all backend tests.
+    dir: backend
+    deps:
+      - backend_setup_dev
+    cmds:
+      - './.venv/bin/python -m pytest tests'
+
+  pubsub_ingest_test:
+    desc: Publish an ingest payload to Pub/Sub and upload the PDF to GCS.
+    env:
+      PROJECT_ID: "{{.PROJECT_ID}}"
+      TOPIC: "orders-dev"
+      RAW_BUCKET: "{{.PROJECT_ID}}-dev-raw"
+      PDF_PATH: "{{.FAX_PDF}}"
+    cmds:
+      - 'bash infra/terraform/tests/push_ingest.sh'
+
+  frontend_setup:
+    desc: Install frontend dependencies.
+    dir: frontend
+    cmds:
+      - 'npm install'
+
+  frontend_test_e2e:
+    desc: Run Playwright E2E tests (requires browsers installed).
+    dir: frontend
+    deps:
+      - frontend_setup
+    cmds:
+      - 'npx playwright install'
+      - 'npm run test:e2e'
+
+  cloudrun_web_public_on:
+    desc: Allow unauthenticated invocations for Cloud Run web (test only).
+    env:
+      PROJECT_ID: "{{.PROJECT_ID}}"
+      CLOUDRUN_REGION: "{{.CLOUDRUN_REGION}}"
+      CLOUDRUN_WEB_SERVICE: "{{.CLOUDRUN_WEB_SERVICE}}"
+    cmds:
+      - >
+        gcloud run services add-iam-policy-binding {{.CLOUDRUN_WEB_SERVICE}}
+        --region={{.CLOUDRUN_REGION}}
+        --project={{.PROJECT_ID}}
+        --member=allUsers
+        --role=roles/run.invoker
+
+  cloudrun_web_public_off:
+    desc: Revoke unauthenticated invocations for Cloud Run web.
+    env:
+      PROJECT_ID: "{{.PROJECT_ID}}"
+      CLOUDRUN_REGION: "{{.CLOUDRUN_REGION}}"
+      CLOUDRUN_WEB_SERVICE: "{{.CLOUDRUN_WEB_SERVICE}}"
+    cmds:
+      - >
+        gcloud run services remove-iam-policy-binding {{.CLOUDRUN_WEB_SERVICE}}
+        --region={{.CLOUDRUN_REGION}}
+        --project={{.PROJECT_ID}}
+        --member=allUsers
+        --role=roles/run.invoker
+
+  frontend_run_cloudrun_proxy:
+    desc: Run frontend dev server with API proxy to Cloud Run (CORS-safe).
+    dir: frontend
+    env:
+      API_PROXY_TARGET: "{{.CLOUDRUN_WEB_URL}}"
+      NEXT_PUBLIC_API_BASE_URL: "/api"
+    cmds:
+      - 'npm run dev -- --hostname 127.0.0.1 --port 3100'
+
+  frontend_run_local:
+    desc: Run frontend dev server against local backend (http://127.0.0.1:8000).
+    dir: frontend
+    env:
+      NEXT_PUBLIC_API_BASE_URL: "http://127.0.0.1:8000"
+    cmds:
+      - 'npm run dev -- --hostname 127.0.0.1 --port 3100'

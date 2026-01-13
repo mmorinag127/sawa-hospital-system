@@ -1,0 +1,44 @@
+env        = "dev"
+project_id = "your-gcp-project-id"
+region     = "asia-northeast1"
+location   = "ASIA-NORTHEAST1"
+
+raw_retention_days     = 60
+firestore_location_id  = "asia-northeast1"
+
+secret_ids = ["gmail-refresh-token", "db-password"]
+
+cloudrun_services = {
+  web    = "gcr.io/your-project/web:latest"
+  worker = "gcr.io/your-project/worker:latest"
+}
+
+cloudrun_service_resources = {
+  "ocr-pipeline" = {
+    cpu    = "2"
+    memory = "8Gi"
+  }
+}
+
+cloudrun_secret_env_vars = {
+  DB_PASSWORD = "db-password"
+}
+
+db_instance_name = "orders-dev"
+db_name = "orders"
+db_user = "orders_app"
+db_tier = "db-f1-micro"
+
+# pubsub_topic_name        = "orders-dev"
+# pubsub_subscription_name = "orders-dev-push"
+
+gmail_watch_schedule = "0 9 * * *"
+gmail_watch_path     = "/watch-refresh"
+# gmail_watch_job_name = "gmail-watch-refresh-dev"
+
+gmail_ingest_query = "is:unread has:attachment filename:pdf"
+gmail_ingest_label_ids = []
+gmail_ingest_max_results = 10
+gmail_ingest_mark_read = true
+gmail_ingest_prefix = "gmail"
+# worker_service_name  = "worker-dev"

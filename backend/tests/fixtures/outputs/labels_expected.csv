@@ -1,0 +1,3 @@
+facility_name,expiry_date,storage_mode,meal_slot,menu_category,product_name,quantity,details,maker_info,notice
+Test Facility,2025-01-06,chilled,AM,Main,Menu A,10.0,ARE0001 / 100g / hot,TODO,TODO
+Test Facility,2025-01-06,chilled,AM,Main,Menu A,5.0,ARE0002 / 100g / hot,TODO,TODO

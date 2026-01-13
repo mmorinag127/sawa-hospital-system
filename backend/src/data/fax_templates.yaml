@@ -1,0 +1,327 @@
+version: 1
+templates:
+  fax_fac00002_v1:
+    template_id: fax_fac00002_v1
+    template_version: 1
+    description: FAC00002 weekly fax template
+    template_image_gcs_uri: file:///app/src/data/templates/fax_fac00002_v1.png
+    units: normalized
+    page: 1
+    match:
+      orb_nfeatures: 2000
+      min_matches: 25
+      min_inlier_ratio: 0.15
+    warp:
+      output_size: [2480, 3508]
+    rois:
+      facility_name_box: [0.10, 0.05, 0.40, 0.10]
+      menu_band: [0.05, 0.26, 0.95, 0.90]
+      qty:
+        schema:
+          rows: 7
+          cols: 6
+          row_names: ["day1", "day2", "day3", "day4", "day5", "day6", "day7"]
+          col_names: ["regular_2f", "regular_3f", "soft_2f", "soft_3f", "mixer_2f", "mixer_3f"]
+        boxes_row_major:
+          - [0.36, 0.260, 0.08, 0.075]
+          - [0.44, 0.260, 0.08, 0.075]
+          - [0.52, 0.260, 0.08, 0.075]
+          - [0.60, 0.260, 0.08, 0.075]
+          - [0.68, 0.260, 0.08, 0.075]
+          - [0.76, 0.260, 0.08, 0.075]
+          - [0.36, 0.345, 0.08, 0.075]
+          - [0.44, 0.345, 0.08, 0.075]
+          - [0.52, 0.345, 0.08, 0.075]
+          - [0.60, 0.345, 0.08, 0.075]
+          - [0.68, 0.345, 0.08, 0.075]
+          - [0.76, 0.345, 0.08, 0.075]
+          - [0.36, 0.430, 0.08, 0.075]
+          - [0.44, 0.430, 0.08, 0.075]
+          - [0.52, 0.430, 0.08, 0.075]
+          - [0.60, 0.430, 0.08, 0.075]
+          - [0.68, 0.430, 0.08, 0.075]
+          - [0.76, 0.430, 0.08, 0.075]
+          - [0.36, 0.515, 0.08, 0.075]
+          - [0.44, 0.515, 0.08, 0.075]
+          - [0.52, 0.515, 0.08, 0.075]
+          - [0.60, 0.515, 0.08, 0.075]
+          - [0.68, 0.515, 0.08, 0.075]
+          - [0.76, 0.515, 0.08, 0.075]
+          - [0.36, 0.600, 0.08, 0.075]
+          - [0.44, 0.600, 0.08, 0.075]
+          - [0.52, 0.600, 0.08, 0.075]
+          - [0.60, 0.600, 0.08, 0.075]
+          - [0.68, 0.600, 0.08, 0.075]
+          - [0.76, 0.600, 0.08, 0.075]
+          - [0.36, 0.685, 0.08, 0.075]
+          - [0.44, 0.685, 0.08, 0.075]
+          - [0.52, 0.685, 0.08, 0.075]
+          - [0.60, 0.685, 0.08, 0.075]
+          - [0.68, 0.685, 0.08, 0.075]
+          - [0.76, 0.685, 0.08, 0.075]
+          - [0.36, 0.770, 0.08, 0.075]
+          - [0.44, 0.770, 0.08, 0.075]
+          - [0.52, 0.770, 0.08, 0.075]
+          - [0.60, 0.770, 0.08, 0.075]
+          - [0.68, 0.770, 0.08, 0.075]
+          - [0.76, 0.770, 0.08, 0.075]
+      notes_box: [0.84, 0.26, 0.11, 0.64]
+    postprocess:
+      qty_regex: '^\\d{0,2}$'
+      normalize_fullwidth: true
+      reject_repetition:
+        max_repeat_run: 3
+        min_unique_line_ratio: 0.3
+      retry:
+        max_attempts: 2
+        crop_inset_px: [6, 6, 6, 6]
+        alt_binarize: true
+    table_box: [0.05, 0.20, 0.95, 0.90]
+    header_rows: 0
+    normalize_whitespace: true
+    fill_forward_roles: ["date"]
+    fill_missing_date_with_first_seen: true
+    grid_expected_columns: 9
+    grid_table_box: [0.05, 0.20, 0.95, 0.90]
+    main_ocr_use_table_box: true
+    main_ocr_resolution: 400
+    main_ocr_body_box: [0.05, 0.26, 0.95, 0.90]
+    main_ocr_provider: pipeline
+    main_ocr_row_fields:
+      - date_mmdd
+      - menu
+      - qty.regular_2f
+      - qty.regular_3f
+      - qty.soft_2f
+      - qty.soft_3f
+      - qty.mixer_2f
+      - qty.mixer_3f
+      - remarks
+    grid_line_min_ratio: 0.35
+    grid_line_scale: 30
+    grid_header_rows: 1
+    grid_min_rows: 10
+    grid_use_rows: false
+    grid_row_padding: 0.002
+    grid_min_row_height: 0.008
+    grid_qty_gap_tolerance: 0.02
+    grid_left_date_ratio: 0.2
+    grid_quantity_ffill: false
+    grid_quantity_ffill_scope: date
+    token_row_tolerance: 0.01
+    token_row_padding: 0.006
+    token_fallback_ocr: true
+    token_ocr_resolution: 320
+    token_ocr_ink_threshold: 200
+    token_ocr_ink_ratio: 0.01
+    auto_header_band: [0.18, 0.30]
+    auto_headers:
+      - index: 0
+        role: date
+        format: MM/DD
+        match_groups: [["日付", "日付け", "日付/"]]
+      - index: 1
+        role: menu_name
+        match_groups: [["献立", "献立名", "メニュー", "メニュー名", "品名", "料理名", "料理"]]
+      - index: 2
+        role: quantity
+        diet_type: regular
+        area_id: 2F
+        bag_type: standard
+        match_groups: [["常食", "常"], ["2F", "２F", "2Ｆ", "2階", "二階"]]
+      - index: 3
+        role: quantity
+        diet_type: regular
+        area_id: 3F
+        bag_type: standard
+        match_groups: [["常食", "常"], ["3F", "３F", "3Ｆ", "3階", "三階"]]
+      - index: 4
+        role: quantity
+        diet_type: soft
+        area_id: 2F
+        bag_type: standard
+        match_groups: [["軟菜", "軟"], ["2F", "２F", "2Ｆ", "2階", "二階"]]
+      - index: 5
+        role: quantity
+        diet_type: soft
+        area_id: 3F
+        bag_type: standard
+        match_groups: [["軟菜", "軟"], ["3F", "３F", "3Ｆ", "3階", "三階"]]
+      - index: 6
+        role: quantity
+        diet_type: mixer
+        area_id: 2F
+        bag_type: standard
+        match_groups: [["ミキサー", "ﾐｷｻｰ", "ミキサ", "ﾐｷｻ"], ["2F", "２F", "2Ｆ", "2階", "二階"]]
+      - index: 7
+        role: quantity
+        diet_type: mixer
+        area_id: 3F
+        bag_type: standard
+        match_groups: [["ミキサー", "ﾐｷｻｰ", "ミキサ", "ﾐｷｻ"], ["3F", "３F", "3Ｆ", "3階", "三階"]]
+      - index: 8
+        role: note
+        match_groups: [["備考", "備考欄", "備"]]
+    auto_numeric_columns:
+      expected_count: 6
+      x_band: [0.36, 0.94]
+      y_band: [0.22, 0.90]
+      cluster_tolerance: 0.02
+      min_tokens: 6
+      columns:
+        - index: 2
+          role: quantity
+          diet_type: regular
+          area_id: 2F
+          bag_type: standard
+        - index: 3
+          role: quantity
+          diet_type: regular
+          area_id: 3F
+          bag_type: standard
+        - index: 4
+          role: quantity
+          diet_type: soft
+          area_id: 2F
+          bag_type: standard
+        - index: 5
+          role: quantity
+          diet_type: soft
+          area_id: 3F
+          bag_type: standard
+        - index: 6
+          role: quantity
+          diet_type: mixer
+          area_id: 2F
+          bag_type: standard
+        - index: 7
+          role: quantity
+          diet_type: mixer
+          area_id: 3F
+          bag_type: standard
+      tail_column:
+        index: 8
+        role: note
+    grid_columns:
+      - index: 0
+        role: date
+        format: MM/DD
+      - index: 1
+        role: menu_name
+      - index: 2
+        role: quantity
+        diet_type: regular
+        area_id: 2F
+        bag_type: standard
+      - index: 3
+        role: quantity
+        diet_type: regular
+        area_id: 3F
+        bag_type: standard
+      - index: 4
+        role: quantity
+        diet_type: soft
+        area_id: 2F
+        bag_type: standard
+      - index: 5
+        role: quantity
+        diet_type: soft
+        area_id: 3F
+        bag_type: standard
+      - index: 6
+        role: quantity
+        diet_type: mixer
+        area_id: 2F
+        bag_type: standard
+      - index: 7
+        role: quantity
+        diet_type: mixer
+        area_id: 3F
+        bag_type: standard
+      - index: 8
+        role: note
+    token_columns:
+      - index: 0
+        role: date
+        format: MM/DD
+        x_range: [0.06, 0.14]
+      - index: 1
+        role: menu_name
+        x_range: [0.14, 0.36]
+      - index: 2
+        role: quantity
+        diet_type: regular
+        area_id: 2F
+        bag_type: standard
+        x_range: [0.36, 0.44]
+      - index: 3
+        role: quantity
+        diet_type: regular
+        area_id: 3F
+        bag_type: standard
+        x_range: [0.44, 0.52]
+      - index: 4
+        role: quantity
+        diet_type: soft
+        area_id: 2F
+        bag_type: standard
+        x_range: [0.52, 0.60]
+      - index: 5
+        role: quantity
+        diet_type: soft
+        area_id: 3F
+        bag_type: standard
+        x_range: [0.60, 0.68]
+      - index: 6
+        role: quantity
+        diet_type: mixer
+        area_id: 2F
+        bag_type: standard
+        x_range: [0.68, 0.76]
+      - index: 7
+        role: quantity
+        diet_type: mixer
+        area_id: 3F
+        bag_type: standard
+        x_range: [0.76, 0.84]
+      - index: 8
+        role: note
+        x_range: [0.84, 0.94]
+    columns:
+      - index: 0
+        role: date
+        format: MM/DD
+      - index: 1
+        role: menu_name
+      - index: 2
+        role: quantity
+        diet_type: regular
+        area_id: 2F
+        bag_type: standard
+      - index: 3
+        role: quantity
+        diet_type: regular
+        area_id: 3F
+        bag_type: standard
+      - index: 4
+        role: quantity
+        diet_type: soft
+        area_id: 2F
+        bag_type: standard
+      - index: 5
+        role: quantity
+        diet_type: soft
+        area_id: 3F
+        bag_type: standard
+      - index: 6
+        role: quantity
+        diet_type: mixer
+        area_id: 2F
+        bag_type: standard
+      - index: 7
+        role: quantity
+        diet_type: mixer
+        area_id: 3F
+        bag_type: standard
+      - index: 8
+        role: note

@@ -1,0 +1,143 @@
+{
+  "schema_version": "1.6",
+  "updated_at": "2025-12-25",
+  "fax_template_base": {
+    "units": "normalized",
+    "page": 1,
+    "facility_name_box": [0.10, 0.05, 0.40, 0.10],
+    "date_boxes": [
+      { "bbox": [0.50, 0.05, 0.70, 0.10], "format": "MM/DD" }
+    ],
+    "table_box": [0.05, 0.20, 0.95, 0.90],
+    "header_rows": 1,
+    "normalize_whitespace": true,
+    "fill_forward_roles": ["date", "menu_name"],
+    "fill_missing_date_with_hint": true,
+    "fill_missing_date_with_first_seen": true,
+    "columns": [
+      { "index": 0, "role": "date", "format": "MM/DD" },
+      { "index": 1, "role": "menu_name" },
+      { "index": 2, "role": "daypart" }
+    ]
+  },
+  "label_profile_base": {
+    "storage_mode": "chilled",
+    "expiry_rule": "meal_date",
+    "label_fields": [
+      "facility_name",
+      "expiry_date",
+      "storage_mode",
+      "meal_slot",
+      "menu_category",
+      "product_name",
+      "quantity",
+      "details",
+      "maker_info",
+      "notice"
+    ],
+    "fixed_text": {
+      "maker_name": "TODO",
+      "address": "TODO",
+      "notice": "TODO"
+    }
+  },
+  "packaging_policy_base": {
+    "split_by_area": true,
+    "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "area_id", "bag_type"]
+  },
+  "facilities": [
+    {
+      "facility_id": "FAC00001",
+      "facility_name": "Test Facility",
+      "aliases": [],
+      "areas": [
+        { "area_id": "ARE0001", "name": "Unit A", "sort_order": 1 },
+        { "area_id": "ARE0002", "name": "Unit B", "sort_order": 2 }
+      ],
+      "bag_types": [
+        { "bag_type_id": "standard", "label": "standard" },
+        { "bag_type_id": "diet", "label": "diet" },
+        { "bag_type_id": "soft", "label": "soft" }
+      ],
+      "packaging_policy_override": {
+        "split_by_area": false,
+        "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "bag_type"]
+      },
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 3,
+            "role": "quantity",
+            "diet_type": "regular",
+            "area_id": "ARE0001",
+            "bag_type": "standard"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "diet_type": "regular",
+            "area_id": "ARE0002",
+            "bag_type": "standard"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "diet_type": "diabetic",
+            "area_id": "ARE0001",
+            "bag_type": "diet"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "diet_type": "diabetic",
+            "area_id": "ARE0002",
+            "bag_type": "diet"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "diet_type": "soft",
+            "area_id": "ARE0001",
+            "bag_type": "soft"
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "diet_type": "soft",
+            "area_id": "ARE0002",
+            "bag_type": "soft"
+          },
+          { "index": 9, "role": "quantity_change", "source_index": 3 },
+          { "index": 10, "role": "quantity_change", "source_index": 4 },
+          { "index": 11, "role": "quantity_change", "source_index": 5 },
+          { "index": 12, "role": "quantity_change", "source_index": 6 }
+        ]
+      },
+      "invoice_template": {
+        "template_uri": "gs://YOUR_BUCKET/templates/invoice_template.xlsx",
+        "columns": [
+          { "name": "date", "source": "date" },
+          { "name": "daypart", "source": "daypart" },
+          { "name": "menu_name", "source": "menu_name" },
+          {
+            "name": "qty_regular_area_a",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "ARE0001"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00002",
+      "facility_name": "医療法人松岡会山城グループホーム",
+      "aliases": [],
+      "areas": [
+        { "area_id": "2F", "name": "2F", "sort_order": 1 },
+        { "area_id": "3F", "name": "3F", "sort_order": 2 }
+      ],
+      "fax_template_id": "fax_fac00002_v1",
+      "main_ocr_facility_prompt": "返すのはJSONのみ。画像の表から行ごとの値を抽出してください。\n出力フォーマット: {\"template_id\":\"FAC00002_weekly_order_v1\",\"rows\":[{\"date_mmdd\":\"MM/DD\",\"menu\":\"...\",\"qty\":{\"regular_2f\":n,\"regular_3f\":n,\"soft_2f\":n,\"soft_3f\":n,\"mixer_2f\":n,\"mixer_3f\":n},\"remarks\":\"\"}],\"errors\":[]}\nルール:\n- 推測しない。読めない数値は null。\n- 画像にない文字を生成しない。\n- 空行は出力しない。\n- 日付が空欄の行は直前行のdate_mmddを引き継いでよい。"
+    }
+  ]
+}

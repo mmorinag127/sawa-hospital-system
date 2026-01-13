@@ -1,0 +1,12 @@
+# One facility per file. Column index is 1-based.
+facility_name: ""
+areas:
+  - name: ""
+    sort_order: 1
+fax_quantity_columns:
+  - column_index: 3
+    order_type: ""
+    area_name: ""
+change_columns:
+  - column_index: 9
+    source_column_index: 3

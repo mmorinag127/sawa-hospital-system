@@ -1,0 +1,4 @@
+project_id  = "your-gcp-project-id"
+region      = "asia-northeast1"
+location    = "ASIA-NORTHEAST1"
+bucket_name = "tfstate-your-gcp-project-id"

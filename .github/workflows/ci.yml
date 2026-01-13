@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      DB_URI: sqlite:///./test.db
+      FACILITY_MASTER_PATH: src/data/facility_master.template.json
+      INGEST_POLICY_PATH: src/data/ingest_policy.template.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend deps
+        working-directory: backend
+        run: python -m pip install -e ".[dev]" --no-build-isolation
+      - name: Run backend tests (US1-4)
+        working-directory: backend
+        run: |
+          python -m pytest \
+            tests/contract/test_ingest.py \
+            tests/integration/test_ingest_supersede.py \
+            tests/integration/test_facility_unresolved.py \
+            tests/integration/test_line_corrections.py \
+            tests/integration/test_status_flow.py \
+            tests/integration/test_menu_upload.py \
+            tests/integration/test_menu_edits_output.py \
+            tests/integration/test_menu_override.py \
+            tests/contract/test_facility_config.py \
+            tests/integration/test_facility_config_apply.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit

@@ -1,0 +1,21 @@
+env        = "stg"
+project_id = "your-gcp-project-id-stg"
+region     = "asia-northeast1"
+location   = "ASIA-NORTHEAST1"
+
+raw_retention_days     = 60
+firestore_location_id  = "asia-northeast1"
+secret_ids = ["gmail-refresh-token"]
+
+cloudrun_services = {
+  web    = "gcr.io/your-project/web:latest"
+  worker = "gcr.io/your-project/worker:latest"
+}
+
+# pubsub_topic_name        = "orders-stg"
+# pubsub_subscription_name = "orders-stg-push"
+
+gmail_watch_schedule = "0 9 * * *"
+gmail_watch_path     = "/watch-refresh"
+# gmail_watch_job_name = "gmail-watch-refresh-stg"
+# worker_service_name  = "worker-stg"

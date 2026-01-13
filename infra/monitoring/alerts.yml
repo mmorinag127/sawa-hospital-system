@@ -1,0 +1,22 @@
+version: 1
+source: /health/backlog
+slo:
+  ingest_latency_seconds:
+    target_p95: 120
+    warning_threshold: 180
+    critical_threshold: 300
+    description: "Oldest ingest backlog age should stay under 2 minutes."
+  output_latency_seconds:
+    target_p95: 120
+    warning_threshold: 180
+    critical_threshold: 300
+    description: "Oldest export backlog age should stay under 2 minutes."
+alerts:
+  - name: ingest_backlog_age
+    metric: oldest_pending_seconds
+    condition: "> 300"
+    action: notify_oncall
+  - name: exports_backlog_age
+    metric: oldest_pending_seconds
+    condition: "> 300"
+    action: notify_oncall

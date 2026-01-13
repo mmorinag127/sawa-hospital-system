@@ -1,0 +1,748 @@
+{
+  "schema_version": "1.6",
+  "updated_at": "2026-01-12",
+  "fax_template_base": {
+    "units": "normalized",
+    "page": 1,
+    "facility_name_box": [
+      0.1,
+      0.05,
+      0.4,
+      0.1
+    ],
+    "date_boxes": [
+      {
+        "bbox": [
+          0.5,
+          0.05,
+          0.7,
+          0.1
+        ],
+        "format": "MM/DD"
+      }
+    ],
+    "table_box": [
+      0.05,
+      0.2,
+      0.95,
+      0.9
+    ],
+    "header_rows": 0,
+    "normalize_whitespace": true,
+    "fill_forward_roles": [
+      "date"
+    ],
+    "fill_missing_date_with_hint": true,
+    "fill_missing_date_with_first_seen": true,
+    "columns": [
+      {
+        "index": 0,
+        "role": "date",
+        "format": "MM/DD"
+      },
+      {
+        "index": 1,
+        "role": "menu_name"
+      }
+    ]
+  },
+  "label_profile_base": {
+    "storage_mode": "chilled",
+    "expiry_rule": "meal_date",
+    "label_fields": [
+      "facility_name",
+      "expiry_date",
+      "storage_mode",
+      "meal_slot",
+      "menu_category",
+      "product_name",
+      "quantity",
+      "details",
+      "maker_info",
+      "notice"
+    ],
+    "fixed_text": {
+      "maker_name": "TODO",
+      "address": "TODO",
+      "notice": "TODO"
+    }
+  },
+  "packaging_policy_base": {
+    "split_by_area": true,
+    "split_key": [
+      "facility",
+      "date",
+      "daypart",
+      "menu_name",
+      "diet_type",
+      "area_id",
+      "bag_type"
+    ]
+  },
+  "facilities": [
+    {
+      "facility_id": "FAC00001",
+      "facility_name": "介護老人保健施設ふれあいの丘",
+      "aliases": [
+        "ふれあいの丘",
+        "ふれあい"
+      ],
+      "address": "神奈川県茅ケ崎市行谷５８３-１",
+      "phone": "0467-54-8111",
+      "areas": [
+        {
+          "area_id": "2F",
+          "name": "2F",
+          "sort_order": 1
+        },
+        {
+          "area_id": "3F",
+          "name": "3F",
+          "sort_order": 2
+        }
+      ],
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/matsuoka.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F"
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F"
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft"
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F"
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00002",
+      "facility_name": "山城グループホーム",
+      "aliases": [
+        "医療法人松岡会山城グループホーム"
+      ],
+      "address": "徳島県徳島市山城町４丁目４７番地",
+      "phone": "0886-576-566",
+      "areas": [
+        {
+          "area_id": "2F",
+          "name": "2F",
+          "sort_order": 1
+        },
+        {
+          "area_id": "3F",
+          "name": "3F",
+          "sort_order": 2
+        }
+      ],
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/matsuoka.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F"
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F"
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft"
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F"
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00003",
+      "facility_name": "大和なでしこ",
+      "aliases": [
+        "有料老人ホーム大和"
+      ],
+      "address": "徳島県徳島市川内町平石夷野２４番地",
+      "phone": "0886-663-966",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/yamato.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "小口",
+            "source": "quantity",
+            "diet_type": "small"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00004",
+      "facility_name": "シルバーホームなごみ",
+      "aliases": [
+        "なごみ"
+      ],
+      "address": "徳島県徳島市北田宮１丁目１-４",
+      "phone": "0858-624-7534",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00005",
+      "facility_name": "春日苑 松茂",
+      "aliases": [
+        "春日苑松茂"
+      ],
+      "address": "徳島県板野郡松茂町広島字四番越１１番５",
+      "phone": "080-6919-5523",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00006",
+      "facility_name": "池袋病院内事業所 傑合同会社",
+      "aliases": [
+        "池袋病院"
+      ],
+      "address": "東京都豊島区東池袋３丁目５-４",
+      "phone": "03-3987-2431",
+      "areas": [
+        {
+          "area_id": "2F",
+          "name": "2F",
+          "sort_order": 1
+        },
+        {
+          "area_id": "3F",
+          "name": "3F",
+          "sort_order": 2
+        }
+      ],
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/matsuoka.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F"
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F"
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft"
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F"
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00007",
+      "facility_name": "藍TERRACE",
+      "aliases": [
+        "藍テラス"
+      ],
+      "address": "徳島県徳島市山城西３丁目１９",
+      "phone": "0886-023-520",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00008",
+      "facility_name": "ゆうゆう（株）百々家",
+      "aliases": [
+        "百々家"
+      ],
+      "address": "徳島県美馬市脇町野村４６３８-１",
+      "phone": "0883-53-8010",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00009",
+      "facility_name": "佐古グループホーム",
+      "aliases": [
+        "松岡会"
+      ],
+      "address": "徳島県徳島市佐古４番町４-７",
+      "phone": "0886-113-630",
+      "areas": [
+        {
+          "area_id": "2F",
+          "name": "2F",
+          "sort_order": 1
+        },
+        {
+          "area_id": "3F",
+          "name": "3F",
+          "sort_order": 2
+        }
+      ],
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/matsuoka.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F"
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F"
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft"
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F"
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00010",
+      "facility_name": "グループホームそよかぜ",
+      "aliases": [
+        "そよかぜ"
+      ],
+      "address": "徳島県鳴門市瀬戸町明神鳴谷１２１番地",
+      "phone": "0886-837-888",
+      "areas": [
+        {
+          "area_id": "2F",
+          "name": "2F",
+          "sort_order": 1
+        },
+        {
+          "area_id": "3F",
+          "name": "3F",
+          "sort_order": 2
+        }
+      ],
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/matsuoka.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F"
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F"
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft"
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F"
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00011",
+      "facility_name": "ケアハウス四万十ピア",
+      "aliases": [
+        "四万十ピア"
+      ],
+      "address": "高知県高岡郡四万十町仁井田１１４-１",
+      "phone": "0880-229-508",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00012",
+      "facility_name": "グランフォレスト方上",
+      "aliases": [
+        "グランフォレスト"
+      ],
+      "address": "徳島県徳島市方上町中須賀３１番地１",
+      "phone": "0886-787-112",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/nagomi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat"
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish"
+          }
+        ]
+      }
+    },
+    {
+      "facility_id": "FAC00013",
+      "facility_name": "いこいの森プラスモリ",
+      "aliases": [
+        "いこいの森"
+      ],
+      "address": "高知県高知市旭町３丁目３",
+      "phone": "088-8567-012",
+      "invoice_template": {
+        "template_uri": "gs://mythic-lattice-483204-t8-dev-templates/invoice/ikoi.xlsx",
+        "columns": [
+          {
+            "name": "date",
+            "source": "date"
+          },
+          {
+            "name": "daypart",
+            "source": "daypart"
+          },
+          {
+            "name": "menu_name",
+            "source": "menu_name"
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular"
+          },
+          {
+            "name": "糖尿",
+            "source": "quantity",
+            "diet_type": "diabetic"
+          }
+        ]
+      }
+    }
+  ]
+}

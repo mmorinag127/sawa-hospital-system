@@ -8,9 +8,14 @@ description: "Task list template for feature implementation"
 **Input**: Design documents from `/specs/[###-feature-name]/`
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**Tests**: Contract/integration tests for ingest -> facility resolution -> menu mapping -> outputs
+are REQUIRED by the constitution (including OCR retries, duplicate replacement, zero suppression,
+change-column precedence, backlog recovery). Add unit tests as needed; only omit these critical
+tests if explicitly out-of-scope in the feature spec.
 
-**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
+**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story. Include
+checks for PC-only UX with consistent statuses/confirm flows and performance/resilience tasks
+(immediate ingest, safe requeue, backlog catch-up, capacity for ~100 facilities/day).
 
 ## Format: `[ID] [P?] [Story] Description`
 
