@@ -27,6 +27,8 @@ jobs:
       - name: Run backend tests (US1-4)
         working-directory: backend
         run: |
+          set -euo pipefail
+          mkdir -p .logs
           python -m pytest \
             tests/contract/test_ingest.py \
             tests/integration/test_ingest_supersede.py \
@@ -37,7 +39,15 @@ jobs:
             tests/integration/test_menu_edits_output.py \
             tests/integration/test_menu_override.py \
             tests/contract/test_facility_config.py \
-            tests/integration/test_facility_config_apply.py
+            tests/integration/test_facility_config_apply.py \
+            --junitxml=.logs/pytest-junit.xml \
+            -vv 2>&1 | tee .logs/pytest.log
+      - name: Upload backend logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-logs
+          path: backend/.logs
 
   frontend:
     runs-on: ubuntu-latest
@@ -53,64 +63,18 @@ jobs:
         run: npm ci
       - name: Frontend lint
         working-directory: frontend
-        run: npm run lint
+        run: |
+          set -euo pipefail
+          mkdir -p .logs
+          npm run lint 2>&1 | tee .logs/lint.log
       - name: Frontend typecheck
         working-directory: frontend
-        run: npx tsc --noEmit
-
-  deploy-dev:
-    needs:
-      - backend
-      - frontend
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      PROJECT_ID: mythic-lattice-483204-t8
-      REGION: asia-northeast1
-      REGISTRY: asia-northeast1-docker.pkg.dev/mythic-lattice-483204-t8/backend
-      TF_ENV_DIR: infra/terraform/envs/dev
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
+        run: |
+          set -euo pipefail
+          npx tsc --noEmit 2>&1 | tee .logs/typecheck.log
+      - name: Upload frontend logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - name: Configure Docker auth
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-      - name: Set image tags
-        run: |
-          TAG_SUFFIX=$(date -u +%Y%m%d-%H%M%S)
-          echo "TAG_SUFFIX=${TAG_SUFFIX}" >> "$GITHUB_ENV"
-          echo "FRONTEND_TAG=dev-frontend-${TAG_SUFFIX}" >> "$GITHUB_ENV"
-          echo "BACKEND_TAG=dev-backend-${TAG_SUFFIX}" >> "$GITHUB_ENV"
-          echo "OCR_TAG=dev-ocr-${TAG_SUFFIX}" >> "$GITHUB_ENV"
-      - name: Build and push images
-        run: |
-          docker build -t "${REGISTRY}/frontend:${FRONTEND_TAG}" -f frontend/Dockerfile frontend
-          docker push "${REGISTRY}/frontend:${FRONTEND_TAG}"
-          docker build -t "${REGISTRY}/backend:${BACKEND_TAG}" -f backend/Dockerfile backend
-          docker push "${REGISTRY}/backend:${BACKEND_TAG}"
-          docker build -t "${REGISTRY}/ocr-pipeline:${OCR_TAG}" -f ocr_pipeline/Dockerfile ocr_pipeline
-          docker push "${REGISTRY}/ocr-pipeline:${OCR_TAG}"
-      - name: Write terraform override
-        run: |
-          cat > "${TF_ENV_DIR}/terraform.auto.tfvars.json" <<EOF
-          {
-            "cloudrun_services": {
-              "web": "${REGISTRY}/frontend:${FRONTEND_TAG}",
-              "worker": "${REGISTRY}/backend:${BACKEND_TAG}",
-              "ocr-pipeline": "${REGISTRY}/ocr-pipeline:${OCR_TAG}"
-            }
-          }
-          EOF
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.5.7
-      - name: Terraform init
-        working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform init -backend-config=backend.hcl
-      - name: Terraform apply
-        working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform apply -auto-approve -var-file=terraform.tfvars
+          name: frontend-test-logs
+          path: frontend/.logs
