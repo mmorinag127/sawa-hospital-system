@@ -48,6 +48,16 @@ jobs:
         with:
           name: backend-test-logs
           path: backend/.logs
+      - name: Backend log summary
+        if: always()
+        working-directory: backend
+        run: |
+          {
+            echo "## Backend pytest log (tail)";
+            echo '```';
+            tail -n 200 .logs/pytest.log || echo "no pytest log";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     runs-on: ubuntu-latest
@@ -78,3 +88,17 @@ jobs:
         with:
           name: frontend-test-logs
           path: frontend/.logs
+      - name: Frontend log summary
+        if: always()
+        working-directory: frontend
+        run: |
+          {
+            echo "## Frontend lint log (tail)";
+            echo '```';
+            tail -n 200 .logs/lint.log || echo "no lint log";
+            echo '```';
+            echo "## Frontend typecheck log (tail)";
+            echo '```';
+            tail -n 200 .logs/typecheck.log || echo "no typecheck log";
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
