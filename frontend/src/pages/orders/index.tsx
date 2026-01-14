@@ -137,7 +137,7 @@ export default function OrdersPage() {
         <div>
           <p className="eyebrow">Orders</p>
           <h1>注文一覧</h1>
-          <p className="subtle">施設×週の進捗と注文明細をまとめて確認できます。</p>
+          <p className="subtle">施設×月の進捗と注文明細をまとめて確認できます。</p>
         </div>
         <TopNav />
       </header>
@@ -168,7 +168,7 @@ export default function OrdersPage() {
               className="input"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="施設/週/IDなど"
+              placeholder="施設/月/IDなど"
             />
           </label>
           <label className="field checkbox">
@@ -184,7 +184,7 @@ export default function OrdersPage() {
 
       <section className="panel">
         <header className="panel-header">
-          <h2>施設×週 進捗</h2>
+          <h2>施設×月 進捗</h2>
           <Link href="/orders" className="ghost-link">
             最新に更新
           </Link>
@@ -194,7 +194,7 @@ export default function OrdersPage() {
             <thead>
               <tr>
                 <th>施設</th>
-                <th>週</th>
+                <th>月</th>
                 <th>未着</th>
                 <th>要確認</th>
                 <th>確定</th>
@@ -254,7 +254,7 @@ export default function OrdersPage() {
                 <div>
                   <p className="list-title">{o.id}</p>
                   <p className="list-meta">
-                    施設: {o.facility || "未確定"} / 週: {o.week || "未確定"} / 受信:{" "}
+                    施設: {o.facility || "未確定"} / 月: {o.week || "未確定"} / 受信:{" "}
                     {formatReceivedAt(o.received_at)} / Message: {o.message_id || "不明"}
                   </p>
                 </div>

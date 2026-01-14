@@ -151,6 +151,7 @@
     {
       "facility_id": "FAC00002",
       "facility_name": "山城グループホーム",
+      "fax_template_id": "fax_fac00002_v1",
       "aliases": [
         "医療法人松岡会山城グループホーム"
       ],

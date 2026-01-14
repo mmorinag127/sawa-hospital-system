@@ -5,19 +5,31 @@ import { apiClient } from "../../services/apiClient";
 
 type MenuItem = {
   id: string;
-  week_id: string;
+  month_id: string;
   name: string;
   unit_type?: string | null;
   qty_per_serving?: number | string | null;
   temp_type?: string | null;
   daypart?: string | null;
   category?: string | null;
+  diet_type?: string | null;
   facility_override?: string | null;
   bag_max_qty?: number | string | null;
   bag_max_unit?: string | null;
 };
 
-type WeeklyMenu = {
+type MenuEntry = {
+  id: string;
+  month_id: string;
+  menu_date?: string | null;
+  daypart?: string | null;
+  name: string;
+  category?: string | null;
+  diet_type?: string | null;
+  slot_index?: number | null;
+};
+
+type MonthlyMenu = {
   id: string;
   filename?: string | null;
 };
@@ -35,55 +47,67 @@ const uniqueValues = (items: MenuItem[], field: keyof MenuItem) => {
   return Array.from(new Set(values));
 };
 
-export default function WeeklyMenuEditorPage() {
+export default function MonthlyMenuEditorPage() {
   const router = useRouter();
-  const { weekId } = router.query;
-  const [menu, setMenu] = useState<WeeklyMenu | null>(null);
+  const { monthId } = router.query;
+  const [menu, setMenu] = useState<MonthlyMenu | null>(null);
   const [items, setItems] = useState<MenuItem[]>([]);
+  const [entries, setEntries] = useState<MenuEntry[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [sheetName, setSheetName] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [lastUpload, setLastUpload] = useState<string>("");
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<boolean>(false);
 
   const loadMenu = async () => {
-    if (!weekId || Array.isArray(weekId)) return;
+    if (!monthId || Array.isArray(monthId)) return;
     try {
-      const res = await apiClient.get(`/weekly-menus/${weekId}`);
+      const res = await apiClient.get(`/monthly-menus/${monthId}`);
       setMenu(res.data.menu);
       setItems(res.data.items || []);
+      setEntries(res.data.entries || []);
       setMessage("");
     } catch (err) {
       setMenu(null);
       setItems([]);
-      setMessage("週次メニューがまだ登録されていません。");
+      setEntries([]);
+      setMessage("月次メニューがまだ登録されていません。");
     }
   };
 
   useEffect(() => {
     loadMenu();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekId]);
+  }, [monthId]);
 
   const handleUpload = async () => {
-    if (!weekId || Array.isArray(weekId)) return;
+    if (!monthId || Array.isArray(monthId)) return;
     if (!file) {
       setMessage("アップロードするファイルを選択してください。");
       return;
     }
+    setUploading(true);
     const formData = new FormData();
     formData.append("file", file);
-    const res = await apiClient.post("/weekly-menus", formData, {
-      params: { week_id: weekId, sheet_name: sheetName || undefined },
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-    setFile(null);
-    await loadMenu();
-    const itemCount = res.data?.item_count ?? 0;
-    const replaced = res.data?.replaced ? "置換" : "新規";
-    const uploadMessage = `${file.name} を${replaced}で反映（${itemCount}件）`;
-    setLastUpload(uploadMessage);
-    setMessage("アップロードしました。");
+    try {
+      const res = await apiClient.post("/monthly-menus", formData, {
+        params: { month_id: monthId, sheet_name: sheetName || undefined },
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setFile(null);
+      await loadMenu();
+      const itemCount = res.data?.item_count ?? 0;
+      const replaced = res.data?.replaced ? "置換" : "新規";
+      const uploadMessage = `${file.name} を${replaced}で反映（${itemCount}件）`;
+      setLastUpload(uploadMessage);
+      setMessage("アップロードしました。");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setMessage(detail ? `アップロード失敗: ${detail}` : "アップロードに失敗しました。");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const updateItemField = (idx: number, field: keyof MenuItem, value: string) => {
@@ -93,7 +117,7 @@ export default function WeeklyMenuEditorPage() {
   };
 
   const saveItem = async (item: MenuItem) => {
-    if (!weekId || Array.isArray(weekId)) return;
+    if (!monthId || Array.isArray(monthId)) return;
     const qtyValue =
       item.qty_per_serving == null || item.qty_per_serving === ""
         ? null
@@ -101,13 +125,14 @@ export default function WeeklyMenuEditorPage() {
     const bagMaxValue =
       item.bag_max_qty == null || item.bag_max_qty === "" ? null : Number(item.bag_max_qty);
     setSavingId(item.id);
-    await apiClient.put(`/weekly-menus/${weekId}/items/${item.id}`, {
+    await apiClient.put(`/monthly-menus/${monthId}/items/${item.id}`, {
       name: item.name,
       unit_type: item.unit_type,
       qty_per_serving: qtyValue,
       temp_type: item.temp_type,
       daypart: item.daypart,
       category: item.category,
+      diet_type: item.diet_type,
       facility_override: item.facility_override,
       bag_max_qty: bagMaxValue,
       bag_max_unit: item.bag_max_unit,
@@ -119,14 +144,15 @@ export default function WeeklyMenuEditorPage() {
   const tempOptions = uniqueValues(items, "temp_type");
   const daypartOptions = uniqueValues(items, "daypart");
   const categoryOptions = uniqueValues(items, "category");
+  const dietOptions = uniqueValues(items, "diet_type");
 
   return (
     <main className="page">
       <header className="hero">
         <div>
-          <p className="eyebrow">Weekly Menu</p>
-          <h1>週次メニュー編集</h1>
-          <p className="subtle">週ID: {Array.isArray(weekId) ? weekId.join(",") : weekId}</p>
+          <p className="eyebrow">Monthly Menu</p>
+          <h1>月次メニュー編集</h1>
+          <p className="subtle">月ID: {Array.isArray(monthId) ? monthId.join(",") : monthId}</p>
         </div>
         <TopNav />
       </header>
@@ -157,8 +183,8 @@ export default function WeeklyMenuEditorPage() {
             value={sheetName}
             onChange={(e) => setSheetName(e.target.value)}
           />
-          <button className="btn primary" onClick={handleUpload}>
-            アップロード
+          <button className="btn primary" onClick={handleUpload} disabled={uploading}>
+            {uploading ? "アップロード中..." : "アップロード"}
           </button>
         </div>
         {message && <p className="message">{message}</p>}
@@ -180,6 +206,7 @@ export default function WeeklyMenuEditorPage() {
                 <th>温冷</th>
                 <th>時間帯</th>
                 <th>区分</th>
+                <th>食種</th>
                 <th>施設上書き</th>
                 <th>保存</th>
               </tr>
@@ -187,7 +214,7 @@ export default function WeeklyMenuEditorPage() {
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={10}>メニューがありません。</td>
+                  <td colSpan={11}>メニューがありません。</td>
                 </tr>
               ) : (
                 items.map((item, idx) => (
@@ -270,6 +297,14 @@ export default function WeeklyMenuEditorPage() {
                     <td>
                       <input
                         className="input"
+                        value={item.diet_type || ""}
+                        list="diet-type-options"
+                        onChange={(e) => updateItemField(idx, "diet_type", e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
                         value={item.facility_override || ""}
                         onChange={(e) => updateItemField(idx, "facility_override", e.target.value)}
                       />
@@ -300,6 +335,48 @@ export default function WeeklyMenuEditorPage() {
             <option key={value} value={value} />
           ))}
         </datalist>
+        <datalist id="diet-type-options">
+          {dietOptions.map((value) => (
+            <option key={value} value={value} />
+          ))}
+        </datalist>
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>日付別献立</h2>
+        </header>
+        <p className="subtle">件数: {entries.length}</p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日付</th>
+                <th>時間帯</th>
+                <th>メニュー名</th>
+                <th>区分</th>
+                <th>食種</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.length === 0 ? (
+                <tr>
+                  <td colSpan={5}>日付別の献立がありません。</td>
+                </tr>
+              ) : (
+                entries.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{entry.menu_date || "-"}</td>
+                    <td>{entry.daypart || "-"}</td>
+                    <td>{entry.name}</td>
+                    <td>{entry.category || "-"}</td>
+                    <td>{entry.diet_type || "-"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <style jsx>{`

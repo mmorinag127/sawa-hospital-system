@@ -24,7 +24,7 @@ from src.services.notification_service import record_event
 from src.services import config_service, menu_service
 from src.services.fax_extractor import extract_fax_data, filter_tokens_by_box, rows_from_markdown
 from src.services.fax_parser import parse_order_lines
-from src.services.ingest_policy import parse_date_string, week_id_from_dates
+from src.services.ingest_policy import parse_date_string, month_id_from_dates
 from src.services.storage_service import load_bytes_from_uri
 from src.services.storage_service import generate_signed_url
 from src.services.grid_detector import detect_table_grid
@@ -317,7 +317,7 @@ def create_order_from_ingest(
             week_id = payload.week_hint
             if not week_id:
                 line_dates = [line.get("date") for line in lines if line.get("date")]
-                week_id = week_id_from_dates(line_dates, received_at, policy)
+                week_id = month_id_from_dates(line_dates, received_at, policy)
             lines = _apply_menu_matching(lines, week_id, payload.facility_hint, min_ratio)
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
             for line in lines:
@@ -707,7 +707,7 @@ def apply_ocr_markdown(order_id: str, markdown: str):
     week_id = existing_week_code
     if not week_id:
         line_dates = [line.get("date") for line in lines if line.get("date")]
-        week_id = week_id_from_dates(line_dates, received_at, policy)
+        week_id = month_id_from_dates(line_dates, received_at, policy)
     lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
 
     after_digest = _line_digest(lines)
@@ -738,7 +738,7 @@ def apply_ocr_markdown(order_id: str, markdown: str):
         if not order.week_code:
             line_dates = [line.get("date") for line in lines if line.get("date")]
             if line_dates:
-                week_id = week_id_from_dates(line_dates, received_at, policy)
+                week_id = month_id_from_dates(line_dates, received_at, policy)
                 if week_id:
                     order.week_code = week_id
         session.flush()
@@ -1154,7 +1154,7 @@ def reparse_order(order_id: str, ocr_prompt: str | None = None):
     week_id = existing_week_code
     if not week_id:
         line_dates = [line.get("date") for line in lines if line.get("date")]
-        week_id = week_id_from_dates(line_dates, received_at, policy)
+        week_id = month_id_from_dates(line_dates, received_at, policy)
     lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
     after_digest = _line_digest(lines)
     after_count = len(lines)
@@ -1185,7 +1185,7 @@ def reparse_order(order_id: str, ocr_prompt: str | None = None):
         if not order.week_code:
             line_dates = [line.get("date") for line in lines if line.get("date")]
             if line_dates:
-                week_id = week_id_from_dates(line_dates, received_at, policy)
+                week_id = month_id_from_dates(line_dates, received_at, policy)
                 if week_id:
                     order.week_code = week_id
         session.flush()

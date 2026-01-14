@@ -9,7 +9,7 @@ from src.services.order_service import create_order_from_ingest
 from src.services import config_service
 from src.services.ingest_policy import (
     parse_date_string,
-    week_id_from_dates,
+    month_id_from_dates,
     should_skip_ocr,
     retry_backoff_seconds,
 )
@@ -213,7 +213,7 @@ def process_ingest(self=None, **kwargs):
                             payload.facility_name = fallback.get("facility_name")
                         logger.info("Facility fallback applied", facility_id=payload.facility_hint)
                 if not payload.week_hint and payload.date_hints:
-                    payload.week_hint = week_id_from_dates(payload.date_hints, payload.received_at, policy)
+                    payload.week_hint = month_id_from_dates(payload.date_hints, payload.received_at, policy)
                 if payload.facility_hint:
                     facility_config = config_service.get_facility_config(payload.facility_hint)
                     if facility_config:
@@ -245,7 +245,7 @@ def process_ingest(self=None, **kwargs):
                         if not payload.week_hint and lines:
                             line_dates = [line.get("date") for line in lines if line.get("date")]
                             if line_dates:
-                                payload.week_hint = week_id_from_dates(line_dates, payload.received_at, policy)
+                                payload.week_hint = month_id_from_dates(line_dates, payload.received_at, policy)
                 ocr_status = "success"
                 ocr_error = None
                 break

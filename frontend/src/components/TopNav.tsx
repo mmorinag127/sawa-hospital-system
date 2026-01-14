@@ -7,14 +7,9 @@ type NavItem = {
   isActive: (path: string) => boolean;
 };
 
-const buildWeekId = () => {
+const buildMonthId = () => {
   const now = new Date();
-  const utc = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
-  const day = utc.getUTCDay() || 7;
-  utc.setUTCDate(utc.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil(((utc.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
-  return `WEK${utc.getUTCFullYear()}${String(weekNo).padStart(2, "0")}`;
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 };
 
 const normalizePath = (path: string) => path.split("?")[0]?.split("#")[0] ?? path;
@@ -29,9 +24,14 @@ export default function TopNav() {
       isActive: (path) => path === "/",
     },
     {
-      href: `/menus/${buildWeekId()}`,
-      label: "週次メニュー",
+      href: `/menus/${buildMonthId()}`,
+      label: "月次メニュー",
       isActive: (path) => path.startsWith("/menus"),
+    },
+    {
+      href: "/menu-rules",
+      label: "メニュールール",
+      isActive: (path) => path.startsWith("/menu-rules"),
     },
     {
       href: "/orders",

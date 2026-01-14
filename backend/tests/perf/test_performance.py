@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.db import session_scope
-from src.models.menu import MenuItem, WeeklyMenu
+from src.models.menu import MonthlyMenu, MonthlyMenuItem
 from src.services import menu_service, order_service
 from src.services.output_builder import build_outputs
 from src.workers.ingest_mail_adapter import IngestEmailPayload
@@ -32,12 +32,12 @@ def _p95(durations: list[float]) -> float:
 def test_output_performance():
     order_service.clear_all()
     with session_scope() as session:
-        session.query(MenuItem).delete()
-        session.query(WeeklyMenu).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MonthlyMenu).delete()
 
-    menu = menu_service.create_item_stub("WEK2025W01", "Menu A")
+    menu = menu_service.create_item_stub("2025-01", "Menu A")
     menu_service.update_item(
-        "WEK2025W01",
+        "2025-01",
         menu["id"],
         {"unit_type": "g", "qty_per_serving": 100, "temp_type": "hot", "daypart": "AM"},
     )
@@ -50,7 +50,7 @@ def test_output_performance():
     durations: list[float] = []
     start_total = time.monotonic()
     for idx in range(order_count):
-        week_id = f"WEK2025W{idx + 1:02d}"
+        week_id = f"2025-{idx + 1:02d}"
         payload = IngestEmailPayload(
             message_id=f"perf-{idx}",
             pdf_uri="file:///tmp/perf.pdf",

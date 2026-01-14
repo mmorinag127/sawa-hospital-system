@@ -1,5 +1,6 @@
 import csv
 import math
+import re
 from pathlib import Path
 from typing import Dict, Any
 from uuid import uuid4
@@ -10,7 +11,7 @@ from loguru import logger
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
-from src.services import config_service, menu_service
+from src.services import config_service, menu_service, menu_rule_service
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,6 +138,74 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
             updated["menu_bag_max_unit"] = item.get("bag_max_unit")
         if item.get("temp_type"):
             updated["menu_temp_type"] = item.get("temp_type")
+        enriched.append(updated)
+    return enriched
+
+
+def _normalize_rule_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", "", str(value)).lower()
+
+
+def _match_menu_pattern(menu_name: str, pattern: str, match_type: str | None) -> bool:
+    if not pattern:
+        return False
+    if match_type == "regex":
+        try:
+            return re.search(pattern, menu_name) is not None
+        except re.error:
+            return False
+    normalized_menu = _normalize_rule_text(menu_name)
+    normalized_pattern = _normalize_rule_text(pattern)
+    if match_type == "exact":
+        return normalized_menu == normalized_pattern
+    return normalized_pattern in normalized_menu
+
+
+def _rule_applies(rule, line: dict, facility_id: str | None) -> bool:
+    if rule.rule_type == "facility":
+        if not facility_id or not rule.facility_id:
+            return False
+        if rule.facility_id != facility_id:
+            return False
+    if rule.rule_type in {"menu", "facility"}:
+        menu_name = line.get("menu_name") or ""
+        if not _match_menu_pattern(menu_name, rule.menu_pattern or "", rule.match_type):
+            return False
+    if rule.daypart and rule.daypart != line.get("daypart"):
+        return False
+    if rule.category and rule.category != line.get("menu_category"):
+        return False
+    if rule.diet_type and rule.diet_type != line.get("diet_type"):
+        return False
+    return True
+
+
+def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
+    rules = menu_rule_service.list_active_rules()
+    if not rules:
+        return lines
+    type_weight = {"global": 100, "menu": 200, "facility": 300}
+    enriched: list[dict] = []
+    for line in lines:
+        matches = [
+            rule
+            for rule in rules
+            if _rule_applies(rule, line, facility_id)
+        ]
+        if not matches:
+            enriched.append(line)
+            continue
+        selected = max(
+            matches,
+            key=lambda rule: type_weight.get(rule.rule_type, 0) + int(rule.priority or 0),
+        )
+        updated = dict(line)
+        if selected.unit_type:
+            updated["menu_unit_type"] = selected.unit_type
+        if selected.qty_per_serving is not None:
+            updated["menu_qty_per_serving"] = selected.qty_per_serving
         enriched.append(updated)
     return enriched
 
@@ -321,9 +390,9 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     invoice_template = facility_config.get("invoice_template", {})
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
 
-    week_id = order.get("week")
+    month_id = order.get("week")
     menu_items = (
-        menu_service.get_menu_items_for_facility(week_id, facility_id) if week_id else []
+        menu_service.get_menu_items_for_facility(month_id, facility_id) if month_id else []
     )
     snapshot = get_order_menu_snapshot(order_id)
     snapshot_items = snapshot.get("menu_items") if isinstance(snapshot, dict) else None
@@ -331,6 +400,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         order_lines = _apply_menu_snapshot(order.get("lines", []), snapshot_items)
     else:
         order_lines = _apply_menu_overrides(order.get("lines", []), menu_items)
+    order_lines = _apply_menu_rules(order_lines, facility_id)
     order_for_outputs = {**order, "lines": order_lines}
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))

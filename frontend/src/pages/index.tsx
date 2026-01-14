@@ -118,7 +118,7 @@ export default function HomePage() {
       const entries = await Promise.all(
         weekList.map(async (week) => {
           try {
-            const res = await apiClient.get(`/weekly-menus/${week}`);
+            const res = await apiClient.get(`/monthly-menus/${week}`);
             const items = res.data?.items || [];
             return [
               week,
@@ -155,9 +155,9 @@ export default function HomePage() {
       <header className="hero">
         <div>
           <p className="eyebrow">Hospital Order Dashboard</p>
-          <h1>週次の進捗と未確定を一画面で確認</h1>
+          <h1>月次の進捗と未確定を一画面で確認</h1>
           <p className="subtle">
-            施設×週の状態、未確定申請、OCR/取込状況をまとめて把握できます。
+            施設×月の状態、未確定申請、OCR/取込状況をまとめて把握できます。
           </p>
         </div>
         <TopNav />
@@ -220,7 +220,7 @@ export default function HomePage() {
       <section className="columns">
         <article className="panel">
           <header className="panel-header">
-            <h2>週ごとの進捗表</h2>
+            <h2>月ごとの進捗表</h2>
             <Link href="/orders" className="ghost-link">
               注文一覧へ
             </Link>
@@ -229,7 +229,7 @@ export default function HomePage() {
             <table>
               <thead>
                 <tr>
-                  <th>週ID</th>
+                  <th>月ID</th>
                   <th>未着</th>
                   <th>未確定</th>
                   <th>確定</th>
@@ -273,7 +273,7 @@ export default function HomePage() {
                   <div>
                     <p className="pending-title">{order.id}</p>
                     <p className="pending-meta">
-                      施設: {order.facility || "未確定"} / 週: {order.week || "未確定"}
+                      施設: {order.facility || "未確定"} / 月: {order.week || "未確定"}
                     </p>
                   </div>
                   <span className="status-tag">{order.status}</span>
@@ -286,14 +286,14 @@ export default function HomePage() {
 
       <section className="menu-section">
         <header className="panel-header">
-          <h2>週ごとのメニュー</h2>
+          <h2>月ごとのメニュー</h2>
           <Link href="/orders" className="ghost-link">
-            週を確認する
+            月を確認する
           </Link>
         </header>
         <div className="menu-grid">
           {weekList.length === 0 ? (
-            <p className="subtle">週次メニューの対象週がありません。</p>
+            <p className="subtle">月次メニューの対象月がありません。</p>
           ) : (
             weekList.map((week) => {
               const info = menuInfo[week];

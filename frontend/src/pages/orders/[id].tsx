@@ -166,6 +166,17 @@ type PivotRow = {
   notes: Set<string>;
 };
 
+type PivotCategoryRow = {
+  date: string;
+  categoryKey: string;
+  categoryLabel: string;
+  menu_name: string;
+  daypart: string;
+  bag_type: string;
+  quantity: number;
+  notes: Set<string>;
+};
+
 const buildPivotRows = (lines: OrderDetail["lines"]): PivotRow[] => {
   const map = new Map<string, PivotRow>();
   lines.forEach((line) => {
@@ -197,17 +208,52 @@ const buildPivotRows = (lines: OrderDetail["lines"]): PivotRow[] => {
   return Array.from(map.values());
 };
 
-const groupByDate = <T extends { date?: string | null }>(rows: T[]) => {
-  const map = new Map<string, T[]>();
+const buildPivotCategoryRows = (rows: PivotRow[]): PivotCategoryRow[] => {
+  const result: PivotCategoryRow[] = [];
+  rows.forEach((row) => {
+    Object.entries(row.totals).forEach(([categoryKey, quantity]) => {
+      if (!quantity) return;
+      result.push({
+        date: row.date,
+        categoryKey,
+        categoryLabel: formatCategoryLabel(categoryKey),
+        menu_name: row.menu_name,
+        daypart: row.daypart,
+        bag_type: row.bag_type,
+        quantity,
+        notes: row.notes,
+      });
+    });
+  });
+  return result;
+};
+
+const groupByDateAndCategory = <
+  T extends { date?: string | null; categoryKey?: string | null; categoryLabel?: string | null },
+>(
+  rows: T[],
+  categoryOrder: string[],
+) => {
+  const map = new Map<string, { date: string; categoryKey: string; categoryLabel: string; rows: T[] }>();
   rows.forEach((row) => {
     const date = row.date || "-";
-    const group = map.get(date) || [];
-    group.push(row);
-    map.set(date, group);
+    const categoryKey = row.categoryKey || "unknown";
+    const categoryLabel = row.categoryLabel || formatCategoryLabel(categoryKey);
+    const groupKey = `${date}__${categoryKey}`;
+    const group =
+      map.get(groupKey) || { date, categoryKey, categoryLabel, rows: [] as T[] };
+    group.rows.push(row);
+    map.set(groupKey, group);
   });
-  return Array.from(map.entries())
-    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB, "ja"))
-    .map(([date, group]) => ({ date, rows: group }));
+  const orderIndex = new Map(categoryOrder.map((key, idx) => [key, idx]));
+  return Array.from(map.values()).sort((a, b) => {
+    const dateCompare = a.date.localeCompare(b.date, "ja");
+    if (dateCompare !== 0) return dateCompare;
+    const aRank = orderIndex.get(a.categoryKey) ?? Number.MAX_SAFE_INTEGER;
+    const bRank = orderIndex.get(b.categoryKey) ?? Number.MAX_SAFE_INTEGER;
+    if (aRank !== bRank) return aRank - bRank;
+    return a.categoryLabel.localeCompare(b.categoryLabel, "ja");
+  });
 };
 
 type MarkdownBlock =
@@ -238,7 +284,7 @@ const parseMarkdownBlocks = (markdown: string): MarkdownBlock[] => {
     );
     let header: string[] = [];
     let dataRows = rows;
-    if (rows.length >= 2 && rows[1].every((cell) => /^:?-{2,}:?$/.test(cell))) {
+    if (rows.length >= 2 && rows[1].every((cell) => /^:?-+:?$/.test(cell))) {
       header = rows[0];
       dataRows = rows.slice(2);
     }
@@ -645,11 +691,11 @@ export default function OrderDetailPage() {
     setOcrTableRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
   };
 
-  const applyOcrTable = async () => {
+  const applyOcrTable = async (): Promise<boolean> => {
     if (!order) return;
     if (!ocrTableRows.length) {
       setOcrTableMessage("編集できる表がありません。");
-      return;
+      return false;
     }
     const markdown = buildMarkdownTable(ocrTableHeader, ocrTableRows);
     setOcrTableSaving(true);
@@ -658,6 +704,7 @@ export default function OrderDetailPage() {
       const res = await apiClient.post(`/orders/${order.id}/ocr-apply`, { markdown });
       setOrder(res.data);
       setOcrTableMessage("OCRテーブルを反映しました。");
+      return true;
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 400) {
@@ -665,8 +712,24 @@ export default function OrderDetailPage() {
       } else {
         setOcrTableMessage("OCRテーブルの反映中にエラーが発生しました。");
       }
+      return false;
     } finally {
       setOcrTableSaving(false);
+    }
+  };
+
+  const applyOcrPreview = async () => {
+    if (!order) return;
+    if (!ocrTableRows.length) {
+      setActionMessage("編集できる表がありません。");
+      return;
+    }
+    setActionMessage("OCR結果を明細に反映中...");
+    const ok = await applyOcrTable();
+    if (ok) {
+      setActionMessage("OCR結果を明細に反映しました。");
+    } else {
+      setActionMessage("OCR結果の反映に失敗しました。");
     }
   };
 
@@ -870,9 +933,21 @@ export default function OrderDetailPage() {
 
   const lines = order?.lines || [];
   const pivotRows = buildPivotRows(lines);
-  const categoryColumns = buildCategoryColumns(lines);
-  const pivotGroups = groupByDate(pivotRows);
-  const lineGroups = groupByDate(lines.map((line, idx) => ({ line, idx, date: line.date })));
+  const categoryOrder = buildCategoryColumns(lines).map((col) => col.key);
+  const pivotGroups = groupByDateAndCategory(buildPivotCategoryRows(pivotRows), categoryOrder);
+  const lineGroups = groupByDateAndCategory(
+    lines.map((line, idx) => {
+      const categoryKey = makeCategoryKey(line.diet_type, line.area_id);
+      return {
+        line,
+        idx,
+        date: line.date,
+        categoryKey,
+        categoryLabel: formatCategoryLabel(categoryKey),
+      };
+    }),
+    categoryOrder,
+  );
   const activeOcrPage = ocrPages[activeOcrPageIndex];
   const activeOcrPageLabel = activeOcrPage
     ? activeOcrPage.page_index ?? activeOcrPageIndex + 1
@@ -912,7 +987,7 @@ export default function OrderDetailPage() {
                 <p className="summary-value">{order.message_id || "不明"}</p>
               </div>
               <div>
-                <p className="field-label">週</p>
+                <p className="field-label">月</p>
                 <p className="summary-value">
                   {order.week || "未確定"}{" "}
                   {order.week ? <Link href={`/menus/${order.week}`}>メニュー編集</Link> : null}
@@ -1057,6 +1132,14 @@ export default function OrderDetailPage() {
               <div className="panel-actions">
                 <button className="btn ghost" type="button" onClick={loadOcrPages} disabled={ocrPagesLoading}>
                   {ocrPagesLoading ? "取得中..." : "OCRページを更新"}
+                </button>
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={applyOcrPreview}
+                  disabled={ocrTableSaving || !ocrTableRows.length}
+                >
+                  {ocrTableSaving ? "反映中..." : "OCR結果を明細に反映"}
                 </button>
                 <button
                   className={`btn ${showOcrEdit ? "primary" : "ghost"}`}
@@ -1241,41 +1324,38 @@ export default function OrderDetailPage() {
             ) : (
               <div className="wrap-grid">
                 {pivotGroups.map((group) => (
-                  <div key={`pivot-${group.date}`} className="date-group">
-                    <div className="date-group-header">{group.date}</div>
+                  <details key={`pivot-${group.date}-${group.categoryKey}`} className="date-group">
+                    <summary className="date-group-header">
+                      <span className="date-group-title">{group.date}</span>
+                      <span className="group-separator">/</span>
+                      <span className="group-tag">{group.categoryLabel}</span>
+                      <span className="group-count">{group.rows.length}件</span>
+                    </summary>
                     <div className="table-wrap">
                       <table>
                         <thead>
                           <tr>
                             <th>メニュー</th>
                             <th>時間帯</th>
-                            <th>エリア</th>
                             <th>袋</th>
-                            {categoryColumns.map((col) => (
-                              <th key={col.key}>{col.label}</th>
-                            ))}
+                            <th>数量</th>
                             <th>備考</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {group.rows.map((row) => (
-                            <tr
-                              key={`${group.date}-${row.menu_name}-${row.area_id}-${row.bag_type}-${row.daypart}`}
-                            >
+                          {group.rows.map((row, rowIdx) => (
+                            <tr key={`pivot-row-${group.date}-${group.categoryKey}-${rowIdx}`}>
                               <td>{row.menu_name}</td>
                               <td>{row.daypart}</td>
-                              <td>{row.area_id}</td>
                               <td>{row.bag_type}</td>
-                              {categoryColumns.map((col) => (
-                                <td key={col.key}>{row.totals[col.key] ?? "-"}</td>
-                              ))}
+                              <td>{row.quantity}</td>
                               <td>{row.notes.size ? Array.from(row.notes).join(" / ") : "-"}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                  </div>
+                  </details>
                 ))}
               </div>
             )}
@@ -1290,16 +1370,19 @@ export default function OrderDetailPage() {
             ) : (
               <div className="wrap-grid">
                 {lineGroups.map((group) => (
-                  <div key={`line-${group.date}`} className="date-group">
-                    <div className="date-group-header">{group.date}</div>
+                  <details key={`line-${group.date}-${group.categoryKey}`} className="date-group">
+                    <summary className="date-group-header">
+                      <span className="date-group-title">{group.date}</span>
+                      <span className="group-separator">/</span>
+                      <span className="group-tag">{group.categoryLabel}</span>
+                      <span className="group-count">{group.rows.length}件</span>
+                    </summary>
                     <div className="table-wrap">
                       <table>
                         <thead>
                           <tr>
-                            <th>区分</th>
                             <th>メニュー</th>
                             <th>時間帯</th>
-                            <th>エリア</th>
                             <th>袋</th>
                             <th>OCR</th>
                             <th>修正</th>
@@ -1309,10 +1392,8 @@ export default function OrderDetailPage() {
                         <tbody>
                           {group.rows.map(({ line, idx }) => (
                             <tr key={line.line_id || idx}>
-                              <td>{formatDietType(line.diet_type)}</td>
                               <td>{line.menu_name || "-"}</td>
                               <td>{line.daypart || "-"}</td>
-                              <td>{line.area_id || "-"}</td>
                               <td>{line.bag_type || "-"}</td>
                               <td>{line.quantity_original ?? "-"}</td>
                               <td>
@@ -1334,7 +1415,7 @@ export default function OrderDetailPage() {
                         </tbody>
                       </table>
                     </div>
-                  </div>
+                  </details>
                 ))}
               </div>
             )}
@@ -1939,7 +2020,8 @@ export default function OrderDetailPage() {
         .wrap-grid {
           display: grid;
           gap: 16px;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+          align-items: start;
         }
 
         .date-group {
@@ -1949,11 +2031,61 @@ export default function OrderDetailPage() {
           background: #ffffff;
         }
 
-        .date-group-header {
+        .date-group summary {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
           font-size: 13px;
           font-weight: 600;
           color: #354341;
+          list-style: none;
+        }
+
+        .date-group summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .date-group[open] summary {
           margin-bottom: 10px;
+        }
+
+        .date-group .table-wrap {
+          max-height: 360px;
+          overflow: auto;
+        }
+
+        .date-group table {
+          min-width: 560px;
+        }
+
+        .date-group th,
+        .date-group td {
+          white-space: nowrap;
+        }
+
+        .date-group-title {
+          white-space: nowrap;
+        }
+
+        .group-separator {
+          color: #a2aaa8;
+        }
+
+        .group-tag {
+          background: #f4f1ea;
+          border-radius: 999px;
+          padding: 2px 8px;
+          font-size: 12px;
+          font-weight: 600;
+          color: #354341;
+        }
+
+        .group-count {
+          margin-left: auto;
+          font-size: 12px;
+          font-weight: 500;
+          color: #6b7b76;
         }
 
         @media (max-width: 720px) {

@@ -22,5 +22,10 @@
     "date_format": "MM/DD",
     "week_format": "WEK%GW%V",
     "week_start": "iso"
+  },
+  "month_id_policy": {
+    "source": "earliest_date",
+    "date_format": "MM/DD",
+    "month_format": "%Y-%m"
   }
 }

@@ -1,7 +1,16 @@
 from src.db import Base  # noqa: F401
 from src.models.order import Order, OrderLine, OrderMenuSnapshot  # noqa: F401
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: F401
-from src.models.menu import WeeklyMenu, MenuItem, MenuMaster, MenuFacilityOverride  # noqa: F401
+from src.models.menu import (  # noqa: F401
+    WeeklyMenu,
+    MenuItem,
+    MenuMaster,
+    MenuFacilityOverride,
+    MonthlyMenu,
+    MonthlyMenuItem,
+    MonthlyMenuEntry,
+    MenuRule,
+)
 from src.models.document import OrderDocument  # noqa: F401
 from src.models.ocr_job import OcrJob  # noqa: F401
 from src.models.ingest_job import IngestJob  # noqa: F401

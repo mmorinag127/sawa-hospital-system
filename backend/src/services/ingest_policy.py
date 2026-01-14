@@ -73,11 +73,28 @@ def _parse_date(date_str: str, fmt: str, default_year: int) -> Optional[date]:
         return None
 
 
+def _adjust_year(parsed: date, received_at: datetime, fmt: str) -> date:
+    normalized = _normalize_format(fmt)
+    if "%Y" in normalized:
+        return parsed
+    candidates = [parsed]
+    for delta in (-1, 1):
+        try:
+            candidates.append(parsed.replace(year=parsed.year + delta))
+        except ValueError:
+            continue
+    received_date = received_at.date()
+    return min(candidates, key=lambda candidate: abs((candidate - received_date).days))
+
+
 def parse_date_string(date_str: str, received_at: datetime) -> Optional[date]:
     policy = load_ingest_policy()
     week_policy = policy.get("week_id_policy", {})
     date_format = week_policy.get("date_format", "MM/DD")
-    return _parse_date(date_str, date_format, received_at.year)
+    parsed = _parse_date(date_str, date_format, received_at.year)
+    if parsed:
+        return _adjust_year(parsed, received_at, date_format)
+    return None
 
 
 def week_id_from_dates(
@@ -99,12 +116,43 @@ def week_id_from_dates(
             continue
         parsed = _parse_date(raw, date_format, received_at.year)
         if parsed:
+            parsed = _adjust_year(parsed, received_at, date_format)
+        if parsed:
             dates.append(parsed)
     if not dates:
         return None
     earliest = min(dates)
     iso_year, iso_week, _ = earliest.isocalendar()
     return week_format.replace("%G", f"{iso_year:04d}").replace("%V", f"{iso_week:02d}")
+
+
+def month_id_from_dates(
+    date_strings: Iterable[object],
+    received_at: datetime,
+    policy: Optional[dict] = None,
+) -> Optional[str]:
+    policy = policy or load_ingest_policy()
+    month_policy = policy.get("month_id_policy", {})
+    week_policy = policy.get("week_id_policy", {})
+    date_format = month_policy.get("date_format") or week_policy.get("date_format", "MM/DD")
+    month_format = month_policy.get("month_format", "%Y-%m")
+
+    dates: list[date] = []
+    for raw in date_strings:
+        if isinstance(raw, date):
+            dates.append(raw)
+            continue
+        if raw is None:
+            continue
+        parsed = _parse_date(raw, date_format, received_at.year)
+        if parsed:
+            parsed = _adjust_year(parsed, received_at, date_format)
+        if parsed:
+            dates.append(parsed)
+    if not dates:
+        return None
+    earliest = min(dates)
+    return earliest.strftime(month_format)
 
 
 def should_skip_ocr(received_at: datetime, policy: Optional[dict] = None) -> bool:

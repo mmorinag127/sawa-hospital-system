@@ -17,7 +17,7 @@ class FacilityArea(Base):
     __tablename__ = "facility_areas"
 
     id = Column(String, primary_key=True)
-    facility_id = Column(String, ForeignKey("facilities.id"), nullable=False)
+    facility_id = Column(String, ForeignKey("facilities.id"), primary_key=True, nullable=False)
     name = Column(String, nullable=False)
 
     facility = relationship("Facility", back_populates="areas")

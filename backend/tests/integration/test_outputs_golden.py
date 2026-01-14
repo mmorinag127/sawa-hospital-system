@@ -9,7 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.db import session_scope
-from src.models.menu import MenuItem, WeeklyMenu
+from src.models.menu import MonthlyMenu, MonthlyMenuItem
 from src.services import menu_service, order_service
 from src.services.output_builder import build_outputs
 from src.workers.ingest_mail_adapter import IngestEmailPayload
@@ -29,10 +29,10 @@ def _sort_rows(rows: list[dict], keys: list[str]) -> list[dict]:
 def test_outputs_match_golden_files():
     order_service.clear_all()
     with session_scope() as session:
-        session.query(MenuItem).delete()
-        session.query(WeeklyMenu).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MonthlyMenu).delete()
 
-    week_id = "WEK2025W01"
+    week_id = "2025-01"
     item = menu_service.create_item_stub(week_id, "Menu A")
     menu_service.update_item(
         week_id,

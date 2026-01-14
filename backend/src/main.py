@@ -8,6 +8,7 @@ from src.api import (
     ingest,
     orders,
     menus,
+    menu_rules,
     facilities,
     outputs,
     worker,
@@ -32,7 +33,8 @@ if cors_origins:
 app.include_router(health.router, prefix="")
 app.include_router(ingest.router, prefix="/ingest")
 app.include_router(orders.router, prefix="/orders")
-app.include_router(menus.router, prefix="/weekly-menus")
+app.include_router(menus.router, prefix="/monthly-menus")
+app.include_router(menu_rules.router, prefix="/menu-rules")
 app.include_router(facilities.router, prefix="/facilities")
 app.include_router(outputs.router, prefix="/outputs")
 app.include_router(worker.router, prefix="")
