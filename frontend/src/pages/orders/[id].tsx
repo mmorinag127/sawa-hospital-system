@@ -863,6 +863,7 @@ export default function OrderDetailPage() {
                 }
               } else {
                 setActionMessage(`再解析しました。${beforeCount}→${afterCount} (${changedText})`);
+                await rebuildBags();
               }
               reparseTimerRef.current = null;
               await refreshOcrOutput(orderId);
@@ -892,6 +893,7 @@ export default function OrderDetailPage() {
       } else {
         setActionMessage("再解析しました。");
       }
+      await rebuildBags();
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
