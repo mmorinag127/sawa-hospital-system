@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 from sqlalchemy import delete, select
+from loguru import logger
 
 from src.db import session_scope
 from src.models.menu import MenuRule
@@ -37,12 +38,16 @@ def _serialize_rule(rule: MenuRule) -> dict:
 
 
 def list_rules(rule_type: str | None = None) -> list[dict]:
-    with session_scope() as session:
-        stmt = select(MenuRule)
-        if rule_type:
-            stmt = stmt.where(MenuRule.rule_type == rule_type)
-        rules = session.execute(stmt).scalars().all()
-        return [_serialize_rule(rule) for rule in rules]
+    try:
+        with session_scope() as session:
+            stmt = select(MenuRule)
+            if rule_type:
+                stmt = stmt.where(MenuRule.rule_type == rule_type)
+            rules = session.execute(stmt).scalars().all()
+            return [_serialize_rule(rule) for rule in rules]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Menu rule query failed", error=str(exc))
+        return []
 
 
 def create_rule(payload: dict) -> dict:
@@ -139,34 +144,42 @@ def delete_rule(rule_id: str) -> bool:
 
 
 def list_active_rules() -> list[MenuRule]:
-    with session_scope() as session:
-        return (
-            session.execute(select(MenuRule).where(MenuRule.active.is_(True)))
-            .scalars()
-            .all()
-        )
+    try:
+        with session_scope() as session:
+            return (
+                session.execute(select(MenuRule).where(MenuRule.active.is_(True)))
+                .scalars()
+                .all()
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Menu rule query failed", error=str(exc))
+        return []
 
 
 def ensure_default_rules() -> bool:
-    with session_scope() as session:
-        existing = session.execute(select(MenuRule.id).limit(1)).first()
-        if existing:
-            return False
-        for rule in DEFAULT_GLOBAL_RULES:
-            session.add(
-                MenuRule(
-                    id=f"MRU{uuid4().hex[:8]}",
-                    rule_type="global",
-                    match_type=None,
-                    menu_pattern=None,
-                    facility_id=None,
-                    daypart=rule["daypart"],
-                    category=rule["category"],
-                    diet_type=None,
-                    unit_type=rule["unit_type"],
-                    qty_per_serving=rule["qty_per_serving"],
-                    priority=0,
-                    active=True,
+    try:
+        with session_scope() as session:
+            existing = session.execute(select(MenuRule.id).limit(1)).first()
+            if existing:
+                return False
+            for rule in DEFAULT_GLOBAL_RULES:
+                session.add(
+                    MenuRule(
+                        id=f"MRU{uuid4().hex[:8]}",
+                        rule_type="global",
+                        match_type=None,
+                        menu_pattern=None,
+                        facility_id=None,
+                        daypart=rule["daypart"],
+                        category=rule["category"],
+                        diet_type=None,
+                        unit_type=rule["unit_type"],
+                        qty_per_serving=rule["qty_per_serving"],
+                        priority=0,
+                        active=True,
+                    )
                 )
-            )
-        return True
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Menu rule seed failed", error=str(exc))
+        return False

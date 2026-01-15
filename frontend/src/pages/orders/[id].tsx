@@ -657,7 +657,11 @@ export default function OrderDetailPage() {
       return true;
     } catch (err: any) {
       setBagRows([]);
-      setBagMessage("袋分けの再計算に失敗しました。");
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const detailText = detail ? ` (${detail})` : "";
+      const statusText = status ? ` [${status}]` : "";
+      setBagMessage(`袋分けの再計算に失敗しました。${statusText}${detailText}`);
       return false;
     } finally {
       setBagLoading(false);
