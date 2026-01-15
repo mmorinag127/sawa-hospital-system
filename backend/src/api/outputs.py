@@ -73,6 +73,7 @@ def download_aggregate(order_id: str):
 @router.get("/preview", dependencies=[Depends(require_role("operator"))])
 def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT):
     outputs = build_outputs(order_id)
+    limit = max(1, min(limit, _PREVIEW_LIMIT_DEFAULT))
     if type == "labels":
         payload = _preview_csv(outputs["labels"], "cp932", limit)
     elif type == "delivery":

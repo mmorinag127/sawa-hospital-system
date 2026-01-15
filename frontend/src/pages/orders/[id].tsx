@@ -996,8 +996,15 @@ export default function OrderDetailPage() {
       });
       const headers = Array.isArray(res.data?.headers) ? res.data.headers : [];
       const rows = Array.isArray(res.data?.rows) ? res.data.rows : [];
-      setOutputPreview({ type, headers, rows });
-      setOutputPreviewMessage(rows.length ? "" : "プレビューが空です。");
+      const cappedRows = rows.slice(0, 10);
+      setOutputPreview({ type, headers, rows: cappedRows });
+      if (!cappedRows.length) {
+        setOutputPreviewMessage("プレビューが空です。");
+      } else if (rows.length > cappedRows.length) {
+        setOutputPreviewMessage("先頭10件のみ表示しています。");
+      } else {
+        setOutputPreviewMessage("");
+      }
     } catch {
       setOutputPreview(null);
       setOutputPreviewMessage("プレビューの取得に失敗しました。");
