@@ -4,6 +4,7 @@ from fastapi.responses import Response, JSONResponse
 from loguru import logger
 
 from src.services import order_service, config_service
+from src.services.output_builder import rebuild_bags
 from src.services.ocr_job_service import get_job as get_ocr_job, get_jobs as get_ocr_jobs, update_job as update_ocr_job
 from src.workers.output_worker import enqueue_outputs, OutputBuildError
 from src.api.auth import require_role
@@ -150,6 +151,14 @@ def get_bags(order_id: str):
     if error:
         raise HTTPException(status_code=500, detail="bag summary failed")
     return data
+
+
+@router.post("/{order_id}/bags/rebuild", dependencies=[Depends(require_role("operator"))])
+def rebuild_bag_summary(order_id: str):
+    try:
+        return rebuild_bags(order_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="order not found")
 
 
 @router.get("/{order_id}/ocr-pages", dependencies=[Depends(require_role("operator"))])

@@ -494,3 +494,76 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         "delivery_note": str(delivery_path),
         "aggregate": str(agg_path),
     }
+
+
+def rebuild_bags(order_id: str) -> Dict[str, Any]:
+    order = get_order_by_id(order_id)
+    if not order:
+        raise ValueError("order not found")
+
+    facility_id = order.get("facility")
+    facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    if not facility_config:
+        logger.warning("Facility config missing", facility_id=facility_id)
+        facility_config = {}
+
+    packaging_policy = facility_config.get("packaging_policy", {})
+    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+
+    month_id = order.get("week")
+    menu_items = (
+        menu_service.get_menu_items_for_facility(month_id, facility_id) if month_id else []
+    )
+    snapshot = get_order_menu_snapshot(order_id)
+    snapshot_items = snapshot.get("menu_items") if isinstance(snapshot, dict) else None
+    if snapshot_items:
+        order_lines = _apply_menu_snapshot(order.get("lines", []), snapshot_items)
+    else:
+        order_lines = _apply_menu_overrides(order.get("lines", []), menu_items)
+    order_lines = _apply_menu_rules(order_lines, facility_id)
+    order_for_outputs = {**order, "lines": order_lines}
+
+    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+    payload = []
+
+    with session_scope() as session:
+        session.query(Bag).filter(Bag.order_id == order_id).delete()
+        for bag in bags:
+            bag_id = f"BAG{uuid4().hex[:8]}"
+            session.add(
+                Bag(
+                    id=bag_id,
+                    order_id=order_id,
+                    date=bag.get("date"),
+                    daypart=bag.get("daypart"),
+                    menu_name=bag.get("menu_name"),
+                    diet_type=bag.get("diet_type"),
+                    area_id=bag.get("area_id"),
+                    bag_type=bag.get("bag_type"),
+                    quantity=bag.get("quantity"),
+                )
+            )
+            payload.append(
+                {
+                    "id": bag_id,
+                    "date": bag.get("date").isoformat() if bag.get("date") else None,
+                    "daypart": bag.get("daypart"),
+                    "menu_name": bag.get("menu_name"),
+                    "diet_type": bag.get("diet_type"),
+                    "area_id": bag.get("area_id"),
+                    "bag_type": bag.get("bag_type"),
+                    "quantity": bag.get("quantity"),
+                }
+            )
+
+    payload.sort(
+        key=lambda row: (
+            row.get("date") or "",
+            row.get("daypart") or "",
+            row.get("menu_name") or "",
+            row.get("diet_type") or "",
+            row.get("area_id") or "",
+            row.get("bag_type") or "",
+        )
+    )
+    return {"order_id": order_id, "generated": bool(payload), "bags": payload}

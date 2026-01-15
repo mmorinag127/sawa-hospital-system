@@ -645,6 +645,25 @@ export default function OrderDetailPage() {
     }
   };
 
+  const rebuildBags = async () => {
+    if (!order) return false;
+    setBagLoading(true);
+    setBagMessage("袋分けを再計算中...");
+    try {
+      const res = await apiClient.post(`/orders/${order.id}/bags/rebuild`);
+      const rows = Array.isArray(res.data?.bags) ? res.data.bags : [];
+      setBagRows(rows);
+      setBagMessage(rows.length ? "袋分けを更新しました。" : "袋分け結果がありません。");
+      return true;
+    } catch (err: any) {
+      setBagRows([]);
+      setBagMessage("袋分けの再計算に失敗しました。");
+      return false;
+    } finally {
+      setBagLoading(false);
+    }
+  };
+
   const selectOcrPage = (pageIndex: number) => {
     setActiveOcrPageIndex(pageIndex);
     setTableFromPage(ocrPages[pageIndex], pageIndex);
@@ -704,6 +723,7 @@ export default function OrderDetailPage() {
       const res = await apiClient.post(`/orders/${order.id}/ocr-apply`, { markdown });
       setOrder(res.data);
       setOcrTableMessage("OCRテーブルを反映しました。");
+      await rebuildBags();
       return true;
     } catch (err: any) {
       const status = err?.response?.status;
@@ -1439,11 +1459,14 @@ export default function OrderDetailPage() {
             <header className="panel-header">
               <div>
                 <h2>袋分け結果</h2>
-                <p className="subtle">確定時に作成された袋分け結果を表示します。</p>
+                <p className="subtle">OCR反映後に自動更新します。必要に応じて再計算できます。</p>
               </div>
               <div className="panel-actions">
                 <button className="btn ghost" type="button" onClick={loadBags} disabled={bagLoading}>
                   {bagLoading ? "取得中..." : "更新"}
+                </button>
+                <button className="btn ghost" type="button" onClick={rebuildBags} disabled={bagLoading}>
+                  {bagLoading ? "再計算中..." : "再計算"}
                 </button>
               </div>
             </header>
