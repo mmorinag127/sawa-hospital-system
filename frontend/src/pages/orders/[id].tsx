@@ -279,8 +279,10 @@ type MarkdownBlock =
   | { type: "table"; header: string[]; rows: string[][] }
   | { type: "text"; lines: string[] };
 
+const splitLines = (text: string) => text.split(/\r\n|\n|\r/);
+
 const parseMarkdownBlocks = (markdown: string): MarkdownBlock[] => {
-  const lines = markdown.split(/\r?\n/);
+  const lines = splitLines(markdown);
   const blocks: MarkdownBlock[] = [];
   let buffer: string[] = [];
   let tableBuffer: string[] = [];
@@ -1037,7 +1039,7 @@ export default function OrderDetailPage() {
     : null;
   const previewLineLimit = 10;
   const activeMarkdownLines = activeOcrPage?.markdown_text
-    ? activeOcrPage.markdown_text.split(/\r?\n/)
+    ? splitLines(activeOcrPage.markdown_text)
     : [];
   const previewMarkdownText = activeMarkdownLines.slice(0, previewLineLimit).join("\n");
   const activeOcrBlocks = previewMarkdownText ? parseMarkdownBlocks(previewMarkdownText) : [];
