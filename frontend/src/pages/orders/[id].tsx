@@ -256,6 +256,19 @@ const groupByDateAndCategory = <
   });
 };
 
+const groupBagsByDate = (rows: BagRow[]) => {
+  const map = new Map<string, BagRow[]>();
+  rows.forEach((row) => {
+    const date = row.date || "-";
+    const group = map.get(date) || [];
+    group.push(row);
+    map.set(date, group);
+  });
+  return Array.from(map.entries())
+    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB, "ja"))
+    .map(([date, group]) => ({ date, rows: group }));
+};
+
 type MarkdownBlock =
   | { type: "table"; header: string[]; rows: string[][] }
   | { type: "text"; lines: string[] };
@@ -974,6 +987,7 @@ export default function OrderDetailPage() {
     }),
     categoryOrder,
   );
+  const bagGroups = groupBagsByDate(bagRows);
   const activeOcrPage = ocrPages[activeOcrPageIndex];
   const activeOcrPageLabel = activeOcrPage
     ? activeOcrPage.page_index ?? activeOcrPageIndex + 1
@@ -1477,40 +1491,46 @@ export default function OrderDetailPage() {
               </div>
             </header>
             {bagMessage ? <p className="subtle">{bagMessage}</p> : null}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>日付</th>
-                    <th>食区</th>
-                    <th>メニュー</th>
-                    <th>区分</th>
-                    <th>エリア</th>
-                    <th>袋</th>
-                    <th>数量</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bagRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={7}>袋分け結果がありません。</td>
-                    </tr>
-                  ) : (
-                    bagRows.map((bag) => (
-                      <tr key={bag.id}>
-                        <td>{bag.date || "-"}</td>
-                        <td>{bag.daypart || "-"}</td>
-                        <td>{bag.menu_name || "-"}</td>
-                        <td>{bag.diet_type ? formatDietType(bag.diet_type) : "-"}</td>
-                        <td>{bag.area_id || "-"}</td>
-                        <td>{bag.bag_type || "-"}</td>
-                        <td>{formatQuantity(bag.quantity)}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+            {bagRows.length === 0 ? (
+              <p className="subtle">袋分け結果がありません。</p>
+            ) : (
+              <div className="wrap-grid">
+                {bagGroups.map((group) => (
+                  <div key={`bag-${group.date}`} className="date-group">
+                    <div className="date-group-header">
+                      <span className="date-group-title">{group.date}</span>
+                      <span className="group-count">{group.rows.length}件</span>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>食区</th>
+                            <th>メニュー</th>
+                            <th>区分</th>
+                            <th>エリア</th>
+                            <th>袋</th>
+                            <th>数量</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {group.rows.map((bag) => (
+                            <tr key={bag.id}>
+                              <td>{bag.daypart || "-"}</td>
+                              <td>{bag.menu_name || "-"}</td>
+                              <td>{bag.diet_type ? formatDietType(bag.diet_type) : "-"}</td>
+                              <td>{bag.area_id || "-"}</td>
+                              <td>{bag.bag_type || "-"}</td>
+                              <td>{formatQuantity(bag.quantity)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <section className="panel">
@@ -2069,6 +2089,16 @@ export default function OrderDetailPage() {
           font-weight: 600;
           color: #354341;
           list-style: none;
+        }
+
+        .date-group-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 13px;
+          font-weight: 600;
+          color: #354341;
+          margin-bottom: 10px;
         }
 
         .date-group summary::-webkit-details-marker {
