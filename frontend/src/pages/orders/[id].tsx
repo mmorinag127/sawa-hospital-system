@@ -1287,7 +1287,7 @@ export default function OrderDetailPage() {
                   type="button"
                   onClick={() => setShowMarkdownRaw((prev) => !prev)}
                 >
-                  {showMarkdownRaw ? "Markdownを閉じる" : "Markdownを表示"}
+                  {showMarkdownRaw ? "全体を閉じる" : "全体を表示"}
                 </button>
               </div>
               <div className="markdown-preview">
