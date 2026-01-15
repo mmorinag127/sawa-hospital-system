@@ -4,7 +4,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse
 
-from src.services.output_builder import build_outputs
+from src.services.output_builder import build_outputs, build_output_preview
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -72,13 +72,15 @@ def download_aggregate(order_id: str):
 
 @router.get("/preview", dependencies=[Depends(require_role("operator"))])
 def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT):
-    outputs = build_outputs(order_id)
     limit = max(1, min(limit, _PREVIEW_LIMIT_DEFAULT))
     if type == "labels":
+        outputs = build_output_preview(order_id, "labels")
         payload = _preview_csv(outputs["labels"], "cp932", limit)
     elif type == "delivery":
+        outputs = build_output_preview(order_id, "delivery")
         payload = _preview_excel(outputs["delivery_note"], limit)
     elif type == "aggregate":
+        outputs = build_output_preview(order_id, "aggregate")
         payload = _preview_csv(outputs["aggregate"], "cp932", limit)
     else:
         raise HTTPException(status_code=400, detail="invalid output type")

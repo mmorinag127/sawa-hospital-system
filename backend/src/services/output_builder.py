@@ -699,7 +699,7 @@ def _write_aggregate_csv(path: Path, rows: list[dict], label_fields: list[str]) 
             writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
-def build_outputs(order_id: str) -> Dict[str, Any]:
+def _prepare_output_context(order_id: str) -> dict:
     order = get_order_by_id(order_id)
     if not order:
         raise ValueError("order not found")
@@ -729,8 +729,64 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     order_for_outputs = {**order, "lines": order_lines}
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+    return {
+        "order": order,
+        "facility_config": facility_config,
+        "label_profile": label_profile,
+        "invoice_template": invoice_template,
+        "quantity_rules": quantity_rules,
+        "order_lines": order_lines,
+        "order_for_outputs": order_for_outputs,
+        "bags": bags,
+    }
+
+
+def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
+    ctx = _prepare_output_context(order_id)
+    label_profile = ctx["label_profile"]
+    invoice_template = ctx["invoice_template"]
+    quantity_rules = ctx["quantity_rules"]
+    facility_name = ctx["facility_config"].get("facility_name")
+    bags = ctx["bags"]
+
+    label_path = OUTPUT_DIR / f"{order_id}_labels.csv"
+    delivery_path = OUTPUT_DIR / f"{order_id}_delivery.xlsx"
+    agg_path = OUTPUT_DIR / f"{order_id}_aggregate.csv"
+
+    if output_type == "labels":
+        labels, label_fields, _ = _build_label_rows(bags, label_profile, facility_name)
+        _write_label_csv(label_path, labels, label_fields)
+        return {"labels": str(label_path)}
+    if output_type == "delivery":
+        delivery_rows = _build_delivery_rows(ctx["order_for_outputs"], invoice_template, quantity_rules)
+        _write_delivery_note(
+            delivery_path,
+            delivery_rows,
+            invoice_template.get("columns", []),
+            invoice_template.get("template_uri"),
+            invoice_template.get("sheet_name"),
+        )
+        return {"delivery_note": str(delivery_path)}
+    if output_type == "aggregate":
+        total_rows, total_fields, _ = _build_total_rows(
+            ctx["order_lines"], label_profile, facility_name, quantity_rules
+        )
+        _write_aggregate_csv(agg_path, total_rows, total_fields)
+        return {"aggregate": str(agg_path)}
+    raise ValueError(f"invalid output type: {output_type}")
+
+
+def build_outputs(order_id: str) -> Dict[str, Any]:
+    ctx = _prepare_output_context(order_id)
+    order = ctx["order"]
+    label_profile = ctx["label_profile"]
+    invoice_template = ctx["invoice_template"]
+    quantity_rules = ctx["quantity_rules"]
+    order_lines = ctx["order_lines"]
+    order_for_outputs = ctx["order_for_outputs"]
+    bags = ctx["bags"]
     labels, label_fields, _ = _build_label_rows(
-        bags, label_profile, facility_config.get("facility_name")
+        bags, label_profile, ctx["facility_config"].get("facility_name")
     )
 
     label_path = OUTPUT_DIR / f"{order_id}_labels.csv"
@@ -749,7 +805,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     )
 
     total_rows, total_fields, _ = _build_total_rows(
-        order_lines, label_profile, facility_config.get("facility_name"), quantity_rules
+        order_lines, label_profile, ctx["facility_config"].get("facility_name"), quantity_rules
     )
     _write_aggregate_csv(agg_path, total_rows, total_fields)
 
