@@ -1035,9 +1035,12 @@ export default function OrderDetailPage() {
   const activeOcrPageLabel = activeOcrPage
     ? activeOcrPage.page_index ?? activeOcrPageIndex + 1
     : null;
-  const activeOcrBlocks = activeOcrPage?.markdown_text
-    ? parseMarkdownBlocks(activeOcrPage.markdown_text)
+  const previewLineLimit = 10;
+  const activeMarkdownLines = activeOcrPage?.markdown_text
+    ? activeOcrPage.markdown_text.split(/\r?\n/)
     : [];
+  const previewMarkdownText = activeMarkdownLines.slice(0, previewLineLimit).join("\n");
+  const activeOcrBlocks = previewMarkdownText ? parseMarkdownBlocks(previewMarkdownText) : [];
   const facilityCandidates = ocrOutput?.facility_candidates || [];
 
   return (
@@ -1297,6 +1300,9 @@ export default function OrderDetailPage() {
                   {showMarkdownRaw ? "全体を閉じる" : "全体を表示"}
                 </button>
               </div>
+              {activeMarkdownLines.length > previewLineLimit ? (
+                <p className="subtle">先頭10行のみ表示しています。</p>
+              ) : null}
               <div className="markdown-preview">
                 {activeOcrBlocks.length ? (
                   activeOcrBlocks.map((block, blockIdx) =>
