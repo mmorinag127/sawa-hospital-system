@@ -992,7 +992,7 @@ export default function OrderDetailPage() {
     setOutputPreviewMessage("プレビューを取得中...");
     try {
       const res = await apiClient.get("/outputs/preview", {
-        params: { order_id: order.id, type },
+        params: { order_id: order.id, type, limit: 10 },
       });
       const headers = Array.isArray(res.data?.headers) ? res.data.headers : [];
       const rows = Array.isArray(res.data?.rows) ? res.data.rows : [];

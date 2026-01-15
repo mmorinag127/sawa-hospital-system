@@ -9,7 +9,7 @@ from src.api.auth import require_role
 
 router = APIRouter()
 
-_PREVIEW_LIMIT_DEFAULT = 200
+_PREVIEW_LIMIT_DEFAULT = 10
 
 
 def _preview_csv(path: str, encoding: str, limit: int) -> dict:
