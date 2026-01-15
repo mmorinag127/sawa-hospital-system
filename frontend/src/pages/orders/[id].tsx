@@ -1043,7 +1043,11 @@ export default function OrderDetailPage() {
     : [];
   const previewMarkdownText = activeMarkdownLines.slice(0, previewLineLimit).join("\n");
   const activeOcrBlocks = previewMarkdownText ? parseMarkdownBlocks(previewMarkdownText) : [];
+  const fullOcrBlocks = activeOcrPage?.markdown_text
+    ? parseMarkdownBlocks(activeOcrPage.markdown_text)
+    : [];
   const facilityCandidates = ocrOutput?.facility_candidates || [];
+  const displayedOcrBlocks = showMarkdownRaw ? fullOcrBlocks : activeOcrBlocks;
 
   return (
     <main className="page">
@@ -1302,12 +1306,12 @@ export default function OrderDetailPage() {
                   {showMarkdownRaw ? "全体を閉じる" : "全体を表示"}
                 </button>
               </div>
-              {activeMarkdownLines.length > previewLineLimit ? (
+              {!showMarkdownRaw && activeMarkdownLines.length > previewLineLimit ? (
                 <p className="subtle">先頭10行のみ表示しています。</p>
               ) : null}
               <div className="markdown-preview">
-                {activeOcrBlocks.length ? (
-                  activeOcrBlocks.map((block, blockIdx) =>
+                {displayedOcrBlocks.length ? (
+                  displayedOcrBlocks.map((block, blockIdx) =>
                     block.type === "table" ? (
                       <div key={`table-${blockIdx}`} className="markdown-table">
                         <table>
@@ -1341,11 +1345,6 @@ export default function OrderDetailPage() {
                   <p className="subtle">Markdownがありません。</p>
                 )}
               </div>
-              {showMarkdownRaw ? (
-                <pre className="markdown-raw">
-                  {activeOcrPage?.markdown_text || "Markdownがありません。"}
-                </pre>
-              ) : null}
             </div>
             {showOcrEdit ? (
               <div className="ocr-edit">
