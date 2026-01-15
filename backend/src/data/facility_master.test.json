@@ -50,16 +50,17 @@
     "storage_mode": "chilled",
     "expiry_rule": "meal_date",
     "label_fields": [
-      "facility_name",
-      "expiry_date",
-      "storage_mode",
-      "meal_slot",
-      "menu_category",
-      "product_name",
-      "quantity",
-      "details",
-      "maker_info",
-      "notice"
+      "呼び出し番号",
+      "発行枚数",
+      "賞味期限",
+      "時間",
+      "メニュー",
+      "温・冷",
+      "商品名１",
+      "商品名２",
+      "内容量",
+      "内容詳細",
+      ""
     ],
     "fixed_text": {
       "maker_name": "TODO",

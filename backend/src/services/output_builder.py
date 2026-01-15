@@ -1,20 +1,50 @@
 import csv
 import math
 import re
+from copy import copy
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any
 from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
+from openpyxl import load_workbook
 
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import config_service, menu_service, menu_rule_service
+from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_LABEL_FIELDS = [
+    "呼び出し番号",
+    "発行枚数",
+    "賞味期限",
+    "時間",
+    "メニュー",
+    "温・冷",
+    "商品名１",
+    "商品名２",
+    "内容量",
+    "内容詳細",
+    "",
+]
+LEGACY_LABEL_FIELDS = {
+    "facility_name",
+    "expiry_date",
+    "storage_mode",
+    "meal_slot",
+    "menu_category",
+    "product_name",
+    "quantity",
+    "details",
+    "maker_info",
+    "notice",
+}
 
 
 def _ensure_date(value):
@@ -36,6 +66,102 @@ def _serialize_for_json(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def _format_number(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    try:
+        num = float(value)
+    except Exception:
+        return str(value)
+    if num.is_integer():
+        return str(int(num))
+    return f"{num:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_jp_date(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+        return f"{value.year}年{value.month}月{value.day}日"
+    try:
+        parsed = pd.to_datetime(value).date()
+        return f"{parsed.year}年{parsed.month}月{parsed.day}日"
+    except Exception:
+        return str(value)
+
+
+def _normalize_temp_label(temp: str | None) -> str:
+    if not temp:
+        return ""
+    value = str(temp)
+    if "冷" in value:
+        return "冷菜"
+    if "温" in value:
+        return "温菜"
+    lowered = value.lower()
+    if lowered in {"hot", "warm"}:
+        return "温菜"
+    if lowered in {"cold", "chilled"}:
+        return "冷菜"
+    return value
+
+
+def _normalize_unit_type(unit_type: str | None) -> str | None:
+    if not unit_type:
+        return None
+    lowered = str(unit_type).lower()
+    if "g" in lowered or "グラム" in lowered:
+        return "g"
+    if "切" in lowered or lowered in {"cut", "slice"}:
+        return "切"
+    if "個" in lowered or lowered in {"count", "piece", "pieces"}:
+        return "個"
+    return str(unit_type)
+
+
+def _extract_qty_and_unit(value: Any, unit_type: str | None) -> tuple[float | None, str | None]:
+    if value is None:
+        return None, _normalize_unit_type(unit_type)
+    if isinstance(value, (int, float)):
+        return float(value), _normalize_unit_type(unit_type)
+    text = str(value).strip()
+    if not text:
+        return None, _normalize_unit_type(unit_type)
+    match = re.search(r"[-+]?[0-9]*\\.?[0-9]+", text)
+    qty = float(match.group()) if match else None
+    inferred_unit = None
+    if "g" in text or "ｇ" in text or "グラム" in text:
+        inferred_unit = "g"
+    elif "切" in text:
+        inferred_unit = "切"
+    elif "個" in text:
+        inferred_unit = "個"
+    return qty, _normalize_unit_type(unit_type) or inferred_unit
+
+
+def _format_amount(value: float | int | None, unit_type: str | None) -> str:
+    if value is None:
+        return ""
+    suffix = _normalize_unit_type(unit_type)
+    formatted = _format_number(value)
+    if suffix:
+        return f"{formatted}{suffix}"
+    return formatted
+
+
+def _format_servings(quantity: float | int | None) -> str:
+    if quantity is None:
+        return ""
+    return f"{_format_number(quantity)}人前"
+
+
+def _resolve_label_fields(label_profile: dict) -> tuple[list[str], str]:
+    fields = label_profile.get("label_fields")
+    if isinstance(fields, list) and any(field in LEGACY_LABEL_FIELDS for field in fields):
+        return fields, "legacy"
+    return (fields if isinstance(fields, list) and fields else DEFAULT_LABEL_FIELDS), "jp"
 
 def _safe_qty(line: dict, zero_as_empty: bool) -> float | None:
     qty = line.get("quantity_corrected")
@@ -59,7 +185,8 @@ def _format_menu_unit(qty: float | int | None, unit_type: str | None) -> str | N
         qty_str = str(int(qty_value))
     else:
         qty_str = str(qty_value)
-    suffix = "g" if unit_type == "g" else ("count" if unit_type == "count" else unit_type)
+    normalized = _normalize_unit_type(unit_type)
+    suffix = "g" if normalized == "g" else ("個" if normalized == "個" else ("切" if normalized == "切" else normalized))
     return f"{qty_str}{suffix}"
 
 
@@ -300,7 +427,7 @@ def _split_bags_by_max(bags: list[dict]) -> list[dict]:
     return split
 
 
-def _label_payload(bag: dict, label_profile: dict, facility_name: str | None) -> dict:
+def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | None) -> dict:
     fixed_text = label_profile.get("fixed_text", {})
     expiry_rule = label_profile.get("expiry_rule", "meal_date")
     expiry_date = bag.get("date")
@@ -322,22 +449,152 @@ def _label_payload(bag: dict, label_profile: dict, facility_name: str | None) ->
         "notice": fixed_text.get("notice"),
     }
 
+def _label_payload_jp(bag: dict) -> dict:
+    per_qty, unit = _extract_qty_and_unit(bag.get("menu_qty_per_serving"), bag.get("menu_unit_type"))
+    servings = bag.get("quantity")
+    total_qty = None
+    if per_qty is not None and servings is not None:
+        try:
+            total_qty = float(per_qty) * float(servings)
+        except Exception:
+            total_qty = None
+    return {
+        "呼び出し番号": "",
+        "発行枚数": 1,
+        "賞味期限": _format_jp_date(bag.get("date")),
+        "時間": bag.get("daypart") or "",
+        "メニュー": bag.get("menu_category") or bag.get("menu_name") or "",
+        "温・冷": _normalize_temp_label(bag.get("menu_temp_type")),
+        "商品名１": bag.get("menu_name") or "",
+        "商品名２": "",
+        "内容量": _format_amount(total_qty, unit),
+        "内容詳細": _format_amount(per_qty, unit),
+        "": _format_servings(servings),
+    }
 
-def _write_label_csv(path: Path, labels: list[dict], label_profile: dict) -> None:
-    fieldnames = label_profile.get("label_fields") or (list(labels[0].keys()) if labels else [])
+
+def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
+    if not rows:
+        return []
+    group_fields = [field for field in fields if field not in {"呼び出し番号", "発行枚数"}]
+    grouped: dict[tuple, dict] = {}
+    counts: dict[tuple, int] = {}
+    for row in rows:
+        key = tuple(row.get(field, "") for field in group_fields)
+        if key not in grouped:
+            grouped[key] = dict(row)
+            counts[key] = 0
+        counts[key] += 1
+    merged = []
+    for key, row in grouped.items():
+        row["発行枚数"] = counts.get(key, 1)
+        merged.append(row)
+    merged.sort(
+        key=lambda r: (
+            r.get("賞味期限", ""),
+            r.get("時間", ""),
+            r.get("メニュー", ""),
+            r.get("商品名１", ""),
+            r.get("内容量", ""),
+        )
+    )
+    return merged
+
+
+def _write_label_csv(path: Path, labels: list[dict], label_fields: list[str]) -> None:
+    fieldnames = label_fields or (list(labels[0].keys()) if labels else [])
     with path.open("w", newline="", encoding="cp932", errors="replace") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for label in labels:
             writer.writerow({k: label.get(k, "") for k in fieldnames})
 
+def _normalize_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    text = re.sub(r"[\\s　]+", "", text)
+    return text
 
-def _write_delivery_note(path: Path, rows: list[dict], columns: list[dict]) -> None:
-    if not rows:
-        df = pd.DataFrame(columns=[col["name"] for col in columns])
+
+def _find_delivery_header_row(ws, column_names: list[str]) -> int | None:
+    targets = [_normalize_cell_text(name) for name in column_names if name]
+    best_row = None
+    best_hits = 0
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
+        row_text = [_normalize_cell_text(cell.value) for cell in row if cell.value is not None]
+        if not row_text:
+            continue
+        hits = sum(1 for target in targets if any(target in cell for cell in row_text))
+        if hits > best_hits:
+            best_hits = hits
+            best_row = row[0].row
+    return best_row
+
+
+def _build_delivery_column_map(ws, header_row: int, column_names: list[str]) -> dict[str, int]:
+    column_map: dict[str, int] = {}
+    header_cells = list(ws[header_row])
+    for col_name in column_names:
+        normalized = _normalize_cell_text(col_name)
+        for cell in header_cells:
+            cell_text = _normalize_cell_text(cell.value)
+            if normalized and normalized in cell_text:
+                column_map[col_name] = cell.col_idx
+                break
+    return column_map
+
+
+def _copy_cell_style(source, target) -> None:
+    target.font = copy(source.font)
+    target.border = copy(source.border)
+    target.fill = copy(source.fill)
+    target.number_format = copy(source.number_format)
+    target.protection = copy(source.protection)
+    target.alignment = copy(source.alignment)
+
+
+def _write_delivery_note(
+    path: Path,
+    rows: list[dict],
+    columns: list[dict],
+    template_uri: str | None,
+    sheet_name: str | None = None,
+) -> None:
+    if not template_uri:
+        if not rows:
+            df = pd.DataFrame(columns=[col["name"] for col in columns])
+        else:
+            df = pd.DataFrame(rows)
+        df.to_excel(path, index=False)
+        return
+
+    template_bytes = load_bytes_from_uri(template_uri)
+    workbook = load_workbook(BytesIO(template_bytes))
+    if sheet_name and sheet_name in workbook.sheetnames:
+        ws = workbook[sheet_name]
     else:
-        df = pd.DataFrame(rows)
-    df.to_excel(path, index=False)
+        ws = workbook.active
+
+    column_names = [col.get("name") for col in columns if col.get("name")]
+    header_row = _find_delivery_header_row(ws, column_names)
+    if not header_row:
+        header_row = 1
+    column_map = _build_delivery_column_map(ws, header_row, column_names)
+    start_row = header_row + 1
+
+    for idx, row in enumerate(rows):
+        target_row = start_row + idx
+        for col in column_names:
+            col_idx = column_map.get(col)
+            if not col_idx:
+                continue
+            cell = ws.cell(row=target_row, column=col_idx)
+            template_cell = ws.cell(row=start_row, column=col_idx)
+            _copy_cell_style(template_cell, cell)
+            cell.value = row.get(col, "")
+
+    workbook.save(path)
 
 
 def _build_delivery_rows(order: dict, template: dict, quantity_rules: dict) -> list[dict]:
@@ -370,12 +627,76 @@ def _build_delivery_rows(order: dict, template: dict, quantity_rules: dict) -> l
     return list(rows.values())
 
 
-def _write_aggregate_csv(path: Path, rows: list[dict]) -> None:
-    fieldnames = ["week", "facility", "menu_name", "diet_type", "area_id", "bag_type", "quantity"]
-    with path.open("w", newline="", encoding="utf-8") as f:
+def _build_label_rows(
+    bags: list[dict],
+    label_profile: dict,
+    facility_name: str | None,
+) -> tuple[list[dict], list[str], str]:
+    label_fields, label_format = _resolve_label_fields(label_profile)
+    if label_format == "legacy":
+        labels = [_label_payload_legacy(bag, label_profile, facility_name) for bag in bags]
+        return labels, label_fields, label_format
+    labels = [_label_payload_jp(bag) for bag in bags]
+    merged = _merge_label_rows(labels, label_fields)
+    return merged, label_fields, label_format
+
+
+def _build_total_rows(
+    order_lines: list[dict],
+    label_profile: dict,
+    facility_name: str | None,
+    quantity_rules: dict,
+) -> tuple[list[dict], list[str], str]:
+    label_fields, label_format = _resolve_label_fields(label_profile)
+    zero_as_empty = quantity_rules.get("zero_as_empty", True)
+    grouped: dict[tuple, dict] = {}
+    for line in order_lines:
+        line_date = _ensure_date(line.get("date"))
+        qty = _safe_qty(line, zero_as_empty)
+        if qty is None:
+            continue
+        key = (
+            line_date,
+            line.get("daypart"),
+            line.get("menu_category"),
+            line.get("menu_name"),
+            line.get("menu_temp_type"),
+            line.get("menu_qty_per_serving"),
+            line.get("menu_unit_type"),
+        )
+        row = grouped.setdefault(
+            key,
+            {
+                "date": line_date,
+                "daypart": line.get("daypart"),
+                "menu_category": line.get("menu_category"),
+                "menu_name": line.get("menu_name"),
+                "menu_temp_type": line.get("menu_temp_type"),
+                "menu_qty_per_serving": line.get("menu_qty_per_serving"),
+                "menu_unit_type": line.get("menu_unit_type"),
+                "quantity": 0.0,
+            },
+        )
+        row["quantity"] += float(qty)
+    if label_format == "legacy":
+        labels = [
+            _label_payload_legacy(row, label_profile, facility_name) for row in grouped.values()
+        ]
+        return labels, label_fields, label_format
+    labels = [_label_payload_jp(row) for row in grouped.values()]
+    merged = _merge_label_rows(labels, label_fields)
+    for row in merged:
+        row["発行枚数"] = ""
+    return merged, label_fields, label_format
+
+
+def _write_aggregate_csv(path: Path, rows: list[dict], label_fields: list[str]) -> None:
+    fieldnames = label_fields or (list(rows[0].keys()) if rows else [])
+    with path.open("w", newline="", encoding="cp932", errors="replace") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
 def build_outputs(order_id: str) -> Dict[str, Any]:
@@ -408,34 +729,29 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     order_for_outputs = {**order, "lines": order_lines}
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
-    labels = [
-        _label_payload(bag, label_profile, facility_config.get("facility_name"))
-        for bag in bags
-    ]
+    labels, label_fields, _ = _build_label_rows(
+        bags, label_profile, facility_config.get("facility_name")
+    )
 
     label_path = OUTPUT_DIR / f"{order_id}_labels.csv"
     delivery_path = OUTPUT_DIR / f"{order_id}_delivery.xlsx"
     agg_path = OUTPUT_DIR / f"{order_id}_aggregate.csv"
 
-    _write_label_csv(label_path, labels, label_profile)
+    _write_label_csv(label_path, labels, label_fields)
 
     delivery_rows = _build_delivery_rows(order_for_outputs, invoice_template, quantity_rules)
-    _write_delivery_note(delivery_path, delivery_rows, invoice_template.get("columns", []))
+    _write_delivery_note(
+        delivery_path,
+        delivery_rows,
+        invoice_template.get("columns", []),
+        invoice_template.get("template_uri"),
+        invoice_template.get("sheet_name"),
+    )
 
-    aggregate_rows: list[dict] = []
-    for bag in bags:
-        aggregate_rows.append(
-            {
-                "week": order.get("week"),
-                "facility": order.get("facility"),
-                "menu_name": bag.get("menu_name"),
-                "diet_type": bag.get("diet_type"),
-                "area_id": bag.get("area_id"),
-                "bag_type": bag.get("bag_type"),
-                "quantity": bag.get("quantity"),
-            }
-        )
-    _write_aggregate_csv(agg_path, aggregate_rows)
+    total_rows, total_fields, _ = _build_total_rows(
+        order_lines, label_profile, facility_config.get("facility_name"), quantity_rules
+    )
+    _write_aggregate_csv(agg_path, total_rows, total_fields)
 
     with session_scope() as session:
         session.query(Bag).filter(Bag.order_id == order_id).delete()
@@ -478,12 +794,12 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
                 payload_json={"rows": delivery_rows_payload},
             )
         )
-        for row in aggregate_rows:
+        for row in bags:
             session.add(
                 ManufacturingAggregateRow(
                     id=f"MAG{uuid4().hex[:8]}",
-                    week_code=row.get("week") or "",
-                    facility_code=row.get("facility") or "",
+                    week_code=order.get("week") or "",
+                    facility_code=order.get("facility") or "",
                     menu_name=row.get("menu_name"),
                     diet_type=row.get("diet_type"),
                     area_id=row.get("area_id"),

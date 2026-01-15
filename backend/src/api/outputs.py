@@ -79,7 +79,7 @@ def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT
     elif type == "delivery":
         payload = _preview_excel(outputs["delivery_note"], limit)
     elif type == "aggregate":
-        payload = _preview_csv(outputs["aggregate"], "utf-8", limit)
+        payload = _preview_csv(outputs["aggregate"], "cp932", limit)
     else:
         raise HTTPException(status_code=400, detail="invalid output type")
     return {"type": type, **payload}
