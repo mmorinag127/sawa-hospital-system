@@ -60,6 +60,12 @@ type BagRow = {
   quantity?: number | null;
 };
 
+type OutputPreview = {
+  type: "labels" | "delivery" | "aggregate";
+  headers: string[];
+  rows: string[][];
+};
+
 type FacilityOption = {
   id: string;
   name: string;
@@ -425,6 +431,10 @@ export default function OrderDetailPage() {
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
   const [bagLoading, setBagLoading] = useState<boolean>(false);
+  const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
+  const [outputPreviewMessage, setOutputPreviewMessage] = useState<string>("");
+  const [outputPreviewLoading, setOutputPreviewLoading] = useState<boolean>(false);
+  const [showMarkdownRaw, setShowMarkdownRaw] = useState<boolean>(false);
   const reparseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -970,6 +980,32 @@ export default function OrderDetailPage() {
     }
   };
 
+  const outputPreviewLabels: Record<OutputPreview["type"], string> = {
+    labels: "ラベルCSV",
+    delivery: "納品書Excel",
+    aggregate: "総量CSV",
+  };
+
+  const loadOutputPreview = async (type: OutputPreview["type"]) => {
+    if (!order) return;
+    setOutputPreviewLoading(true);
+    setOutputPreviewMessage("プレビューを取得中...");
+    try {
+      const res = await apiClient.get("/outputs/preview", {
+        params: { order_id: order.id, type },
+      });
+      const headers = Array.isArray(res.data?.headers) ? res.data.headers : [];
+      const rows = Array.isArray(res.data?.rows) ? res.data.rows : [];
+      setOutputPreview({ type, headers, rows });
+      setOutputPreviewMessage(rows.length ? "" : "プレビューが空です。");
+    } catch {
+      setOutputPreview(null);
+      setOutputPreviewMessage("プレビューの取得に失敗しました。");
+    } finally {
+      setOutputPreviewLoading(false);
+    }
+  };
+
   const lines = order?.lines || [];
   const pivotRows = buildPivotRows(lines);
   const categoryOrder = buildCategoryColumns(lines).map((col) => col.key);
@@ -1246,6 +1282,13 @@ export default function OrderDetailPage() {
             <div className="ocr-result">
               <div className="ocr-result-header">
                 <p className="subtle">読み取り結果</p>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => setShowMarkdownRaw((prev) => !prev)}
+                >
+                  {showMarkdownRaw ? "Markdownを閉じる" : "Markdownを表示"}
+                </button>
               </div>
               <div className="markdown-preview">
                 {activeOcrBlocks.length ? (
@@ -1283,6 +1326,11 @@ export default function OrderDetailPage() {
                   <p className="subtle">Markdownがありません。</p>
                 )}
               </div>
+              {showMarkdownRaw ? (
+                <pre className="markdown-raw">
+                  {activeOcrPage?.markdown_text || "Markdownがありません。"}
+                </pre>
+              ) : null}
             </div>
             {showOcrEdit ? (
               <div className="ocr-edit">
@@ -1538,28 +1586,89 @@ export default function OrderDetailPage() {
               <h2>出力</h2>
             </header>
             <div className="outputs">
-              <button
-                className="output-link"
-                type="button"
-                onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`)}
-              >
-                ラベルCSV
-              </button>
-              <button
-                className="output-link"
-                type="button"
-                onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`)}
-              >
-                納品書Excel
-              </button>
-              <button
-                className="output-link"
-                type="button"
-                onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`)}
-              >
-                総量CSV
-              </button>
+              <div className="output-card">
+                <button
+                  className="output-link"
+                  type="button"
+                  onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`)}
+                >
+                  ラベルCSV
+                </button>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => loadOutputPreview("labels")}
+                  disabled={outputPreviewLoading}
+                >
+                  プレビュー
+                </button>
+              </div>
+              <div className="output-card">
+                <button
+                  className="output-link"
+                  type="button"
+                  onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`)}
+                >
+                  納品書Excel
+                </button>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => loadOutputPreview("delivery")}
+                  disabled={outputPreviewLoading}
+                >
+                  プレビュー
+                </button>
+              </div>
+              <div className="output-card">
+                <button
+                  className="output-link"
+                  type="button"
+                  onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`)}
+                >
+                  総量CSV
+                </button>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => loadOutputPreview("aggregate")}
+                  disabled={outputPreviewLoading}
+                >
+                  プレビュー
+                </button>
+              </div>
             </div>
+            {outputPreviewMessage ? <p className="subtle">{outputPreviewMessage}</p> : null}
+            {outputPreview ? (
+              <details className="output-preview" open>
+                <summary>
+                  プレビュー: {outputPreviewLabels[outputPreview.type]}
+                  {outputPreview.rows.length ? ` (${outputPreview.rows.length}件)` : ""}
+                </summary>
+                <div className="table-wrap">
+                  <table>
+                    {outputPreview.headers.length ? (
+                      <thead>
+                        <tr>
+                          {outputPreview.headers.map((header, idx) => (
+                            <th key={`preview-head-${idx}`}>{header}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                    ) : null}
+                    <tbody>
+                      {outputPreview.rows.map((row, rowIdx) => (
+                        <tr key={`preview-row-${rowIdx}`}>
+                          {row.map((cell, idx) => (
+                            <td key={`preview-cell-${rowIdx}-${idx}`}>{cell}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            ) : null}
           </section>
         </>
       )}
@@ -1899,6 +2008,10 @@ export default function OrderDetailPage() {
         }
 
         .ocr-result-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
           margin-bottom: 8px;
         }
 
@@ -1930,6 +2043,20 @@ export default function OrderDetailPage() {
           border: 1px solid rgba(25, 32, 30, 0.12);
           background: #fff;
           margin-bottom: 8px;
+        }
+
+        .markdown-raw {
+          margin-top: 10px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px dashed rgba(25, 32, 30, 0.12);
+          background: #fbfbf9;
+          font-size: 12px;
+          color: #3f4d4a;
+          white-space: pre-wrap;
+          word-break: break-word;
+          max-height: 280px;
+          overflow: auto;
         }
 
         .ocr-edit {
@@ -2056,6 +2183,13 @@ export default function OrderDetailPage() {
           flex-wrap: wrap;
         }
 
+        .output-card {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
         .output-link {
           padding: 10px 16px;
           border-radius: 12px;
@@ -2064,6 +2198,27 @@ export default function OrderDetailPage() {
           color: inherit;
           font-weight: 600;
           cursor: pointer;
+        }
+
+        .output-preview {
+          margin-top: 12px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #ffffff;
+        }
+
+        .output-preview summary {
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 13px;
+          color: #354341;
+          margin-bottom: 10px;
+          list-style: none;
+        }
+
+        .output-preview summary::-webkit-details-marker {
+          display: none;
         }
 
         .wrap-grid {
