@@ -606,12 +606,13 @@ def _build_delivery_rows(order: dict, template: dict, quantity_rules: dict) -> l
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:
             continue
-        key = (line_date, line.get("daypart"), line.get("menu_name"))
+        daypart_value = line.get("daypart") or line.get("menu_category")
+        key = (line_date, daypart_value, line.get("menu_name"))
         row = rows.setdefault(
             key,
             {
                 "date": line_date,
-                "daypart": line.get("daypart"),
+                "daypart": daypart_value,
                 "menu_name": line.get("menu_name"),
             },
         )
@@ -782,9 +783,15 @@ def build_delivery_preview(order_id: str) -> dict:
     quantity_rules = ctx["quantity_rules"]
     columns = invoice_template.get("columns", [])
     column_names = [col.get("name") for col in columns if col.get("name")]
+    display_map = {
+        "date": "日付",
+        "daypart": "区分",
+        "menu_name": "献立",
+    }
+    display_headers = [display_map.get(name, name) for name in column_names]
     rows = _build_delivery_rows(ctx["order_for_outputs"], invoice_template, quantity_rules)
     preview_rows = [[row.get(name, "") for name in column_names] for row in rows]
-    return {"headers": column_names, "rows": preview_rows}
+    return {"headers": display_headers, "rows": preview_rows}
 
 
 def build_outputs(order_id: str) -> Dict[str, Any]:
