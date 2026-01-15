@@ -312,18 +312,32 @@ def _auto_columns_from_numeric(tokens: list[dict], template: dict) -> list[dict]
 
 
 def _infer_quantity_meta(field: str) -> tuple[str | None, str | None] | None:
-    normalized = field
+    normalized = field.strip()
     if normalized.startswith("qty"):
         normalized = normalized[3:]
     normalized = normalized.lstrip("._")
-    parts = [part for part in re.split(r"[._]", normalized) if part]
+    lowered = normalized.lower()
+
     diet_type = None
     area_id = None
+
+    if any(token in normalized for token in ("常食", "通常")):
+        diet_type = "regular"
+    elif any(token in normalized for token in ("軟菜", "やわ", "ﾔﾜ", "ヤワ")):
+        diet_type = "soft"
+    elif any(token in normalized for token in ("ミキサ", "ﾐｷｻ")):
+        diet_type = "mixer"
+
+    area_match = re.search(r"(\\d)\\s*(?:f|ｆ|階)", lowered)
+    if area_match:
+        area_id = f"{area_match.group(1)}F"
+
+    parts = [part for part in re.split(r"[._]", lowered) if part]
     for part in parts:
         if part in {"regular", "soft", "mixer"}:
-            diet_type = part
+            diet_type = diet_type or part
         elif part in {"2f", "3f"}:
-            area_id = part.upper()
+            area_id = area_id or part.upper()
         elif part in {"2", "3"} and area_id is None:
             area_id = f"{part}F"
     if not diet_type and not area_id:
@@ -338,16 +352,17 @@ def _columns_from_row_fields(template: dict) -> list[dict]:
     columns: list[dict] = []
     for idx, field in enumerate(fields):
         field_name = str(field).strip()
+        compact = re.sub(r"[\\s　]+", "", field_name)
         col: dict = {"index": idx}
         if not field_name:
             columns.append(col)
             continue
         normalized = field_name.lower()
-        if normalized.startswith("date"):
+        if normalized.startswith("date") or "日付" in compact:
             col["role"] = "date"
-        elif normalized in {"menu", "menu_name"}:
+        elif normalized in {"menu", "menu_name"} or any(token in compact for token in ("献立", "メニュー")):
             col["role"] = "menu_name"
-        elif normalized in {"daypart", "day_part", "meal"}:
+        elif normalized in {"daypart", "day_part", "meal"} or any(token in compact for token in ("区分", "時間")):
             col["role"] = "daypart"
         elif "remark" in normalized or normalized in {"note", "notes"}:
             col["role"] = "note"
