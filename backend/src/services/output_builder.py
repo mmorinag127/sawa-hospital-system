@@ -163,21 +163,25 @@ def _match_menu_pattern(menu_name: str, pattern: str, match_type: str | None) ->
     return normalized_pattern in normalized_menu
 
 
-def _rule_applies(rule, line: dict, facility_id: str | None) -> bool:
-    if rule.rule_type == "facility":
-        if not facility_id or not rule.facility_id:
+def _rule_applies(rule: dict, line: dict, facility_id: str | None) -> bool:
+    if rule.get("rule_type") == "facility":
+        if not facility_id or not rule.get("facility_id"):
             return False
-        if rule.facility_id != facility_id:
+        if rule.get("facility_id") != facility_id:
             return False
-    if rule.rule_type in {"menu", "facility"}:
+    if rule.get("rule_type") in {"menu", "facility"}:
         menu_name = line.get("menu_name") or ""
-        if not _match_menu_pattern(menu_name, rule.menu_pattern or "", rule.match_type):
+        if not _match_menu_pattern(
+            menu_name,
+            rule.get("menu_pattern") or "",
+            rule.get("match_type"),
+        ):
             return False
-    if rule.daypart and rule.daypart != line.get("daypart"):
+    if rule.get("daypart") and rule.get("daypart") != line.get("daypart"):
         return False
-    if rule.category and rule.category != line.get("menu_category"):
+    if rule.get("category") and rule.get("category") != line.get("menu_category"):
         return False
-    if rule.diet_type and rule.diet_type != line.get("diet_type"):
+    if rule.get("diet_type") and rule.get("diet_type") != line.get("diet_type"):
         return False
     return True
 
@@ -199,13 +203,13 @@ def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
             continue
         selected = max(
             matches,
-            key=lambda rule: type_weight.get(rule.rule_type, 0) + int(rule.priority or 0),
+            key=lambda rule: type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0),
         )
         updated = dict(line)
-        if selected.unit_type:
-            updated["menu_unit_type"] = selected.unit_type
-        if selected.qty_per_serving is not None:
-            updated["menu_qty_per_serving"] = selected.qty_per_serving
+        if selected.get("unit_type"):
+            updated["menu_unit_type"] = selected.get("unit_type")
+        if selected.get("qty_per_serving") is not None:
+            updated["menu_qty_per_serving"] = selected.get("qty_per_serving")
         enriched.append(updated)
     return enriched
 

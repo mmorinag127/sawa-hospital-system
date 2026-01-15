@@ -143,14 +143,15 @@ def delete_rule(rule_id: str) -> bool:
         return result.rowcount > 0
 
 
-def list_active_rules() -> list[MenuRule]:
+def list_active_rules() -> list[dict]:
     try:
         with session_scope() as session:
-            return (
+            rules = (
                 session.execute(select(MenuRule).where(MenuRule.active.is_(True)))
                 .scalars()
                 .all()
             )
+            return [_serialize_rule(rule) for rule in rules]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Menu rule query failed", error=str(exc))
         return []

@@ -230,17 +230,21 @@ def _match_menu_pattern(menu_name: str, pattern: str, match_type: str | None) ->
     return normalized_pattern in normalized_menu
 
 
-def _rule_applies_to_item(rule, item: dict) -> bool:
-    if rule.rule_type not in {"global", "menu"}:
+def _rule_applies_to_item(rule: dict, item: dict) -> bool:
+    if rule.get("rule_type") not in {"global", "menu"}:
         return False
-    if rule.rule_type == "menu":
-        if not _match_menu_pattern(item.get("name") or "", rule.menu_pattern or "", rule.match_type):
+    if rule.get("rule_type") == "menu":
+        if not _match_menu_pattern(
+            item.get("name") or "",
+            rule.get("menu_pattern") or "",
+            rule.get("match_type"),
+        ):
             return False
-    if rule.daypart and rule.daypart != item.get("daypart"):
+    if rule.get("daypart") and rule.get("daypart") != item.get("daypart"):
         return False
-    if rule.category and rule.category != item.get("category"):
+    if rule.get("category") and rule.get("category") != item.get("category"):
         return False
-    if rule.diet_type and rule.diet_type != item.get("diet_type"):
+    if rule.get("diet_type") and rule.get("diet_type") != item.get("diet_type"):
         return False
     return True
 
@@ -258,13 +262,13 @@ def _apply_rules_to_items(items: list[dict]) -> list[dict]:
             continue
         selected = max(
             matches,
-            key=lambda rule: type_weight.get(rule.rule_type, 0) + int(rule.priority or 0),
+            key=lambda rule: type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0),
         )
         updated = dict(item)
-        if not updated.get("unit_type") and selected.unit_type:
-            updated["unit_type"] = selected.unit_type
-        if updated.get("qty_per_serving") is None and selected.qty_per_serving is not None:
-            updated["qty_per_serving"] = selected.qty_per_serving
+        if not updated.get("unit_type") and selected.get("unit_type"):
+            updated["unit_type"] = selected.get("unit_type")
+        if updated.get("qty_per_serving") is None and selected.get("qty_per_serving") is not None:
+            updated["qty_per_serving"] = selected.get("qty_per_serving")
         enriched.append(updated)
     return enriched
 
