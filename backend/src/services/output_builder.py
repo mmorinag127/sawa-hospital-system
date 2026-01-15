@@ -776,6 +776,17 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
     raise ValueError(f"invalid output type: {output_type}")
 
 
+def build_delivery_preview(order_id: str) -> dict:
+    ctx = _prepare_output_context(order_id)
+    invoice_template = ctx["invoice_template"]
+    quantity_rules = ctx["quantity_rules"]
+    columns = invoice_template.get("columns", [])
+    column_names = [col.get("name") for col in columns if col.get("name")]
+    rows = _build_delivery_rows(ctx["order_for_outputs"], invoice_template, quantity_rules)
+    preview_rows = [[row.get(name, "") for name in column_names] for row in rows]
+    return {"headers": column_names, "rows": preview_rows}
+
+
 def build_outputs(order_id: str) -> Dict[str, Any]:
     ctx = _prepare_output_context(order_id)
     order = ctx["order"]

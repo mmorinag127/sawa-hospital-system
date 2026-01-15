@@ -4,7 +4,11 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse
 
-from src.services.output_builder import build_outputs, build_output_preview
+from src.services.output_builder import (
+    build_outputs,
+    build_output_preview,
+    build_delivery_preview,
+)
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -77,8 +81,10 @@ def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT
         outputs = build_output_preview(order_id, "labels")
         payload = _preview_csv(outputs["labels"], "cp932", limit)
     elif type == "delivery":
-        outputs = build_output_preview(order_id, "delivery")
-        payload = _preview_excel(outputs["delivery_note"], limit)
+        preview = build_delivery_preview(order_id)
+        headers = preview.get("headers", [])
+        rows = preview.get("rows", [])
+        payload = {"headers": headers, "rows": rows[:limit]}
     elif type == "aggregate":
         outputs = build_output_preview(order_id, "aggregate")
         payload = _preview_csv(outputs["aggregate"], "cp932", limit)
