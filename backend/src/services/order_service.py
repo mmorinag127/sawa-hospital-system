@@ -157,6 +157,28 @@ def _make_line_id() -> str:
     return f"OLN{uuid4().hex[:6]}"
 
 
+def _ensure_unique_line_ids(lines: list[dict] | None) -> list[dict]:
+    if not isinstance(lines, list):
+        return []
+    normalized: list[dict] = []
+    used_ids: set[str] = set()
+    for raw in lines:
+        if not isinstance(raw, dict):
+            continue
+        line = dict(raw)
+        candidate = str(line.get("id") or "").strip()
+        if not candidate or candidate in used_ids:
+            candidate = _make_line_id()
+            while candidate in used_ids:
+                candidate = _make_line_id()
+            line["id"] = candidate
+        else:
+            line["id"] = candidate
+        used_ids.add(candidate)
+        normalized.append(line)
+    return normalized
+
+
 def _line_digest(rows: list[dict]) -> str:
     normalized = []
     for row in rows:
@@ -684,25 +706,33 @@ def _build_reparse_position_menu_entries(
         payload_dates_outside_existing = {
             item for item in payload_dates_in_scope if item < lower or item > upper
         }
+        dominant_payload_dates = _select_dominant_date_cluster(payload_dates_in_scope)
+        dominant_payload_dates_inside_existing = {
+            item for item in dominant_payload_dates if lower <= item <= upper
+        }
+        dominant_payload_dates_outside_existing = {
+            item for item in dominant_payload_dates if item < lower or item > upper
+        }
         payload_scope_span_days = 0
-        if payload_dates_in_scope:
+        if dominant_payload_dates:
             payload_scope_span_days = (
-                max(payload_dates_in_scope) - min(payload_dates_in_scope)
+                max(dominant_payload_dates) - min(dominant_payload_dates)
             ).days
         payload_suggests_week_scope = (
-            len(payload_dates_in_scope) >= 5
-            and len(payload_dates_outside_existing) >= 3
+            len(dominant_payload_dates) >= 5
+            and len(dominant_payload_dates_outside_existing) >= 3
             and 5 <= payload_scope_span_days <= 10
-            and payload_scope_span_days >= existing_span_days + 3
         )
-        # If most payload anchors point outside existing scope, existing lines are
-        # likely stale (for example previously shifted to an adjacent week).
+        existing_scope_is_partial = (
+            existing_span_days <= 2 or len(existing_line_dates) <= 3
+        )
         allow_payload_scope_override = (
-            (
-                len(payload_dates_outside_existing) >= 3
-                and len(payload_dates_outside_existing) > (len(payload_dates_inside_existing) * 2)
+            payload_suggests_week_scope
+            and (
+                len(dominant_payload_dates_outside_existing)
+                > (len(dominant_payload_dates_inside_existing) * 2)
+                or existing_scope_is_partial
             )
-            or payload_suggests_week_scope
         )
         if allow_payload_scope_override:
             logger.warning(
@@ -710,7 +740,15 @@ def _build_reparse_position_menu_entries(
                 existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
                 payload_inside_existing=[item.isoformat() for item in sorted(payload_dates_inside_existing)],
                 payload_outside_existing=[item.isoformat() for item in sorted(payload_dates_outside_existing)],
+                dominant_payload_dates=[item.isoformat() for item in sorted(dominant_payload_dates)],
+                dominant_payload_inside_existing=[
+                    item.isoformat() for item in sorted(dominant_payload_dates_inside_existing)
+                ],
+                dominant_payload_outside_existing=[
+                    item.isoformat() for item in sorted(dominant_payload_dates_outside_existing)
+                ],
                 payload_scope_span_days=payload_scope_span_days,
+                existing_scope_is_partial=existing_scope_is_partial,
             )
             # Parsed line dates can still be stale (carried from old scope). When
             # payload anchors are strong enough to override existing scope, defer
@@ -737,7 +775,7 @@ def _build_reparse_position_menu_entries(
             # Use full in-scope payload anchors when overriding stale/partial
             # existing scope. Keeping only "outside" anchors can drop valid
             # leading/trailing week dates.
-            payload_dates = _select_dominant_date_cluster(
+            payload_dates = dominant_payload_dates or _select_dominant_date_cluster(
                 payload_dates_in_scope or observed_payload_dates
             )
     else:
@@ -760,8 +798,8 @@ def _collect_line_dates_for_position_scope(lines: list[dict[str, Any]] | None) -
     return dates
 
 
-def _max_source_row_index_for_position_scope(lines: list[dict[str, Any]] | None) -> int:
-    max_index = -1
+def _collect_source_row_indexes_for_position_scope(lines: list[dict[str, Any]] | None) -> list[int]:
+    indexes: set[int] = set()
     for line in lines or []:
         if not isinstance(line, dict):
             continue
@@ -770,9 +808,16 @@ def _max_source_row_index_for_position_scope(lines: list[dict[str, Any]] | None)
             source_idx = int(source_idx_raw) if source_idx_raw is not None else -1
         except Exception:
             source_idx = -1
-        if source_idx > max_index:
-            max_index = source_idx
-    return max_index
+        if source_idx >= 0:
+            indexes.add(source_idx)
+    return sorted(indexes)
+
+
+def _max_source_row_index_for_position_scope(lines: list[dict[str, Any]] | None) -> int:
+    indexes = _collect_source_row_indexes_for_position_scope(lines)
+    if not indexes:
+        return -1
+    return indexes[-1]
 
 
 def _expand_scoped_entries_for_source_row_span(
@@ -784,10 +829,24 @@ def _expand_scoped_entries_for_source_row_span(
 ) -> list[dict]:
     if not entries or not scoped_entries:
         return list(scoped_entries)
-    max_source_row_index = _max_source_row_index_for_position_scope(lines)
+    source_indexes = _collect_source_row_indexes_for_position_scope(lines)
+    if not source_indexes:
+        return list(scoped_entries)
+    max_source_row_index = source_indexes[-1]
     if max_source_row_index < 0:
         return list(scoped_entries)
     needed_count = max_source_row_index + 1
+    span_density = len(source_indexes) / max(needed_count, 1)
+    min_span_density = min(
+        _read_reparse_float_env(
+            "OCR_REPARSE_SOURCE_ROW_SPAN_MIN_DENSITY",
+            0.85,
+            min_value=0.0,
+        ),
+        1.0,
+    )
+    if span_density < min_span_density:
+        return list(scoped_entries)
     overflow_rows = needed_count - len(scoped_entries)
     if overflow_rows <= 0:
         return list(scoped_entries)
@@ -880,6 +939,7 @@ def _resolve_llm_expected_row_count(
     fallback_expected_row_count: int = 0,
     pipeline_rows: list[list[str]] | None = None,
     observed_rows: list[list[str]] | None = None,
+    anchor_date_count: int = 0,
 ) -> int:
     expected = int(menu_expected_row_count) if menu_expected_row_count and menu_expected_row_count > 0 else 0
     if expected <= 0:
@@ -902,6 +962,54 @@ def _resolve_llm_expected_row_count(
         return expected
     if expected <= 0:
         return pipeline_count
+
+    # Existing persisted anchors can be partial (for example only 1-2 dates kept
+    # after a previous failed reparse). In that case menu expectation becomes too
+    # small and row-coverage gating misses obvious shortfalls. When pipeline rows
+    # are significantly larger than this small expectation, trust observable rows.
+    partial_anchor_max = _read_reparse_int_env(
+        "OCR_REPARSE_PARTIAL_ANCHOR_MAX_ROWS",
+        24,
+        min_value=1,
+    )
+    partial_anchor_min_gap = _read_reparse_int_env(
+        "OCR_REPARSE_PARTIAL_ANCHOR_MIN_GAP_ROWS",
+        12,
+        min_value=1,
+    )
+    if (
+        expected <= partial_anchor_max
+        and pipeline_count >= (expected + partial_anchor_min_gap)
+    ):
+        return pipeline_count
+
+    weak_anchor_max_dates = _read_reparse_int_env(
+        "OCR_REPARSE_WEAK_ANCHOR_MAX_DATES",
+        1,
+        min_value=0,
+    )
+    weak_anchor_min_gap = _read_reparse_int_env(
+        "OCR_REPARSE_WEAK_ANCHOR_MIN_GAP_ROWS",
+        8,
+        min_value=1,
+    )
+    weak_anchor_observed_delta = _read_reparse_int_env(
+        "OCR_REPARSE_WEAK_ANCHOR_OBSERVED_DELTA_ROWS",
+        3,
+        min_value=0,
+    )
+    if (
+        pipeline_count > 0
+        and expected > pipeline_count
+        and int(anchor_date_count) <= weak_anchor_max_dates
+        and (expected - pipeline_count) >= weak_anchor_min_gap
+    ):
+        observed_is_close = (
+            observed_count <= 0
+            or abs(observed_count - pipeline_count) <= weak_anchor_observed_delta
+        )
+        if observed_is_close:
+            return max(pipeline_count, observed_count)
 
     # When menu expectation is month-wide but OCR/pipeline rows are week-scoped,
     # avoid over-rejecting by preferring the observable pipeline row count.
@@ -1286,6 +1394,169 @@ def _read_reparse_int_env(name: str, default: int, *, min_value: int | None = No
     if min_value is not None and value < min_value:
         value = int(min_value)
     return value
+
+
+def _read_reparse_bool_env(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _coerce_usage_int(value: object) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _extract_usage_from_provider_debug(provider_debug: dict[str, Any] | None) -> dict[str, int]:
+    if not isinstance(provider_debug, dict):
+        return {}
+
+    usage_raw = provider_debug.get("usage")
+    if not isinstance(usage_raw, dict):
+        attempts = provider_debug.get("attempts")
+        if isinstance(attempts, list) and attempts:
+            last_attempt = attempts[-1]
+            if isinstance(last_attempt, dict):
+                usage_raw = last_attempt.get("usage")
+    if not isinstance(usage_raw, dict):
+        return {}
+
+    prompt_tokens = _coerce_usage_int(usage_raw.get("prompt_tokens"))
+    completion_tokens = _coerce_usage_int(usage_raw.get("completion_tokens"))
+    total_tokens = _coerce_usage_int(usage_raw.get("total_tokens"))
+    cached_content_tokens = _coerce_usage_int(usage_raw.get("cached_content_tokens"))
+
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cached_content_tokens": cached_content_tokens,
+    }
+
+
+def _resolve_reparse_cost_rates(
+    *,
+    provider: str,
+    model: str | None,
+) -> tuple[float, float]:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip().lower()
+    if normalized_provider == "gemini":
+        if "pro" in normalized_model:
+            input_rate = _read_reparse_float_env(
+                "OCR_REPARSE_COST_GEMINI_PRO_INPUT_USD_PER_1M",
+                1.25,
+                min_value=0.0,
+            )
+            output_rate = _read_reparse_float_env(
+                "OCR_REPARSE_COST_GEMINI_PRO_OUTPUT_USD_PER_1M",
+                10.0,
+                min_value=0.0,
+            )
+        else:
+            input_rate = _read_reparse_float_env(
+                "OCR_REPARSE_COST_GEMINI_FLASH_INPUT_USD_PER_1M",
+                0.30,
+                min_value=0.0,
+            )
+            output_rate = _read_reparse_float_env(
+                "OCR_REPARSE_COST_GEMINI_FLASH_OUTPUT_USD_PER_1M",
+                2.50,
+                min_value=0.0,
+            )
+    elif normalized_provider == "openai":
+        input_rate = _read_reparse_float_env(
+            "OCR_REPARSE_COST_OPENAI_INPUT_USD_PER_1M",
+            5.0,
+            min_value=0.0,
+        )
+        output_rate = _read_reparse_float_env(
+            "OCR_REPARSE_COST_OPENAI_OUTPUT_USD_PER_1M",
+            15.0,
+            min_value=0.0,
+        )
+    else:
+        input_rate = _read_reparse_float_env(
+            "OCR_REPARSE_COST_INPUT_USD_PER_1M",
+            0.0,
+            min_value=0.0,
+        )
+        output_rate = _read_reparse_float_env(
+            "OCR_REPARSE_COST_OUTPUT_USD_PER_1M",
+            0.0,
+            min_value=0.0,
+        )
+    return input_rate, output_rate
+
+
+def _estimate_reparse_llm_cost(
+    *,
+    provider: str | None,
+    model: str | None,
+    provider_debug: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider not in {"gemini", "openai"}:
+        return None
+
+    usage = _extract_usage_from_provider_debug(provider_debug)
+    if not usage or usage.get("total_tokens", 0) <= 0:
+        return None
+
+    input_rate, output_rate = _resolve_reparse_cost_rates(
+        provider=normalized_provider,
+        model=model,
+    )
+    estimated_cost: float | None = None
+    if input_rate > 0.0 or output_rate > 0.0:
+        estimated_cost = (
+            (float(usage.get("prompt_tokens", 0)) * input_rate)
+            + (float(usage.get("completion_tokens", 0)) * output_rate)
+        ) / 1_000_000.0
+
+    soft_limit = _read_reparse_float_env(
+        "OCR_REPARSE_COST_SOFT_LIMIT_USD",
+        0.10,
+        min_value=0.0,
+    )
+    hard_limit = _read_reparse_float_env(
+        "OCR_REPARSE_COST_HARD_LIMIT_USD",
+        1.00,
+        min_value=0.0,
+    )
+
+    over_soft = (
+        estimated_cost is not None
+        and soft_limit > 0.0
+        and estimated_cost > soft_limit
+    )
+    over_hard = (
+        estimated_cost is not None
+        and hard_limit > 0.0
+        and estimated_cost > hard_limit
+    )
+    return {
+        "provider": normalized_provider,
+        "model": str(model or "").strip() or None,
+        "usage": usage,
+        "pricing": {
+            "input_usd_per_1m_tokens": input_rate,
+            "output_usd_per_1m_tokens": output_rate,
+        },
+        "estimated_cost_usd": estimated_cost,
+        "soft_limit_usd": soft_limit,
+        "hard_limit_usd": hard_limit,
+        "over_soft_limit": bool(over_soft),
+        "over_hard_limit": bool(over_hard),
+    }
 
 
 def _quantity_column_non_empty_counts(
@@ -1721,6 +1992,7 @@ def create_order_from_ingest(
             )
             if mapped_rows <= 0:
                 lines = _apply_menu_matching(lines, week_id, payload.facility_hint, min_ratio)
+            lines = _ensure_unique_line_ids(lines)
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
             for line in lines:
                 session.add(
@@ -1820,9 +2092,10 @@ def update_lines(order_id: str, lines: list) -> bool:
         order = session.get(Order, order_id)
         if not order:
             return False
+        normalized_lines = _ensure_unique_line_ids(lines)
         # wipe existing
         session.execute(delete(OrderLine).where(OrderLine.order_id == order_id))
-        for line in lines:
+        for line in normalized_lines:
             session.add(
                 OrderLine(
                     id=line.get("id") or _make_line_id(),
@@ -1847,7 +2120,7 @@ def update_lines(order_id: str, lines: list) -> bool:
             target=order_id,
             fac=order.facility_code,
             wek=order.week_code,
-            metadata={"line_count": len(lines)},
+            metadata={"line_count": len(normalized_lines)},
         )
         return True
 
@@ -2875,6 +3148,7 @@ def apply_ocr_table(
         )
     if mapped_rows <= 0:
         lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
+    lines = _ensure_unique_line_ids(lines)
 
     after_digest = _line_digest(lines)
     after_count = len(lines)
@@ -3079,6 +3353,7 @@ def _sync_reparse_debug_from_job_metrics(
     provider = str(provider_raw or "").strip()
     if not provider:
         return parsed, False
+    job_status = str(job.get("status") or "").strip().lower()
 
     debug = parsed.get("_reparse_debug")
     next_debug = dict(debug) if isinstance(debug, dict) else {}
@@ -3108,16 +3383,23 @@ def _sync_reparse_debug_from_job_metrics(
         _set_value("truncated_output", bool(metrics.get("truncated_output")))
     if isinstance(metrics.get("rows_replaced_with_pipeline"), bool):
         _set_value("rows_replaced_with_pipeline", bool(metrics.get("rows_replaced_with_pipeline")))
-    if isinstance(metrics.get("error"), str) and metrics.get("error").strip():
-        _set_value("error", metrics.get("error").strip())
+    if isinstance(metrics.get("error"), str):
+        normalized_error = metrics.get("error").strip() or None
+        _set_value("error", normalized_error)
+    elif job_status in {"done", "success"} and next_debug.get("error") not in {None, ""}:
+        _set_value("error", None)
     reject_reasons = metrics.get("reject_reasons")
     if isinstance(reject_reasons, list):
         normalized_reasons = [str(item).strip() for item in reject_reasons if str(item).strip()]
-        if normalized_reasons:
-            _set_value("reject_reasons", normalized_reasons[:20])
+        _set_value("reject_reasons", normalized_reasons[:20])
+    elif job_status in {"done", "success"} and "reject_reasons" in next_debug:
+        _set_value("reject_reasons", [])
     validation_detail = metrics.get("validation_detail")
-    if isinstance(validation_detail, dict) and validation_detail:
-        _set_value("validation_detail", validation_detail)
+    if "validation_detail" in metrics:
+        normalized_validation_detail = validation_detail if isinstance(validation_detail, dict) else {}
+        _set_value("validation_detail", normalized_validation_detail)
+    elif job_status in {"done", "success"} and "validation_detail" in next_debug:
+        _set_value("validation_detail", {})
     llm_quantity_only_merge = metrics.get("llm_quantity_only_merge")
     if isinstance(llm_quantity_only_merge, dict) and llm_quantity_only_merge:
         _set_value("llm_quantity_only_merge", llm_quantity_only_merge)
@@ -6944,6 +7226,7 @@ def _build_reparse_debug_payload(
     reject_reasons: list[str] | None = None,
     validation_detail: dict[str, Any] | None = None,
     llm_quantity_only_merge: dict[str, Any] | None = None,
+    llm_cost: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_limit = _debug_text_max_chars()
     payload: dict[str, Any] = {
@@ -6972,6 +7255,8 @@ def _build_reparse_debug_payload(
         payload["validation_detail"] = validation_detail
     if isinstance(llm_quantity_only_merge, dict) and llm_quantity_only_merge:
         payload["llm_quantity_only_merge"] = llm_quantity_only_merge
+    if isinstance(llm_cost, dict) and llm_cost:
+        payload["llm_cost"] = llm_cost
     provider_debug = getattr(extracted, "provider_debug", None) if extracted is not None else None
     if isinstance(provider_debug, dict) and provider_debug:
         payload["provider_debug"] = provider_debug
@@ -7137,6 +7422,7 @@ def reparse_order(
     )
     pipeline_output_payload: dict | None = None
     pipeline_rows_for_rescue: list[list[str]] = []
+    pipeline_anchor_dates: set[date] = set()
     position_entries_for_existing_week: list[dict] = []
     expected_weekly_row_count = 0
     if existing_week_code:
@@ -7152,12 +7438,13 @@ def reparse_order(
         pipeline_output_payload = _load_pipeline_output_with_retry(pipeline_output_ref)
         if isinstance(pipeline_output_payload, dict):
             pipeline_rows_for_rescue = _extract_sheet_rows_from_payload(pipeline_output_payload, template_to_use)
+            pipeline_anchor_dates = {
+                item
+                for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at)
+                if isinstance(item, date)
+            }
             if position_entries_for_existing_week and not stable_existing_anchor_scope:
-                payload_dates = {
-                    item
-                    for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at)
-                    if isinstance(item, date)
-                }
+                payload_dates = set(pipeline_anchor_dates)
                 if payload_dates:
                     scoped_entries = _filter_position_menu_entries_by_dates(
                         position_entries_for_existing_week,
@@ -7169,6 +7456,7 @@ def reparse_order(
             expected_weekly_row_count = _resolve_llm_expected_row_count(
                 menu_expected_row_count=expected_weekly_row_count,
                 pipeline_rows=pipeline_rows_for_rescue,
+                anchor_date_count=len(pipeline_anchor_dates),
             )
         effective_provider = requested_provider or main_provider
         if effective_provider in {"openai", "gemini"}:
@@ -7213,6 +7501,7 @@ def reparse_order(
     llm_repair_pass_error: str | None = None
     llm_primary_model: str | None = None
     llm_repair_pass_model: str | None = None
+    reparse_cost_info: dict[str, Any] | None = None
     try:
         extracted = extract_fax_data(
             pdf_bytes,
@@ -7310,6 +7599,7 @@ def reparse_order(
             expected_weekly_row_count = _resolve_llm_expected_row_count(
                 menu_expected_row_count=expected_weekly_row_count,
                 pipeline_rows=pipeline_rows_for_rescue,
+                anchor_date_count=len(pipeline_anchor_dates),
             )
             quality_error, quality_detail = _evaluate_quantity_only_rows_quality(
                 rows=[list(row) for row in rows if isinstance(row, list)],
@@ -7411,6 +7701,35 @@ def reparse_order(
                         "Reparse repair pass failed provider={} error={}",
                         main_provider,
                         llm_repair_pass_error,
+                    )
+        if main_provider in {"openai", "gemini"}:
+            final_debug = (
+                extracted_data.provider_debug
+                if extracted_data is not None and isinstance(extracted_data.provider_debug, dict)
+                else {}
+            )
+            final_model = llm_repair_pass_model or llm_primary_model
+            if not final_model and isinstance(final_debug, dict):
+                final_model = str(final_debug.get("model") or "").strip() or None
+            reparse_cost_info = _estimate_reparse_llm_cost(
+                provider=main_provider,
+                model=final_model,
+                provider_debug=final_debug,
+            )
+            if reparse_cost_info:
+                if isinstance(final_debug, dict):
+                    final_debug = dict(final_debug)
+                    final_debug["cost_estimate"] = reparse_cost_info
+                    if extracted_data is not None:
+                        extracted_data.provider_debug = final_debug
+                if reparse_cost_info.get("over_soft_limit"):
+                    logger.warning(
+                        "Reparse LLM estimated cost over soft limit",
+                        order_id=order_id,
+                        provider=main_provider,
+                        model=final_model,
+                        estimated_cost_usd=reparse_cost_info.get("estimated_cost_usd"),
+                        soft_limit_usd=reparse_cost_info.get("soft_limit_usd"),
                     )
         sample_row_text = ""
         if rows:
@@ -7561,6 +7880,7 @@ def reparse_order(
             normalized_lines=lines,
             reject_reasons=[lines_empty_error],
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
+            llm_cost=reparse_cost_info,
         )
         try:
             cache_payload: dict[str, Any] = {}
@@ -7595,6 +7915,7 @@ def reparse_order(
                 "repair_pass_model": llm_repair_pass_model,
                 "quality_error": reparse_quality_error,
                 "quality_detail": reparse_quality_detail or {},
+                "llm_cost": reparse_cost_info or None,
             },
         )
         return None, "lines_empty"
@@ -7652,11 +7973,17 @@ def reparse_order(
         and not llm_rows_replaced_with_pipeline
     ):
         week_menu_row_count = len(_build_position_menu_entries(week_id)) if week_id else 0
+        quality_anchor_dates = {
+            item
+            for item in _collect_line_dates_for_position_scope(week_resolution_lines)
+            if isinstance(item, date)
+        } | pipeline_payload_dates
         quality_expected_row_count = _resolve_llm_expected_row_count(
             menu_expected_row_count=len(reparse_position_entries),
             fallback_expected_row_count=expected_weekly_row_count or week_menu_row_count,
             pipeline_rows=pipeline_rows_for_rescue,
             observed_rows=[list(row) for row in rows if isinstance(row, list)],
+            anchor_date_count=len(quality_anchor_dates),
         )
         if quality_expected_row_count > 0:
             reparse_quality_error, reparse_quality_detail = _evaluate_quantity_only_rows_quality(
@@ -7699,6 +8026,22 @@ def reparse_order(
     if not validation_error and reparse_quality_error:
         validation_error = reparse_quality_error
         validation_detail = reparse_quality_detail or {}
+    if (
+        not validation_error
+        and isinstance(reparse_cost_info, dict)
+        and _read_reparse_bool_env("OCR_REPARSE_COST_ENFORCE_HARD_LIMIT", True)
+        and bool(reparse_cost_info.get("over_hard_limit"))
+    ):
+        validation_error = "llm_cost_limit_exceeded"
+        validation_detail = {
+            "estimated_cost_usd": reparse_cost_info.get("estimated_cost_usd"),
+            "hard_limit_usd": reparse_cost_info.get("hard_limit_usd"),
+            "soft_limit_usd": reparse_cost_info.get("soft_limit_usd"),
+            "provider": reparse_cost_info.get("provider"),
+            "model": reparse_cost_info.get("model"),
+            "usage": reparse_cost_info.get("usage"),
+            "pricing": reparse_cost_info.get("pricing"),
+        }
     if validation_error:
         logger.warning(
             "Reparse validation rejected",
@@ -7725,6 +8068,7 @@ def reparse_order(
             reject_reasons=[validation_error],
             validation_detail=validation_detail,
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
+            llm_cost=reparse_cost_info,
         )
         try:
             cache_payload: dict[str, Any] = {}
@@ -7765,9 +8109,11 @@ def reparse_order(
                 "repair_pass_model": llm_repair_pass_model,
                 "quality_error": reparse_quality_error,
                 "quality_detail": reparse_quality_detail or {},
+                "llm_cost": reparse_cost_info or None,
             },
         )
         return None, validation_error
+    lines = _ensure_unique_line_ids(lines)
     after_digest = _line_digest(lines)
     after_count = len(lines)
     reparse_changed = before_digest != after_digest
@@ -7849,6 +8195,7 @@ def reparse_order(
             "repair_pass_model": llm_repair_pass_model,
             "quality_error": reparse_quality_error,
             "quality_detail": reparse_quality_detail or {},
+            "llm_cost": reparse_cost_info or None,
             "before_count": before_count,
             "after_count": after_count,
             "before_digest": before_digest,
@@ -7873,6 +8220,7 @@ def reparse_order(
         normalized_lines=lines,
         validation_detail=reparse_quality_detail,
         llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
+        llm_cost=reparse_cost_info,
     )
     try:
         cache_ref = pipeline_output_ref
@@ -7898,6 +8246,7 @@ def reparse_order(
         "after_digest": after_digest,
         "provider": main_provider,
         "changed": reparse_changed,
+        "llm_cost": reparse_cost_info or None,
     }
     serialized["ocr_job_id"] = ocr_job_id
     return serialized, None

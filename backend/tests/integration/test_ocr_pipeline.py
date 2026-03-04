@@ -2,6 +2,7 @@ import sys
 import pathlib
 from datetime import date, datetime
 from uuid import uuid4
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -711,6 +712,73 @@ def test_build_position_entries_for_lines_scopes_single_payload_date_when_line_d
     assert {entry.get("menu_date") for entry in scoped} == {date(2026, 2, 8)}
 
 
+def test_build_position_entries_for_lines_does_not_expand_sparse_source_row_span(monkeypatch):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    scoped = order_service._build_position_entries_for_lines(
+        week_id="2026-02",
+        lines=[
+            {"source_row_index": 0},
+            {"source_row_index": 1},
+            {"source_row_index": 2},
+            {"source_row_index": 3},
+            {"source_row_index": 39},
+        ],
+        payload_dates={date(2026, 2, 8)},
+    )
+
+    assert len(scoped) == 8
+    assert {entry.get("menu_date") for entry in scoped} == {date(2026, 2, 8)}
+
+
+def test_build_position_entries_for_lines_expands_dense_source_row_span(monkeypatch):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    scoped = order_service._build_position_entries_for_lines(
+        week_id="2026-02",
+        lines=[{"source_row_index": idx} for idx in range(12)],
+        payload_dates={date(2026, 2, 8)},
+    )
+
+    assert len(scoped) == 12
+    assert scoped[0].get("menu_date") == date(2026, 2, 8)
+    assert scoped[-1].get("menu_date") == date(2026, 2, 9)
+
+
 def test_build_reparse_position_entries_prefers_existing_line_dates_when_new_line_dates_collapse(
     monkeypatch,
 ):
@@ -889,6 +957,72 @@ def test_build_reparse_position_entries_ignores_out_of_scope_line_date_range_wit
         parsed_output={},
         existing_lines=existing_lines,
         extra_payload_dates={date(2026, 2, 1)},
+        received_at=datetime(2026, 2, 8, 9, 0, 0),
+    )
+
+    assert scoped
+    assert {entry.get("menu_date") for entry in scoped} == {
+        date(2026, 2, 8),
+        date(2026, 2, 9),
+        date(2026, 2, 10),
+        date(2026, 2, 11),
+        date(2026, 2, 12),
+        date(2026, 2, 13),
+    }
+
+
+def test_build_reparse_position_entries_does_not_override_existing_scope_for_sparse_payload_noise(
+    monkeypatch,
+):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    # Existing lines preserve the correct scope (2/8-2/13).
+    existing_lines = [
+        {
+            "date": f"2026-02-{day:02d}",
+            "daypart": "朝",
+            "menu_name": f"existing-{day}",
+        }
+        for day in range(8, 14)
+    ]
+    # Payload anchors are sparse and spread across the month (noise).
+    parsed_output = {
+        "date_strings": ["2/1", "2/4", "2/8", "2/12", "2/16", "2/20", "2/24"]
+    }
+    new_lines = [
+        {
+            "date": "2026-02-01",
+            "daypart": dayparts[idx % len(dayparts)],
+            "menu_name": f"OCR-{idx}",
+            "source_row_index": idx,
+        }
+        for idx in range(56)
+    ]
+
+    scoped = order_service._build_reparse_position_menu_entries(
+        week_id="2026-02",
+        lines=new_lines,
+        rows=[["", "", "", "6"] for _ in range(56)],
+        parsed_output=parsed_output,
+        existing_lines=existing_lines,
+        extra_payload_dates=set(),
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
@@ -1697,6 +1831,85 @@ def test_resolve_llm_expected_row_count_keeps_menu_scope_when_gap_is_not_large()
     assert resolved == 64
 
 
+def test_resolve_llm_expected_row_count_prefers_pipeline_rows_for_partial_anchor_scope(monkeypatch):
+    monkeypatch.setenv("OCR_REPARSE_PARTIAL_ANCHOR_MAX_ROWS", "24")
+    monkeypatch.setenv("OCR_REPARSE_PARTIAL_ANCHOR_MIN_GAP_ROWS", "12")
+    resolved = order_service._resolve_llm_expected_row_count(
+        menu_expected_row_count=16,
+        pipeline_rows=[[""] for _ in range(56)],
+        observed_rows=[[""] for _ in range(43)],
+    )
+    assert resolved == 56
+
+
+def test_resolve_llm_expected_row_count_prefers_pipeline_rows_when_anchor_is_weak(monkeypatch):
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MAX_DATES", "1")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MIN_GAP_ROWS", "8")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_OBSERVED_DELTA_ROWS", "2")
+    resolved = order_service._resolve_llm_expected_row_count(
+        menu_expected_row_count=56,
+        pipeline_rows=[[""] for _ in range(43)],
+        observed_rows=[[""] for _ in range(43)],
+        anchor_date_count=1,
+    )
+    assert resolved == 43
+
+
+def test_resolve_llm_expected_row_count_keeps_menu_scope_when_anchor_is_not_weak(monkeypatch):
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MAX_DATES", "1")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MIN_GAP_ROWS", "8")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_OBSERVED_DELTA_ROWS", "2")
+    resolved = order_service._resolve_llm_expected_row_count(
+        menu_expected_row_count=56,
+        pipeline_rows=[[""] for _ in range(43)],
+        observed_rows=[[""] for _ in range(43)],
+        anchor_date_count=3,
+    )
+    assert resolved == 56
+
+
+def test_ensure_unique_line_ids_replaces_duplicate_and_missing_ids(monkeypatch):
+    generated_ids = iter(["OLNnew001", "OLNnew002", "OLNnew003"])
+    monkeypatch.setattr(order_service, "_make_line_id", lambda: next(generated_ids))
+
+    normalized = order_service._ensure_unique_line_ids(
+        [
+            {"id": "OLNkeep001", "menu_name": "A"},
+            {"id": "OLNkeep001", "menu_name": "B"},
+            {"id": "", "menu_name": "C"},
+            {"menu_name": "D"},
+        ]
+    )
+
+    ids = [row.get("id") for row in normalized]
+    assert ids == ["OLNkeep001", "OLNnew001", "OLNnew002", "OLNnew003"]
+    assert len(ids) == len(set(ids))
+
+
+def test_estimate_reparse_llm_cost_marks_soft_and_hard_limit(monkeypatch):
+    monkeypatch.setenv("OCR_REPARSE_COST_GEMINI_FLASH_INPUT_USD_PER_1M", "0.5")
+    monkeypatch.setenv("OCR_REPARSE_COST_GEMINI_FLASH_OUTPUT_USD_PER_1M", "2.0")
+    monkeypatch.setenv("OCR_REPARSE_COST_SOFT_LIMIT_USD", "0.01")
+    monkeypatch.setenv("OCR_REPARSE_COST_HARD_LIMIT_USD", "0.02")
+
+    cost = order_service._estimate_reparse_llm_cost(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        provider_debug={
+            "usage": {
+                "prompt_tokens": 10_000,
+                "completion_tokens": 10_000,
+                "total_tokens": 20_000,
+            }
+        },
+    )
+
+    assert isinstance(cost, dict)
+    assert cost.get("estimated_cost_usd") == pytest.approx(0.025, rel=1e-6)
+    assert cost.get("over_soft_limit") is True
+    assert cost.get("over_hard_limit") is True
+
+
 def test_build_quantity_only_repair_prompts_includes_focus_context():
     template = {
         "columns": [
@@ -1921,6 +2134,128 @@ def test_reparse_order_row_coverage_uses_payload_scoped_expected_rows(monkeypatc
     detail = metrics.get("validation_detail") or {}
     assert detail.get("expected_row_count") == 56
     assert detail.get("actual_row_count") == 54
+
+
+def test_reparse_order_row_coverage_prefers_pipeline_rows_when_anchor_dates_are_weak(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-row-coverage-weak-anchor.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-row-coverage-weak-anchor-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 8, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_config(_facility_id: str):
+        return {
+            "facility_id": "FAC00001",
+            "fax_template": {
+                "header_rows": 0,
+                "map_menu_by_position": True,
+                "columns": [
+                    {"index": 0, "role": "date"},
+                    {"index": 1, "role": "daypart"},
+                    {"index": 2, "role": "menu_name"},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "bag_type": "standard",
+                    },
+                ],
+                "main_ocr_row_fields": [
+                    "date_mmdd",
+                    "daypart",
+                    "menu",
+                    "qty.regular_2f",
+                ],
+            },
+        }
+
+    def _fake_pipeline(**_kwargs):
+        return "file://pipeline-output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref, retries=0, delay=0.0):  # noqa: ARG001
+        return {"table_rows": [["", "", "", "6"] for _ in range(43)]}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        rows = [["", "", "", "6"] for _ in range(43)]
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["1/18"],
+            table_rows=rows,
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        parsed = []
+        for idx, row in enumerate(rows):
+            qty_raw = row[3] if len(row) > 3 else ""
+            if not str(qty_raw).strip():
+                continue
+            parsed.append(
+                {
+                    "date": "2026-01-18",
+                    "daypart": "朝",
+                    "menu_name": f"OCR-{idx}",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "bag_type": "standard",
+                    "quantity_original": int(qty_raw),
+                    "source_row_index": idx,
+                }
+            )
+        return parsed
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(8, 15):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 56
+        return entries
+
+    monkeypatch.setattr(config_service, "get_facility_config", _fake_config)
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setenv("OCR_REPARSE_ROW_COVERAGE_MIN_RATIO", "0.98")
+    monkeypatch.setenv("OCR_REPARSE_MAX_MISSING_TAIL_ROWS", "0")
+    monkeypatch.setenv("OCR_REPARSE_ENABLE_REPAIR_PASS", "0")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MAX_DATES", "1")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_MIN_GAP_ROWS", "8")
+    monkeypatch.setenv("OCR_REPARSE_WEAK_ANCHOR_OBSERVED_DELTA_ROWS", "2")
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    metrics = job.get("metrics") or {}
+    assert metrics.get("error") in {None, ""}
+    detail = metrics.get("quality_detail") or {}
+    assert detail.get("expected_row_count") == 43
+    assert detail.get("actual_row_count") == 43
 
 
 def test_reparse_order_row_coverage_prefers_existing_line_anchor_scope(monkeypatch, tmp_path):
@@ -2389,6 +2724,206 @@ def test_reparse_order_rejects_canonical_mismatch_before_save(monkeypatch, tmp_p
     assert debug.get("error") == "sheet_canonical_mismatch"
     assert "sheet_canonical_mismatch" in (debug.get("reject_reasons") or [])
     assert "strict quantity only" in str(debug.get("request_prompt") or "")
+
+
+def test_reparse_order_keeps_existing_lines_when_validation_rejected(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-keep-lines-on-reject.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-keep-lines-on-reject-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    menu_date, daypart, menu_name = _canonical_row_for_week("2026-02")
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": menu_date,
+                "daypart": daypart,
+                "menu_name": menu_name,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 6,
+            }
+        ],
+    )
+    before = order_service.get_order_by_id(order["id"])
+    before_lines = before.get("lines") or []
+    assert len(before_lines) == 1
+
+    def _fake_config(_facility_id: str):
+        return {
+            "facility_id": "FAC00001",
+            "fax_template": {
+                "header_rows": 0,
+                "columns": [
+                    {"index": 0, "role": "date"},
+                    {"index": 1, "role": "daypart"},
+                    {"index": 2, "role": "menu_name"},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "bag_type": "standard",
+                    },
+                ],
+            },
+        }
+
+    def _fake_pipeline(**_kwargs):
+        return None
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["2026/02/15"],
+            table_rows=[["02/15", "昼", "Wrong Menu", "8"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        return [
+            {
+                "date": "2026-02-15",
+                "daypart": "昼",
+                "menu_name": "Wrong Menu",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 8,
+                "source_row_index": 0,
+            }
+        ]
+
+    def _fake_weekly_entries(_week_id: str):
+        return [
+            {"menu_date": date(2026, 2, 15), "daypart_key": "昼", "menu_name": "Menu A"},
+        ]
+
+    monkeypatch.setattr(config_service, "get_facility_config", _fake_config)
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+    monkeypatch.setattr(order_service, "_apply_menu_position_mapping", lambda lines, _week_id: (lines, 0))
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini")
+
+    assert updated is None
+    assert error == "sheet_canonical_mismatch"
+    after = order_service.get_order_by_id(order["id"])
+    after_lines = after.get("lines") or []
+    assert len(after_lines) == 1
+    assert after_lines[0].get("menu_name") == before_lines[0].get("menu_name")
+    assert after_lines[0].get("quantity_original") == before_lines[0].get("quantity_original")
+
+
+def test_reparse_order_rejects_when_llm_cost_hard_limit_exceeded(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-cost-hard-limit.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-cost-hard-limit-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    def _fake_config(_facility_id: str):
+        return {
+            "facility_id": "FAC00001",
+            "fax_template": {
+                "header_rows": 0,
+                "columns": [
+                    {"index": 0, "role": "date"},
+                    {"index": 1, "role": "daypart"},
+                    {"index": 2, "role": "menu_name"},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "bag_type": "standard",
+                    },
+                ],
+            },
+        }
+
+    def _fake_pipeline(**_kwargs):
+        return None
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["2026/02/15"],
+            table_rows=[["02/15", "昼", "Menu A", "8"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "usage": {
+                    "prompt_tokens": 10000,
+                    "completion_tokens": 10000,
+                    "total_tokens": 20000,
+                },
+            },
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        return [
+            {
+                "date": "2026-02-15",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 8,
+                "source_row_index": 0,
+            }
+        ]
+
+    def _fake_weekly_entries(_week_id: str):
+        return [
+            {"menu_date": date(2026, 2, 15), "daypart_key": "昼", "menu_name": "Menu A"},
+        ]
+
+    monkeypatch.setenv("OCR_REPARSE_COST_GEMINI_FLASH_INPUT_USD_PER_1M", "1.0")
+    monkeypatch.setenv("OCR_REPARSE_COST_GEMINI_FLASH_OUTPUT_USD_PER_1M", "3.0")
+    monkeypatch.setenv("OCR_REPARSE_COST_HARD_LIMIT_USD", "0.01")
+    monkeypatch.setenv("OCR_REPARSE_COST_ENFORCE_HARD_LIMIT", "1")
+
+    monkeypatch.setattr(config_service, "get_facility_config", _fake_config)
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+    monkeypatch.setattr(order_service, "_apply_menu_position_mapping", lambda lines, _week_id: (lines, 0))
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini")
+
+    assert updated is None
+    assert error == "llm_cost_limit_exceeded"
+    after = order_service.get_order_by_id(order["id"])
+    assert not (after.get("lines") or [])
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("error") == "llm_cost_limit_exceeded"
+    assert isinstance(metrics.get("llm_cost"), dict)
 
 
 def test_reparse_order_rejects_missing_numeric_source_row(monkeypatch, tmp_path):
