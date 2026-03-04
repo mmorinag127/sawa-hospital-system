@@ -1103,6 +1103,47 @@ def test_build_reparse_position_entries_extends_small_source_row_overflow_with_e
     assert date(2026, 2, 14) in scoped_dates
 
 
+def test_build_reparse_position_entries_extends_payload_anchor_scope_for_moderate_overflow(
+    monkeypatch,
+):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    # Payload anchors only two days, but OCR rows span much further.
+    parsed_output = {"date_strings": ["2/8", "2/9"]}
+    scoped = order_service._build_reparse_position_menu_entries(
+        week_id="2026-02",
+        lines=[{"source_row_index": idx, "menu_name": f"OCR-{idx}"} for idx in range(43)],
+        rows=[["", "", "", "6"] for _ in range(43)],
+        parsed_output=parsed_output,
+        existing_lines=[],
+        extra_payload_dates=set(),
+        received_at=datetime(2026, 2, 8, 9, 0, 0),
+    )
+
+    assert scoped
+    assert len(scoped) == 43
+    scoped_dates = {entry.get("menu_date") for entry in scoped}
+    assert date(2026, 2, 8) in scoped_dates
+    assert date(2026, 2, 13) in scoped_dates
+
+
 def test_create_order_from_ingest_scopes_position_mapping_entries_to_line_dates(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-ingest-position-scope.pdf"

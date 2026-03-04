@@ -725,7 +725,7 @@ def _expand_scoped_entries_for_source_row_span(
     entries: list[dict],
     scoped_entries: list[dict],
     lines: list[dict[str, Any]] | None,
-    max_extension_rows: int = 8,
+    max_extension_rows: int = 32,
 ) -> list[dict]:
     if not entries or not scoped_entries:
         return list(scoped_entries)
