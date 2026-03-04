@@ -1041,6 +1041,73 @@ def test_build_reparse_position_entries_ignores_stale_line_dates_when_payload_ov
     }
 
 
+def test_build_reparse_position_entries_keeps_week_scope_when_existing_dates_are_partial(
+    monkeypatch,
+):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    # Persisted lines still reflect an older partial scope (2/8-2/9 only).
+    existing_lines = [
+        {"date": "2026-02-08", "daypart": "朝", "menu_name": "existing-0208"},
+        {"date": "2026-02-09", "daypart": "朝", "menu_name": "existing-0209"},
+    ]
+    # Reparse lines already span a full week (2/8-2/14), and payload anchors
+    # confirm the same week range.
+    new_lines = []
+    for idx in range(56):
+        day = 8 + min(idx // 8, 6)
+        new_lines.append(
+            {
+                "date": f"2026-02-{day:02d}",
+                "daypart": dayparts[idx % len(dayparts)],
+                "menu_name": f"OCR-{idx}",
+                "source_row_index": idx,
+            }
+        )
+    parsed_output = {
+        "date_strings": ["2/8", "2/9", "2/10", "2/11", "2/12", "2/13", "2/14"]
+    }
+
+    scoped = order_service._build_reparse_position_menu_entries(
+        week_id="2026-02",
+        lines=new_lines,
+        rows=[["", "", "", "6"] for _ in range(56)],
+        parsed_output=parsed_output,
+        existing_lines=existing_lines,
+        extra_payload_dates=set(),
+        received_at=datetime(2026, 2, 8, 9, 0, 0),
+    )
+
+    assert scoped
+    assert len(scoped) == 56
+    assert {entry.get("menu_date") for entry in scoped} == {
+        date(2026, 2, 8),
+        date(2026, 2, 9),
+        date(2026, 2, 10),
+        date(2026, 2, 11),
+        date(2026, 2, 12),
+        date(2026, 2, 13),
+        date(2026, 2, 14),
+    }
+
+
 def test_build_reparse_position_entries_extends_small_source_row_overflow_with_existing_scope(
     monkeypatch,
 ):

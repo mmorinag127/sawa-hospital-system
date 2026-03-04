@@ -599,6 +599,43 @@ def _filter_position_menu_entries_by_dates(
     return filtered
 
 
+def _select_dominant_date_cluster(
+    dates: set[date] | None,
+    *,
+    max_gap_days: int = 2,
+    min_cluster_size: int = 3,
+    min_cluster_share: float = 0.6,
+) -> set[date]:
+    normalized = sorted(item for item in (dates or set()) if isinstance(item, date))
+    if len(normalized) <= 1:
+        return set(normalized)
+
+    clusters: list[list[date]] = []
+    current: list[date] = []
+    for item in normalized:
+        if not current:
+            current = [item]
+            continue
+        prev = current[-1]
+        if (item - prev).days <= max(1, int(max_gap_days)):
+            current.append(item)
+        else:
+            clusters.append(current)
+            current = [item]
+    if current:
+        clusters.append(current)
+    if len(clusters) <= 1:
+        return set(normalized)
+
+    best = max(clusters, key=lambda cluster: (len(cluster), cluster[-1]))
+    if (
+        len(best) >= max(1, int(min_cluster_size))
+        and (len(best) / len(normalized)) >= float(min_cluster_share)
+    ):
+        return set(best)
+    return set(normalized)
+
+
 def _build_reparse_position_menu_entries(
     *,
     week_id: str | None,
@@ -628,6 +665,9 @@ def _build_reparse_position_menu_entries(
     if len(existing_line_dates) >= 2:
         lower = min(existing_line_dates) - timedelta(days=1)
         upper = max(existing_line_dates) + timedelta(days=1)
+        existing_min = min(existing_line_dates)
+        existing_max = max(existing_line_dates)
+        existing_span_days = (existing_max - existing_min).days
         entry_dates_for_scope: set[date] = set()
         if week_id:
             entry_dates_for_scope = {
@@ -644,11 +684,25 @@ def _build_reparse_position_menu_entries(
         payload_dates_outside_existing = {
             item for item in payload_dates_in_scope if item < lower or item > upper
         }
+        payload_scope_span_days = 0
+        if payload_dates_in_scope:
+            payload_scope_span_days = (
+                max(payload_dates_in_scope) - min(payload_dates_in_scope)
+            ).days
+        payload_suggests_week_scope = (
+            len(payload_dates_in_scope) >= 5
+            and len(payload_dates_outside_existing) >= 3
+            and 5 <= payload_scope_span_days <= 10
+            and payload_scope_span_days >= existing_span_days + 3
+        )
         # If most payload anchors point outside existing scope, existing lines are
         # likely stale (for example previously shifted to an adjacent week).
         allow_payload_scope_override = (
-            len(payload_dates_outside_existing) >= 3
-            and len(payload_dates_outside_existing) > (len(payload_dates_inside_existing) * 2)
+            (
+                len(payload_dates_outside_existing) >= 3
+                and len(payload_dates_outside_existing) > (len(payload_dates_inside_existing) * 2)
+            )
+            or payload_suggests_week_scope
         )
         if allow_payload_scope_override:
             logger.warning(
@@ -656,6 +710,7 @@ def _build_reparse_position_menu_entries(
                 existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
                 payload_inside_existing=[item.isoformat() for item in sorted(payload_dates_inside_existing)],
                 payload_outside_existing=[item.isoformat() for item in sorted(payload_dates_outside_existing)],
+                payload_scope_span_days=payload_scope_span_days,
             )
             # Parsed line dates can still be stale (carried from old scope). When
             # payload anchors are strong enough to override existing scope, defer
@@ -679,12 +734,12 @@ def _build_reparse_position_menu_entries(
                 item for item in observed_payload_dates if lower <= item <= upper
             } | existing_line_dates
         else:
-            edge_inside_dates = {
-                item for item in payload_dates_inside_existing if item in {lower, upper}
-            }
-            payload_dates = (
-                payload_dates_outside_existing | edge_inside_dates
-            ) or observed_payload_dates
+            # Use full in-scope payload anchors when overriding stale/partial
+            # existing scope. Keeping only "outside" anchors can drop valid
+            # leading/trailing week dates.
+            payload_dates = _select_dominant_date_cluster(
+                payload_dates_in_scope or observed_payload_dates
+            )
     else:
         payload_dates = observed_payload_dates | existing_line_dates
     return _build_position_entries_for_lines(
