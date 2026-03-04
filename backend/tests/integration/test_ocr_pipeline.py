@@ -903,6 +903,73 @@ def test_build_reparse_position_entries_ignores_out_of_scope_line_date_range_wit
     }
 
 
+def test_build_reparse_position_entries_allows_payload_week_shift_when_existing_scope_is_stale(
+    monkeypatch,
+):
+    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
+
+    def _fake_weekly_entries(_week_id: str):
+        entries = []
+        for day in range(1, 29):
+            menu_date = date(2026, 2, day)
+            for slot, daypart in enumerate(dayparts):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart_key": daypart,
+                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
+                    }
+                )
+        assert len(entries) == 224
+        return entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
+
+    # Existing order lines were already shifted to an old week (2/1-2/7).
+    existing_lines = [
+        {
+            "date": f"2026-02-{day:02d}",
+            "daypart": "朝",
+            "menu_name": f"existing-{day}",
+        }
+        for day in range(1, 8)
+    ]
+    # New payload carries multiple anchors for the correct week (2/8-2/14).
+    parsed_output = {
+        "date_strings": [
+            "2026/01/18",  # header timestamp noise
+            "2/8",
+            "2/9",
+            "2/10",
+            "2/11",
+            "2/12",
+            "2/13",
+            "2/14",
+        ]
+    }
+
+    scoped = order_service._build_reparse_position_menu_entries(
+        week_id="2026-02",
+        lines=[{"source_row_index": idx, "menu_name": f"OCR-{idx}"} for idx in range(48)],
+        rows=[["", "", "", "6"] for _ in range(48)],
+        parsed_output=parsed_output,
+        existing_lines=existing_lines,
+        extra_payload_dates=set(),
+        received_at=datetime(2026, 1, 28, 9, 0, 0),
+    )
+
+    assert scoped
+    assert {entry.get("menu_date") for entry in scoped} == {
+        date(2026, 2, 8),
+        date(2026, 2, 9),
+        date(2026, 2, 10),
+        date(2026, 2, 11),
+        date(2026, 2, 12),
+        date(2026, 2, 13),
+        date(2026, 2, 14),
+    }
+
+
 def test_build_reparse_position_entries_extends_small_source_row_overflow_with_existing_scope(
     monkeypatch,
 ):

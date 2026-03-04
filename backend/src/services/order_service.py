@@ -622,22 +622,62 @@ def _build_reparse_position_menu_entries(
             if isinstance(item, date)
         }
     payload_dates |= _collect_sheet_dates_from_rows(rows, received_at=received_at)
-    payload_dates |= existing_line_dates
+    observed_payload_dates = {
+        item for item in payload_dates if isinstance(item, date)
+    }
     if len(existing_line_dates) >= 2:
         lower = min(existing_line_dates) - timedelta(days=1)
         upper = max(existing_line_dates) + timedelta(days=1)
+        entry_dates_for_scope: set[date] = set()
+        if week_id:
+            entry_dates_for_scope = {
+                item.get("menu_date")
+                for item in _build_position_menu_entries(week_id)
+                if isinstance(item, dict) and isinstance(item.get("menu_date"), date)
+            }
+        payload_dates_in_scope = {
+            item for item in observed_payload_dates if item in entry_dates_for_scope
+        }
+        payload_dates_inside_existing = {
+            item for item in payload_dates_in_scope if lower <= item <= upper
+        }
+        payload_dates_outside_existing = {
+            item for item in payload_dates_in_scope if item < lower or item > upper
+        }
+        # If most payload anchors point outside existing scope, existing lines are
+        # likely stale (for example previously shifted to an adjacent week).
+        allow_payload_scope_override = (
+            len(payload_dates_outside_existing) >= 3
+            and len(payload_dates_outside_existing) > (len(payload_dates_inside_existing) * 2)
+        )
+        if allow_payload_scope_override:
+            logger.warning(
+                "Reparse existing anchors look stale; prefer payload date anchors",
+                existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
+                payload_inside_existing=[item.isoformat() for item in sorted(payload_dates_inside_existing)],
+                payload_outside_existing=[item.isoformat() for item in sorted(payload_dates_outside_existing)],
+            )
         # When persisted lines already define a week scope, ignore parsed line-date
         # anchors that are clearly outside that scope (typical LLM date drift).
-        if line_dates and any(item < lower or item > upper for item in line_dates):
+        if (
+            not allow_payload_scope_override
+            and line_dates
+            and any(item < lower or item > upper for item in line_dates)
+        ):
             logger.warning(
                 "Reparse parsed line dates out of existing scope; fallback to existing anchors",
                 existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
                 parsed_line_dates=[item.isoformat() for item in sorted(line_dates)],
             )
             lines_for_scope = []
-        payload_dates = {
-            item for item in payload_dates if isinstance(item, date) and lower <= item <= upper
-        } | existing_line_dates
+        if not allow_payload_scope_override:
+            payload_dates = {
+                item for item in observed_payload_dates if lower <= item <= upper
+            } | existing_line_dates
+        else:
+            payload_dates = observed_payload_dates
+    else:
+        payload_dates = observed_payload_dates | existing_line_dates
     return _build_position_entries_for_lines(
         week_id=week_id,
         lines=lines_for_scope,
