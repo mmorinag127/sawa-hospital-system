@@ -657,6 +657,10 @@ def _build_reparse_position_menu_entries(
                 payload_inside_existing=[item.isoformat() for item in sorted(payload_dates_inside_existing)],
                 payload_outside_existing=[item.isoformat() for item in sorted(payload_dates_outside_existing)],
             )
+            # Parsed line dates can still be stale (carried from old scope). When
+            # payload anchors are strong enough to override existing scope, defer
+            # to payload-driven positioning.
+            lines_for_scope = []
         # When persisted lines already define a week scope, ignore parsed line-date
         # anchors that are clearly outside that scope (typical LLM date drift).
         if (
@@ -675,7 +679,12 @@ def _build_reparse_position_menu_entries(
                 item for item in observed_payload_dates if lower <= item <= upper
             } | existing_line_dates
         else:
-            payload_dates = observed_payload_dates
+            edge_inside_dates = {
+                item for item in payload_dates_inside_existing if item in {lower, upper}
+            }
+            payload_dates = (
+                payload_dates_outside_existing | edge_inside_dates
+            ) or observed_payload_dates
     else:
         payload_dates = observed_payload_dates | existing_line_dates
     return _build_position_entries_for_lines(
