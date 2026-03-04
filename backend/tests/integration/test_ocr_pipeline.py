@@ -1431,6 +1431,26 @@ def test_evaluate_quantity_only_rows_quality_detects_column_anomaly(monkeypatch)
     assert int(detail.get("column_anomaly_count") or 0) >= 1
 
 
+def test_resolve_llm_expected_row_count_prefers_observed_rows_when_menu_scope_is_over_broad():
+    observed_rows = [[""] for _ in range(56)]
+    resolved = order_service._resolve_llm_expected_row_count(
+        menu_expected_row_count=224,
+        pipeline_rows=[],
+        observed_rows=observed_rows,
+    )
+    assert resolved == 56
+
+
+def test_resolve_llm_expected_row_count_keeps_menu_scope_when_gap_is_not_large():
+    observed_rows = [[""] for _ in range(56)]
+    resolved = order_service._resolve_llm_expected_row_count(
+        menu_expected_row_count=64,
+        pipeline_rows=[],
+        observed_rows=observed_rows,
+    )
+    assert resolved == 64
+
+
 def test_build_quantity_only_repair_prompts_includes_focus_context():
     template = {
         "columns": [

@@ -775,6 +775,7 @@ def _resolve_llm_expected_row_count(
     menu_expected_row_count: int,
     fallback_expected_row_count: int = 0,
     pipeline_rows: list[list[str]] | None = None,
+    observed_rows: list[list[str]] | None = None,
 ) -> int:
     expected = int(menu_expected_row_count) if menu_expected_row_count and menu_expected_row_count > 0 else 0
     if expected <= 0:
@@ -785,7 +786,15 @@ def _resolve_llm_expected_row_count(
         )
 
     pipeline_count = len([row for row in (pipeline_rows or []) if isinstance(row, list)])
+    observed_count = len([row for row in (observed_rows or []) if isinstance(row, list)])
     if pipeline_count <= 0:
+        if expected <= 0:
+            return observed_count
+        # If menu scope is clearly over-broad (for example month-wide 224 rows)
+        # while observed rows are week-sized and no reliable pipeline rows exist,
+        # use observed row count to avoid false row-coverage failures.
+        if observed_count > 0 and expected >= observed_count * 3:
+            return observed_count
         return expected
     if expected <= 0:
         return pipeline_count
@@ -7543,6 +7552,7 @@ def reparse_order(
             menu_expected_row_count=len(reparse_position_entries),
             fallback_expected_row_count=expected_weekly_row_count or week_menu_row_count,
             pipeline_rows=pipeline_rows_for_rescue,
+            observed_rows=[list(row) for row in rows if isinstance(row, list)],
         )
         if quality_expected_row_count > 0:
             reparse_quality_error, reparse_quality_detail = _evaluate_quantity_only_rows_quality(
