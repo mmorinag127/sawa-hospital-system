@@ -59,6 +59,9 @@ export default function MonthlyMenuEditorPage() {
   const [lastUpload, setLastUpload] = useState<string>("");
   const [savingId, setSavingId] = useState<string | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
+  const [condimentFile, setCondimentFile] = useState<File | null>(null);
+  const [condimentUploading, setCondimentUploading] = useState<boolean>(false);
+  const [condimentMessage, setCondimentMessage] = useState<string>("");
 
   const loadMenu = async () => {
     if (!monthId || Array.isArray(monthId)) return;
@@ -110,6 +113,31 @@ export default function MonthlyMenuEditorPage() {
     }
   };
 
+  const handleCondimentUpload = async () => {
+    if (!condimentFile) {
+      setCondimentMessage("付属品フラグのファイルを選択してください。");
+      return;
+    }
+    setCondimentUploading(true);
+    setCondimentMessage("アップロード中...");
+    const formData = new FormData();
+    formData.append("file", condimentFile);
+    try {
+      const res = await apiClient.post("/monthly-menus/condiments", formData, {
+        params: { sheet_name: "主菜" },
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const itemsCount = res.data?.items ?? 0;
+      setCondimentMessage(`付属品フラグを反映しました（${itemsCount}件）。`);
+      setCondimentFile(null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setCondimentMessage(detail ? `反映に失敗しました: ${detail}` : "反映に失敗しました。");
+    } finally {
+      setCondimentUploading(false);
+    }
+  };
+
   const updateItemField = (idx: number, field: keyof MenuItem, value: string) => {
     const next = [...items];
     next[idx] = { ...next[idx], [field]: value };
@@ -125,20 +153,27 @@ export default function MonthlyMenuEditorPage() {
     const bagMaxValue =
       item.bag_max_qty == null || item.bag_max_qty === "" ? null : Number(item.bag_max_qty);
     setSavingId(item.id);
-    await apiClient.put(`/monthly-menus/${monthId}/items/${item.id}`, {
-      name: item.name,
-      unit_type: item.unit_type,
-      qty_per_serving: qtyValue,
-      temp_type: item.temp_type,
-      daypart: item.daypart,
-      category: item.category,
-      diet_type: item.diet_type,
-      facility_override: item.facility_override,
-      bag_max_qty: bagMaxValue,
-      bag_max_unit: item.bag_max_unit,
-    });
-    setSavingId(null);
-    setMessage(`保存しました: ${item.name}`);
+    try {
+      await apiClient.put(`/monthly-menus/${monthId}/items/${item.id}`, {
+        name: item.name,
+        unit_type: item.unit_type,
+        qty_per_serving: qtyValue,
+        temp_type: item.temp_type,
+        daypart: item.daypart,
+        category: item.category,
+        diet_type: item.diet_type,
+        facility_override: item.facility_override,
+        bag_max_qty: bagMaxValue,
+        bag_max_unit: item.bag_max_unit,
+      });
+      setMessage(`保存しました: ${item.name}`);
+      await loadMenu();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setMessage(detail ? `保存に失敗しました: ${detail}` : "保存に失敗しました。");
+    } finally {
+      setSavingId(null);
+    }
   };
 
   const tempOptions = uniqueValues(items, "temp_type");
@@ -188,6 +223,20 @@ export default function MonthlyMenuEditorPage() {
           </button>
         </div>
         {message && <p className="message">{message}</p>}
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>付属品フラグ</h2>
+          <p className="subtle">献立メニューからソース等の付属品フラグを反映します。</p>
+        </header>
+        <div className="upload-actions">
+          <input type="file" onChange={(e) => setCondimentFile(e.target.files?.[0] || null)} />
+          <button className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
+            {condimentUploading ? "反映中..." : "反映する"}
+          </button>
+        </div>
+        {condimentMessage && <p className="message">{condimentMessage}</p>}
       </section>
 
       <section className="panel">

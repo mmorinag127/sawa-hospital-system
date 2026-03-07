@@ -27,14 +27,21 @@ type FacilityResponse = {
   validation?: ValidationResult;
 };
 
-const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
-
-const readFacilityPrompt = (config?: Record<string, unknown>) => {
-  if (!config) return "";
-  const direct =
-    config.main_ocr_facility_prompt || config.ocr_prompt || config.facility_prompt;
-  return typeof direct === "string" ? direct : "";
+type OrderFormPattern = {
+  pattern_id: string;
+  label?: string;
+  description?: string;
 };
+
+const DEFAULT_ORDER_FORM_PATTERNS: OrderFormPattern[] = [
+  { pattern_id: "PATTERN_A", label: "標準A" },
+  { pattern_id: "PATTERN_B", label: "標準B" },
+  { pattern_id: "PATTERN_C", label: "標準C" },
+  { pattern_id: "PATTERN_D", label: "標準D" },
+  { pattern_id: "PATTERN_E", label: "標準E" },
+];
+
+const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
 const parseJson = (text: string) => {
   try {
@@ -45,6 +52,32 @@ const parseJson = (text: string) => {
   }
 };
 
+const parseBoolean = (value: unknown, defaultValue = false): boolean => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+  return defaultValue;
+};
+
+const parseStringList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || "").trim())
+      .filter((item) => Boolean(item));
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,\n\r\t ]+/)
+      .map((item) => item.trim())
+      .filter((item) => Boolean(item));
+  }
+  return [];
+};
+
 export default function FacilityConfigPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -53,24 +86,92 @@ export default function FacilityConfigPage() {
   const [areasText, setAreasText] = useState("[]");
   const [configText, setConfigText] = useState("{}");
   const [resolvedText, setResolvedText] = useState("{}");
-  const [facilityPrompt, setFacilityPrompt] = useState("");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [orderFormPatterns, setOrderFormPatterns] = useState<OrderFormPattern[]>(
+    DEFAULT_ORDER_FORM_PATTERNS
+  );
+  const [orderFormPatternId, setOrderFormPatternId] = useState("");
+  const [mainOcrProvider, setMainOcrProvider] = useState<string>("pipeline");
+  const [openaiOcrEnabled, setOpenaiOcrEnabled] = useState<boolean>(false);
+  const [openaiOcrModel, setOpenaiOcrModel] = useState<string>("");
+  const [openaiOcrPrompt, setOpenaiOcrPrompt] = useState<string>("");
+  const [openaiFallbackProvider, setOpenaiFallbackProvider] = useState<string>("pipeline");
+  const [geminiOcrEnabled, setGeminiOcrEnabled] = useState<boolean>(false);
+  const [geminiOcrModel, setGeminiOcrModel] = useState<string>("");
+  const [geminiOcrPrompt, setGeminiOcrPrompt] = useState<string>("");
+  const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("pipeline");
+  const [largeCellMode, setLargeCellMode] = useState<boolean>(false);
+  const [menuOverrideTags, setMenuOverrideTags] = useState<string>("");
 
   const loadFacility = async () => {
     if (!id || Array.isArray(id)) return;
     setLoadError("");
     try {
-      const res = await apiClient.get<FacilityResponse>(`/facilities/${id}`);
-      const data = res.data;
+      const [facilityRes, patternsRes] = await Promise.all([
+        apiClient.get<FacilityResponse>(`/facilities/${id}`),
+        apiClient.get("/order-forms/patterns").catch(() => null),
+      ]);
+      const data = facilityRes.data;
       setFacility(data.facility);
       setName(data.facility.name || "");
       setAreasText(prettyJson(data.facility.areas || []));
       setConfigText(prettyJson(data.config || {}));
       setResolvedText(prettyJson(data.resolved_config || {}));
-      setFacilityPrompt(readFacilityPrompt(data.config));
       setValidation(data.validation || null);
+      const configRecord =
+        data.config && typeof data.config === "object"
+          ? (data.config as Record<string, unknown>)
+          : {};
+      const selectedPattern = configRecord.order_form_pattern_id;
+      setOrderFormPatternId(typeof selectedPattern === "string" ? selectedPattern : "");
+      const provider = configRecord.main_ocr_provider;
+      const normalizedProvider = typeof provider === "string" && provider.trim()
+        ? provider.trim().toLowerCase()
+        : "pipeline";
+      setMainOcrProvider(normalizedProvider);
+      setOpenaiOcrEnabled(parseBoolean(configRecord.openai_ocr_enabled));
+      const model = configRecord.openai_ocr_model;
+      setOpenaiOcrModel(typeof model === "string" ? model : "");
+      const prompt = configRecord.openai_ocr_prompt;
+      setOpenaiOcrPrompt(typeof prompt === "string" ? prompt : "");
+      const fallback = configRecord.openai_ocr_fallback_provider;
+      setOpenaiFallbackProvider(
+        typeof fallback === "string" && fallback.trim() ? fallback.trim().toLowerCase() : "pipeline"
+      );
+      setGeminiOcrEnabled(parseBoolean(configRecord.gemini_ocr_enabled));
+      const geminiModel = configRecord.gemini_ocr_model;
+      setGeminiOcrModel(typeof geminiModel === "string" ? geminiModel : "");
+      const geminiPrompt = configRecord.gemini_ocr_prompt;
+      setGeminiOcrPrompt(typeof geminiPrompt === "string" ? geminiPrompt : "");
+      const geminiFallback = configRecord.gemini_ocr_fallback_provider;
+      setGeminiFallbackProvider(
+        typeof geminiFallback === "string" && geminiFallback.trim()
+          ? geminiFallback.trim().toLowerCase()
+          : "pipeline"
+      );
+      setLargeCellMode(parseBoolean(configRecord.large_cell_mode));
+      setMenuOverrideTags(parseStringList(configRecord.menu_override_tags).join(","));
+      const rawPatterns = patternsRes?.data?.patterns;
+      if (Array.isArray(rawPatterns)) {
+        const normalized = rawPatterns
+          .map((item: any) => ({
+            pattern_id: String(item?.pattern_id || "").trim(),
+            label:
+              typeof item?.label === "string" && item.label.trim()
+                ? item.label.trim()
+                : undefined,
+            description:
+              typeof item?.description === "string" && item.description.trim()
+                ? item.description.trim()
+                : undefined,
+          }))
+          .filter((item: OrderFormPattern) => Boolean(item.pattern_id));
+        setOrderFormPatterns(normalized.length ? normalized : DEFAULT_ORDER_FORM_PATTERNS);
+      } else {
+        setOrderFormPatterns(DEFAULT_ORDER_FORM_PATTERNS);
+      }
       setMessage("");
     } catch (err: any) {
       const status = err?.response?.status;
@@ -117,14 +218,57 @@ export default function FacilityConfigPage() {
       setMessage("Config JSON must be an object.");
       return;
     }
-    const nextConfig = { ...(parsed.value as Record<string, unknown>) };
-    const prompt = facilityPrompt.trim();
-    if (prompt) {
-      nextConfig.main_ocr_facility_prompt = prompt;
-    } else {
-      delete nextConfig.main_ocr_facility_prompt;
-    }
     try {
+      const nextConfig = { ...(parsed.value as Record<string, unknown>) };
+      const selectedPattern = orderFormPatternId.trim();
+      if (selectedPattern) {
+        nextConfig.order_form_pattern_id = selectedPattern;
+      } else {
+        delete nextConfig.order_form_pattern_id;
+      }
+      nextConfig.main_ocr_provider = mainOcrProvider || "pipeline";
+      nextConfig.openai_ocr_enabled = openaiOcrEnabled;
+      if (openaiOcrModel.trim()) {
+        nextConfig.openai_ocr_model = openaiOcrModel.trim();
+      } else {
+        delete nextConfig.openai_ocr_model;
+      }
+      if (openaiOcrPrompt.trim()) {
+        nextConfig.openai_ocr_prompt = openaiOcrPrompt.trim();
+      } else {
+        delete nextConfig.openai_ocr_prompt;
+      }
+      if (openaiFallbackProvider.trim()) {
+        nextConfig.openai_ocr_fallback_provider = openaiFallbackProvider.trim();
+      } else {
+        delete nextConfig.openai_ocr_fallback_provider;
+      }
+      nextConfig.gemini_ocr_enabled = geminiOcrEnabled;
+      if (geminiOcrModel.trim()) {
+        nextConfig.gemini_ocr_model = geminiOcrModel.trim();
+      } else {
+        delete nextConfig.gemini_ocr_model;
+      }
+      if (geminiOcrPrompt.trim()) {
+        nextConfig.gemini_ocr_prompt = geminiOcrPrompt.trim();
+      } else {
+        delete nextConfig.gemini_ocr_prompt;
+      }
+      if (geminiFallbackProvider.trim()) {
+        nextConfig.gemini_ocr_fallback_provider = geminiFallbackProvider.trim();
+      } else {
+        delete nextConfig.gemini_ocr_fallback_provider;
+      }
+      nextConfig.large_cell_mode = largeCellMode;
+      const tags = menuOverrideTags
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => Boolean(item));
+      if (tags.length > 0) {
+        nextConfig.menu_override_tags = tags;
+      } else {
+        delete nextConfig.menu_override_tags;
+      }
       setConfigText(prettyJson(nextConfig));
       const res = await apiClient.put(`/facilities/${facility.id}/config`, nextConfig);
       if (res.data?.validation) {
@@ -133,6 +277,7 @@ export default function FacilityConfigPage() {
       if (res.data?.resolved_config) {
         setResolvedText(prettyJson(res.data.resolved_config));
       }
+      setOrderFormPatternId(selectedPattern);
       setMessage("Config saved.");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
@@ -216,22 +361,146 @@ export default function FacilityConfigPage() {
             </header>
             <div className="form-grid">
               <label className="field">
-                <span className="field-label">OCR Prompt (施設別)</span>
-                <textarea
-                  className="textarea"
-                  value={facilityPrompt}
-                  onChange={(e) => setFacilityPrompt(e.target.value)}
-                  rows={10}
-                  placeholder="未設定の場合はデフォルトプロンプトが使われます。"
+                <span className="field-label">Order Form Pattern</span>
+                <select
+                  className="input"
+                  value={orderFormPatternId}
+                  onChange={(e) => setOrderFormPatternId(e.target.value)}
+                >
+                  <option value="">未設定</option>
+                  {orderFormPatterns.map((pattern) => (
+                    <option key={pattern.pattern_id} value={pattern.pattern_id}>
+                      {pattern.label ? `${pattern.label} (${pattern.pattern_id})` : pattern.pattern_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="subtle">注文書自動生成とOCR補正の既定パターンです。</p>
+              <label className="field">
+                <span className="field-label">Menu Override Tags</span>
+                <input
+                  className="input"
+                  value={menuOverrideTags}
+                  onChange={(e) => setMenuOverrideTags(e.target.value)}
+                  placeholder="larger"
                 />
               </label>
+              <p className="subtle">
+                カンマ区切り。例: <code>larger</code>。`TAG:larger` のメニュー上書きを適用します。
+              </p>
             </div>
-            <textarea
-              className="textarea"
-              value={configText}
-              onChange={(e) => setConfigText(e.target.value)}
-              rows={14}
-            />
+            <div className="form-grid">
+              <label className="field">
+                <span className="field-label">Main OCR Provider</span>
+                <select
+                  className="input"
+                  value={mainOcrProvider}
+                  onChange={(e) => setMainOcrProvider(e.target.value)}
+                >
+                  <option value="pipeline">pipeline (default)</option>
+                  <option value="tesseract">tesseract</option>
+                  <option value="openai">openai</option>
+                  <option value="gemini">gemini</option>
+                </select>
+              </label>
+              <label className="field checkbox">
+                <span className="field-label">OpenAI OCR Enabled</span>
+                <input
+                  type="checkbox"
+                  checked={openaiOcrEnabled}
+                  onChange={(e) => setOpenaiOcrEnabled(e.target.checked)}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">OpenAI Model</span>
+                <input
+                  className="input"
+                  value={openaiOcrModel}
+                  onChange={(e) => setOpenaiOcrModel(e.target.value)}
+                  placeholder="gpt-4.1-mini"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">OpenAI Fallback</span>
+                <select
+                  className="input"
+                  value={openaiFallbackProvider}
+                  onChange={(e) => setOpenaiFallbackProvider(e.target.value)}
+                >
+                  <option value="pipeline">pipeline</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">OpenAI Prompt</span>
+                <textarea
+                  className="textarea"
+                  value={openaiOcrPrompt}
+                  onChange={(e) => setOpenaiOcrPrompt(e.target.value)}
+                  rows={5}
+                  placeholder="施設固有のOCR指示（任意）"
+                />
+              </label>
+              <label className="field checkbox">
+                <span className="field-label">Gemini OCR Enabled</span>
+                <input
+                  type="checkbox"
+                  checked={geminiOcrEnabled}
+                  onChange={(e) => setGeminiOcrEnabled(e.target.checked)}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Gemini Model</span>
+                <input
+                  className="input"
+                  value={geminiOcrModel}
+                  onChange={(e) => setGeminiOcrModel(e.target.value)}
+                  placeholder="gemini-2.5-flash"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Gemini Fallback</span>
+                <select
+                  className="input"
+                  value={geminiFallbackProvider}
+                  onChange={(e) => setGeminiFallbackProvider(e.target.value)}
+                >
+                  <option value="pipeline">pipeline</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Gemini Prompt</span>
+                <textarea
+                  className="textarea"
+                  value={geminiOcrPrompt}
+                  onChange={(e) => setGeminiOcrPrompt(e.target.value)}
+                  rows={5}
+                  placeholder="施設固有のOCR指示（任意）"
+                />
+              </label>
+              <label className="field checkbox">
+                <span className="field-label">Large Cell Mode</span>
+                <input
+                  type="checkbox"
+                  checked={largeCellMode}
+                  onChange={(e) => setLargeCellMode(e.target.checked)}
+                />
+                <span className="subtle">
+                  結合セルを含む注文書向けに日付/時間帯/メニューの引き継ぎを強化します。
+                </span>
+              </label>
+            </div>
+            <details className="json-panel">
+              <summary>Config JSON (上級)</summary>
+              <textarea
+                className="textarea json-textarea"
+                value={configText}
+                onChange={(e) => setConfigText(e.target.value)}
+                rows={14}
+                wrap="soft"
+              />
+            </details>
             <div className="actions">
               <button className="btn primary" onClick={saveConfig}>
                 Save Config
@@ -263,7 +532,10 @@ export default function FacilityConfigPage() {
             <header className="panel-header">
               <h2>Resolved Preview</h2>
             </header>
-            <pre className="code-block">{resolvedText}</pre>
+            <details className="json-panel">
+              <summary>Resolved JSON (上級)</summary>
+              <pre className="code-block">{resolvedText}</pre>
+            </details>
           </section>
         </>
       )}
@@ -417,6 +689,23 @@ export default function FacilityConfigPage() {
           padding: 12px;
           border: 1px solid rgba(25, 32, 30, 0.08);
           white-space: pre-wrap;
+          word-break: break-word;
+        }
+
+        .json-panel {
+          margin-top: 12px;
+        }
+
+        .json-panel summary {
+          cursor: pointer;
+          font-weight: 600;
+          color: #1f2a2a;
+          margin-bottom: 8px;
+        }
+
+        .json-textarea {
+          white-space: pre-wrap;
+          word-break: break-word;
         }
 
         .message {

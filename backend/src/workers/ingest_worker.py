@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from src.workers import celery_app
@@ -28,6 +29,93 @@ from src.services.ocr_pipeline_service import run_ocr_pipeline
 from src.services import ingest_job_service
 from src.services.gmail_ingest_service import mark_message_read
 from loguru import logger
+
+_INGEST_MAX_WORKERS = int(os.getenv("INGEST_MAX_WORKERS", "4") or 4)
+_INGEST_EXECUTOR = ThreadPoolExecutor(max_workers=_INGEST_MAX_WORKERS)
+
+
+def _build_pipeline_match_text(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def _push(value: object) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        parts.append(text)
+
+    def _push_row(row: object) -> None:
+        if isinstance(row, list):
+            values = [str(cell).strip() for cell in row if str(cell).strip()]
+            if values:
+                _push(" ".join(values))
+            return
+        if isinstance(row, dict):
+            values = [
+                str(value).strip()
+                for value in row.values()
+                if not isinstance(value, (dict, list)) and str(value).strip()
+            ]
+            if values:
+                _push(" ".join(values))
+
+    _push(payload.get("facility_name"))
+    for value in payload.get("date_strings") or []:
+        _push(value)
+    roi_extraction = payload.get("roi_extraction")
+    if isinstance(roi_extraction, dict):
+        _push(roi_extraction.get("facility_name"))
+        _push(roi_extraction.get("menu_band"))
+        _push(roi_extraction.get("notes"))
+    table_raw = payload.get("table_raw")
+    if isinstance(table_raw, str) and table_raw.strip():
+        _push(table_raw)
+    for key in ("table_rows", "rows", "roi_overlay_rows"):
+        raw_rows = payload.get(key)
+        if not isinstance(raw_rows, list):
+            continue
+        for row in raw_rows[:200]:
+            _push_row(row)
+    if isinstance(roi_extraction, dict):
+        raw_rows = roi_extraction.get("overlay_rows")
+        if isinstance(raw_rows, list):
+            for row in raw_rows[:200]:
+                _push_row(row)
+
+    def _push_tables(tables: object) -> None:
+        if not isinstance(tables, list):
+            return
+        for table in tables[:40]:
+            if not isinstance(table, dict):
+                continue
+            raw_rows = table.get("rows")
+            if isinstance(raw_rows, list):
+                for row in raw_rows[:120]:
+                    _push_row(row)
+            raw_cells = table.get("cells")
+            if isinstance(raw_cells, list):
+                for cell in raw_cells[:400]:
+                    if not isinstance(cell, dict):
+                        continue
+                    text = cell.get("text")
+                    if text is None:
+                        text = cell.get("contents")
+                    _push(text)
+
+    _push_tables(payload.get("tables"))
+    pages = payload.get("pages")
+    if isinstance(pages, list):
+        for page in pages[:10]:
+            if not isinstance(page, dict):
+                continue
+            _push_tables(page.get("tables"))
+
+    return "\n".join(parts)
 
 
 def _dump_ocr_debug(payload, extracted) -> None:
@@ -68,25 +156,25 @@ def _get_ocr_storage() -> StorageService:
     return StorageService(base_dir)
 
 
-def enqueue_ingest(payload: dict):
+def enqueue_ingest(payload: dict, force: bool = False):
     """
     For now process inline to avoid external broker dependency during bring-up.
     """
-    job_id, should_enqueue = ingest_job_service.create_ingest_job(payload)
+    job_id, should_enqueue = ingest_job_service.create_ingest_job(payload, force=force)
     if not should_enqueue:
         logger.info("Ingest job already completed", job_id=job_id)
         return
     process_ingest_job(job_id)
 
 
-def enqueue_ingest_async(payload: dict) -> None:
+def enqueue_ingest_async(payload: dict, force: bool = False) -> None:
     """
     Run ingest on a background thread so API handlers stay responsive.
     """
     if os.getenv("INGEST_RUN_INLINE", "").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-        enqueue_ingest(payload)
+        enqueue_ingest(payload, force=force)
         return
-    job_id, should_enqueue = ingest_job_service.create_ingest_job(payload)
+    job_id, should_enqueue = ingest_job_service.create_ingest_job(payload, force=force)
     if not should_enqueue:
         logger.info("Ingest job already completed", job_id=job_id)
         return
@@ -94,7 +182,7 @@ def enqueue_ingest_async(payload: dict) -> None:
 
 
 def enqueue_ingest_job_async(job_id: str) -> None:
-    threading.Thread(target=process_ingest_job, kwargs={"job_id": job_id}, daemon=True).start()
+    _INGEST_EXECUTOR.submit(process_ingest_job, job_id=job_id)
 
 
 def _maybe_mark_gmail_read(payload: dict) -> None:
@@ -111,16 +199,18 @@ def _maybe_mark_gmail_read(payload: dict) -> None:
 
 
 def process_ingest_job(job_id: str) -> None:
-    job = ingest_job_service.get_ingest_job(job_id)
-    if not job:
+    payload = ingest_job_service.get_ingest_payload(job_id)
+    if payload is None:
         logger.warning("Ingest job missing", job_id=job_id)
         return
     if not ingest_job_service.claim_ingest_job(job_id):
         logger.info("Ingest job already claimed", job_id=job_id)
         return
-    payload = job.payload or {}
     try:
-        process_ingest(**payload)
+        # Run the ingest logic directly. Calling the Celery task wrapper
+        # (process_ingest(**payload)) can fail in multi-threaded Cloud Run
+        # because the task may not be bound yet (request_stack is None).
+        _process_ingest_inline(**payload)
     except Exception as exc:  # noqa: BLE001
         ingest_job_service.fail_ingest_job(job_id, str(exc))
         logger.exception("Ingest job failed", job_id=job_id)
@@ -129,8 +219,11 @@ def process_ingest_job(job_id: str) -> None:
     _maybe_mark_gmail_read(payload)
 
 
-@celery_app.task(name="backend.src.workers.ingest_worker.process_ingest", bind=True, max_retries=3)
-def process_ingest(self=None, **kwargs):
+def _process_ingest_inline(**kwargs):
+    """
+    In Cloud Run we execute ingest in-process (ThreadPoolExecutor).
+    Keep this path independent from Celery task plumbing to avoid request_stack issues.
+    """
     payload = parse_ingest_payload(kwargs)
     policy = config_service.load_ingest_policy()
     master = config_service.load_facility_master()
@@ -138,15 +231,21 @@ def process_ingest(self=None, **kwargs):
     ocr_attempts = 0
     ocr_status = "success"
     ocr_error = None
+    pipeline_output = None
     retry_limit = int(policy.get("ocr_retry_limit", 3) or 3)
     ocr_job_id = f"OCR-{payload.message_id}"
     create_job(ocr_job_id, input_reference=payload.pdf_uri)
+    if payload.skip_ocr:
+        ocr_status = "skipped"
+        ocr_error = "skipped_by_request"
+        retry_limit = 0
     if should_skip_ocr(payload.received_at, policy):
         logger.warning("Skipping OCR due to stale backlog", message_id=payload.message_id)
         ocr_status = "skipped"
         ocr_error = "backlog_skipped"
         retry_limit = 0
     preferred_template_id = None
+    preferred_template_ids: list[str] = []
     try:
         for attempt in range(1, retry_limit + 1):
             ocr_attempts = attempt
@@ -155,7 +254,21 @@ def process_ingest(self=None, **kwargs):
                 if attempt == 1:
                     if payload.facility_hint:
                         fac_config = config_service.get_facility_config(payload.facility_hint)
-                        preferred_template_id = fac_config.get("fax_template_id") if fac_config else None
+                        if fac_config:
+                            preferred_template_id = fac_config.get("fax_template_id")
+                            raw_template_ids = fac_config.get("fax_template_ids")
+                            if isinstance(raw_template_ids, list):
+                                preferred_template_ids = [
+                                    str(item).strip()
+                                    for item in raw_template_ids
+                                    if str(item).strip()
+                                ]
+                            if (
+                                isinstance(preferred_template_id, str)
+                                and preferred_template_id
+                                and preferred_template_id not in preferred_template_ids
+                            ):
+                                preferred_template_ids.insert(0, preferred_template_id)
                     try:
                         output = run_ocr_pipeline(
                             pdf_bytes=pdf_bytes,
@@ -163,7 +276,9 @@ def process_ingest(self=None, **kwargs):
                             facility_id=payload.facility_hint,
                             input_reference=payload.pdf_uri,
                             preferred_template_id=preferred_template_id,
+                            preferred_template_ids=preferred_template_ids,
                         )
+                        pipeline_output = output
                         output_ref = None
                         bucket = get_default_output_bucket()
                         if bucket:
@@ -177,9 +292,7 @@ def process_ingest(self=None, **kwargs):
                             )
                         else:
                             storage = _get_ocr_storage()
-                            output_ref = save_output_json(
-                                storage, ocr_job_id, "ocr_output.json", output
-                            )
+                            output_ref = save_output_json(storage, ocr_job_id, "ocr_output.json", output)
                         update_job(
                             ocr_job_id,
                             status=output.get("status") or "done",
@@ -204,6 +317,20 @@ def process_ingest(self=None, **kwargs):
                     payload.date_hints = extracted.date_strings
                 if not payload.facility_hint and payload.facility_name:
                     payload.facility_hint = config_service.resolve_facility_id(payload.facility_name)
+                if not payload.facility_hint and isinstance(pipeline_output, dict):
+                    match_text = _build_pipeline_match_text(pipeline_output)
+                    candidates = config_service.match_facility_candidates(match_text)
+                    auto_match = next((item for item in candidates if item.get("auto")), None)
+                    if auto_match:
+                        payload.facility_hint = auto_match.get("facility_id")
+                        if not payload.facility_name:
+                            payload.facility_name = auto_match.get("facility_name")
+                        logger.info(
+                            "Facility auto matched from OCR",
+                            facility_id=payload.facility_hint,
+                            reason=auto_match.get("reason"),
+                            score=auto_match.get("score"),
+                        )
                 if not payload.facility_hint:
                     facilities = master.get("facilities", [])
                     if len(facilities) == 1:
@@ -257,17 +384,23 @@ def process_ingest(self=None, **kwargs):
                     logger.warning("OCR retries exhausted", attempts=attempt)
     except Exception:  # noqa: BLE001
         logger.exception("OCR pipeline failed; continuing without lines")
+    create_order_from_ingest(
+        payload,
+        lines=lines,
+        ocr_attempts=ocr_attempts or 1,
+        document_status=ocr_status,
+        error_message=ocr_error,
+    )
+
+
+@celery_app.task(name="backend.src.workers.ingest_worker.process_ingest", bind=True, max_retries=3)
+def process_ingest(self=None, **kwargs):
     try:
-        create_order_from_ingest(
-            payload,
-            lines=lines,
-            ocr_attempts=ocr_attempts or 1,
-            document_status=ocr_status,
-            error_message=ocr_error,
-        )
+        return _process_ingest_inline(**kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Ingest failed; retrying")
         if self:
+            policy = config_service.load_ingest_policy()
             attempt = getattr(self.request, "retries", 0) + 1
             delay = retry_backoff_seconds(attempt, policy)
             raise self.retry(exc=exc, countdown=delay)

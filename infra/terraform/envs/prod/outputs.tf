@@ -29,3 +29,7 @@ output "pubsub_subscription" {
 output "scheduler_job" {
   value = module.scheduler.job_name
 }
+
+output "cloudsql_connection_name" {
+  value = module.cloudsql.connection_name
+}

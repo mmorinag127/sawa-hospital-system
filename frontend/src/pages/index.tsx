@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
 import TopNav from "../components/TopNav";
+import GmailInvalidGrantRecoverySteps from "../components/GmailInvalidGrantRecoverySteps";
+import {
+  fetchFacilityNameMap,
+  fetchOrderFacilityCandidates,
+  pickBestFacilityCandidate,
+  type FacilityHint,
+  type FacilityNameMap,
+} from "../services/facilityData";
 
 type Order = {
   id?: string;
@@ -17,6 +25,68 @@ type MenuInfo = {
   filename?: string | null;
 };
 
+type SystemStatus = {
+  gmail_watch?: {
+    status?: string | null;
+    expiration_iso?: string | null;
+    updated_at?: string | null;
+    error_code?: string | null;
+  };
+  gmail_config?: {
+    configured?: boolean;
+    client_id_set?: boolean;
+    client_secret_set?: boolean;
+    refresh_token_set?: boolean;
+  };
+  oauth_config?: {
+    configured?: boolean;
+  };
+  ocr_pipeline?: {
+    status?: string | null;
+    updated_at?: string | null;
+    last_success_at?: string | null;
+    last_error_at?: string | null;
+    last_error?: string | null;
+    configured?: boolean;
+    url_set?: boolean;
+    bucket_set?: boolean;
+    inflight?: number | null;
+    max_inflight?: number | null;
+  };
+};
+
+type ShippingTodayItem = {
+  id: string;
+  tracking_number: string;
+  facility_name?: string | null;
+  status: string;
+  delivered: boolean;
+  arrival_text?: string | null;
+  error?: string | null;
+  looked_up_at?: string | null;
+};
+
+type ShippingTodayPayload = {
+  date?: string;
+  summary?: {
+    total: number;
+    delivered: number;
+    pending: number;
+    errors: number;
+    all_delivered: boolean;
+  };
+  quota?: {
+    resource?: string;
+    unit?: string;
+    used?: number;
+    limit?: number;
+    ratio?: number | null;
+    alert_level?: "ok" | "warning" | "critical" | "unknown" | string;
+    message?: string;
+  };
+  items?: ShippingTodayItem[];
+};
+
 const STATUS_KEYS = ["未着", "要確認", "確定", "エラー"] as const;
 
 const formatDate = (value?: string | null) => {
@@ -26,10 +96,26 @@ const formatDate = (value?: string | null) => {
   return date.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 };
 
+const formatSystemStatus = (value?: string | null) => {
+  const raw = (value || "").toLowerCase();
+  if (!raw) return "未取得";
+  if (raw === "ok") return "OK";
+  if (raw === "error") return "エラー";
+  if (raw === "invalid_grant") return "失効";
+  if (raw === "expired") return "期限切れ";
+  if (raw === "misconfigured") return "未設定";
+  if (raw === "running") return "実行中";
+  return value || "未取得";
+};
+
 export default function HomePage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuInfo, setMenuInfo] = useState<Record<string, MenuInfo>>({});
   const [error, setError] = useState("");
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [shippingToday, setShippingToday] = useState<ShippingTodayPayload | null>(null);
+  const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
+  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
 
   useEffect(() => {
     apiClient
@@ -41,6 +127,42 @@ export default function HomePage() {
       .catch(() => {
         setError("データ取得に失敗しました。");
       });
+  }, []);
+
+  useEffect(() => {
+    apiClient
+      .get("/system/status")
+      .then((res) => {
+        setSystemStatus(res.data || null);
+      })
+      .catch(() => {
+        setSystemStatus(null);
+      });
+  }, []);
+
+  useEffect(() => {
+    apiClient
+      .get("/shipping/status/today", { params: { limit: 12 } })
+      .then((res) => {
+        setShippingToday(res.data || null);
+      })
+      .catch(() => {
+        setShippingToday(null);
+      });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchFacilityNameMap()
+      .then((map) => {
+        if (!cancelled) setFacilityNameMap(map);
+      })
+      .catch(() => {
+        if (!cancelled) setFacilityNameMap({});
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const stats = useMemo(() => {
@@ -150,6 +272,60 @@ export default function HomePage() {
     return orders.filter((order) => order.status === "要確認" || !order.facility).slice(0, 8);
   }, [orders]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const unresolved = pendingOrders
+      .filter((order) => !order.facility && order.id)
+      .map((order) => String(order.id || ""))
+      .filter((orderId) => orderId && !facilityHints[orderId]);
+
+    if (unresolved.length === 0) return;
+
+    const queue = [...unresolved];
+    const results: Record<string, FacilityHint> = {};
+
+    const workers = Array.from({ length: 2 }, async () => {
+      while (queue.length > 0) {
+        const orderId = queue.shift();
+        if (!orderId) continue;
+        try {
+          const candidates = await fetchOrderFacilityCandidates(orderId);
+          const best = pickBestFacilityCandidate(candidates);
+          if (best) {
+            results[orderId] = { ...best, order_id: orderId };
+          }
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    Promise.all(workers).then(() => {
+      if (cancelled) return;
+      if (Object.keys(results).length === 0) return;
+      setFacilityHints((prev) => ({ ...prev, ...results }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingOrders, facilityHints]);
+
+  const facilityLabel = (order: Order) => {
+    const facilityId = order.facility || "";
+    if (facilityId) {
+      const name = facilityNameMap[facilityId];
+      return name ? `${name} (${facilityId})` : facilityId;
+    }
+    const orderId = order.id || "";
+    const hint = orderId ? facilityHints[orderId] : null;
+    if (hint?.facility_name) {
+      const score = hint.score != null ? ` / score=${hint.score}` : "";
+      return `推定: ${hint.facility_name} (${hint.facility_id}${score})`;
+    }
+    return "未確定";
+  };
+
   return (
     <main className="dashboard">
       <header className="hero">
@@ -196,8 +372,8 @@ export default function HomePage() {
             <p className="card-value">{stats.unresolved}</p>
           </article>
         </Link>
-        <Link href="/orders" className="card-link wide">
-          <article className="card wide" style={{ animationDelay: "240ms" }}>
+        <Link href="/orders" className="card-link">
+          <article className="card" style={{ animationDelay: "240ms" }}>
             <p className="card-label">OCR / 取込状況</p>
             <div className="processing">
               <div>
@@ -218,6 +394,87 @@ export default function HomePage() {
       </section>
 
       <section className="columns">
+        <article className="panel system-panel">
+          <header className="panel-header">
+            <h2>システム状態</h2>
+            <span className="badge">自動取込</span>
+            <Link href="/system-status" className="ghost-link">
+              管理画面
+            </Link>
+          </header>
+          <div className="system-grid">
+            <div className="system-card">
+              <p className="system-label">Gmail Watch</p>
+              <p className="system-value">
+                {formatSystemStatus(systemStatus?.gmail_watch?.status)}
+              </p>
+              <p className="system-meta">
+                最終更新: {formatDate(systemStatus?.gmail_watch?.updated_at)}
+              </p>
+              <p className="system-meta">
+                有効期限: {systemStatus?.gmail_watch?.expiration_iso ?? "未取得"}
+              </p>
+              {systemStatus?.gmail_watch?.error_code && (
+                <p className="system-meta warn">
+                  エラー: {systemStatus.gmail_watch.error_code}
+                </p>
+              )}
+            </div>
+            <div className="system-card">
+              <p className="system-label">Gmail 設定</p>
+              <p className="system-value">
+                {systemStatus?.gmail_config?.configured ? "OK" : "未設定"}
+              </p>
+              <p className="system-meta">
+                client_id: {systemStatus?.gmail_config?.client_id_set ? "OK" : "NG"}
+              </p>
+              <p className="system-meta">
+                client_secret: {systemStatus?.gmail_config?.client_secret_set ? "OK" : "NG"}
+              </p>
+              <p className="system-meta">
+                refresh_token: {systemStatus?.gmail_config?.refresh_token_set ? "OK" : "NG"}
+              </p>
+            </div>
+            <div className="system-card">
+              <p className="system-label">Web OAuth</p>
+              <p className="system-value">
+                {systemStatus?.oauth_config?.configured ? "OK" : "未設定"}
+              </p>
+              <p className="system-meta">
+                ログイン不具合時はJS Origin/Redirectを更新
+              </p>
+            </div>
+            <div className="system-card">
+              <p className="system-label">OCRパイプライン</p>
+              <p className="system-value">
+                {systemStatus?.ocr_pipeline?.configured
+                  ? formatSystemStatus(systemStatus?.ocr_pipeline?.status)
+                  : "未設定"}
+              </p>
+              <p className="system-meta">
+                最終成功: {formatDate(systemStatus?.ocr_pipeline?.last_success_at)}
+              </p>
+              <p className="system-meta">
+                稼働中:{" "}
+                {systemStatus?.ocr_pipeline?.inflight != null &&
+                systemStatus?.ocr_pipeline?.max_inflight != null
+                  ? `${systemStatus.ocr_pipeline.inflight}/${systemStatus.ocr_pipeline.max_inflight}`
+                  : "未取得"}
+              </p>
+              {systemStatus?.ocr_pipeline?.last_error && (
+                <p className="system-meta warn">
+                  エラー: {systemStatus.ocr_pipeline.last_error}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="system-recovery">
+            <h3>Gmail復帰手順</h3>
+            <GmailInvalidGrantRecoverySteps className="recovery-body" />
+          </div>
+        </article>
+
         <article className="panel">
           <header className="panel-header">
             <h2>月ごとの進捗表</h2>
@@ -273,10 +530,61 @@ export default function HomePage() {
                   <div>
                     <p className="pending-title">{order.id}</p>
                     <p className="pending-meta">
-                      施設: {order.facility || "未確定"} / 月: {order.week || "未確定"}
+                      施設: {facilityLabel(order)} / 月: {order.week || "未確定"}
                     </p>
                   </div>
                   <span className="status-tag">{order.status}</span>
+                </Link>
+              ))
+            )}
+          </div>
+        </article>
+
+        <article className="panel">
+          <header className="panel-header">
+            <h2>佐川追跡（本日）</h2>
+            <Link href="/shipping-history" className="ghost-link">
+              履歴を見る
+            </Link>
+          </header>
+          {shippingToday?.summary ? (
+            <div className="shipping-summary">
+              <p>総件数: {shippingToday.summary.total}</p>
+              <p>配達完了: {shippingToday.summary.delivered}</p>
+              <p>未完了: {shippingToday.summary.pending}</p>
+              <p>照会失敗: {shippingToday.summary.errors}</p>
+            </div>
+          ) : (
+            <p className="subtle">本日の追跡データはありません。</p>
+          )}
+          <div className="shipping-list">
+            {shippingToday?.quota &&
+            (shippingToday.quota.alert_level === "warning" ||
+              shippingToday.quota.alert_level === "critical") ? (
+              <div className={`shipping-quota quota-${shippingToday.quota.alert_level}`}>
+                <p className="pending-title">Quotaアラート: {shippingToday.quota.alert_level}</p>
+                <p className="pending-meta">
+                  使用量: {shippingToday.quota.used ?? "-"} / 上限: {shippingToday.quota.limit ?? "-"}
+                </p>
+                <p className="pending-meta">{shippingToday.quota.message || "quotaが上限に近づいています。"}</p>
+              </div>
+            ) : null}
+            {(shippingToday?.items || []).length === 0 ? (
+              <p className="subtle">表示できる伝票がありません。</p>
+            ) : (
+              (shippingToday?.items || []).map((item) => (
+                <Link key={item.id} href="/shipping-history" className="shipping-item">
+                  <div>
+                    <p className="pending-title">{item.tracking_number}</p>
+                    <p className="pending-meta">
+                      施設: {item.facility_name || "未設定"} / 状態: {item.status}
+                    </p>
+                    <p className="pending-meta">
+                      到着: {item.arrival_text || "未取得"} / 更新: {formatDate(item.looked_up_at)}
+                    </p>
+                    {item.error ? <p className="pending-meta warn">エラー: {item.error}</p> : null}
+                  </div>
+                  <span className="status-tag">{item.delivered ? "完了" : "未完了"}</span>
                 </Link>
               ))
             )}
@@ -459,9 +767,6 @@ export default function HomePage() {
           color: #f7f2e7;
         }
 
-        .card.wide {
-          grid-column: span 2;
-        }
 
         .card-label {
           margin: 0 0 8px;
@@ -511,6 +816,71 @@ export default function HomePage() {
           border: 1px solid rgba(25, 32, 30, 0.06);
           box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
           animation: rise 0.6s ease both;
+        }
+
+        .system-panel {
+          grid-column: 1 / -1;
+        }
+
+        .system-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          margin-top: 12px;
+        }
+
+        .system-recovery {
+          margin-top: 16px;
+          border-radius: 16px;
+          padding: 16px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          background: #fbfbf9;
+        }
+
+        .system-recovery h3 {
+          margin: 0 0 10px;
+          font-size: 14px;
+        }
+
+        .system-card {
+          border-radius: 14px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          padding: 12px 14px;
+          background: #f8f4ec;
+        }
+
+        .system-label {
+          margin: 0 0 6px;
+          font-size: 12px;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          color: #5f7b74;
+        }
+
+        .system-value {
+          margin: 0 0 6px;
+          font-weight: 700;
+          font-size: 16px;
+        }
+
+        .system-meta {
+          margin: 0;
+          font-size: 12px;
+          color: #51615c;
+        }
+
+        .system-meta.warn {
+          color: #b24500;
+          font-weight: 600;
+        }
+
+        .system-steps {
+          margin-top: 14px;
+          font-size: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          color: #5a4d3b;
         }
 
         .panel-header {
@@ -570,6 +940,51 @@ export default function HomePage() {
           transition: transform 0.2s ease;
         }
 
+        .shipping-summary {
+          margin-bottom: 12px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #fbf8ef;
+          font-size: 13px;
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          gap: 6px;
+        }
+
+        .shipping-list {
+          display: grid;
+          gap: 10px;
+        }
+
+        .shipping-item {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 10px;
+          padding: 12px 14px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.06);
+          background: #fbfbf9;
+        }
+
+        .shipping-quota {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #f5f8f6;
+        }
+
+        .shipping-quota.quota-warning {
+          background: #fff4df;
+          border-color: rgba(173, 102, 0, 0.35);
+        }
+
+        .shipping-quota.quota-critical {
+          background: #ffe7e7;
+          border-color: rgba(170, 45, 45, 0.35);
+        }
+
         .pending-item:hover {
           transform: translateY(-2px);
         }
@@ -583,6 +998,10 @@ export default function HomePage() {
           margin: 0;
           font-size: 12px;
           color: #5f7b74;
+        }
+
+        .pending-meta.warn {
+          color: #b24500;
         }
 
         .status-tag {

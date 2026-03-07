@@ -141,6 +141,9 @@ module "pubsub" {
   subscription_name = local.pubsub_subscription_name
   push_endpoint     = "${local.worker_url}${local.pubsub_push_path}"
   push_sa_email     = module.cloudrun.service_accounts["worker"]
+  topic_publisher_members = [
+    "serviceAccount:gmail-api-push@system.gserviceaccount.com",
+  ]
   depends_on        = [module.apis]
 }
 
@@ -166,6 +169,18 @@ module "ingest_retry_scheduler" {
   target_url      = "${local.worker_url}/ingest/retry?limit=10"
   target_sa_email = module.cloudrun.service_accounts["worker"]
   paused          = true
+  depends_on      = [module.apis]
+}
+
+module "gmail_scan_scheduler" {
+  source          = "../../modules/scheduler"
+  project_id      = var.project_id
+  region          = var.region
+  job_name        = "gmail-scan-${local.env}"
+  schedule        = "*/5 * * * *"
+  description     = "Scan Gmail for PDF attachments"
+  target_url      = "${local.worker_url}/ingest/gmail-scan"
+  target_sa_email = module.cloudrun.service_accounts["worker"]
   depends_on      = [module.apis]
 }
 
@@ -227,6 +242,23 @@ module "iam" {
     }
   ]
   depends_on = [module.apis, module.cloudrun]
+}
+
+resource "google_service_account_iam_member" "worker_token_creator" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["worker"]}"
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
+}
+
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
+# Cloud Scheduler needs this permission to mint OIDC tokens for the worker service account.
+resource "google_service_account_iam_member" "cloudscheduler_worker_token_creator" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["worker"]}"
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
 }
 
 resource "google_eventarc_trigger" "ocr_pipeline_gcs" {

@@ -77,6 +77,8 @@ const readInvoiceTemplate = (facility?: FacilityEntry) => {
   const columns = Array.isArray(invoiceRecord.columns) ? invoiceRecord.columns : [];
   return {
     templateUri: readString(invoiceRecord.template_uri),
+    sheetName: readString(invoiceRecord.sheet_name),
+    includeMenuName: Boolean(invoiceRecord.include_menu_name),
     columns: columns
       .map((column) => {
         if (!column || typeof column !== "object") return null;
@@ -255,6 +257,7 @@ export default function FacilityMasterPage() {
       name: readString(record.facility_name),
       address: readString(record.address),
       phone: readString(record.phone),
+      orderFormPatternId: readString(record.order_form_pattern_id),
       aliases: readStringList(record.aliases),
       areas: readAreas(record.areas),
       invoice: readInvoiceTemplate(selectedFacility),
@@ -265,8 +268,8 @@ export default function FacilityMasterPage() {
     <main className="page">
       <header className="hero">
         <div>
-          <p className="eyebrow">Facility Master</p>
-          <h1>施設マスター編集</h1>
+          <p className="eyebrow">Facilities</p>
+          <h1>施設一覧</h1>
           <p className="subtle">施設情報と納品書テンプレート設定を更新します。</p>
         </div>
         <TopNav />
@@ -342,6 +345,10 @@ export default function FacilityMasterPage() {
                   <p className="detail-label">電話番号</p>
                   <p className="detail-value">{facilityInfo?.phone || "-"}</p>
                 </div>
+                <div className="detail-card">
+                  <p className="detail-label">注文書パターン</p>
+                  <p className="detail-value">{facilityInfo?.orderFormPatternId || "未設定"}</p>
+                </div>
               </div>
               <div className="detail-card detail-wide">
                 <p className="detail-label">別名</p>
@@ -380,6 +387,14 @@ export default function FacilityMasterPage() {
                     ) : (
                       <p className="detail-meta">template_uri: 未設定</p>
                     )}
+                    {facilityInfo.invoice.sheetName ? (
+                      <p className="detail-meta">sheet_name: {facilityInfo.invoice.sheetName}</p>
+                    ) : (
+                      <p className="detail-meta">sheet_name: 未設定</p>
+                    )}
+                    <p className="detail-meta">
+                      include_menu_name: {facilityInfo.invoice.includeMenuName ? "true" : "false"}
+                    </p>
                     {facilityInfo.invoice.columns.length ? (
                       <div className="table-wrap">
                         <table className="invoice-table">
@@ -420,6 +435,7 @@ export default function FacilityMasterPage() {
                     value={facilityText}
                     onChange={(e) => setFacilityText(e.target.value)}
                     rows={14}
+                    wrap="soft"
                   />
                 </label>
               </details>
@@ -428,7 +444,7 @@ export default function FacilityMasterPage() {
                   施設編集を反映
                 </button>
                 <button className="btn primary" onClick={saveMaster}>
-                  Facility Master を保存
+                  施設一覧を保存
                 </button>
               </div>
             </div>
@@ -437,18 +453,21 @@ export default function FacilityMasterPage() {
       </section>
 
       <section className="panel">
-        <header className="panel-header">
-          <h2>Master JSON (上級)</h2>
-          <button className="btn ghost" onClick={applyMasterJson}>
-            JSON を反映
-          </button>
-        </header>
-        <textarea
-          className="textarea"
-          value={masterText}
-          onChange={(e) => setMasterText(e.target.value)}
-          rows={16}
-        />
+        <details className="json-panel">
+          <summary>Master JSON (上級)</summary>
+          <div className="actions">
+            <button className="btn ghost" onClick={applyMasterJson}>
+              JSON を反映
+            </button>
+          </div>
+          <textarea
+            className="textarea json-textarea"
+            value={masterText}
+            onChange={(e) => setMasterText(e.target.value)}
+            rows={16}
+            wrap="soft"
+          />
+        </details>
       </section>
 
       {validation && (
@@ -777,6 +796,23 @@ export default function FacilityMasterPage() {
           border-radius: 12px;
           padding: 12px;
           white-space: pre-wrap;
+          word-break: break-word;
+        }
+
+        .json-panel {
+          margin-top: 8px;
+        }
+
+        .json-panel summary {
+          cursor: pointer;
+          font-weight: 600;
+          color: #1f2a2a;
+          margin-bottom: 8px;
+        }
+
+        .json-textarea {
+          white-space: pre-wrap;
+          word-break: break-word;
         }
 
         .validation-details summary {

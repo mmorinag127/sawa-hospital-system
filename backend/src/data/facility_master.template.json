@@ -1,23 +1,164 @@
 {
   "schema_version": "1.6",
-  "updated_at": "2025-12-25",
+  "updated_at": "2026-01-17",
+  "order_form_patterns": [
+    {
+      "pattern_id": "PATTERN_A",
+      "label": "標準A",
+      "description": "Placeholder pattern A (TBD)",
+      "marker_cells": [
+        "A1",
+        "L1",
+        "A40",
+        "L40"
+      ]
+    },
+    {
+      "pattern_id": "PATTERN_B",
+      "label": "標準B",
+      "description": "Placeholder pattern B (TBD)",
+      "marker_cells": [
+        "A1",
+        "M1",
+        "A42",
+        "M42"
+      ]
+    },
+    {
+      "pattern_id": "PATTERN_C",
+      "label": "標準C",
+      "description": "Placeholder pattern C (TBD)",
+      "marker_cells": [
+        "A1",
+        "K1",
+        "A38",
+        "K38"
+      ]
+    },
+    {
+      "pattern_id": "PATTERN_D",
+      "label": "標準D",
+      "description": "Placeholder pattern D (TBD)",
+      "marker_cells": [
+        "A1",
+        "N1",
+        "A44",
+        "N44"
+      ]
+    },
+    {
+      "pattern_id": "PATTERN_E",
+      "label": "標準E",
+      "description": "Placeholder pattern E (TBD)",
+      "marker_cells": [
+        "A1",
+        "J1",
+        "A36",
+        "J36"
+      ]
+    }
+  ],
   "fax_template_base": {
     "units": "normalized",
     "page": 1,
-    "facility_name_box": [0.10, 0.05, 0.40, 0.10],
-    "date_boxes": [
-      { "bbox": [0.50, 0.05, 0.70, 0.10], "format": "MM/DD" }
+    "facility_name_box": [
+      0.1,
+      0.05,
+      0.4,
+      0.1
     ],
-    "table_box": [0.05, 0.20, 0.95, 0.90],
-    "header_rows": 1,
+    "date_boxes": [
+      {
+        "bbox": [
+          0.5,
+          0.05,
+          0.7,
+          0.1
+        ],
+        "format": "MM/DD"
+      }
+    ],
+    "table_box": [
+      0.05,
+      0.2,
+      0.95,
+      0.9
+    ],
+    "header_rows": 0,
     "normalize_whitespace": true,
-    "fill_forward_roles": ["date", "menu_name"],
+    "fill_forward_roles": [
+      "date",
+      "daypart",
+      "menu_name"
+    ],
     "fill_missing_date_with_hint": true,
     "fill_missing_date_with_first_seen": true,
+    "main_ocr_row_fields": [
+      "date_mmdd",
+      "daypart",
+      "menu",
+      "qty.regular_2f",
+      "qty.regular_3f",
+      "qty.soft_2f",
+      "qty.soft_3f",
+      "qty.mixer_2f",
+      "qty.mixer_3f",
+      "remarks"
+    ],
     "columns": [
-      { "index": 0, "role": "date", "format": "MM/DD" },
-      { "index": 1, "role": "menu_name" },
-      { "index": 2, "role": "daypart" }
+      {
+        "index": 0,
+        "role": "date",
+        "format": "MM/DD"
+      },
+      {
+        "index": 1,
+        "role": "daypart"
+      },
+      {
+        "index": 2,
+        "role": "menu_name"
+      },
+      {
+        "index": 3,
+        "role": "quantity",
+        "diet_type": "regular",
+        "area_id": "2F"
+      },
+      {
+        "index": 4,
+        "role": "quantity",
+        "diet_type": "regular",
+        "area_id": "3F"
+      },
+      {
+        "index": 5,
+        "role": "quantity",
+        "diet_type": "soft",
+        "area_id": "2F"
+      },
+      {
+        "index": 6,
+        "role": "quantity",
+        "diet_type": "soft",
+        "area_id": "3F"
+      },
+      {
+        "index": 7,
+        "role": "quantity",
+        "diet_type": "mixer",
+        "area_id": "2F"
+      },
+      {
+        "index": 8,
+        "role": "quantity",
+        "diet_type": "mixer",
+        "area_id": "3F"
+      },
+      {
+        "index": 9,
+        "role": "note"
+      }
     ]
   },
   "label_profile_base": {
@@ -44,101 +185,992 @@
   },
   "packaging_policy_base": {
     "split_by_area": true,
-    "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "area_id", "bag_type"]
+    "split_key": [
+      "facility",
+      "date",
+      "daypart",
+      "menu_name",
+      "diet_type",
+      "area_id",
+      "bag_type"
+    ]
   },
+  "bag_types": [
+    {
+      "bag_type_id": "small",
+      "label": "小",
+      "max_qty": 100,
+      "unit": "g"
+    },
+    {
+      "bag_type_id": "medium",
+      "label": "中",
+      "max_qty": 500,
+      "unit": "g"
+    },
+    {
+      "bag_type_id": "large",
+      "label": "大",
+      "max_qty": 1500,
+      "unit": "g"
+    }
+  ],
   "facilities": [
     {
+      "facility_name": "大和なでしこ",
+      "aliases": [
+        "大和なでしこヤマト"
+      ],
+      "address": "徳島県徳島市川内町平石夷野２４番地",
+      "phone": "0886-663-966",
+      "areas": [],
       "facility_id": "FAC00001",
-      "facility_name": "Test Facility",
-      "aliases": [],
-      "areas": [
-        { "area_id": "ARE0001", "name": "Unit A", "sort_order": 1 },
-        { "area_id": "ARE0002", "name": "Unit B", "sort_order": 2 }
-      ],
-      "bag_types": [
-        { "bag_type_id": "standard", "label": "standard" },
-        { "bag_type_id": "diet", "label": "diet" },
-        { "bag_type_id": "soft", "label": "soft" }
-      ],
-      "packaging_policy_override": {
-        "split_by_area": false,
-        "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "bag_type"]
-      },
-      "fax_template_override": {
-        "columns": [
-          {
-            "index": 3,
-            "role": "quantity",
-            "diet_type": "regular",
-            "area_id": "ARE0001",
-            "bag_type": "standard"
-          },
-          {
-            "index": 4,
-            "role": "quantity",
-            "diet_type": "regular",
-            "area_id": "ARE0002",
-            "bag_type": "standard"
-          },
-          {
-            "index": 5,
-            "role": "quantity",
-            "diet_type": "diabetic",
-            "area_id": "ARE0001",
-            "bag_type": "diet"
-          },
-          {
-            "index": 6,
-            "role": "quantity",
-            "diet_type": "diabetic",
-            "area_id": "ARE0002",
-            "bag_type": "diet"
-          },
-          {
-            "index": 7,
-            "role": "quantity",
-            "diet_type": "soft",
-            "area_id": "ARE0001",
-            "bag_type": "soft"
-          },
-          {
-            "index": 8,
-            "role": "quantity",
-            "diet_type": "soft",
-            "area_id": "ARE0002",
-            "bag_type": "soft"
-          },
-          { "index": 9, "role": "quantity_change", "source_index": 3 },
-          { "index": 10, "role": "quantity_change", "source_index": 4 },
-          { "index": 11, "role": "quantity_change", "source_index": 5 },
-          { "index": 12, "role": "quantity_change", "source_index": 6 }
-        ]
-      },
       "invoice_template": {
-        "template_uri": "gs://YOUR_BUCKET/templates/invoice_template.xlsx",
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "大和なでしこ",
+        "include_menu_name": false,
         "columns": [
-          { "name": "date", "source": "date" },
-          { "name": "daypart", "source": "daypart" },
-          { "name": "menu_name", "source": "menu_name" },
           {
-            "name": "qty_regular_area_a",
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食",
             "source": "quantity",
             "diet_type": "regular",
-            "area_id": "ARE0001"
+            "header": "常食",
+            "column_index": 4
+          },
+          {
+            "name": "小口",
+            "source": "quantity",
+            "diet_type": "小口",
+            "header": "小口",
+            "column_index": 5
+          },
+          {
+            "name": "禁食",
+            "source": "quantity",
+            "diet_type": "禁食",
+            "header": "禁食",
+            "column_index": 6
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 8
           }
         ]
       }
     },
     {
-      "facility_id": "FAC00002",
-      "facility_name": "医療法人松岡会山城グループホーム",
+      "facility_name": "シルバーホームなごみ",
       "aliases": [],
-      "areas": [
-        { "area_id": "2F", "name": "2F", "sort_order": 1 },
-        { "area_id": "3F", "name": "3F", "sort_order": 2 }
+      "address": "徳島県徳島市北田宮１丁目１-４",
+      "phone": "0858-624-7534",
+      "areas": [],
+      "facility_id": "FAC00002",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "なごみ",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular",
+            "header": "常食",
+            "column_index": 4
+          },
+          {
+            "name": "禁食",
+            "source": "quantity",
+            "diet_type": "禁食",
+            "header": "禁食",
+            "column_index": 5
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 7
+          }
+        ]
+      },
+      "fax_template_id": "fax_layout_regular_forbidden_v1"
+    },
+    {
+      "facility_name": "春日苑 松茂",
+      "aliases": [
+        "春日苑　松茂カスガエンマツシゲ"
       ],
-      "fax_template_id": "fax_fac00002_v1",
-      "main_ocr_facility_prompt": "返すのはJSONのみ。画像の表から行ごとの値を抽出してください。\n出力フォーマット: {\"template_id\":\"FAC00002_weekly_order_v1\",\"rows\":[{\"date_mmdd\":\"MM/DD\",\"menu\":\"...\",\"qty\":{\"regular_2f\":n,\"regular_3f\":n,\"soft_2f\":n,\"soft_3f\":n,\"mixer_2f\":n,\"mixer_3f\":n},\"remarks\":\"\"}],\"errors\":[]}\nルール:\n- 推測しない。読めない数値は null。\n- 画像にない文字を生成しない。\n- 空行は出力しない。\n- 日付が空欄の行は直前行のdate_mmddを引き継いでよい。"
+      "address": "徳島県板野郡松茂町広島字四番越１１番５トクシマケンイタノグンマツシゲチョウヒロシマアザ4",
+      "phone": "080-6919-5523",
+      "areas": [],
+      "facility_id": "FAC00003",
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_ids": [
+        "fax_layout_floor_2f3f_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "介護老人保健施設ふれあいの丘",
+      "aliases": [
+        "介護老人保健施設ふれあいの丘カイゴロウジンホケンシセツオカ"
+      ],
+      "address": "神奈川県茅ケ崎市行谷５８３-１",
+      "phone": "0467-54-8111",
+      "areas": [],
+      "facility_id": "FAC00004",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "池袋病院内事業所 傑合同会社",
+      "aliases": [
+        "池袋病院内事業所　傑合同会社イケブクロビョウインナイジギョウショケツゴウドウガイシャ"
+      ],
+      "address": "東京都豊島区東池袋３丁目５-４",
+      "phone": "03-3987-2431",
+      "areas": [],
+      "facility_id": "FAC00005",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      },
+      "label_profile_override": {
+        "expiry_offset_months": 3
+      }
+    },
+    {
+      "facility_name": "藍TERRACE",
+      "aliases": [
+        "藍TERRACEアイ"
+      ],
+      "address": "徳島県徳島市山城西３丁目１９",
+      "phone": "0886-023-520",
+      "areas": [],
+      "facility_id": "FAC00006",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      },
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_ids": [
+        "fax_layout_floor_2f3f_v1",
+        "fax_layout_regular_staff_daycare_v1",
+        "fax_layout_regular_soft_mixer_forbidden_v1"
+      ]
+    },
+    {
+      "facility_name": "ゆうゆう（株）百々家",
+      "aliases": [
+        "ゆうゆう（株）百々家カブモモイエ"
+      ],
+      "address": "徳島県美馬市脇町野村４６３８-１",
+      "phone": "0883-53-8010",
+      "areas": [],
+      "facility_id": "FAC00007",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "佐古",
+      "aliases": [
+        "佐古グループホームサコ"
+      ],
+      "address": "徳島県徳島市佐古４番町４-７",
+      "phone": "0886-113-630",
+      "areas": [],
+      "facility_id": "FAC00008",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "グループホームそよかぜ",
+      "aliases": [],
+      "address": "徳島県鳴門市瀬戸町明神鳴谷１２１番地",
+      "phone": "0886-837-888",
+      "areas": [],
+      "facility_id": "FAC00009",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "山城",
+      "aliases": [
+        "山城グループホームヤマシロ",
+        "松岡会山城グループホーム",
+        "やましろケアサポート"
+      ],
+      "address": "徳島県徳島市山城町４丁目４７番地",
+      "phone": "088-657-6567",
+      "areas": [],
+      "facility_id": "FAC00010",
+      "fax_template_override": {
+        "grid_line_scale_horizontal": 20
+      },
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "ケアハウス四万十",
+      "aliases": [
+        "ケアハウス四万十ピアシマント"
+      ],
+      "address": "高知県高岡郡四万十町仁井田１１４-１",
+      "phone": "0880-229-508",
+      "areas": [],
+      "facility_id": "FAC00011",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食2F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "header": "常食2F",
+            "column_index": 4
+          },
+          {
+            "name": "常食3F",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "header": "常食3F",
+            "column_index": 5
+          },
+          {
+            "name": "軟菜",
+            "source": "quantity",
+            "diet_type": "soft",
+            "header": "軟菜",
+            "column_index": 6
+          },
+          {
+            "name": "ミキサー2F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "header": "ミキサー",
+            "column_index": 7
+          },
+          {
+            "name": "ミキサー3F",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "header": "ミキサー",
+            "column_index": 8
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 9
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "グランフォレスト方上",
+      "aliases": [
+        "グランフォレスト方上ホウウエ"
+      ],
+      "address": "徳島県徳島市方上町中須賀３１番地１",
+      "phone": "0886-787-112",
+      "areas": [],
+      "facility_id": "FAC00012",
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular",
+            "header": "常食",
+            "column_index": 4
+          },
+          {
+            "name": "禁食",
+            "source": "quantity",
+            "diet_type": "禁食",
+            "header": "禁食",
+            "column_index": 5
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 7
+          }
+        ]
+      },
+      "fax_template_id": "fax_layout_regular_forbidden_v1"
+    },
+    {
+      "facility_name": "いこいの森",
+      "aliases": [
+        "いこいの森プラスモリ"
+      ],
+      "address": "高知県高知市旭町３丁目３",
+      "phone": "088-8567-012",
+      "areas": [],
+      "facility_id": "FAC00013",
+      "fax_template_id": "fax_layout_regular_diabetes_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_diabetes_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
+      "invoice_template": {
+        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "いこいの森",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular",
+            "header": "常食",
+            "column_index": 4
+          },
+          {
+            "name": "糖尿",
+            "source": "quantity",
+            "diet_type": "糖尿",
+            "header": "糖尿",
+            "column_index": 5
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考",
+            "column_index": 6
+          }
+        ]
+      }
     }
   ]
 }

@@ -80,14 +80,14 @@ def test_outputs_match_golden_files():
 
     actual_labels = _read_csv(pathlib.Path(outputs["labels"]), encoding="cp932")
     expected_labels = _read_csv(FIXTURES_DIR / "labels_expected.csv", encoding="cp932")
-    assert _sort_rows(actual_labels, ["product_name", "details", "quantity"]) == _sort_rows(
-        expected_labels, ["product_name", "details", "quantity"]
+    assert _sort_rows(actual_labels, ["商品名１", "内容詳細", "内容量"]) == _sort_rows(
+        expected_labels, ["商品名１", "内容詳細", "内容量"]
     )
 
-    actual_agg = _read_csv(pathlib.Path(outputs["aggregate"]), encoding="utf-8")
-    expected_agg = _read_csv(FIXTURES_DIR / "aggregate_expected.csv", encoding="utf-8")
-    assert _sort_rows(actual_agg, ["diet_type", "area_id", "bag_type"]) == _sort_rows(
-        expected_agg, ["diet_type", "area_id", "bag_type"]
+    actual_agg = _read_csv(pathlib.Path(outputs["aggregate"]), encoding="cp932")
+    expected_agg = _read_csv(FIXTURES_DIR / "aggregate_expected.csv", encoding="cp932")
+    assert _sort_rows(actual_agg, ["商品名１", "内容詳細", "内容量"]) == _sort_rows(
+        expected_agg, ["商品名１", "内容詳細", "内容量"]
     )
 
     actual_delivery = pd.read_excel(outputs["delivery_note"])

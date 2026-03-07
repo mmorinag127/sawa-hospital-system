@@ -1,4 +1,5 @@
 from typing import Any
+import re
 
 
 def _ensure_list(value: Any, path: str, errors: list[str]) -> list:
@@ -33,6 +34,44 @@ def _validate_columns(columns: Any, path: str, errors: list[str], warnings: list
         if column.get("role") in {"quantity", "quantity_change"}:
             if not column.get("diet_type"):
                 warnings.append(f"{path}[{idx}].diet_type is missing for quantity role")
+
+
+_MAIN_FIELD_PATTERN = re.compile(
+    r"^(date_mmdd|date|daypart|menu|menu_name|remarks|note|qty\.[a-z_]+_(?:x|\df))$"
+)
+
+
+def _validate_main_ocr_row_fields(
+    fields: Any,
+    path: str,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    values = _ensure_list(fields, path, errors)
+    if not values:
+        return
+    seen: set[str] = set()
+    quantity_count = 0
+    for idx, raw in enumerate(values):
+        item_path = f"{path}[{idx}]"
+        if not isinstance(raw, str) or not raw.strip():
+            errors.append(f"{item_path} must be a non-empty string")
+            continue
+        token = raw.strip()
+        if token in seen:
+            errors.append(f"{item_path} duplicated field: {token}")
+            continue
+        seen.add(token)
+        if not _MAIN_FIELD_PATTERN.match(token):
+            errors.append(
+                f"{item_path} invalid field: {token} "
+                "(expected date/daypart/menu/remarks or qty.<diet>_<x|2f|3f...>)"
+            )
+            continue
+        if token.startswith("qty."):
+            quantity_count += 1
+    if quantity_count == 0:
+        warnings.append(f"{path} has no qty.* columns")
 
 
 def _validate_invoice_columns(columns: Any, path: str, errors: list[str]) -> None:
@@ -201,12 +240,151 @@ def _validate_template_postprocess(postprocess: Any, path: str, errors: list[str
             errors.append(f"{path}.retry.alt_binarize must be a boolean")
 
 
+_CELL_REF_RE = re.compile(r"^[A-Za-z]{1,3}[1-9][0-9]*$")
+
+
+def _validate_order_form_patterns(
+    patterns: Any,
+    path: str,
+    errors: list[str],
+    warnings: list[str],
+) -> set[str]:
+    pattern_ids: set[str] = set()
+    if patterns is None:
+        return pattern_ids
+    items = _ensure_list(patterns, path, errors)
+    for idx, pattern in enumerate(items):
+        item_path = f"{path}[{idx}]"
+        if not isinstance(pattern, dict):
+            errors.append(f"{item_path} must be an object")
+            continue
+        pattern_id = pattern.get("pattern_id")
+        if not isinstance(pattern_id, str) or not pattern_id.strip():
+            errors.append(f"{item_path}.pattern_id is required")
+            continue
+        pattern_id = pattern_id.strip()
+        if pattern_id in pattern_ids:
+            errors.append(f"{item_path}.pattern_id duplicated: {pattern_id}")
+            continue
+        pattern_ids.add(pattern_id)
+        label = pattern.get("label")
+        if label is not None and not isinstance(label, str):
+            errors.append(f"{item_path}.label must be a string")
+        description = pattern.get("description")
+        if description is not None and not isinstance(description, str):
+            errors.append(f"{item_path}.description must be a string")
+        marker_cells = pattern.get("marker_cells")
+        if marker_cells is not None:
+            cell_items = _ensure_list(marker_cells, f"{item_path}.marker_cells", errors)
+            for cell_idx, cell in enumerate(cell_items):
+                if not isinstance(cell, str) or not cell.strip():
+                    errors.append(f"{item_path}.marker_cells[{cell_idx}] must be a non-empty string")
+                    continue
+                if not _CELL_REF_RE.match(cell.strip()):
+                    warnings.append(
+                        f"{item_path}.marker_cells[{cell_idx}] has unusual cell reference: {cell}"
+                    )
+        layout = pattern.get("layout")
+        if layout is not None and not isinstance(layout, dict):
+            errors.append(f"{item_path}.layout must be an object")
+    return pattern_ids
+
+
+def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) -> None:
+    provider = config.get("main_ocr_provider")
+    if provider is not None:
+        if not isinstance(provider, str):
+            errors.append(f"{path}.main_ocr_provider must be a string")
+        elif provider.strip().lower() not in {"pipeline", "tesseract", "openai", "gemini"}:
+            errors.append(
+                f"{path}.main_ocr_provider must be one of pipeline|tesseract|openai|gemini"
+            )
+    enabled = config.get("openai_ocr_enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append(f"{path}.openai_ocr_enabled must be a boolean")
+    model = config.get("openai_ocr_model")
+    if model is not None and not isinstance(model, str):
+        errors.append(f"{path}.openai_ocr_model must be a string")
+    prompt = config.get("openai_ocr_prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        errors.append(f"{path}.openai_ocr_prompt must be a string")
+    max_tokens = config.get("openai_ocr_max_tokens")
+    if max_tokens is not None and not isinstance(max_tokens, int):
+        errors.append(f"{path}.openai_ocr_max_tokens must be an integer")
+    openai_retry_on_truncation = config.get("openai_ocr_retry_on_truncation")
+    if openai_retry_on_truncation is not None and not isinstance(openai_retry_on_truncation, bool):
+        errors.append(f"{path}.openai_ocr_retry_on_truncation must be a boolean")
+    openai_retry_max_tokens = config.get("openai_ocr_retry_max_tokens")
+    if openai_retry_max_tokens is not None and not isinstance(openai_retry_max_tokens, int):
+        errors.append(f"{path}.openai_ocr_retry_max_tokens must be an integer")
+    timeout = config.get("openai_ocr_timeout_seconds")
+    if timeout is not None and not isinstance(timeout, (int, float)):
+        errors.append(f"{path}.openai_ocr_timeout_seconds must be a number")
+    fallback = config.get("openai_ocr_fallback_provider")
+    if fallback is not None:
+        if not isinstance(fallback, str):
+            errors.append(f"{path}.openai_ocr_fallback_provider must be a string")
+        elif fallback.strip().lower() not in {"pipeline", "none"}:
+            errors.append(
+                f"{path}.openai_ocr_fallback_provider must be one of pipeline|none"
+            )
+    gemini_enabled = config.get("gemini_ocr_enabled")
+    if gemini_enabled is not None and not isinstance(gemini_enabled, bool):
+        errors.append(f"{path}.gemini_ocr_enabled must be a boolean")
+    gemini_model = config.get("gemini_ocr_model")
+    if gemini_model is not None and not isinstance(gemini_model, str):
+        errors.append(f"{path}.gemini_ocr_model must be a string")
+    gemini_prompt = config.get("gemini_ocr_prompt")
+    if gemini_prompt is not None and not isinstance(gemini_prompt, str):
+        errors.append(f"{path}.gemini_ocr_prompt must be a string")
+    gemini_max_tokens = config.get("gemini_ocr_max_tokens")
+    if gemini_max_tokens is not None and not isinstance(gemini_max_tokens, int):
+        errors.append(f"{path}.gemini_ocr_max_tokens must be an integer")
+    gemini_retry_on_truncation = config.get("gemini_ocr_retry_on_truncation")
+    if gemini_retry_on_truncation is not None and not isinstance(gemini_retry_on_truncation, bool):
+        errors.append(f"{path}.gemini_ocr_retry_on_truncation must be a boolean")
+    gemini_retry_max_tokens = config.get("gemini_ocr_retry_max_tokens")
+    if gemini_retry_max_tokens is not None and not isinstance(gemini_retry_max_tokens, int):
+        errors.append(f"{path}.gemini_ocr_retry_max_tokens must be an integer")
+    gemini_timeout = config.get("gemini_ocr_timeout_seconds")
+    if gemini_timeout is not None and not isinstance(gemini_timeout, (int, float)):
+        errors.append(f"{path}.gemini_ocr_timeout_seconds must be a number")
+    gemini_fallback = config.get("gemini_ocr_fallback_provider")
+    if gemini_fallback is not None:
+        if not isinstance(gemini_fallback, str):
+            errors.append(f"{path}.gemini_ocr_fallback_provider must be a string")
+        elif gemini_fallback.strip().lower() not in {"pipeline", "none"}:
+            errors.append(
+                f"{path}.gemini_ocr_fallback_provider must be one of pipeline|none"
+            )
+    large_cell_mode = config.get("large_cell_mode")
+    if large_cell_mode is not None and not isinstance(large_cell_mode, bool):
+        errors.append(f"{path}.large_cell_mode must be a boolean")
+
+
 def validate_facility_config(config: Any) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     config_dict = _ensure_dict(config, "config", errors)
+    _validate_ocr_provider_config(config_dict, "config", errors)
+    pattern_id = config_dict.get("order_form_pattern_id")
+    if pattern_id is not None and not isinstance(pattern_id, str):
+        errors.append("config.order_form_pattern_id must be a string")
     fax_override = _ensure_dict(config_dict.get("fax_template_override"), "fax_template_override", errors)
     _validate_columns(fax_override.get("columns"), "fax_template_override.columns", errors, warnings)
+    _validate_main_ocr_row_fields(
+        fax_override.get("main_ocr_row_fields"),
+        "fax_template_override.main_ocr_row_fields",
+        errors,
+        warnings,
+    )
+    fax_template = _ensure_dict(config_dict.get("fax_template"), "fax_template", errors)
+    _validate_main_ocr_row_fields(
+        fax_template.get("main_ocr_row_fields"),
+        "fax_template.main_ocr_row_fields",
+        errors,
+        warnings,
+    )
     _validate_packaging_policy(config_dict.get("packaging_policy_override"), errors)
     _validate_label_profile(config_dict.get("label_profile_override"), errors)
     _validate_invoice_template(config_dict.get("invoice_template"), errors, warnings)
@@ -218,6 +396,19 @@ def validate_facility_master(master: Any) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     master_dict = _ensure_dict(master, "facility_master", errors)
+    base_template = _ensure_dict(master_dict.get("fax_template_base"), "fax_template_base", errors)
+    _validate_main_ocr_row_fields(
+        base_template.get("main_ocr_row_fields"),
+        "fax_template_base.main_ocr_row_fields",
+        errors,
+        warnings,
+    )
+    pattern_ids = _validate_order_form_patterns(
+        master_dict.get("order_form_patterns"),
+        "order_form_patterns",
+        errors,
+        warnings,
+    )
     facilities = _ensure_list(master_dict.get("facilities"), "facilities", errors)
     for idx, fac in enumerate(facilities):
         if not isinstance(fac, dict):
@@ -227,6 +418,31 @@ def validate_facility_master(master: Any) -> dict:
             errors.append(f"facilities[{idx}].facility_id is required")
         if not fac.get("facility_name"):
             errors.append(f"facilities[{idx}].facility_name is required")
+        _validate_ocr_provider_config(fac, f"facilities[{idx}]", errors)
+        fax_template_ids = fac.get("fax_template_ids")
+        if fax_template_ids is not None:
+            template_ids = _ensure_list(
+                fax_template_ids,
+                f"facilities[{idx}].fax_template_ids",
+                errors,
+            )
+            for item_idx, template_id in enumerate(template_ids):
+                if not isinstance(template_id, str) or not template_id.strip():
+                    errors.append(
+                        f"facilities[{idx}].fax_template_ids[{item_idx}] must be a non-empty string"
+                    )
+        pattern_id = fac.get("order_form_pattern_id")
+        if pattern_id is not None and not isinstance(pattern_id, str):
+            errors.append(f"facilities[{idx}].order_form_pattern_id must be a string")
+        if (
+            isinstance(pattern_id, str)
+            and pattern_id.strip()
+            and pattern_ids
+            and pattern_id.strip() not in pattern_ids
+        ):
+            errors.append(
+                f"facilities[{idx}].order_form_pattern_id not found in order_form_patterns: {pattern_id.strip()}"
+            )
         _ensure_list(fac.get("aliases"), f"facilities[{idx}].aliases", errors)
         _ensure_list(fac.get("areas"), f"facilities[{idx}].areas", errors)
         fax_override = _ensure_dict(
@@ -235,6 +451,23 @@ def validate_facility_master(master: Any) -> dict:
         _validate_columns(
             fax_override.get("columns"),
             f"facilities[{idx}].fax_template_override.columns",
+            errors,
+            warnings,
+        )
+        _validate_main_ocr_row_fields(
+            fax_override.get("main_ocr_row_fields"),
+            f"facilities[{idx}].fax_template_override.main_ocr_row_fields",
+            errors,
+            warnings,
+        )
+        fax_template = _ensure_dict(
+            fac.get("fax_template"),
+            f"facilities[{idx}].fax_template",
+            errors,
+        )
+        _validate_main_ocr_row_fields(
+            fax_template.get("main_ocr_row_fields"),
+            f"facilities[{idx}].fax_template.main_ocr_row_fields",
             errors,
             warnings,
         )

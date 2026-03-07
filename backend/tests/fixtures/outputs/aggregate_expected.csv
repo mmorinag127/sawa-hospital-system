@@ -1,3 +1,2 @@
-week,facility,menu_name,diet_type,area_id,bag_type,quantity
-WEK2025W01,FAC00001,Menu A,regular,ARE0001,standard,10.0
-WEK2025W01,FAC00001,Menu A,diabetic,ARE0002,diet,5.0
+呼び出し番号,発行枚数,賞味期限,時間,メニュー,温・冷,商品名１,商品名２,内容量,内容詳細,,実量,一人前
+,,2025年1月6日,AM,Main,温菜,Menu A,,1500g,100g / hot,15人前,1500g,100g

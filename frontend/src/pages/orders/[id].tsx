@@ -22,13 +22,31 @@ type OrderDetail = {
     quantity_original?: number | null;
     quantity_corrected?: number | null;
     change_note?: string | null;
+    menu_qty_per_serving?: number | null;
+    menu_unit_type?: string | null;
+    actual_amount?: number | null;
+    actual_unit_type?: string | null;
   }[];
   facility?: string | null;
   ocr_status?: string | null;
   ocr_error?: string | null;
-  ocr_metrics?: { failed_cells?: number } | null;
+  ocr_metrics?: {
+    failed_cells?: number;
+    provider?: string | null;
+    requested_provider?: string | null;
+    row_count?: number | null;
+    line_count?: number | null;
+    llm_assist?: boolean | null;
+    before_count?: number | null;
+    after_count?: number | null;
+    changed?: boolean | null;
+    warning_reasons?: string[] | null;
+    warning_detail?: Record<string, unknown> | null;
+  } | null;
   ocr_prompt_enabled?: boolean | null;
   ocr_updated_at?: string | null;
+  lines_updated_at?: string | null;
+  ocr_job_id?: string | null;
 };
 
 type OcrOutput = {
@@ -39,6 +57,40 @@ type OcrOutput = {
   warnings?: string[];
   table_raw?: string;
   facility_candidates?: FacilityCandidate[];
+  ocr_source?: string;
+  _reparse_debug?: ReparseDebugPayload | null;
+  edited_table?: {
+    header?: string[];
+    rows?: string[][];
+    row_ids?: string[];
+    edited_at?: string;
+    ui_mode?: string;
+    revision_id?: string;
+  } | null;
+};
+
+type ReparseDebugPayload = {
+  updated_at?: string | null;
+  provider?: string | null;
+  requested_provider?: string | null;
+  llm_assist?: boolean | null;
+  row_count?: number | null;
+  line_count?: number | null;
+  before_count?: number | null;
+  after_count?: number | null;
+  changed?: boolean | null;
+  error?: string | null;
+  date_strings?: string[];
+  sample_rows?: string[][];
+  raw_text?: string | null;
+  provider_debug?: Record<string, unknown> | null;
+  request_prompt?: string | null;
+  normalized_lines?: Record<string, unknown>[] | null;
+  reject_reasons?: string[] | null;
+  validation_detail?: Record<string, unknown> | null;
+  warning_reasons?: string[] | null;
+  warning_detail?: Record<string, unknown> | null;
+  llm_quantity_only_merge?: Record<string, unknown> | null;
 };
 
 type OcrPage = {
@@ -48,6 +100,86 @@ type OcrPage = {
   layout_overlay_url?: string | null;
   figure_urls?: string[];
 };
+
+type OcrPagesMeta = {
+  table_box?: number[] | null;
+  table_units?: string | null;
+};
+
+type OcrSheetPayload = {
+  order_id: string;
+  facility_id?: string | null;
+  week_id?: string | null;
+  fields?: string[];
+  header?: string[];
+  rows?: string[][];
+  row_ids?: string[];
+  source?: string;
+  quantity_column_count?: number;
+  legacy_available?: boolean;
+  warnings?: string[];
+};
+
+type NormalizedEditorSheetPayload = {
+  fields: string[];
+  header: string[];
+  rows: string[][];
+  rowIds: string[];
+  source: string;
+};
+
+type OcrEditRevision = {
+  revision_id?: string;
+  edited_at?: string;
+  ui_mode?: string;
+  fields?: string[];
+  header?: string[];
+  row_ids?: string[];
+  rows?: string[][];
+  row_count?: number;
+  before_digest?: string;
+  after_digest?: string;
+  changed?: boolean;
+  markdown?: string;
+  sheet_save_only?: boolean;
+  sheet_save_mode?: string;
+};
+
+type OcrHistoryPayload = {
+  order_id: string;
+  latest?: OcrEditRevision | null;
+  revisions?: OcrEditRevision[];
+  raw_output?: Record<string, unknown> | null;
+};
+
+type OrderHistoryItem = {
+  id?: string;
+  actor?: string | null;
+  action?: string | null;
+  target?: string | null;
+  facility?: string | null;
+  week?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_at?: string | null;
+};
+
+type OrderHistoryPayload = {
+  order_id: string;
+  items?: OrderHistoryItem[];
+};
+
+type GridParams = {
+  grid_dpi: number;
+  grid_line_scale: number;
+  grid_line_min_ratio: number;
+  grid_line_merge_gap: number;
+  grid_line_merge_tolerance: number;
+  grid_expected_columns: number;
+  grid_qty_gap_tolerance: number;
+  grid_left_date_ratio: number;
+};
+
+type OcrEditorUiMode = "sheet" | "legacy";
 
 type BagRow = {
   id: string;
@@ -71,6 +203,23 @@ type FacilityOption = {
   name: string;
 };
 
+type WeekOption = {
+  week_id: string;
+  label: string;
+  date_from?: string | null;
+  date_to?: string | null;
+  selected?: boolean;
+};
+
+type FacilityTemplateColumn = {
+  index: number;
+  role: string;
+  header?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+};
+
 type FacilityCandidate = {
   facility_id: string;
   facility_name?: string | null;
@@ -81,22 +230,112 @@ type FacilityCandidate = {
 
 const toNumber = (value?: number | null) => (value == null || Number.isNaN(value) ? 0 : Number(value));
 
+const normalizeDietTypeToken = (value?: string | null) => {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+  const compact = raw
+    .toLowerCase()
+    .replace(/[\s　]+/g, "")
+    .replace(/[＿_]/g, "")
+    .replace(/[／/・+＋-]/g, "")
+    .replace(/[()（）\[\]【】]/g, "");
+  if (!compact) return "";
+  if (compact === "regular" || compact === "常食") return "regular";
+  if (compact === "daycare" || compact === "通所") return "daycare";
+  if (compact === "staff" || compact === "職員") return "staff";
+  if (compact === "nomeat" || compact === "nobeef" || compact === "禁食肉禁" || compact === "肉禁") return "no_meat";
+  if (compact === "nofish" || compact === "禁食魚禁" || compact === "魚禁") return "no_fish";
+  if (compact === "unknown" || compact === "不明") return "unknown";
+  if (compact === "change1" || compact === "変更1") return "change_1";
+  if (compact === "change2" || compact === "変更2") return "change_2";
+  const hasSoft = compact.includes("soft") || compact.includes("軟");
+  const hasMixer = compact.includes("mixer") || compact.includes("mix") || compact.includes("ミキサ");
+  if (hasSoft && hasMixer) return "soft_mixer";
+  if (hasSoft) return "soft";
+  if (hasMixer) return "mixer";
+  return compact;
+};
+
 const formatDietType = (value?: string | null) => {
   if (!value) return "不明";
-  const normalized = value.toLowerCase();
-  if (normalized === "regular") return "常食";
-  if (normalized === "daycare") return "通所";
-  if (normalized === "staff") return "職員";
-  if (normalized === "no_meat") return "禁食(肉禁)";
-  if (normalized === "no_fish") return "禁食(魚禁)";
+  const token = normalizeDietTypeToken(value);
+  if (token === "regular") return "常食";
+  if (token === "daycare") return "通所";
+  if (token === "staff") return "職員";
+  if (token === "no_meat") return "禁食(肉禁)";
+  if (token === "no_fish") return "禁食(魚禁)";
+  if (token === "soft_mixer") return "軟菜/ミキサー";
+  if (token === "soft") return "軟菜";
+  if (token === "mixer") return "ミキサー";
+  if (token === "change_1") return "変更1";
+  if (token === "change_2") return "変更2";
+  if (token === "unknown") return "不明";
   return value;
 };
+
+const normalizeWeekId = (value?: string | null) => {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})$/);
+  if (!match) return "";
+  const month = Number(match[2]);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return "";
+  return `${match[1]}-${match[2]}`;
+};
+
+const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
+
+const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateColumn[] => {
+  if (!Array.isArray(columns)) return [];
+  return columns
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item, idx) => ({
+      index:
+        typeof item.index === "number" && Number.isFinite(item.index)
+          ? Number(item.index)
+          : idx,
+      role: String(item.role || "").trim().toLowerCase() || "quantity",
+      header: String(item.header || ""),
+      name: String(item.name || ""),
+      diet_type: String(item.diet_type || ""),
+      area_id: String(item.area_id || ""),
+    }))
+    .sort((left, right) => left.index - right.index);
+};
+
+const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) =>
+  columns.map((column, idx) => {
+    const role = String(column.role || "").trim().toLowerCase() || "quantity";
+    const header = String(column.header || "").trim();
+    const name = String(column.name || "").trim();
+    const payload: Record<string, unknown> = {
+      index: idx,
+      role,
+    };
+    if (header) payload.header = header;
+    if (name) payload.name = name;
+    if (role === "quantity") {
+      const dietType = String(column.diet_type || "").trim();
+      const areaId = String(column.area_id || "").trim();
+      if (dietType) payload.diet_type = dietType;
+      if (areaId) payload.area_id = areaId;
+    }
+    return payload;
+  });
+
+const columnRoleOptions = [
+  { value: "date", label: "日付" },
+  { value: "daypart", label: "区分" },
+  { value: "menu_name", label: "メニュー" },
+  { value: "quantity", label: "数量" },
+  { value: "note", label: "備考" },
+];
 
 const dietTypeLabels: Record<string, string> = {
   regular: "常食",
   daycare: "通所",
   staff: "職員",
   soft: "軟菜",
+  soft_mixer: "軟菜/ミキサー",
   mixer: "ミキサー",
   no_meat: "禁食(肉禁)",
   no_fish: "禁食(魚禁)",
@@ -114,16 +353,353 @@ const formatTimestamp = (value?: string | null) => {
   return date.toLocaleString("ja-JP");
 };
 
+const extractErrorDetailText = (detail: unknown): string => {
+  if (typeof detail === "string") return detail.trim();
+  if (detail && typeof detail === "object") {
+    const payload = detail as Record<string, unknown>;
+    const textCandidates = [payload.message, payload.detail, payload.error];
+    for (const candidate of textCandidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+};
+
+const extractErrorDetailCode = (detail: unknown): string => {
+  if (typeof detail === "string") return detail.trim().toLowerCase();
+  if (detail && typeof detail === "object") {
+    const payload = detail as Record<string, unknown>;
+    const codeCandidates = [payload.error, payload.code, payload.detail];
+    for (const candidate of codeCandidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim().toLowerCase();
+      }
+    }
+  }
+  return "";
+};
+
+const resolveOcrApplyErrorMessage = (status: number | undefined, detail: unknown): string => {
+  const detailText = extractErrorDetailText(detail);
+  const detailCode = extractErrorDetailCode(detail);
+  if (status === 403) {
+    return "権限がありません。";
+  }
+  if (status === 404) {
+    return "注文が見つかりません。画面を再読込してください。";
+  }
+  if (status === 400) {
+    if (detailCode === "markdown or rows is required" || detailCode === "markdown_empty") {
+      return "反映対象の表が空です。1行以上入力してから再実行してください。";
+    }
+    if (detailCode === "rows_empty") {
+      return "表の行を解析できませんでした。空行のみになっていないか確認してください。";
+    }
+    if (detailCode === "lines_empty") {
+      return "注文行を生成できませんでした。日付・区分・メニュー・数量列の入力を確認してください。";
+    }
+    if (detailCode === "facility missing") {
+      return "施設が未設定のため反映できません。Step1（注文書）で施設を設定してください。";
+    }
+    if (detailCode === "facility not found") {
+      return "施設設定が見つかりません。施設IDを確認して再設定してください。";
+    }
+    return detailText ? `OCRテーブルの反映に失敗しました: ${detailText}` : "OCRテーブルの反映に失敗しました。";
+  }
+  if (status) {
+    return detailText
+      ? `OCRテーブルの反映中にエラーが発生しました (status ${status}): ${detailText}`
+      : `OCRテーブルの反映中にエラーが発生しました (status ${status})。`;
+  }
+  return detailText ? `OCRテーブルの反映中にエラーが発生しました: ${detailText}` : "OCRテーブルの反映中にエラーが発生しました。";
+};
+
+const describeReparseWarningReason = (code: string) => {
+  const normalized = String(code || "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "sheet_column_anomaly") return "施設区分列の異常";
+  if (normalized === "sheet_row_coverage_low") return "OCR行カバレッジ不足";
+  if (normalized === "sheet_line_count_regression") return "明細行数の回帰";
+  if (normalized === "sheet_llm_audit_failed") return "LLM監査NG";
+  return code;
+};
+
+const normalizeHeaderToken = (value: string) => {
+  const normalized = value
+    .replace(/[　\s]+/g, "")
+    .replace(/[（）()[\]【】]/g, "")
+    .toLowerCase();
+  return normalized
+    .replace(/[０-９]/g, (match) => String.fromCharCode(match.charCodeAt(0) - 0xfee0))
+    .replace("ｆ", "f")
+    .replace("Ｆ", "f");
+};
+
+const isSubheaderRow = (row: string[]) => {
+  if (!row.length) return false;
+  let nonEmpty = 0;
+  let markers = 0;
+  row.forEach((cell) => {
+    const token = normalizeHeaderToken(cell);
+    if (!token) return;
+    nonEmpty += 1;
+    if (token === "2f" || token === "3f" || token === "2階" || token === "3階") {
+      markers += 1;
+    }
+  });
+  return nonEmpty >= 2 && nonEmpty === markers;
+};
+
+const mergeHeaderRows = (primary: string[], secondary: string[]) => {
+  const maxLen = Math.max(primary.length, secondary.length);
+  const merged: string[] = [];
+  let currentGroup = "";
+  for (let idx = 0; idx < maxLen; idx += 1) {
+    const h1 = primary[idx]?.trim() || "";
+    const h2 = secondary[idx]?.trim() || "";
+    if (h1) currentGroup = h1;
+    if (h2) {
+      const group = currentGroup || h1;
+      merged.push(group ? `${group} ${h2}`.trim() : h2);
+    } else {
+      merged.push(h1);
+    }
+  }
+  return merged;
+};
+
+const buildPreviewBlocks = (blocks: MarkdownBlock[], lineLimit: number) => {
+  let remaining = lineLimit;
+  const preview: MarkdownBlock[] = [];
+  blocks.forEach((block) => {
+    if (remaining <= 0) return;
+    if (block.type === "table") {
+      const hasHeader = block.header.length > 0;
+      const headerCost = hasHeader ? 1 : 0;
+      if (remaining <= 0 || (hasHeader && remaining < headerCost)) return;
+      const available = Math.max(remaining - headerCost, 0);
+      const rows = available > 0 ? block.rows.slice(0, available) : [];
+      if (!hasHeader && rows.length === 0) return;
+      preview.push({ type: "table", header: block.header, rows });
+      remaining -= headerCost + rows.length;
+      return;
+    }
+    const lines = block.lines.filter((line) => line.trim().length > 0);
+    const slice = lines.slice(0, remaining);
+    if (!slice.length) return;
+    preview.push({ type: "text", lines: slice });
+    remaining -= slice.length;
+  });
+  return preview;
+};
+
+const countMarkdownLines = (blocks: MarkdownBlock[]) =>
+  blocks.reduce((sum, block) => {
+    if (block.type === "table") {
+      return sum + (block.header.length ? 1 : 0) + block.rows.length;
+    }
+    return sum + block.lines.length;
+  }, 0);
+
 const formatQuantity = (value?: number | null) => {
   if (value == null || Number.isNaN(value)) return "-";
   return value.toLocaleString("ja-JP");
 };
+
+const formatActualAmount = (line: {
+  actual_amount?: number | null;
+  actual_unit_type?: string | null;
+  menu_unit_type?: string | null;
+}) => {
+  const value = line.actual_amount;
+  if (value == null || Number.isNaN(value)) return "-";
+  const numberValue = Number(value);
+  const text = Number.isInteger(numberValue)
+    ? numberValue.toLocaleString("ja-JP")
+    : numberValue.toLocaleString("ja-JP", { maximumFractionDigits: 2 });
+  const unit = line.actual_unit_type || line.menu_unit_type || "";
+  return unit ? `${text}${unit}` : text;
+};
+
+const formatAmountNumber = (value: number) => {
+  if (!Number.isFinite(value)) return "";
+  if (Number.isInteger(value)) return `${value}`;
+  return value.toFixed(2).replace(/\.00$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+};
+
+const normalizeUnitType = (value?: string | null) => {
+  const unit = (value || "").trim();
+  if (!unit) return "";
+  const normalized = unit.replace(/[　\s]+/g, "").toLowerCase();
+  if (normalized === "g" || normalized === "ｇ" || normalized === "gram" || normalized === "grams") return "g";
+  if (normalized === "個") return "個";
+  if (normalized === "切") return "切";
+  return unit;
+};
+
+const buildCondimentAmountKey = (date: string, daypart: string) => `condiment__${date}__${daypart}`;
+
+const buildNonCondimentAmountKey = (date: string, daypart: string, menu: string, diet: string, area: string) =>
+  `normal__${date}__${daypart}__${menu}__${diet}__${area}`;
+
+const buildNonCondimentAmountKeyForLine = (line: OrderDetail["lines"][number]) => {
+  const date = line.date || "";
+  const daypart = line.daypart || "";
+  const menu = line.menu_name || "";
+  const diet = normalizeDietTypeToken(line.diet_type);
+  const area = line.area_id || "";
+  return buildNonCondimentAmountKey(date, daypart, menu, diet, area);
+};
+
+const buildNonCondimentAmountKeyForBag = (bag: BagRow) => {
+  const date = bag.date || "";
+  const daypart = bag.daypart || "";
+  const menu = bag.menu_name || "";
+  const diet = normalizeDietTypeToken(bag.diet_type);
+  const area = bag.area_id || "";
+  return buildNonCondimentAmountKey(date, daypart, menu, diet, area);
+};
+
+type BagAmountStats = {
+  condimentTotals: Map<string, Record<string, number>>;
+  perServingByGroup: Map<string, Record<string, number>>;
+};
+
+const buildBagAmountStats = (lines: OrderDetail["lines"]): BagAmountStats => {
+  const condimentTotals = new Map<string, Record<string, number>>();
+  const nonCondimentStats = new Map<string, Record<string, { amount: number; quantity: number }>>();
+  lines.forEach((line) => {
+    const quantity =
+      line.quantity_corrected == null ? toNumber(line.quantity_original) : toNumber(line.quantity_corrected);
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+    const unit = normalizeUnitType(line.actual_unit_type || line.menu_unit_type);
+    if (!unit) return;
+    let amount = line.actual_amount;
+    if (amount == null) {
+      const perServing = line.menu_qty_per_serving;
+      if (perServing == null || !Number.isFinite(Number(perServing))) return;
+      amount = Number(perServing) * quantity;
+    }
+    if (!Number.isFinite(Number(amount))) return;
+    const amountValue = Number(amount);
+    const bagType = (line.bag_type || "").trim().toLowerCase();
+    if (bagType === "condiment") {
+      const key = buildCondimentAmountKey(line.date || "", line.daypart || "");
+      const totals = condimentTotals.get(key) || {};
+      totals[unit] = (totals[unit] || 0) + amountValue;
+      condimentTotals.set(key, totals);
+      return;
+    }
+    const key = buildNonCondimentAmountKeyForLine(line);
+    const unitStats = nonCondimentStats.get(key) || {};
+    const current = unitStats[unit] || { amount: 0, quantity: 0 };
+    current.amount += amountValue;
+    current.quantity += quantity;
+    unitStats[unit] = current;
+    nonCondimentStats.set(key, unitStats);
+  });
+  const perServingByGroup = new Map<string, Record<string, number>>();
+  nonCondimentStats.forEach((unitStats, key) => {
+    const perServing: Record<string, number> = {};
+    Object.entries(unitStats).forEach(([unit, stat]) => {
+      if (stat.quantity > 0 && Number.isFinite(stat.amount) && Number.isFinite(stat.quantity)) {
+        perServing[unit] = stat.amount / stat.quantity;
+      }
+    });
+    if (Object.keys(perServing).length) {
+      perServingByGroup.set(key, perServing);
+    }
+  });
+  return { condimentTotals, perServingByGroup };
+};
+
+const resolveBagAmountTotals = (bag: BagRow, stats: BagAmountStats): Record<string, number> | undefined => {
+  const bagType = (bag.bag_type || "").trim().toLowerCase();
+  if (bagType === "condiment") {
+    return stats.condimentTotals.get(buildCondimentAmountKey(bag.date || "", bag.daypart || ""));
+  }
+  const quantity = toNumber(bag.quantity);
+  if (!Number.isFinite(quantity) || quantity < 0) return undefined;
+  const perServing = stats.perServingByGroup.get(buildNonCondimentAmountKeyForBag(bag));
+  if (!perServing) return undefined;
+  const totals: Record<string, number> = {};
+  Object.entries(perServing).forEach(([unit, value]) => {
+    if (!Number.isFinite(value) || value < 0) return;
+    totals[unit] = value * quantity;
+  });
+  return totals;
+};
+
+const formatBagAmountFromTotals = (totals: Record<string, number> | undefined) => {
+  if (!totals) return "-";
+  const entries = Object.entries(totals).filter(([, value]) => Number.isFinite(value) && value >= 0);
+  if (!entries.length) return "-";
+  return entries
+    .sort((a, b) => a[0].localeCompare(b[0], "ja"))
+    .map(([unit, value]) => `${formatAmountNumber(value)}${unit}`)
+    .join(" + ");
+};
+
 const DEFAULT_OCR_PROMPT =
   "Return a JSON object only.\\n" +
   'Schema: {"rows":[[date, menu_name, regular_2f, regular_3f, soft_2f, soft_3f, mixer_2f, mixer_3f, note], ...], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}\\n' +
   "Do not output header rows or date-only headers. Output menu rows only.\\n" +
   'If no menu rows are readable, return {"rows":[], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}.\\n' +
   "Use null when a cell is unreadable or missing. Use ASCII digits 0-9 only in numeric cells.";
+
+const defaultGridParams: GridParams = {
+  grid_dpi: 300,
+  grid_line_scale: 30,
+  grid_line_min_ratio: 0.6,
+  grid_line_merge_gap: 2,
+  grid_line_merge_tolerance: 0.02,
+  grid_expected_columns: 0,
+  grid_qty_gap_tolerance: 0.02,
+  grid_left_date_ratio: 0.2,
+};
+
+const makeSheetRowId = (prefix = "sheet") =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const orderSteps = [
+  {
+    id: "document",
+    label: "注文書",
+    title: "注文書 (FAX PDF) の確認",
+    description: "原本のPDFを確認して内容を把握します。",
+  },
+  {
+    id: "ocr",
+    label: "OCR修正",
+    title: "OCR修正",
+    description: "シートUIでOCR結果を修正します。",
+  },
+  {
+    id: "details",
+    label: "明細",
+    title: "明細の確認と修正",
+    description: "区分別一覧と明細の数量を確認します。",
+  },
+  {
+    id: "bags",
+    label: "袋わけ",
+    title: "袋わけ結果の確認",
+    description: "袋分け結果を確認し、必要なら再計算します。",
+  },
+  {
+    id: "output",
+    label: "出力",
+    title: "出力と確定",
+    description: "出力を確認して確定します。",
+  },
+];
 
 const makeCategoryKey = (dietType?: string | null, areaId?: string | null) => {
   const diet = (dietType || "").toLowerCase() || "unknown";
@@ -136,11 +712,55 @@ const makeCategoryKey = (dietType?: string | null, areaId?: string | null) => {
 
 const formatCategoryLabel = (key: string) => {
   if (!key.includes("__")) {
-    return dietTypeLabels[key] || key;
+    const normalized = normalizeDietTypeToken(key);
+    return dietTypeLabels[normalized] || formatDietType(key);
   }
   const [diet, area] = key.split("__");
-  const dietLabel = dietTypeLabels[diet] || diet;
+  const normalized = normalizeDietTypeToken(diet);
+  const dietLabel = dietTypeLabels[normalized] || formatDietType(diet);
   return `${dietLabel}${area}`;
+};
+
+const buildBagTypeLabelMap = (facilityConfig: Record<string, any> | null) => {
+  const map: Record<string, string> = {
+    standard: "標準",
+    condiment: "付属品",
+    small: "小",
+    medium: "中",
+    large: "大",
+  };
+  const bagTypes = Array.isArray(facilityConfig?.bag_types) ? facilityConfig?.bag_types : [];
+  bagTypes.forEach((entry: any) => {
+    const id = typeof entry?.bag_type_id === "string" ? entry.bag_type_id.trim() : "";
+    const label = typeof entry?.label === "string" ? entry.label.trim() : "";
+    if (!id) return;
+    const normalizedId = id.toLowerCase();
+    map[id] = label || id;
+    map[normalizedId] = label || id;
+  });
+  return map;
+};
+
+const formatBagTypeLabel = (value: string | null | undefined, labelMap: Record<string, string>) => {
+  const key = (value || "").trim();
+  if (!key) return "-";
+  return labelMap[key] || labelMap[key.toLowerCase()] || key;
+};
+
+const isBagColumnHeader = (header: string | undefined) => {
+  if (!header) return false;
+  const normalized = header.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes("bag") || normalized.includes("袋");
+};
+
+const formatOutputPreviewCell = (
+  cell: string,
+  header: string | undefined,
+  labelMap: Record<string, string>,
+) => {
+  if (!isBagColumnHeader(header)) return cell;
+  return formatBagTypeLabel(cell, labelMap);
 };
 
 const buildCategoryColumns = (lines: OrderDetail["lines"]) => {
@@ -336,7 +956,13 @@ const extractTableFromPage = (page?: OcrPage | null) => {
     (block) => block.type === "table" && block.rows.length > 0,
   ) as MarkdownBlock | undefined;
   if (table && table.type === "table") {
-    return { header: table.header, rows: table.rows };
+    let header = table.header;
+    let rows = table.rows;
+    if (header.length && rows.length && isSubheaderRow(rows[0])) {
+      header = mergeHeaderRows(header, rows[0]);
+      rows = rows.slice(1);
+    }
+    return { header, rows };
   }
   return null;
 };
@@ -402,15 +1028,40 @@ const formatFacilityReason = (reason?: string | null) => {
   return reason;
 };
 
+const formatOrderAction = (value?: string | null) => {
+  const action = (value || "").trim();
+  if (!action) return "-";
+  if (action === "order_create") return "注文作成";
+  if (action === "order_reparse") return "再解析";
+  if (action === "order_lines_update") return "明細更新";
+  if (action === "order_confirm") return "注文確定";
+  if (action === "order_facility_set") return "施設設定";
+  if (action === "order_week_set") return "週設定";
+  if (action === "ocr_job_started") return "OCR開始";
+  if (action === "ocr_job_failed") return "OCR失敗";
+  return action;
+};
+
+const isGsUri = (value?: string | null) =>
+  typeof value === "string" && value.trim().toLowerCase().startsWith("gs://");
+
+const toFixedOrEmpty = (value: number | null, decimals: number) =>
+  value == null || Number.isNaN(value) ? "" : value.toFixed(decimals);
+
 export default function OrderDetailPage() {
   const router = useRouter();
   const { id } = router.query;
   const [order, setOrder] = useState<OrderDetail | null>(null);
   const [facility, setFacility] = useState<string>("");
+  const [weekDraft, setWeekDraft] = useState<string>("");
+  const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
+  const [weekOptionsLoading, setWeekOptionsLoading] = useState<boolean>(false);
+  const [weekOptionsError, setWeekOptionsError] = useState<string>("");
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
   const [actionMessage, setActionMessage] = useState<string>("");
+  const [trainingSampleSaving, setTrainingSampleSaving] = useState<boolean>(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [ocrPrompt, setOcrPrompt] = useState<string>(DEFAULT_OCR_PROMPT);
@@ -422,21 +1073,76 @@ export default function OrderDetailPage() {
   const [ocrPages, setOcrPages] = useState<OcrPage[]>([]);
   const [ocrPagesMessage, setOcrPagesMessage] = useState<string>("");
   const [ocrPagesLoading, setOcrPagesLoading] = useState<boolean>(false);
+  const [ocrTableBox, setOcrTableBox] = useState<number[] | null>(null);
+  const [ocrTableUnits, setOcrTableUnits] = useState<string | null>(null);
+  const [tableBoxUnitsOverride, setTableBoxUnitsOverride] = useState<string | null>(null);
   const [activeOcrPageIndex, setActiveOcrPageIndex] = useState<number>(0);
   const [ocrTableHeader, setOcrTableHeader] = useState<string[]>([]);
   const [ocrTableRows, setOcrTableRows] = useState<string[][]>([]);
   const [ocrTablePageIndex, setOcrTablePageIndex] = useState<number | null>(null);
+  const [ocrSheetFields, setOcrSheetFields] = useState<string[]>([]);
+  const [ocrSheetHeader, setOcrSheetHeader] = useState<string[]>([]);
+  const [ocrSheetRows, setOcrSheetRows] = useState<string[][]>([]);
+  const [ocrSheetRowIds, setOcrSheetRowIds] = useState<string[]>([]);
+  const [ocrSheetSource, setOcrSheetSource] = useState<string>("");
+  const [ocrSheetLoading, setOcrSheetLoading] = useState<boolean>(false);
+  const [ocrSheetMessage, setOcrSheetMessage] = useState<string>("");
+  const [ocrSheetAutoRetryBlocked, setOcrSheetAutoRetryBlocked] = useState<boolean>(false);
+  const [ocrHistoryLatest, setOcrHistoryLatest] = useState<OcrEditRevision | null>(null);
+  const [ocrHistoryRows, setOcrHistoryRows] = useState<OcrEditRevision[]>([]);
+  const [ocrHistoryLoading, setOcrHistoryLoading] = useState<boolean>(false);
+  const [ocrHistoryMessage, setOcrHistoryMessage] = useState<string>("");
+  const latestSavedSheetRevisionRef = useRef<OcrEditRevision | null>(null);
+  const [orderHistoryRows, setOrderHistoryRows] = useState<OrderHistoryItem[]>([]);
+  const [orderHistoryLoading, setOrderHistoryLoading] = useState<boolean>(false);
+  const [orderHistoryMessage, setOrderHistoryMessage] = useState<string>("");
   const [ocrTableMessage, setOcrTableMessage] = useState<string>("");
   const [ocrTableSaving, setOcrTableSaving] = useState<boolean>(false);
+  const [ocrEditorUiMode, setOcrEditorUiMode] = useState<OcrEditorUiMode>("sheet");
   const [showOcrEdit, setShowOcrEdit] = useState<boolean>(false);
+  const [showTableBoxEditor, setShowTableBoxEditor] = useState<boolean>(false);
+  const [tableBoxDraft, setTableBoxDraft] = useState<number[] | null>(null);
+  const [tableBoxStep, setTableBoxStep] = useState<number>(0.005);
+  const [tableBoxMessage, setTableBoxMessage] = useState<string>("");
+  const [tableBoxSaving, setTableBoxSaving] = useState<boolean>(false);
+  const [gridDetecting, setGridDetecting] = useState<boolean>(false);
+  const [gridDetectMessage, setGridDetectMessage] = useState<string>("");
+  const [facilityConfig, setFacilityConfig] = useState<Record<string, any> | null>(null);
+  const [facilityTemplateColumns, setFacilityTemplateColumns] = useState<FacilityTemplateColumn[]>([]);
+  const [facilityTemplateColumnDraft, setFacilityTemplateColumnDraft] = useState<FacilityTemplateColumn[]>([]);
+  const [facilityTemplateMessage, setFacilityTemplateMessage] = useState<string>("");
+  const [facilityTemplateSaving, setFacilityTemplateSaving] = useState<boolean>(false);
+  const [gridParams, setGridParams] = useState<GridParams>(defaultGridParams);
+  const [gridParamsDraft, setGridParamsDraft] = useState<GridParams>(defaultGridParams);
+  const [gridColumnEdges, setGridColumnEdges] = useState<number[] | null>(null);
+  const [gridColumnEdgesDraft, setGridColumnEdgesDraft] = useState<number[] | null>(null);
+  const [columnEdgesText, setColumnEdgesText] = useState<string>("");
+  const [gridRowEdges, setGridRowEdges] = useState<number[] | null>(null);
+  const [gridRowEdgesDraft, setGridRowEdgesDraft] = useState<number[] | null>(null);
+  const [rowEdgesText, setRowEdgesText] = useState<string>("");
   const [reparsePending, setReparsePending] = useState<boolean>(false);
+  const [llmReparseProvider, setLlmReparseProvider] = useState<string>("gemini");
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
   const [bagLoading, setBagLoading] = useState<boolean>(false);
   const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
   const [outputPreviewMessage, setOutputPreviewMessage] = useState<string>("");
   const [outputPreviewLoading, setOutputPreviewLoading] = useState<boolean>(false);
-  const [showMarkdownRaw, setShowMarkdownRaw] = useState<boolean>(false);
+  const [downloadMessage, setDownloadMessage] = useState<string>("");
+  const [showLayoutOverlay, setShowLayoutOverlay] = useState<boolean>(false);
+  const [ocrOverlayError, setOcrOverlayError] = useState<boolean>(false);
+  const [layoutOverlayError, setLayoutOverlayError] = useState<boolean>(false);
+  const [ocrOverlayRetry, setOcrOverlayRetry] = useState<boolean>(false);
+  const [layoutOverlayRetry, setLayoutOverlayRetry] = useState<boolean>(false);
+  const [overlayActiveCell, setOverlayActiveCell] = useState<{ row: number; col: number } | null>(null);
+  const [overlayImageSize, setOverlayImageSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
+  const [activeStep, setActiveStep] = useState<number>(0);
+  const [ocrEditMode, setOcrEditMode] = useState<boolean>(false);
+  const overlayImageRef = useRef<HTMLImageElement | null>(null);
+  const overlayInputRef = useRef<HTMLInputElement | null>(null);
   const reparseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -444,20 +1150,140 @@ export default function OrderDetailPage() {
     apiClient.get(`/orders/${id}`).then((res) => {
       setOrder(res.data);
       setFacility(res.data.facility || "");
+      setWeekDraft(normalizeWeekId(res.data.week || ""));
     });
     setOcrPrompt(DEFAULT_OCR_PROMPT);
   }, [id]);
 
   useEffect(() => {
+    if (!facility) {
+      setFacilityConfig(null);
+      setFacilityTemplateColumns([]);
+      setFacilityTemplateColumnDraft([]);
+      setFacilityTemplateMessage("");
+      return;
+    }
+    let active = true;
+    apiClient
+      .get(`/facilities/${facility}`)
+      .then((res) => {
+        if (!active) return;
+        setFacilityConfig(res.data?.config || null);
+        const resolvedColumns = normalizeFacilityTemplateColumns(
+          res.data?.resolved_config?.fax_template?.columns,
+        );
+        setFacilityTemplateColumns(resolvedColumns);
+        setFacilityTemplateColumnDraft(resolvedColumns);
+        setFacilityTemplateMessage("");
+      })
+      .catch(() => {
+        if (!active) return;
+        setFacilityConfig(null);
+        setFacilityTemplateColumns([]);
+        setFacilityTemplateColumnDraft([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [facility]);
+
+  useEffect(() => {
     setOcrPages([]);
     setOcrPagesMessage("");
+    setOcrTableBox(null);
+    setOcrTableUnits(null);
     setOcrTableHeader([]);
     setOcrTableRows([]);
     setOcrTablePageIndex(null);
+    setOcrSheetFields([]);
+    setOcrSheetHeader([]);
+    setOcrSheetRows([]);
+    setOcrSheetRowIds([]);
+    setOcrSheetSource("");
+    setOcrSheetLoading(false);
+    setOcrSheetMessage("");
+    setOcrSheetAutoRetryBlocked(false);
+    setOcrHistoryLatest(null);
+    setOcrHistoryRows([]);
+    setOcrHistoryLoading(false);
+    setOcrHistoryMessage("");
+    setOrderHistoryRows([]);
+    setOrderHistoryLoading(false);
+    setOrderHistoryMessage("");
     setOcrTableMessage("");
     setActiveOcrPageIndex(0);
+    setOcrEditorUiMode("sheet");
     setShowOcrEdit(false);
+    setShowLayoutOverlay(false);
+    setShowTableBoxEditor(false);
+    setTableBoxDraft(null);
+    setTableBoxMessage("");
+    setTableBoxSaving(false);
+    setGridDetecting(false);
+    setGridDetectMessage("");
+    setFacilityConfig(null);
+    setGridParams(defaultGridParams);
+    setGridParamsDraft(defaultGridParams);
+    setGridColumnEdges(null);
+    setGridColumnEdgesDraft(null);
+    setColumnEdgesText("");
+    setGridRowEdges(null);
+    setGridRowEdgesDraft(null);
+    setRowEdgesText("");
+    setOverlayActiveCell(null);
+    setOverlayImageSize({ width: 0, height: 0 });
+    setOcrOverlayError(false);
+    setLayoutOverlayError(false);
+    setOcrOverlayRetry(false);
+    setLayoutOverlayRetry(false);
+    setActiveStep(0);
+    setOcrEditMode(false);
+    setWeekDraft("");
+    setWeekOptions([]);
+    setWeekOptionsLoading(false);
+    setWeekOptionsError("");
+    setFacilityTemplateColumns([]);
+    setFacilityTemplateColumnDraft([]);
+    setFacilityTemplateMessage("");
+    setFacilityTemplateSaving(false);
   }, [id]);
+
+  useEffect(() => {
+    setOcrOverlayError(false);
+    setLayoutOverlayError(false);
+    setOcrOverlayRetry(false);
+    setLayoutOverlayRetry(false);
+  }, [activeOcrPageIndex, ocrPages]);
+
+  useEffect(() => {
+    if (showTableBoxEditor) return;
+    setTableBoxDraft(ocrTableBox ? [...ocrTableBox] : null);
+  }, [ocrTableBox, showTableBoxEditor]);
+
+  useEffect(() => {
+    if (showTableBoxEditor) return;
+    setGridColumnEdgesDraft(gridColumnEdges ? [...gridColumnEdges] : null);
+  }, [gridColumnEdges, showTableBoxEditor]);
+
+  useEffect(() => {
+    if (!showTableBoxEditor) return;
+    setColumnEdgesText(formatColumnEdgesText(gridColumnEdgesDraft));
+  }, [gridColumnEdgesDraft, showTableBoxEditor]);
+
+  useEffect(() => {
+    if (showTableBoxEditor) return;
+    setGridRowEdgesDraft(gridRowEdges ? [...gridRowEdges] : null);
+  }, [gridRowEdges, showTableBoxEditor]);
+
+  useEffect(() => {
+    if (!showTableBoxEditor) return;
+    setRowEdgesText(formatRowEdgesText(gridRowEdgesDraft));
+  }, [gridRowEdgesDraft, showTableBoxEditor]);
+
+  useEffect(() => {
+    if (showTableBoxEditor) return;
+    setGridParamsDraft({ ...gridParams });
+  }, [gridParams, showTableBoxEditor]);
 
   useEffect(() => {
     let active = true;
@@ -530,10 +1356,125 @@ export default function OrderDetailPage() {
     };
   }, [order?.id]);
 
+  const normalizeSheetEditorPayload = (payload: {
+    fields?: unknown;
+    header?: unknown;
+    rows?: unknown;
+    rowIds?: unknown;
+    source?: string;
+  }): NormalizedEditorSheetPayload => {
+    const fields = Array.isArray(payload.fields)
+      ? payload.fields.map((field) => String(field || "").trim()).filter(Boolean)
+      : [];
+    const headerCells = Array.isArray(payload.header)
+      ? payload.header.map((cell) => String(cell ?? ""))
+      : [];
+    const rowValues = Array.isArray(payload.rows) ? payload.rows : [];
+    const rowIds = Array.isArray(payload.rowIds)
+      ? payload.rowIds.map((rowId) => String(rowId || "").trim())
+      : [];
+    const rowWidth = rowValues.reduce(
+      (max, row) => Math.max(max, Array.isArray(row) ? row.length : 0),
+      0,
+    );
+    const columnCount = Math.max(fields.length, headerCells.length, rowWidth, 1);
+    const normalizedFields =
+      fields.length
+        ? [...fields]
+        : Array.from({ length: columnCount }, (_, idx) => `col${idx + 1}`);
+    if (normalizedFields.length < columnCount) {
+      normalizedFields.push(
+        ...Array.from(
+          { length: columnCount - normalizedFields.length },
+          (_, idx) => `col${normalizedFields.length + idx + 1}`,
+        ),
+      );
+    }
+    const fallbackHeader = Array.from(
+      { length: columnCount },
+      (_, idx) => normalizedFields[idx] || `列${idx + 1}`,
+    );
+    const normalizedHeader = Array.from(
+      { length: columnCount },
+      (_, idx) => headerCells[idx] || fallbackHeader[idx],
+    );
+    const normalizedRows = rowValues.map((row) => {
+      const source = Array.isArray(row) ? row : [];
+      return Array.from({ length: columnCount }, (_, idx) =>
+        source[idx] == null ? "" : String(source[idx]),
+      );
+    });
+    const normalizedRowIds = normalizedRows.map((_, idx) => rowIds[idx] || makeSheetRowId("sheet"));
+    return {
+      fields: normalizedFields,
+      header: normalizedHeader,
+      rows: normalizedRows,
+      rowIds: normalizedRowIds,
+      source: typeof payload.source === "string" ? payload.source : "",
+    };
+  };
+
+  const applyNormalizedSheetEditorPayload = (payload: NormalizedEditorSheetPayload) => {
+    setOcrSheetFields(payload.fields);
+    setOcrSheetHeader(payload.header);
+    setOcrSheetRows(payload.rows);
+    setOcrSheetRowIds(payload.rowIds);
+    setOcrSheetSource(payload.source);
+  };
+
+  const findLatestSheetRevision = (
+    latest: OcrEditRevision | null,
+    revisions: OcrEditRevision[],
+  ): OcrEditRevision | null => {
+    const seenRevisionIds = new Set<string>();
+    const candidates: OcrEditRevision[] = [];
+    revisions.forEach((revision) => {
+      const revisionId = String(revision.revision_id || "").trim();
+      if (revisionId) {
+        seenRevisionIds.add(revisionId);
+      }
+      candidates.push(revision);
+    });
+    if (latest) {
+      const latestRevisionId = String(latest.revision_id || "").trim();
+      if (!latestRevisionId || !seenRevisionIds.has(latestRevisionId)) {
+        candidates.push(latest);
+      }
+    }
+    for (let idx = candidates.length - 1; idx >= 0; idx -= 1) {
+      const revision = candidates[idx];
+      if (revision?.ui_mode !== "sheet" || !Array.isArray(revision.rows)) {
+        continue;
+      }
+      return revision;
+    }
+    return null;
+  };
+
+  const getSheetEditorPayloadFromRevision = (
+    revision: OcrEditRevision | null,
+  ): NormalizedEditorSheetPayload | null => {
+    if (!revision || revision.ui_mode !== "sheet" || !Array.isArray(revision.rows)) {
+      return null;
+    }
+    return normalizeSheetEditorPayload({
+      fields: revision.fields,
+      header: revision.header,
+      rows: revision.rows,
+      rowIds: revision.row_ids,
+      source:
+        revision.sheet_save_only || revision.sheet_save_mode === "exact"
+          ? "edited_sheet_exact"
+          : "edited_sheet",
+    });
+  };
+
   const refreshOcrOutput = async (orderId: string) => {
     setOcrOutputMessage("OCR結果を取得中...");
     try {
-      const res = await apiClient.get(`/orders/${orderId}/ocr-output`);
+      const res = await apiClient.get(`/orders/${orderId}/ocr-output`, {
+        params: { _ts: Date.now() },
+      });
       if (res.status === 202 || res.data?.pending) {
         setOcrOutput(null);
         setOcrOutputMessage("OCR結果は処理中です。");
@@ -554,6 +1495,234 @@ export default function OrderDetailPage() {
   useEffect(() => {
     if (!order?.id) return;
     refreshOcrOutput(order.id);
+  }, [order?.id]);
+
+  const loadWeekOptions = async (orderId: string) => {
+    setWeekOptionsLoading(true);
+    setWeekOptionsError("");
+    try {
+      const res = await apiClient.get(`/orders/${orderId}/week-options`);
+      const options = Array.isArray(res.data?.options)
+        ? res.data.options
+            .map((item) => ({
+              week_id: normalizeWeekId(item?.week_id),
+              label: String(item?.label || item?.week_id || ""),
+              date_from: typeof item?.date_from === "string" ? item.date_from : null,
+              date_to: typeof item?.date_to === "string" ? item.date_to : null,
+              selected: Boolean(item?.selected),
+            }))
+            .filter((item) => item.week_id)
+        : [];
+      setWeekOptions(options);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        setWeekOptions([]);
+      } else {
+        setWeekOptionsError("週候補の取得に失敗しました。手入力で設定してください。");
+      }
+    } finally {
+      setWeekOptionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!order?.id) return;
+    loadWeekOptions(order.id);
+  }, [order?.id]);
+
+  const loadOcrSheet = async (
+    options: { silent?: boolean } = {},
+  ): Promise<{
+    fields: string[];
+    header: string[];
+    rows: string[][];
+    rowIds: string[];
+    source: string;
+  } | null> => {
+    if (!order) return null;
+    const { silent = false } = options;
+    if (!silent) {
+      setOcrSheetMessage("シートを取得中...");
+    }
+    setOcrSheetAutoRetryBlocked(false);
+    setOcrSheetLoading(true);
+    try {
+      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
+      if (savedRevisionPayload) {
+        applyNormalizedSheetEditorPayload(savedRevisionPayload);
+        if (!silent) {
+          setOcrSheetMessage("保存済みシートを読み込みました。");
+        }
+        return savedRevisionPayload;
+      }
+      const res = await apiClient.get(`/orders/${order.id}/ocr-sheet`);
+      const payload = (res.data || {}) as OcrSheetPayload;
+      const normalizedPayload = normalizeSheetEditorPayload({
+        fields: payload.fields,
+        header: payload.header,
+        rows: payload.rows,
+        rowIds: payload.row_ids,
+        source: typeof payload.source === "string" ? payload.source : "",
+      });
+      const latestRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
+      const effectivePayload = latestRevisionPayload || normalizedPayload;
+      applyNormalizedSheetEditorPayload(effectivePayload);
+      setOcrSheetAutoRetryBlocked(false);
+      if (!silent) {
+        setOcrSheetMessage(
+          effectivePayload.rows.length
+            ? effectivePayload.source.startsWith("edited_sheet")
+              ? "保存済みシートを読み込みました。"
+              : "シートを取得しました。"
+            : "シートは取得しましたが、編集対象の行がありません。",
+        );
+      }
+      return effectivePayload;
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      setOcrSheetAutoRetryBlocked(true);
+      setOcrSheetFields([]);
+      setOcrSheetHeader([]);
+      setOcrSheetRows([]);
+      setOcrSheetRowIds([]);
+      setOcrSheetSource("");
+      if (!silent || status === 400 || status === 404) {
+        if (status === 404) {
+          setOcrSheetMessage("シートを取得できませんでした。施設設定またはメニューを確認してください。");
+        } else if (status === 400) {
+          if (detail === "facility_missing") {
+            setOcrSheetMessage("シートを生成できませんでした。施設が未設定です。先に施設を設定してください。");
+          } else if (detail === "menu_entries_missing" || detail === "week_unresolved") {
+            setOcrSheetMessage("シートを生成できませんでした。週次メニューを参照できません。メニュー設定を確認してください。");
+          } else if (detail === "sheet_week_dates_incomplete") {
+            setOcrSheetMessage("シートを生成できませんでした。週次メニューの日付に欠落があります（OCR日付範囲の中間日が不足）。再解析またはメニュー設定を確認してください。");
+          } else if (detail === "sheet_quantity_column_unmapped") {
+            setOcrSheetMessage("シートを生成できませんでした。施設区分（数量列）にマップできないOCR行があります。施設テンプレートの列定義を確認してください。");
+          } else if (detail === "sheet_fields_duplicate") {
+            setOcrSheetMessage("シートを生成できませんでした。施設テンプレートの列定義に重複があります。管理画面で修正してください。");
+          } else if (detail === "sheet_template_field_invalid") {
+            setOcrSheetMessage("シートを生成できませんでした。施設テンプレートの列定義が不正です。管理画面で修正してください。");
+          } else if (detail === "sheet_quantity_columns_missing") {
+            setOcrSheetMessage("シートを生成できませんでした。施設テンプレートに数量列(qty.*)がありません。管理画面で修正してください。");
+          } else if (detail === "week_menu_date_mismatch" || detail === "sheet_date_mismatch") {
+            setOcrSheetMessage("シートを生成できませんでした。OCRの日付と週次メニューの日付が一致しません。週次メニュー設定を確認してください。");
+          } else {
+            setOcrSheetMessage("シートを生成できませんでした。施設設定を確認してください。");
+          }
+        } else {
+          setOcrSheetMessage("シートの取得に失敗しました。");
+        }
+      }
+      return null;
+    } finally {
+      setOcrSheetLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!order?.id) return;
+    if (!(order.facility || "").trim()) {
+      setOcrSheetAutoRetryBlocked(true);
+      setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で施設設定を完了してください。");
+      return;
+    }
+    if (!normalizeWeekId(order.week || "")) {
+      setOcrSheetAutoRetryBlocked(true);
+      setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で週を設定してください。");
+      return;
+    }
+    loadOcrSheet({ silent: true });
+  }, [order?.id, order?.facility, order?.week]);
+
+  const loadOcrHistory = async (options: { silent?: boolean } = {}) => {
+    if (!order) return;
+    const { silent = false } = options;
+    if (!silent) {
+      setOcrHistoryMessage("履歴を取得中...");
+    }
+    setOcrHistoryLoading(true);
+    try {
+      const res = await apiClient.get(`/orders/${order.id}/ocr-history`);
+      const payload = (res.data || {}) as OcrHistoryPayload;
+      const latest =
+        payload.latest && typeof payload.latest === "object" ? (payload.latest as OcrEditRevision) : null;
+      const revisions = Array.isArray(payload.revisions)
+        ? payload.revisions.filter((item): item is OcrEditRevision => Boolean(item && typeof item === "object"))
+        : [];
+      const latestSheetRevision = findLatestSheetRevision(latest, revisions);
+      latestSavedSheetRevisionRef.current = latestSheetRevision;
+      setOcrHistoryLatest(latest);
+      setOcrHistoryRows(revisions);
+      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSheetRevision);
+      if (savedRevisionPayload) {
+        applyNormalizedSheetEditorPayload(savedRevisionPayload);
+      }
+      if (!silent) {
+        setOcrHistoryMessage(
+          revisions.length
+            ? `履歴を取得しました (${revisions.length}件)。`
+            : "履歴はまだありません。",
+        );
+      }
+    } catch (err: any) {
+      const status = err?.response?.status;
+      latestSavedSheetRevisionRef.current = null;
+      setOcrHistoryLatest(null);
+      setOcrHistoryRows([]);
+      if (!silent) {
+        if (status === 404) {
+          setOcrHistoryMessage("履歴はまだありません。");
+        } else {
+          setOcrHistoryMessage("履歴の取得に失敗しました。");
+        }
+      }
+    } finally {
+      setOcrHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!order?.id) return;
+    loadOcrHistory({ silent: true });
+  }, [order?.id]);
+
+  const loadOrderHistory = async (options: { silent?: boolean } = {}) => {
+    if (!order) return;
+    const { silent = false } = options;
+    if (!silent) {
+      setOrderHistoryMessage("注文履歴を取得中...");
+    }
+    setOrderHistoryLoading(true);
+    try {
+      const res = await apiClient.get(`/orders/${order.id}/history?limit=100`);
+      const payload = (res.data || {}) as OrderHistoryPayload;
+      const items = Array.isArray(payload.items)
+        ? payload.items.filter((item): item is OrderHistoryItem => Boolean(item && typeof item === "object"))
+        : [];
+      setOrderHistoryRows(items);
+      if (!silent) {
+        setOrderHistoryMessage(items.length ? `注文履歴を取得しました (${items.length}件)。` : "注文履歴はまだありません。");
+      }
+    } catch (err: any) {
+      const status = err?.response?.status;
+      setOrderHistoryRows([]);
+      if (!silent) {
+        if (status === 404) {
+          setOrderHistoryMessage("注文履歴はまだありません。");
+        } else {
+          setOrderHistoryMessage("注文履歴の取得に失敗しました。");
+        }
+      }
+    } finally {
+      setOrderHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!order?.id) return;
+    loadOrderHistory({ silent: true });
   }, [order?.id]);
 
   const loadOcrRaw = async () => {
@@ -599,6 +1768,23 @@ export default function OrderDetailPage() {
     }
   };
 
+  const buildGridParams = (raw: any): GridParams => {
+    const next = { ...defaultGridParams };
+    if (!raw || typeof raw !== "object") return next;
+    Object.keys(next).forEach((key) => {
+      const value = raw[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        (next as Record<string, number>)[key] = value;
+      } else if (typeof value === "string") {
+        const parsed = Number(value);
+        if (!Number.isNaN(parsed)) {
+          (next as Record<string, number>)[key] = parsed;
+        }
+      }
+    });
+    return next;
+  };
+
   const loadOcrPages = async () => {
     if (!order) return;
     setOcrPagesLoading(true);
@@ -608,6 +1794,16 @@ export default function OrderDetailPage() {
       if (res.status === 202 || res.data?.pending) {
         setOcrPagesMessage("OCRページは処理中です。");
         setOcrPages([]);
+        setOcrTableBox(null);
+        setOcrTableUnits(null);
+        setTableBoxUnitsOverride(null);
+        setTableBoxDraft(null);
+        setGridParams(defaultGridParams);
+        setGridParamsDraft(defaultGridParams);
+        setGridColumnEdges(null);
+        setGridColumnEdgesDraft(null);
+        setGridRowEdges(null);
+        setGridRowEdgesDraft(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -616,6 +1812,23 @@ export default function OrderDetailPage() {
         return;
       }
       const pages = Array.isArray(res.data?.pages) ? res.data.pages : [];
+      const metaTableBox = Array.isArray(res.data?.table_box) ? res.data.table_box : null;
+      const metaTableUnits = typeof res.data?.table_units === "string" ? res.data.table_units : null;
+      const metaColumnEdges = Array.isArray(res.data?.grid_column_edges)
+        ? res.data.grid_column_edges
+        : null;
+      const metaRowEdges = Array.isArray(res.data?.grid_row_edges) ? res.data.grid_row_edges : null;
+      const metaGridParams = buildGridParams(res.data?.grid_params);
+      setOcrTableBox(metaTableBox);
+      setOcrTableUnits(metaTableUnits);
+      setTableBoxUnitsOverride(null);
+      setTableBoxDraft(metaTableBox ? [...metaTableBox] : null);
+      setGridParams(metaGridParams);
+      setGridParamsDraft(metaGridParams);
+      setGridColumnEdges(metaColumnEdges ? [...metaColumnEdges] : null);
+      setGridColumnEdgesDraft(metaColumnEdges ? [...metaColumnEdges] : null);
+      setGridRowEdges(metaRowEdges ? [...metaRowEdges] : null);
+      setGridRowEdgesDraft(metaRowEdges ? [...metaRowEdges] : null);
       if (pages.length) {
         const table = extractFirstTable(pages);
         if (table) {
@@ -631,8 +1844,11 @@ export default function OrderDetailPage() {
         setOcrPages(pages);
         setOcrPagesMessage("");
       } else {
-        setOcrPages([]);
-        setOcrPagesMessage("OCRページがありません。");
+      setOcrPages([]);
+      setOcrPagesMessage("OCRページがありません。");
+      setOcrTableBox(metaTableBox);
+      setOcrTableUnits(metaTableUnits);
+      setTableBoxUnitsOverride(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -643,6 +1859,14 @@ export default function OrderDetailPage() {
       const status = err?.response?.status;
       setOcrPagesMessage(status === 404 ? "OCRページが見つかりません。" : "OCRページの取得に失敗しました。");
       setOcrPages([]);
+      setOcrTableBox(null);
+      setOcrTableUnits(null);
+      setTableBoxUnitsOverride(null);
+      setTableBoxDraft(null);
+      setGridColumnEdges(null);
+      setGridColumnEdgesDraft(null);
+      setGridRowEdges(null);
+      setGridRowEdgesDraft(null);
       setOcrTableHeader([]);
       setOcrTableRows([]);
       setOcrTablePageIndex(null);
@@ -704,28 +1928,500 @@ export default function OrderDetailPage() {
   }, [order?.id]);
 
   useEffect(() => {
+    setOverlayActiveCell(null);
+  }, [activeOcrPageIndex, ocrTableHeader, ocrTableRows.length]);
+
+  useEffect(() => {
+    if (!showOcrEdit) {
+      setOverlayActiveCell(null);
+    }
+  }, [showOcrEdit]);
+
+  useEffect(() => {
+    if (activeStep !== 1 && ocrEditMode) {
+      setOcrEditMode(false);
+      setShowOcrEdit(false);
+      setShowTableBoxEditor(false);
+    }
+  }, [activeStep, ocrEditMode]);
+
+  useEffect(() => {
+    if (activeStep !== 1) return;
+    if (!ocrEditMode) {
+      setOcrEditMode(true);
+    }
+    if (!showOcrEdit) {
+      setShowOcrEdit(true);
+    }
+    if (!(order?.facility || "").trim()) {
+      return;
+    }
+    if (!ocrSheetRows.length && !ocrSheetLoading && !ocrSheetAutoRetryBlocked) {
+      loadOcrSheet({ silent: true });
+    }
+  }, [
+    activeStep,
+    ocrEditMode,
+    showOcrEdit,
+    ocrSheetRows.length,
+    ocrSheetLoading,
+    ocrSheetAutoRetryBlocked,
+    order?.facility,
+  ]);
+
+  useEffect(() => {
     if (!order?.id) return;
     loadBags();
   }, [order?.id]);
 
-  const updateOcrTableCell = (rowIndex: number, cellIndex: number, value: string) => {
-    setOcrTableRows((prev) => {
+  const updateOcrTableCell = (
+    rowIndex: number,
+    cellIndex: number,
+    value: string,
+    targetMode: OcrEditorUiMode = ocrEditorUiMode,
+  ) => {
+    const updater = (prev: string[][]) => {
       const next = prev.map((row) => [...row]);
-      if (!next[rowIndex]) return prev;
+      while (next.length <= rowIndex) {
+        next.push([]);
+      }
       while (next[rowIndex].length <= cellIndex) {
         next[rowIndex].push("");
       }
       next[rowIndex][cellIndex] = value;
       return next;
+    };
+    if (targetMode === "sheet") {
+      setOcrSheetRows(updater);
+    } else {
+      setOcrTableRows(updater);
+    }
+  };
+
+  const updateOcrTableHeaderCell = (
+    cellIndex: number,
+    value: string,
+    targetMode: OcrEditorUiMode = ocrEditorUiMode,
+  ) => {
+    const updater = (prev: string[]) => {
+      const next = [...prev];
+      while (next.length <= cellIndex) {
+        next.push("");
+      }
+      next[cellIndex] = value;
+      return next;
+    };
+    if (targetMode === "sheet") {
+      setOcrSheetHeader(updater);
+    } else {
+      setOcrTableHeader(updater);
+    }
+  };
+
+  const getOverlayCellValue = (rowIndex: number, cellIndex: number) => {
+    const headerRows = ocrTableHeader.length ? 1 : 0;
+    if (headerRows && rowIndex === 0) {
+      return ocrTableHeader[cellIndex] ?? "";
+    }
+    const dataRowIndex = rowIndex - headerRows;
+    if (dataRowIndex < 0) return "";
+    return ocrTableRows[dataRowIndex]?.[cellIndex] ?? "";
+  };
+
+  const updateOverlayCellValue = (rowIndex: number, cellIndex: number, value: string) => {
+    const headerRows = ocrTableHeader.length ? 1 : 0;
+    if (headerRows && rowIndex === 0) {
+      updateOcrTableHeaderCell(cellIndex, value, "legacy");
+      return;
+    }
+    const dataRowIndex = rowIndex - headerRows;
+    if (dataRowIndex < 0) return;
+    updateOcrTableCell(dataRowIndex, cellIndex, value, "legacy");
+  };
+
+  const updateOverlaySize = () => {
+    const image = overlayImageRef.current;
+    if (!image) return;
+    const rect = image.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    setOverlayImageSize({ width: rect.width, height: rect.height });
+  };
+
+  useEffect(() => {
+    const image = overlayImageRef.current;
+    if (!image) return;
+    updateOverlaySize();
+    const handleLoad = () => updateOverlaySize();
+    image.addEventListener("load", handleLoad);
+    let observer: ResizeObserver | null = null;
+    if ("ResizeObserver" in window) {
+      observer = new ResizeObserver(() => updateOverlaySize());
+      observer.observe(image);
+    }
+    window.addEventListener("resize", updateOverlaySize);
+    return () => {
+      image.removeEventListener("load", handleLoad);
+      if (observer) observer.disconnect();
+      window.removeEventListener("resize", updateOverlaySize);
+    };
+  }, [ocrPages, activeOcrPageIndex, showOcrEdit]);
+
+  useEffect(() => {
+    if (!overlayActiveCell) return;
+    overlayInputRef.current?.focus();
+  }, [overlayActiveCell]);
+
+  const tableBoxUnitsLabel = (tableBoxUnitsOverride || ocrTableUnits || "normalized").toLowerCase();
+  const tableBoxNormalized = tableBoxUnitsLabel === "normalized" || tableBoxUnitsLabel === "ratio";
+  const tableBoxClampMax = tableBoxNormalized ? 1 : 10000;
+  const tableBoxMinSize = tableBoxNormalized ? 0.002 : 2;
+  const tableBoxDecimals = tableBoxNormalized ? 3 : 0;
+
+  useEffect(() => {
+    setTableBoxStep(tableBoxNormalized ? 0.005 : 5);
+  }, [tableBoxNormalized]);
+
+  const normalizeTableBox = (box: number[]) => {
+    const clamp = (value: number, min: number, max: number) =>
+      Math.min(Math.max(value, min), max);
+    let [x0, y0, x1, y1] = box.map((value) => (Number.isFinite(value) ? value : 0));
+    if (tableBoxNormalized) {
+      x0 = clamp(x0, 0, tableBoxClampMax);
+      y0 = clamp(y0, 0, tableBoxClampMax);
+      x1 = clamp(x1, 0, tableBoxClampMax);
+      y1 = clamp(y1, 0, tableBoxClampMax);
+    }
+    if (x1 <= x0) {
+      x1 = clamp(x0 + tableBoxMinSize, 0, tableBoxClampMax);
+    }
+    if (y1 <= y0) {
+      y1 = clamp(y0 + tableBoxMinSize, 0, tableBoxClampMax);
+    }
+    return [x0, y0, x1, y1];
+  };
+
+  const normalizeRowEdges = (edges: number[]) => {
+    const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+    const cleaned = edges
+      .map((value) => (Number.isFinite(value) ? clamp(value) : null))
+      .filter((value): value is number => value != null);
+    if (!cleaned.length) {
+      return null;
+    }
+    const unique = Array.from(new Set(cleaned)).sort((a, b) => a - b);
+    return unique.length >= 2 ? unique : null;
+  };
+
+  const normalizeColumnEdges = (edges: number[]) => {
+    const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+    const cleaned = edges
+      .map((value) => (Number.isFinite(value) ? clamp(value) : null))
+      .filter((value): value is number => value != null);
+    if (!cleaned.length) {
+      return null;
+    }
+    const unique = Array.from(new Set(cleaned)).sort((a, b) => a - b);
+    return unique.length >= 2 ? unique : null;
+  };
+
+  const updateGridParam = (key: keyof GridParams, rawValue: string) => {
+    if (!rawValue.trim()) return;
+    const parsed = Number(rawValue);
+    if (Number.isNaN(parsed)) return;
+    setGridParamsDraft((prev) => ({ ...prev, [key]: parsed }));
+  };
+
+  const setRowCount = (count: number) => {
+    if (!Number.isFinite(count) || count <= 1) {
+      setGridRowEdgesDraft(null);
+      return;
+    }
+    const bounds = tableBoxDraft || ocrTableBox || [0, 0, 1, 1];
+    const y0 = bounds[1] ?? 0;
+    const y1 = bounds[3] ?? 1;
+    const span = Math.max(y1 - y0, 0.001);
+    const edges = Array.from({ length: count + 1 }, (_, idx) => y0 + (span * idx) / count);
+    setGridRowEdgesDraft(edges);
+  };
+
+  const setColumnCount = (count: number) => {
+    if (!Number.isFinite(count) || count <= 1) {
+      setGridColumnEdgesDraft(null);
+      return;
+    }
+    const bounds = tableBoxDraft || ocrTableBox || [0, 0, 1, 1];
+    const x0 = bounds[0] ?? 0;
+    const x1 = bounds[2] ?? 1;
+    const span = Math.max(x1 - x0, 0.001);
+    const edges = Array.from({ length: count + 1 }, (_, idx) => x0 + (span * idx) / count);
+    setGridColumnEdgesDraft(edges);
+  };
+
+  const updateRowEdgesText = (raw: string) => {
+    if (!raw.trim()) {
+      setGridRowEdgesDraft(null);
+      return;
+    }
+    const values = raw
+      .split(/[,、\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => Number(item))
+      .filter((num) => !Number.isNaN(num))
+      .map((num) => (num > 1 ? num / 100 : num));
+    const normalized = normalizeRowEdges(values);
+    setGridRowEdgesDraft(normalized);
+  };
+
+  const updateColumnEdgesText = (raw: string) => {
+    if (!raw.trim()) {
+      setGridColumnEdgesDraft(null);
+      return;
+    }
+    const values = raw
+      .split(/[,、\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => Number(item))
+      .filter((num) => !Number.isNaN(num))
+      .map((num) => (num > 1 ? num / 100 : num));
+    const normalized = normalizeColumnEdges(values);
+    setGridColumnEdgesDraft(normalized);
+  };
+
+  const formatRowEdgesText = (edges: number[] | null) => {
+    if (!edges || edges.length < 2) return "";
+    return edges
+      .slice(1, -1)
+      .map((edge) => (edge * 100).toFixed(1).replace(/\.0$/, ""))
+      .join(", ");
+  };
+
+  const formatColumnEdgesText = (edges: number[] | null) => {
+    if (!edges || edges.length < 2) return "";
+    return edges
+      .slice(1, -1)
+      .map((edge) => (edge * 100).toFixed(1).replace(/\.0$/, ""))
+      .join(", ");
+  };
+
+  const updateTableBoxDraft = (next: number[]) => {
+    setTableBoxDraft(normalizeTableBox(next));
+  };
+
+  const updateTableBoxIndex = (index: number, rawValue: string) => {
+    if (!tableBoxDraft) return;
+    if (!rawValue.trim()) return;
+    const parsed = Number(rawValue);
+    if (Number.isNaN(parsed)) return;
+    const next = [...tableBoxDraft];
+    next[index] = parsed;
+    updateTableBoxDraft(next);
+  };
+
+  const nudgeTableBox = (dx: number, dy: number) => {
+    if (!tableBoxDraft) return;
+    const [x0, y0, x1, y1] = tableBoxDraft;
+    updateTableBoxDraft([x0 + dx, y0 + dy, x1 + dx, y1 + dy]);
+  };
+
+  const expandTableBox = (delta: number) => {
+    if (!tableBoxDraft) return;
+    const [x0, y0, x1, y1] = tableBoxDraft;
+    updateTableBoxDraft([x0 - delta, y0 - delta, x1 + delta, y1 + delta]);
+  };
+
+  const toggleTableBoxEditor = () => {
+    setShowTableBoxEditor((prev) => {
+      const next = !prev;
+      if (next && !tableBoxDraft) {
+        setTableBoxDraft(ocrTableBox ? [...ocrTableBox] : [0.05, 0.2, 0.95, 0.9]);
+      }
+      if (!next && tableBoxDraft) {
+        setOcrTableBox([...tableBoxDraft]);
+        setGridParams({ ...gridParamsDraft });
+        setGridColumnEdges(gridColumnEdgesDraft ? [...gridColumnEdgesDraft] : null);
+        setGridRowEdges(gridRowEdgesDraft ? [...gridRowEdgesDraft] : null);
+      }
+      return next;
     });
+    setTableBoxMessage("");
+    setGridDetectMessage("");
+  };
+
+  const detectGridEdges = async () => {
+    if (!order) return;
+    setGridDetecting(true);
+    setGridDetectMessage("自動で合わせています...");
+    try {
+      const payload: Record<string, any> = {};
+      if (tableBoxDraft && tableBoxDraft.length >= 4) {
+        payload.table_box = tableBoxDraft;
+      }
+      const expectedColumns =
+        gridParamsDraft.grid_expected_columns > 1 ? gridParamsDraft.grid_expected_columns : null;
+      const suggestedColumns =
+        !expectedColumns && overlayColumnCount > 1 ? overlayColumnCount : null;
+      const gridParamsPayload: Record<string, any> = {
+        ...gridParamsDraft,
+        ...(suggestedColumns ? { grid_expected_columns: suggestedColumns } : {}),
+        grid_auto_table_box: true,
+        grid_auto_use_raw_edges: true,
+        grid_source: "layout_overlay",
+      };
+      payload.grid_params = gridParamsPayload;
+      const res = await apiClient.post(`/orders/${order.id}/grid-detect`, payload);
+      const detectedBox = Array.isArray(res.data?.table_box) ? res.data.table_box : null;
+      const detectedColumns = Array.isArray(res.data?.grid_column_edges)
+        ? res.data.grid_column_edges
+        : null;
+      const detectedRows = Array.isArray(res.data?.grid_row_edges) ? res.data.grid_row_edges : null;
+      const detectedUnits = typeof res.data?.table_units === "string" ? res.data.table_units : null;
+      const fallback = Boolean(res.data?.fallback);
+      if (detectedBox && detectedBox.length >= 4) {
+        setTableBoxDraft(detectedBox.slice(0, 4));
+      }
+      if (detectedUnits) {
+        setTableBoxUnitsOverride(detectedUnits);
+      }
+      if (detectedColumns && detectedColumns.length >= 2) {
+        setGridColumnEdgesDraft([...detectedColumns]);
+      }
+      if (detectedRows && detectedRows.length >= 2) {
+        setGridRowEdgesDraft([...detectedRows]);
+        const headerRows = ocrTableHeader.length ? 1 : 0;
+        const targetRows = Math.max(detectedRows.length - 1 - headerRows, 0);
+        if (targetRows > ocrTableRows.length) {
+          const columnCount = getColumnCount(ocrTableHeader, ocrTableRows);
+          setOcrTableRows((prev) => {
+            const next = prev.map((row) => [...row]);
+            while (next.length < targetRows) {
+              next.push(Array.from({ length: columnCount }, () => ""));
+            }
+            return next;
+          });
+        }
+      }
+      const confidence =
+        typeof res.data?.confidence === "number" ? res.data.confidence.toFixed(2) : null;
+      setGridDetectMessage(
+        `自動検出しました${fallback ? " (低信頼)" : ""}${confidence ? ` (信頼度 ${confidence})` : ""}。必要なら微調整して保存してください。`,
+      );
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      if (status === 404) {
+        const reason =
+          typeof detail?.reason === "string"
+            ? detail.reason
+            : typeof detail === "string"
+              ? detail
+              : "";
+        setGridDetectMessage(reason ? `自動検出できませんでした。(${reason})` : "自動検出できませんでした。");
+      } else if (status === 400) {
+        setGridDetectMessage("table_boxを確認してください。");
+      } else {
+        setGridDetectMessage("自動検出に失敗しました。");
+      }
+    } finally {
+      setGridDetecting(false);
+    }
+  };
+
+  const saveTableBox = async () => {
+    if (!facility) {
+      setTableBoxMessage("施設を選択してください。");
+      return;
+    }
+    if (!tableBoxDraft) {
+      setTableBoxMessage("table_boxがありません。");
+      return;
+    }
+    setTableBoxSaving(true);
+    setTableBoxMessage("保存中...");
+    try {
+      let config = facilityConfig;
+      if (!config) {
+        const res = await apiClient.get(`/facilities/${facility}`);
+        config = res.data?.config || {};
+        setFacilityConfig(config);
+      }
+      const nextConfig = { ...(config || {}) };
+      const override = { ...(nextConfig.fax_template_override || {}) };
+      override.table_box = tableBoxDraft;
+      override.grid_table_box = tableBoxDraft;
+      if (gridColumnEdgesDraft && gridColumnEdgesDraft.length >= 2) {
+        override.grid_column_edges = gridColumnEdgesDraft;
+      }
+      if (gridRowEdgesDraft && gridRowEdgesDraft.length >= 2) {
+        override.grid_row_edges = gridRowEdgesDraft;
+      }
+      if (gridParamsDraft) {
+        Object.entries(gridParamsDraft).forEach(([key, value]) => {
+          if (typeof value === "number" && Number.isFinite(value)) {
+            override[key] = value;
+          }
+        });
+      }
+      if (tableBoxUnitsOverride || ocrTableUnits) {
+        override.units = tableBoxUnitsOverride || ocrTableUnits;
+      }
+      nextConfig.fax_template_override = override;
+      await apiClient.put(`/facilities/${facility}/config`, { config: nextConfig });
+      setTableBoxMessage("保存しました。再解析で反映されます。");
+      setOcrTableBox([...tableBoxDraft]);
+      setGridParams({ ...gridParamsDraft });
+      setGridColumnEdges(gridColumnEdgesDraft ? [...gridColumnEdgesDraft] : null);
+      setGridRowEdges(gridRowEdgesDraft ? [...gridRowEdgesDraft] : null);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      setTableBoxMessage(status === 403 ? "権限がありません。" : "保存に失敗しました。");
+    } finally {
+      setTableBoxSaving(false);
+    }
+  };
+
+  const resetTableBoxDraft = () => {
+    if (!ocrTableBox) {
+      setTableBoxDraft(null);
+      return;
+    }
+    setTableBoxDraft([...ocrTableBox]);
+    setGridParamsDraft({ ...gridParams });
+    setGridColumnEdgesDraft(gridColumnEdges ? [...gridColumnEdges] : null);
+    setGridRowEdgesDraft(gridRowEdges ? [...gridRowEdges] : null);
+    setTableBoxMessage("");
+    setTableBoxUnitsOverride(null);
   };
 
   const addOcrTableRow = () => {
+    if (ocrEditorUiMode === "sheet") {
+      const columnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
+      setOcrSheetRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
+      setOcrSheetRowIds((prev) => [...prev, makeSheetRowId("manual")]);
+      return;
+    }
     const columnCount = getColumnCount(ocrTableHeader, ocrTableRows);
     setOcrTableRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
   };
 
   const duplicateOcrTableRow = (rowIndex: number) => {
+    if (ocrEditorUiMode === "sheet") {
+      setOcrSheetRows((prev) => {
+        const next = prev.map((row) => [...row]);
+        const row = next[rowIndex];
+        if (!row) return prev;
+        next.splice(rowIndex + 1, 0, [...row]);
+        return next;
+      });
+      setOcrSheetRowIds((prev) => {
+        const next = [...prev];
+        const sourceId = next[rowIndex] || `sheet-${rowIndex + 1}`;
+        next.splice(rowIndex + 1, 0, `${sourceId}-copy-${Date.now()}`);
+        return next;
+      });
+      return;
+    }
     setOcrTableRows((prev) => {
       const next = prev.map((row) => [...row]);
       const row = next[rowIndex];
@@ -736,49 +2432,208 @@ export default function OrderDetailPage() {
   };
 
   const removeOcrTableRow = (rowIndex: number) => {
+    if (ocrEditorUiMode === "sheet") {
+      setOcrSheetRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
+      setOcrSheetRowIds((prev) => prev.filter((_, idx) => idx !== rowIndex));
+      return;
+    }
     setOcrTableRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
   };
 
-  const applyOcrTable = async (): Promise<boolean> => {
-    if (!order) return;
-    if (!ocrTableRows.length) {
-      setOcrTableMessage("編集できる表がありません。");
-      return false;
+  const switchToSheetMode = async () => {
+    setOcrEditorUiMode("sheet");
+    setOverlayActiveCell(null);
+    setShowTableBoxEditor(false);
+    if (!ocrSheetRows.length && !ocrSheetLoading) {
+      await loadOcrSheet();
     }
-    const markdown = buildMarkdownTable(ocrTableHeader, ocrTableRows);
+  };
+
+  const switchToLegacyMode = () => {
+    setOcrEditorUiMode("legacy");
+    setShowTableBoxEditor(true);
+  };
+
+  const applyOcrTable = async (): Promise<{ ok: boolean; message: string }> => {
+    if (!order) {
+      return { ok: false, message: "注文が見つかりません。" };
+    }
+    const trimmedFacility = facility.trim();
+    const persistedFacility = (order.facility || "").trim();
+    const normalizedWeek = normalizeWeekId(weekDraft);
+    const persistedWeek = normalizeWeekId(order.week || "");
+    if (!trimmedFacility && !persistedFacility) {
+      const message = "施設が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で施設を設定してください。";
+      setOcrTableMessage(message);
+      return { ok: false, message };
+    }
+    if (!normalizedWeek && !persistedWeek) {
+      const message = "週が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で週を設定してください。";
+      setOcrTableMessage(message);
+      return { ok: false, message };
+    }
+    if (trimmedFacility && persistedFacility !== trimmedFacility) {
+      // Users often select a facility from suggestions but forget to persist it.
+      // Persist first so backend OCR apply can load the correct template.
+      const ok = await saveFacility(trimmedFacility);
+      if (!ok) {
+        const message = "施設の設定に失敗したため、OCRテーブルを反映できませんでした。";
+        setOcrTableMessage(message);
+        return { ok: false, message };
+      }
+    }
+    if (normalizedWeek && persistedWeek !== normalizedWeek) {
+      const ok = await saveWeek(normalizedWeek);
+      if (!ok) {
+        const message = "週の設定に失敗したため、OCRテーブルを反映できませんでした。";
+        setOcrTableMessage(message);
+        return { ok: false, message };
+      }
+    }
+    const useSheet = ocrEditorUiMode === "sheet";
+    let targetHeader = useSheet ? ocrSheetHeader : ocrTableHeader;
+    let targetRows = useSheet ? ocrSheetRows : ocrTableRows;
+    let targetFields = useSheet ? ocrSheetFields : [];
+    let targetRowIds = useSheet ? ocrSheetRowIds : [];
+
+    if (useSheet && !targetRows.length) {
+      const loaded = await loadOcrSheet({ silent: true });
+      if (loaded) {
+        targetHeader = loaded.header;
+        targetRows = loaded.rows;
+        targetFields = loaded.fields;
+        targetRowIds = loaded.rowIds;
+      }
+    }
+    if (!targetRows.length) {
+      const message = "編集できる表がありません。";
+      setOcrTableMessage(message);
+      return { ok: false, message };
+    }
+    const markdown = buildMarkdownTable(targetHeader, targetRows);
     setOcrTableSaving(true);
     setOcrTableMessage("OCRテーブルを反映中...");
     try {
-      const res = await apiClient.post(`/orders/${order.id}/ocr-apply`, { markdown });
+      const res = await apiClient.post(`/orders/${order.id}/ocr-apply`, {
+        markdown,
+        header: targetHeader,
+        rows: targetRows,
+        ui_mode: useSheet ? "sheet" : "legacy",
+        fields: useSheet ? targetFields : undefined,
+        row_ids: useSheet ? targetRowIds : undefined,
+      });
       setOrder(res.data);
-      setOcrTableMessage("OCRテーブルを反映しました。");
+      const message = "OCRテーブルを反映しました。";
+      setOcrTableMessage(message);
+      await refreshOcrOutput(order.id);
+      await loadOcrHistory({ silent: true });
+      if (useSheet) {
+        await loadOcrSheet({ silent: true });
+      }
       await rebuildBags();
-      return true;
+      return { ok: true, message };
     } catch (err: any) {
       const status = err?.response?.status;
-      if (status === 400) {
-        setOcrTableMessage("OCRテーブルの反映に失敗しました。");
-      } else {
-        setOcrTableMessage("OCRテーブルの反映中にエラーが発生しました。");
-      }
-      return false;
+      const detail = err?.response?.data?.detail;
+      const message = resolveOcrApplyErrorMessage(status, detail);
+      setOcrTableMessage(message);
+      return { ok: false, message };
     } finally {
       setOcrTableSaving(false);
     }
   };
 
-  const applyOcrPreview = async () => {
+  const saveOcrSheetExact = async (): Promise<{ ok: boolean; message: string }> => {
+    if (!order) {
+      return { ok: false, message: "注文が見つかりません。" };
+    }
+    let targetHeader = ocrSheetHeader;
+    let targetRows = ocrSheetRows;
+    let targetFields = ocrSheetFields;
+    let targetRowIds = ocrSheetRowIds;
+
+    if (!targetRows.length && !ocrSheetLoading) {
+      const loaded = await loadOcrSheet({ silent: true });
+      if (loaded) {
+        targetHeader = loaded.header;
+        targetRows = loaded.rows;
+        targetFields = loaded.fields;
+        targetRowIds = loaded.rowIds;
+      }
+    }
+    if (!targetRows.length) {
+      const message = "保存できるシートがありません。";
+      setOcrTableMessage(message);
+      return { ok: false, message };
+    }
+    setOcrTableSaving(true);
+    setOcrTableMessage("シートを保存中...");
+    try {
+      await apiClient.post(`/orders/${order.id}/ocr-sheet-save`, {
+        header: targetHeader,
+        rows: targetRows,
+        ui_mode: "sheet",
+        fields: targetFields,
+        row_ids: targetRowIds,
+      });
+      const message = "シートをそのまま保存しました。明細にはまだ反映していません。";
+      setOcrTableMessage(message);
+      await refreshOcrOutput(order.id);
+      await loadOcrHistory({ silent: true });
+      return { ok: true, message };
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      let message = "シートの保存に失敗しました。";
+      if (status === 404) {
+        message = "注文が見つかりません。";
+      } else if (status === 400 && detail === "rows_empty") {
+        message = "保存できるシートがありません。";
+      }
+      setOcrTableMessage(message);
+      return { ok: false, message };
+    } finally {
+      setOcrTableSaving(false);
+    }
+  };
+
+  const enterOcrEditMode = () => {
+    setOcrEditMode(true);
+    setShowOcrEdit(true);
+    setShowTableBoxEditor(ocrEditorUiMode === "legacy");
+    if (ocrEditorUiMode === "sheet" && !ocrSheetRows.length && !ocrSheetLoading) {
+      loadOcrSheet();
+    }
+  };
+
+  const exitOcrEditMode = () => {
+    setOcrEditMode(false);
+    setShowOcrEdit(false);
+    setShowTableBoxEditor(false);
+    setOverlayActiveCell(null);
+  };
+
+  const applyOcrAndMoveToDetails = async () => {
     if (!order) return;
-    if (!ocrTableRows.length) {
+    let activeRows = ocrEditorUiMode === "sheet" ? ocrSheetRows : ocrTableRows;
+    if (ocrEditorUiMode === "sheet" && !activeRows.length) {
+      const loaded = await loadOcrSheet({ silent: true });
+      if (loaded) {
+        activeRows = loaded.rows;
+      }
+    }
+    if (!activeRows.length) {
       setActionMessage("編集できる表がありません。");
       return;
     }
     setActionMessage("OCR結果を明細に反映中...");
-    const ok = await applyOcrTable();
-    if (ok) {
+    const result = await applyOcrTable();
+    if (result.ok) {
       setActionMessage("OCR結果を明細に反映しました。");
+      exitOcrEditMode();
+      setActiveStep(2);
     } else {
-      setActionMessage("OCR結果の反映に失敗しました。");
+      setActionMessage(result.message);
     }
   };
 
@@ -800,17 +2655,57 @@ export default function OrderDetailPage() {
     }
   };
 
-  const updateFacility = async () => {
+  const registerTrainingSample = async () => {
     if (!order) return;
-    const trimmed = facility.trim();
+    setTrainingSampleSaving(true);
+    try {
+      const res = await apiClient.post(`/ocr/training-samples/from-order/${order.id}`, {
+        source: "manual",
+        note: "registered from order detail",
+      });
+      const sampleId = typeof res.data?.sample?.id === "string" ? res.data.sample.id : "";
+      const lineCount =
+        typeof res.data?.sample?.line_count === "number" ? res.data.sample.line_count : null;
+      const lineText = lineCount == null ? "" : ` (${lineCount}行)`;
+      setActionMessage(
+        sampleId
+          ? `学習データに登録しました。sample_id=${sampleId}${lineText}`
+          : `学習データに登録しました。${lineText}`,
+      );
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const detailText = typeof detail === "string" ? detail : detail ? JSON.stringify(detail) : "";
+      if (status === 404) {
+        setActionMessage("注文が見つからないため、学習データ登録できませんでした。");
+      } else if (status === 400) {
+        setActionMessage(
+          detailText
+            ? `学習データ登録に失敗しました: ${detailText}`
+            : "学習データ登録に失敗しました。",
+        );
+      } else if (status === 403) {
+        setActionMessage("権限がないため、学習データ登録できません。");
+      } else {
+        setActionMessage("学習データ登録中にエラーが発生しました。");
+      }
+    } finally {
+      setTrainingSampleSaving(false);
+    }
+  };
+
+  const saveFacility = async (facilityId: string): Promise<boolean> => {
+    if (!order) return false;
+    const trimmed = facilityId.trim();
     if (!trimmed) {
       setActionMessage("施設IDを入力してください。");
-      return;
+      return false;
     }
     try {
       await apiClient.post(`/orders/${order.id}/facility`, { facility: trimmed });
-      setOrder({ ...order, facility: trimmed });
+      setOrder((current) => (current ? { ...current, facility: trimmed } : current));
       setActionMessage("施設を設定しました。");
+      return true;
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 404) {
@@ -818,16 +2713,143 @@ export default function OrderDetailPage() {
       } else {
         setActionMessage("施設の設定に失敗しました。");
       }
+      return false;
     }
   };
 
-  const reparse = async () => {
+  const saveWeek = async (weekId: string): Promise<boolean> => {
+    if (!order) return false;
+    const normalizedWeek = normalizeWeekId(weekId);
+    if (!normalizedWeek) {
+      setActionMessage("週は YYYY-MM 形式で入力してください。");
+      return false;
+    }
+    try {
+      await apiClient.post(`/orders/${order.id}/week`, { week: normalizedWeek });
+      setOrder((current) => (current ? { ...current, week: normalizedWeek } : current));
+      setWeekDraft(normalizedWeek);
+      setActionMessage("週を設定しました。");
+      return true;
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        setActionMessage("注文が見つかりません。");
+      } else if (status === 400) {
+        setActionMessage("週の設定に失敗しました。YYYY-MM を確認してください。");
+      } else {
+        setActionMessage("週の設定に失敗しました。");
+      }
+      return false;
+    }
+  };
+
+  const updateStep1 = async () => {
+    const normalizedWeek = normalizeWeekId(weekDraft);
+    if (!facility.trim()) {
+      setActionMessage("施設を選択してください。");
+      return;
+    }
+    if (!normalizedWeek) {
+      setActionMessage("週を選択してください。");
+      return;
+    }
+    const persistedFacility = (order?.facility || "").trim();
+    const persistedWeek = normalizeWeekId(order?.week || "");
+    if (facility.trim() !== persistedFacility) {
+      const saved = await saveFacility(facility);
+      if (!saved) return;
+    }
+    if (normalizedWeek !== persistedWeek) {
+      const saved = await saveWeek(normalizedWeek);
+      if (!saved) return;
+    }
+    if (order?.id) {
+      await loadWeekOptions(order.id);
+    }
+    setOcrSheetAutoRetryBlocked(false);
+    if (activeStep === 1 && ocrEditorUiMode === "sheet") {
+      await loadOcrSheet();
+    }
+  };
+
+  const updateFacilityTemplateColumn = (
+    rowIndex: number,
+    key: keyof FacilityTemplateColumn,
+    value: string,
+  ) => {
+    setFacilityTemplateColumnDraft((prev) =>
+      prev.map((column, idx) => {
+        if (idx !== rowIndex) return column;
+        const next = { ...column, [key]: value };
+        if (key === "role" && value !== "quantity") {
+          next.diet_type = "";
+          next.area_id = "";
+        }
+        return next;
+      }),
+    );
+  };
+
+  const saveFacilityTemplateColumns = async () => {
+    if (!order?.id) {
+      setFacilityTemplateMessage("注文が見つかりません。");
+      return;
+    }
+    if (!facility.trim()) {
+      setFacilityTemplateMessage("施設を選択してください。");
+      return;
+    }
+    if (facility.trim() !== (order.facility || "").trim()) {
+      setFacilityTemplateMessage("先に Step1 の施設設定を保存してください。");
+      return;
+    }
+    if (!facilityTemplateColumnDraft.length) {
+      setFacilityTemplateMessage("保存できる施設区分列がありません。");
+      return;
+    }
+    setFacilityTemplateSaving(true);
+    setFacilityTemplateMessage("施設テンプレートを保存中...");
+    try {
+      const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
+      const res = await apiClient.put(`/orders/${order.id}/facility-template-columns`, { columns });
+      const resolvedConfig = res.data?.resolved_config || null;
+      const resolvedColumns = normalizeFacilityTemplateColumns(
+        resolvedConfig?.fax_template?.columns ?? columns,
+      );
+      const nextConfig = {
+        ...(facilityConfig || {}),
+        fax_template_override: {
+          ...((facilityConfig || {}).fax_template_override || {}),
+          columns,
+        },
+      };
+      delete nextConfig.fax_template_override.main_ocr_row_fields;
+      setFacilityConfig(nextConfig);
+      setFacilityTemplateColumns(resolvedColumns);
+      setFacilityTemplateColumnDraft(resolvedColumns);
+      setFacilityTemplateMessage("施設テンプレートに保存しました。シート再読込で反映されます。");
+      if (order?.id && normalizeWeekId(order.week || "")) {
+        await loadOcrSheet({ silent: true });
+      }
+    } catch (err: any) {
+      const status = err?.response?.status;
+      setFacilityTemplateMessage(status === 403 ? "権限がありません。" : "施設テンプレートの保存に失敗しました。");
+    } finally {
+      setFacilityTemplateSaving(false);
+    }
+  };
+
+  const reparse = async (options?: { ocrProvider?: string; llmAssist?: boolean }) => {
     if (!order) return;
+    const providerOverride = (options?.ocrProvider || "").trim().toLowerCase();
+    const llmAssist = Boolean(options?.llmAssist && providerOverride);
+    const providerLabel =
+      providerOverride === "gemini" ? "Gemini" : providerOverride === "openai" ? "OpenAI" : "";
     if (reparseTimerRef.current !== null) {
       window.clearTimeout(reparseTimerRef.current);
       reparseTimerRef.current = null;
     }
-    setActionMessage("再解析中...");
+    setActionMessage(llmAssist ? `LLM補完再解析(${providerLabel})中...` : "再解析中...");
     setReparsePending(true);
     const beforeCount = order.lines?.length ?? 0;
     const orderId = order.id;
@@ -838,11 +2860,25 @@ export default function OrderDetailPage() {
     const withErrorContext = (message: string, id: string) => `${message}${errorContext(id)}`;
     let accepted = false;
     try {
-      const payload = ocrPrompt.trim() ? { ocr_prompt: ocrPrompt.trim() } : null;
-      const res = await apiClient.post(`/orders/${orderId}/reparse`, payload, { timeout: 900000 });
+      const payload: Record<string, any> = {};
+      if (ocrPrompt.trim()) {
+        payload.ocr_prompt = ocrPrompt.trim();
+      }
+      if (providerOverride) {
+        payload.ocr_provider = providerOverride;
+      }
+      if (llmAssist) {
+        payload.llm_assist = true;
+      }
+      const requestPayload = Object.keys(payload).length ? payload : null;
+      const res = await apiClient.post(`/orders/${orderId}/reparse`, requestPayload, { timeout: 900000 });
       if (res.status === 202 || res.data?.accepted) {
         accepted = true;
-        setActionMessage("再解析を開始しました。完了まで数分かかります。");
+        setActionMessage(
+          llmAssist
+            ? `LLM補完再解析(${providerLabel})を開始しました。完了まで数分かかります。`
+            : "再解析を開始しました。完了まで数分かかります。"
+        );
         setOrder({
           ...order,
           ocr_status: "running",
@@ -855,10 +2891,17 @@ export default function OrderDetailPage() {
             const updated = statusRes.data as OrderDetail;
             setOrder(updated);
             const status = updated.ocr_status || "";
-            if (status && status !== "running") {
+            if (status && status !== "running" && status !== "pending") {
               setReparsePending(false);
               const afterCount = updated.lines?.length ?? 0;
-              const changedText = beforeCount === afterCount ? "変更なし" : "変更あり";
+              const metricBefore = updated.ocr_metrics?.before_count;
+              const metricAfter = updated.ocr_metrics?.after_count;
+              const metricChanged = updated.ocr_metrics?.changed;
+              const summaryBefore = typeof metricBefore === "number" ? metricBefore : beforeCount;
+              const summaryAfter = typeof metricAfter === "number" ? metricAfter : afterCount;
+              const changed =
+                typeof metricChanged === "boolean" ? metricChanged : summaryBefore !== summaryAfter;
+              const changedText = changed ? "変更あり" : "変更なし";
               const error = updated.ocr_error || "";
               const errorDetail = error ? ` (${error})` : "";
               if (status === "failed" || status === "empty") {
@@ -866,6 +2909,41 @@ export default function OrderDetailPage() {
                   setActionMessage(
                     withErrorContext(
                       `解析結果が空でした。OCR設定を見直してください。${errorDetail}`,
+                      orderId
+                    )
+                  );
+                } else if (error === "sheet_canonical_mismatch") {
+                  setActionMessage(
+                    withErrorContext(
+                      `週メニュー整合チェックで不一致を検知しました。再解析デバッグを確認してください。${errorDetail}`,
+                      orderId
+                    )
+                  );
+                } else if (error === "sheet_suspicious_blank_row") {
+                  setActionMessage(
+                    withErrorContext(
+                      `数量行の欠落を検知したため保存を中止しました。再解析デバッグを確認してください。${errorDetail}`,
+                      orderId
+                    )
+                  );
+                } else if (error === "sheet_row_coverage_low") {
+                  setActionMessage(
+                    withErrorContext(
+                      `OCR行カバレッジ不足を検知したため保存を中止しました。再解析デバッグを確認してください。${errorDetail}`,
+                      orderId
+                    )
+                  );
+                } else if (error === "sheet_column_anomaly") {
+                  setActionMessage(
+                    withErrorContext(
+                      `施設区分列の異常を検知したため保存を中止しました。再解析デバッグを確認してください。${errorDetail}`,
+                      orderId
+                    )
+                  );
+                } else if (error === "sheet_date_anchor_drift") {
+                  setActionMessage(
+                    withErrorContext(
+                      `既存シートの日付範囲から大きく外れたため保存を中止しました。再解析デバッグを確認してください。${errorDetail}`,
                       orderId
                     )
                   );
@@ -887,7 +2965,30 @@ export default function OrderDetailPage() {
                   setActionMessage(withErrorContext(`再解析に失敗しました。${errorDetail}`, orderId));
                 }
               } else {
-                setActionMessage(`再解析しました。${beforeCount}→${afterCount} (${changedText})`);
+                const provider =
+                  typeof updated.ocr_metrics?.provider === "string"
+                    ? updated.ocr_metrics.provider
+                    : "";
+                const providerText = provider ? ` / ${provider}` : "";
+                const warningReasonsRaw = Array.isArray(updated.ocr_metrics?.warning_reasons)
+                  ? updated.ocr_metrics?.warning_reasons
+                  : [];
+                const warningReasons = warningReasonsRaw
+                  .map((item) => String(item || "").trim())
+                  .filter(Boolean);
+                if (warningReasons.length) {
+                  const warningText = warningReasons
+                    .map((code) => describeReparseWarningReason(code))
+                    .filter(Boolean)
+                    .join(" / ");
+                  setActionMessage(
+                    `再解析しました（警告あり: ${warningText || warningReasons.join(" / ")}）。シートには反映済みです。${summaryBefore}→${summaryAfter} (${changedText})${providerText}`
+                  );
+                } else {
+                  setActionMessage(
+                    `再解析しました。${summaryBefore}→${summaryAfter} (${changedText})${providerText}`
+                  );
+                }
                 await rebuildBags();
               }
               reparseTimerRef.current = null;
@@ -971,14 +3072,58 @@ export default function OrderDetailPage() {
     setOrder({ ...order, lines: next });
   };
 
-  const openOutput = async (path: string) => {
+  const extractFilename = (value?: string | null) => {
+    if (!value) return "";
+    const match = value.match(/filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i);
+    const rawName = match?.[1] || match?.[2] || "";
+    if (!rawName) return "";
+    try {
+      return decodeURIComponent(rawName);
+    } catch {
+      return rawName;
+    }
+  };
+
+  const openOutput = async (path: string, label: string) => {
+    const timestamp = new Date().toLocaleString("ja-JP");
+    setActionMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
+    setDownloadMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
+    let popup: Window | null = null;
+    try {
+      popup = window.open("", "_blank");
+      if (popup) {
+        popup.document.title = `${label} ダウンロード`;
+        popup.document.body.innerHTML = "<p>ダウンロードを準備中...</p>";
+      }
+    } catch {
+      popup = null;
+    }
     try {
       const res = await apiClient.get(path, { responseType: "blob" });
-      const url = URL.createObjectURL(res.data);
-      window.open(url, "_blank", "noopener");
+      const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
+      const filename = extractFilename(contentDisposition) || "output";
+      const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
+      const url = URL.createObjectURL(blob);
+      if (popup) {
+        popup.location.href = url;
+      } else {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-    } catch {
-      setActionMessage("出力の取得に失敗しました。");
+      setDownloadMessage(`${label}をダウンロードしました。 (${timestamp})`);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const suffix = status ? ` (${status})` : "";
+      setActionMessage(`${label}のダウンロードに失敗しました。${suffix}`);
+      setDownloadMessage(`${label}のダウンロードに失敗しました。${suffix}`);
+      if (popup) {
+        popup.close();
+      }
     }
   };
 
@@ -1033,21 +3178,379 @@ export default function OrderDetailPage() {
     categoryOrder,
   );
   const bagGroups = groupBagsByDate(bagRows);
+  const bagAmountStats = buildBagAmountStats(lines);
+  const bagTypeLabelMap = buildBagTypeLabelMap(facilityConfig);
   const activeOcrPage = ocrPages[activeOcrPageIndex];
   const activeOcrPageLabel = activeOcrPage
     ? activeOcrPage.page_index ?? activeOcrPageIndex + 1
     : null;
-  const previewLineLimit = 10;
-  const activeMarkdownLines = activeOcrPage?.markdown_text
-    ? splitLines(activeOcrPage.markdown_text)
-    : [];
-  const previewMarkdownText = activeMarkdownLines.slice(0, previewLineLimit).join("\n");
-  const activeOcrBlocks = previewMarkdownText ? parseMarkdownBlocks(previewMarkdownText) : [];
-  const fullOcrBlocks = activeOcrPage?.markdown_text
-    ? parseMarkdownBlocks(activeOcrPage.markdown_text)
-    : [];
   const facilityCandidates = ocrOutput?.facility_candidates || [];
-  const displayedOcrBlocks = showMarkdownRaw ? fullOcrBlocks : activeOcrBlocks;
+  const reparseDebug = ocrOutput?._reparse_debug || null;
+  const reparseProviderDebugText = (() => {
+    if (!reparseDebug || !reparseDebug.provider_debug) return "";
+    try {
+      return JSON.stringify(reparseDebug.provider_debug, null, 2);
+    } catch {
+      return "";
+    }
+  })();
+  const reparseNormalizedLinesText = (() => {
+    if (!reparseDebug || !Array.isArray(reparseDebug.normalized_lines) || !reparseDebug.normalized_lines.length) {
+      return "";
+    }
+    try {
+      return JSON.stringify(reparseDebug.normalized_lines, null, 2);
+    } catch {
+      return "";
+    }
+  })();
+  const reparseValidationDetailText = (() => {
+    if (!reparseDebug || !reparseDebug.validation_detail) return "";
+    try {
+      return JSON.stringify(reparseDebug.validation_detail, null, 2);
+    } catch {
+      return "";
+    }
+  })();
+  const reparseWarningReasons = (() => {
+    const fromDebug = Array.isArray(reparseDebug?.warning_reasons) ? reparseDebug.warning_reasons : [];
+    const fromMetrics = Array.isArray(order?.ocr_metrics?.warning_reasons)
+      ? order?.ocr_metrics?.warning_reasons
+      : [];
+    const merged = [...fromDebug, ...fromMetrics]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(merged));
+  })();
+  const reparseWarningDetailText = (() => {
+    const detail =
+      (reparseDebug?.warning_detail && typeof reparseDebug.warning_detail === "object"
+        ? reparseDebug.warning_detail
+        : null) ||
+      (order?.ocr_metrics?.warning_detail && typeof order.ocr_metrics.warning_detail === "object"
+        ? order.ocr_metrics.warning_detail
+        : null);
+    if (!detail) return "";
+    try {
+      return JSON.stringify(detail, null, 2);
+    } catch {
+      return "";
+    }
+  })();
+  const reparseQuantityMergeText = (() => {
+    if (!reparseDebug || !reparseDebug.llm_quantity_only_merge) return "";
+    try {
+      return JSON.stringify(reparseDebug.llm_quantity_only_merge, null, 2);
+    } catch {
+      return "";
+    }
+  })();
+  const ocrPagesPending = ocrPagesMessage.includes("処理中");
+  const rawOcrStatus = (order?.ocr_status || "").toLowerCase();
+  let ocrStatusLabel = "未実行";
+  let ocrStatusDetail = "";
+  if (rawOcrStatus === "running" || rawOcrStatus === "pending" || (!rawOcrStatus && ocrPagesPending)) {
+    ocrStatusLabel = "実行中";
+    ocrStatusDetail = "OCRを実行中です。完了まで数分かかります。";
+  } else if (rawOcrStatus === "stalled") {
+    ocrStatusLabel = "停止";
+    ocrStatusDetail = order?.ocr_error
+      ? `理由: ${order.ocr_error}`
+      : "OCRが停止しました。再解析してください。";
+  } else if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
+    ocrStatusLabel = "失敗";
+    ocrStatusDetail = order?.ocr_error ? `理由: ${order.ocr_error}` : "OCRの処理に失敗しました。";
+  } else if (rawOcrStatus === "empty") {
+    ocrStatusLabel = "空";
+    ocrStatusDetail = "解析結果が空です。";
+  } else if (rawOcrStatus === "skipped") {
+    ocrStatusLabel = "スキップ";
+    ocrStatusDetail = "バックログのためOCRをスキップしました。";
+  } else if (rawOcrStatus) {
+    if (!ocrPagesLoading && !ocrPages.length) {
+      ocrStatusLabel = "完了(表示なし)";
+      ocrStatusDetail = ocrPagesMessage || "OCR結果は完了していますが表示データがありません。";
+    } else {
+      ocrStatusLabel = "完了";
+    }
+  } else if (ocrPagesMessage) {
+    ocrStatusDetail = ocrPagesMessage;
+  }
+  const activeColumnEdges = showTableBoxEditor ? gridColumnEdgesDraft : gridColumnEdges;
+  const activeRowEdges = showTableBoxEditor ? gridRowEdgesDraft : gridRowEdges;
+  const overlayHeaderRows = ocrTableHeader.length ? 1 : 0;
+  const gridRowCount =
+    activeRowEdges && activeRowEdges.length >= 2 ? activeRowEdges.length - 1 : null;
+  const overlayRowCount = gridRowCount ?? overlayHeaderRows + ocrTableRows.length;
+  const fallbackColumnCount = getColumnCount(ocrTableHeader, ocrTableRows);
+  const overlayColumnCount =
+    activeColumnEdges && activeColumnEdges.length >= 2
+      ? activeColumnEdges.length - 1
+      : fallbackColumnCount;
+  const ocrOverlayUrl = activeOcrPage?.ocr_overlay_url ?? null;
+  const layoutOverlayUrl = activeOcrPage?.layout_overlay_url ?? null;
+  const ocrOverlayGs = isGsUri(ocrOverlayUrl);
+  const layoutOverlayGs = isGsUri(layoutOverlayUrl);
+  const showOcrOverlay = Boolean(ocrOverlayUrl && !ocrOverlayGs && !ocrOverlayError);
+  const canToggleLayoutOverlay = Boolean(layoutOverlayUrl);
+  const showLayoutOverlayImage = Boolean(
+    showLayoutOverlay && layoutOverlayUrl && !layoutOverlayGs && !layoutOverlayError,
+  );
+  const tableBoxReady = Boolean(tableBoxDraft && tableBoxDraft.length >= 4);
+  const tableBoxNudge = Math.abs(tableBoxStep) || (tableBoxNormalized ? 0.005 : 5);
+  let ocrOverlayPlaceholder = "OCRオーバーレイなし";
+  if (ocrOverlayUrl && ocrOverlayGs) {
+    ocrOverlayPlaceholder = "OCRオーバーレイの署名URL取得に失敗しました。";
+  } else if (ocrOverlayError) {
+    ocrOverlayPlaceholder = "OCRオーバーレイの読み込みに失敗しました。";
+  }
+  let layoutOverlayPlaceholder = "レイアウトオーバーレイなし";
+  if (layoutOverlayUrl && layoutOverlayGs) {
+    layoutOverlayPlaceholder = "レイアウトオーバーレイの署名URL取得に失敗しました。";
+  } else if (layoutOverlayError) {
+    layoutOverlayPlaceholder = "レイアウトオーバーレイの読み込みに失敗しました。";
+  }
+  const activeTableBox = showTableBoxEditor && tableBoxDraft ? tableBoxDraft : ocrTableBox;
+  const overlayBox = (() => {
+    if (!activeTableBox || overlayRowCount < 1 || overlayColumnCount < 1) return null;
+    if (!overlayImageSize.width || !overlayImageSize.height) return null;
+    const [x0, y0, x1, y1] = activeTableBox.map((value) => Number(value));
+    if ([x0, y0, x1, y1].some((value) => Number.isNaN(value))) return null;
+    if (x1 <= x0 || y1 <= y0) return null;
+    const units = (tableBoxUnitsOverride || ocrTableUnits || "normalized").toLowerCase();
+    const normalized = units === "normalized" || units === "ratio";
+    const image = overlayImageRef.current;
+    const naturalWidth = image?.naturalWidth || overlayImageSize.width;
+    const naturalHeight = image?.naturalHeight || overlayImageSize.height;
+    const scaleX = normalized ? overlayImageSize.width : overlayImageSize.width / (naturalWidth || 1);
+    const scaleY = normalized ? overlayImageSize.height : overlayImageSize.height / (naturalHeight || 1);
+    const left = x0 * scaleX;
+    const top = y0 * scaleY;
+    const width = (x1 - x0) * scaleX;
+    const height = (y1 - y0) * scaleY;
+    if (width <= 0 || height <= 0) return null;
+    return { left, top, width, height };
+  })();
+  const normalizeEdgesToTable = (
+    edges: number[] | null,
+    tableBox: number[] | null,
+    axis: "x" | "y",
+  ) => {
+    if (!edges || edges.length < 2 || !tableBox || tableBox.length < 4) return edges;
+    const [x0, y0, x1, y1] = tableBox;
+    const min = axis === "x" ? x0 : y0;
+    const max = axis === "x" ? x1 : y1;
+    const span = max - min;
+    if (span <= 0) return edges;
+    const epsilon = 0.02;
+    const withinTable = edges.every((edge) => edge >= min - epsilon && edge <= max + epsilon);
+    if (!withinTable) {
+      return edges;
+    }
+    return edges.map((edge) => (edge - min) / span);
+  };
+
+  const overlayColumnEdges = normalizeEdgesToTable(activeColumnEdges, activeTableBox, "x");
+  const overlayRowEdges = normalizeEdgesToTable(activeRowEdges, activeTableBox, "y");
+  const overlayColumnTemplate = (() => {
+    if (!overlayBox || !overlayColumnEdges || overlayColumnEdges.length < 2) {
+      return `repeat(${overlayColumnCount}, 1fr)`;
+    }
+    const widths = overlayColumnEdges
+      .slice(1)
+      .map((edge, idx) => edge - overlayColumnEdges[idx])
+      .map((width) => `${Math.max(width, 0) * 100}%`);
+    return widths.join(" ");
+  })();
+  const overlayColumnEdgesPx = overlayBox && overlayColumnEdges && overlayColumnEdges.length >= 2
+    ? overlayColumnEdges.map((edge) => overlayBox.left + overlayBox.width * edge)
+    : null;
+  const overlayRowTemplate = (() => {
+    if (!overlayBox || !overlayRowEdges || overlayRowEdges.length !== overlayRowCount + 1) {
+      return `repeat(${overlayRowCount}, 1fr)`;
+    }
+    const heights = overlayRowEdges
+      .slice(1)
+      .map((edge, idx) => edge - overlayRowEdges[idx])
+      .map((height) => `${Math.max(height, 0) * 100}%`);
+    return heights.join(" ");
+  })();
+  const overlayRowEdgesPx =
+    overlayBox && overlayRowEdges && overlayRowEdges.length === overlayRowCount + 1
+      ? overlayRowEdges.map((edge) => overlayBox.top + overlayBox.height * edge)
+      : null;
+  const overlayCellHeight = overlayBox ? overlayBox.height / overlayRowCount : 0;
+  const isLegacyEditor = ocrEditorUiMode === "legacy";
+  const overlayEditingEnabled = isLegacyEditor;
+  const activeEditorRows = ocrEditorUiMode === "sheet" ? ocrSheetRows : ocrTableRows;
+  const activeEditorRowIds = ocrEditorUiMode === "sheet" ? ocrSheetRowIds : [];
+  const activeEditorFields = ocrEditorUiMode === "sheet" ? ocrSheetFields : [];
+  const recentOcrHistory = [...ocrHistoryRows].reverse().slice(0, 5);
+  const latestOcrRevisionMode =
+    ocrHistoryLatest?.ui_mode === "sheet"
+      ? "シートUI"
+      : ocrHistoryLatest?.ui_mode === "legacy"
+        ? "レガシーUI"
+        : ocrHistoryLatest?.ui_mode || "-";
+  const latestOcrRevisionChanged =
+    typeof ocrHistoryLatest?.changed === "boolean"
+      ? ocrHistoryLatest.changed
+        ? "あり"
+        : "なし"
+      : "-";
+  const latestOcrRevisionActionLabel =
+    ocrHistoryLatest?.sheet_save_only || ocrHistoryLatest?.sheet_save_mode === "exact"
+      ? "最終保存"
+      : "最終反映";
+  const ocrSheetColumnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
+  const ocrSheetHeaders = Array.from({ length: ocrSheetColumnCount }, (_, idx) => {
+    const name = ocrSheetHeader[idx]?.trim() || "";
+    return name || `列${idx + 1}`;
+  });
+  const ocrSheetDateColumnIndex = (() => {
+    const fieldIdx = ocrSheetFields.findIndex((field) =>
+      String(field || "").trim().toLowerCase().startsWith("date"),
+    );
+    if (fieldIdx >= 0) return fieldIdx;
+    return ocrSheetHeaders.findIndex((header) => {
+      const token = normalizeHeaderToken(header);
+      return token.includes("日付") || token.startsWith("date");
+    });
+  })();
+  const ocrSheetDaypartColumnIndex = (() => {
+    const fieldIdx = ocrSheetFields.findIndex((field) => {
+      const token = String(field || "").trim().toLowerCase();
+      return token === "daypart" || token === "meal" || token === "time";
+    });
+    if (fieldIdx >= 0) return fieldIdx;
+    return ocrSheetHeaders.findIndex((header) => {
+      const token = normalizeHeaderToken(header);
+      return token.includes("区分") || token === "daypart" || token === "meal" || token === "time";
+    });
+  })();
+  const ocrSheetRowDateStripeClasses = (() => {
+    const stripes: string[] = [];
+    let tone = 0;
+    let prevDate = "";
+    ocrSheetRows.forEach((row, idx) => {
+      const rawDate =
+        ocrSheetDateColumnIndex >= 0 && ocrSheetDateColumnIndex < row.length
+          ? row[ocrSheetDateColumnIndex]
+          : "";
+      const dateValue = String(rawDate || "").trim();
+      const effectiveDate = dateValue || prevDate;
+      if (idx === 0) {
+        prevDate = effectiveDate;
+      } else if (effectiveDate && effectiveDate !== prevDate) {
+        tone = tone === 0 ? 1 : 0;
+        prevDate = effectiveDate;
+      } else if (!prevDate && dateValue) {
+        prevDate = dateValue;
+      }
+      stripes.push(tone === 0 ? "ocr-sheet-row-date-a" : "ocr-sheet-row-date-b");
+    });
+    return stripes;
+  })();
+  const ocrSheetRowBoundaryClasses = (() => {
+    const boundaries: string[] = [];
+    let prevDate = "";
+    let prevDaypart = "";
+    ocrSheetRows.forEach((row, idx) => {
+      const rawDate =
+        ocrSheetDateColumnIndex >= 0 && ocrSheetDateColumnIndex < row.length
+          ? row[ocrSheetDateColumnIndex]
+          : "";
+      const rawDaypart =
+        ocrSheetDaypartColumnIndex >= 0 && ocrSheetDaypartColumnIndex < row.length
+          ? row[ocrSheetDaypartColumnIndex]
+          : "";
+      const dateValue = String(rawDate || "").trim();
+      const daypartValue = String(rawDaypart || "").trim();
+      const effectiveDate = dateValue || prevDate;
+      const effectiveDaypart = daypartValue || prevDaypart;
+
+      let boundaryClass = "";
+      if (idx > 0) {
+        if (effectiveDate && prevDate && effectiveDate !== prevDate) {
+          boundaryClass = "ocr-sheet-boundary-date";
+        } else if (
+          effectiveDate &&
+          prevDate &&
+          effectiveDate === prevDate &&
+          effectiveDaypart &&
+          prevDaypart &&
+          effectiveDaypart !== prevDaypart
+        ) {
+          boundaryClass = "ocr-sheet-boundary-daypart";
+        }
+      }
+      boundaries.push(boundaryClass);
+      if (dateValue) prevDate = dateValue;
+      if (daypartValue) prevDaypart = daypartValue;
+    });
+    return boundaries;
+  })();
+  const weeklyMenuMissingWarning =
+    ocrEditorUiMode === "sheet" && ocrSheetSource.startsWith("ocr_table");
+  const ocrReparseBlockedHint = (() => {
+    if (ocrEditorUiMode !== "sheet") return "";
+    const status = String(order?.ocr_status || "").trim().toLowerCase();
+    const error = String(order?.ocr_error || "").trim();
+    if (!error) return "";
+    if (status !== "failed" && status !== "empty") return "";
+    if (error === "sheet_date_anchor_drift") {
+      return "LLM再解析は日付範囲のドリフトを検知したため保存されませんでした。シート再読込では値は変わりません。";
+    }
+    if (error === "sheet_canonical_mismatch") {
+      return "LLM再解析は週メニュー整合チェックで不一致を検知したため保存されませんでした。シート再読込では値は変わりません。";
+    }
+    if (error === "sheet_suspicious_blank_row") {
+      return "LLM再解析は数量行の欠落を検知したため保存されませんでした。シート再読込では値は変わりません。";
+    }
+    if (error === "sheet_row_coverage_low") {
+      return "LLM再解析はOCR行カバレッジ不足を検知したため保存されませんでした。シート再読込では値は変わりません。";
+    }
+    if (error === "sheet_column_anomaly") {
+      return "LLM再解析は施設区分列の異常を検知したため保存されませんでした。シート再読込では値は変わりません。";
+    }
+    return "";
+  })();
+  const persistedFacility = (order?.facility || "").trim();
+  const selectedFacility = facility.trim();
+  const persistedWeek = normalizeWeekId(order?.week || "");
+  const selectedWeek = normalizeWeekId(weekDraft);
+  const facilityMissing = !persistedFacility;
+  const weekMissing = !persistedWeek;
+  const facilitySelectionPending = Boolean(selectedFacility && selectedFacility !== persistedFacility);
+  const weekSelectionPending = Boolean(selectedWeek && selectedWeek !== persistedWeek);
+  const canSaveStep1 =
+    Boolean(selectedFacility && selectedFacility !== persistedFacility) ||
+    Boolean(selectedWeek && selectedWeek !== persistedWeek);
+  const step1Incomplete =
+    facilityMissing || weekMissing || facilitySelectionPending || weekSelectionPending;
+  const facilityTemplateDirty =
+    JSON.stringify(facilityTemplateColumns) !== JSON.stringify(facilityTemplateColumnDraft);
+  const stepCount = orderSteps.length;
+  const activeStepIndex = Math.min(Math.max(activeStep, 0), stepCount - 1);
+  const activeStepMeta = orderSteps[activeStepIndex];
+  const canStepPrev = activeStepIndex > 0;
+  const canStepNext = activeStepIndex < stepCount - 1;
+  const nextStepLabel = canStepNext ? orderSteps[activeStepIndex + 1].label : "";
+  const prevStepLabel = canStepPrev ? orderSteps[activeStepIndex - 1].label : "";
+  const goStep = (index: number) => {
+    const bounded = Math.min(Math.max(index, 0), stepCount - 1);
+    setActiveStep(bounded);
+  };
+  const goNextStep = () => {
+    if (canStepNext) {
+      goStep(activeStepIndex + 1);
+    }
+  };
+  const goPrevStep = () => {
+    if (canStepPrev) {
+      goStep(activeStepIndex - 1);
+    }
+  };
 
   return (
     <main className="page">
@@ -1088,83 +3591,46 @@ export default function OrderDetailPage() {
               <div>
                 <p className="field-label">解析ステータス</p>
                 <p className="summary-value">
-                  {order.ocr_status || "未実行"}
+                  {ocrStatusLabel}
                   {order.ocr_updated_at ? ` / ${formatTimestamp(order.ocr_updated_at)}` : ""}
+                  {order.lines_updated_at ? ` / 明細:${formatTimestamp(order.lines_updated_at)}` : ""}
                 </p>
+                {ocrStatusDetail ? <p className="subtle">{ocrStatusDetail}</p> : null}
               </div>
             </div>
-            <div className="summary-actions">
-              <label className="field">
-                <span className="field-label">施設</span>
-                <select
-                  className="input"
-                  value={facility}
-                  onChange={(e) => setFacility(e.target.value)}
-                  disabled={facilityOptionsLoading}
-                >
-                  <option value="">施設を選択</option>
-                  {facility && !facilityOptions.some((opt) => opt.id === facility) ? (
-                    <option value={facility}>{facility} (未登録)</option>
-                  ) : null}
-                  {facilityOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {formatFacilityLabel(option)}
-                    </option>
-                  ))}
-                </select>
-                {facilityOptionsError ? (
-                  <span className="subtle">{facilityOptionsError}</span>
-                ) : facilityOptionsLoading ? (
-                  <span className="subtle">施設一覧を取得中...</span>
-                ) : null}
-              </label>
-              <button className="btn" onClick={updateFacility}>
-                施設を設定
-              </button>
-            </div>
-            {facilityCandidates.length ? (
-              <div className="facility-suggestions">
-                <span className="field-label">推定施設</span>
-                <div className="facility-suggestion-list">
-                  {facilityCandidates.map((candidate) => (
-                    <button
-                      key={`${candidate.facility_id}-${candidate.reason || "auto"}`}
-                      type="button"
-                      className={`facility-chip${candidate.auto ? " auto" : ""}`}
-                      onClick={() => setFacility(candidate.facility_id)}
-                    >
-                      <span className="facility-chip-name">
-                        {candidate.facility_name || candidate.facility_id}
-                      </span>
-                      {candidate.score != null ? (
-                        <span className="facility-chip-score">
-                          {Math.round(candidate.score * 100)}%
-                        </span>
-                      ) : null}
-                      {candidate.reason ? (
-                        <span className="facility-chip-reason">
-                          {formatFacilityReason(candidate.reason)}
-                        </span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-                <span className="facility-suggestion-note">クリックで施設選択に反映します。</span>
-              </div>
-            ) : null}
             <div className="summary-actions summary-actions-right">
-              <button className="btn ghost" onClick={reparse} disabled={reparsePending}>
+              <button className="btn ghost" onClick={() => void reparse()} disabled={reparsePending}>
                 {reparsePending ? "再解析中..." : "再解析"}
+              </button>
+              <select
+                className="input llm-provider-select"
+                value={llmReparseProvider}
+                onChange={(event) => setLlmReparseProvider(event.target.value)}
+                disabled={reparsePending}
+              >
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Gemini</option>
+              </select>
+              <button
+                className="btn primary"
+                onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
+                disabled={reparsePending}
+              >
+                {reparsePending ? "再解析中..." : "LLM補完再解析"}
               </button>
             </div>
             {order.ocr_prompt_enabled === false ? null : (
               <details className="prompt-panel">
-                <summary>OCRプロンプト（任意）</summary>
+                <summary>LLM追加ユーザープロンプト（任意）</summary>
+                <p className="subtle">
+                  LLM補完再解析時、システムプロンプトは固定で適用されます。ここに入力した内容は追加のユーザー指示として末尾に連結されます。
+                </p>
                 <textarea
                   className="input"
                   rows={4}
                   value={ocrPrompt}
                   onChange={(e) => setOcrPrompt(e.target.value)}
+                  placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
                 />
               </details>
             )}
@@ -1189,6 +3655,13 @@ export default function OrderDetailPage() {
                     {" / "}テンプレート:{" "}
                     {ocrOutput.template_id || "未分類"}
                   </p>
+                  {ocrOutput.ocr_source ? <p>反映ソース: {ocrOutput.ocr_source}</p> : null}
+                  {ocrOutput.edited_table?.edited_at ? (
+                    <p>
+                      最終編集: {formatTimestamp(ocrOutput.edited_table.edited_at)} / UI:{" "}
+                      {ocrOutput.edited_table.ui_mode || "-"}
+                    </p>
+                  ) : null}
                   {ocrOutput.warnings?.length ? (
                     <p>警告: {ocrOutput.warnings.join(" / ")}</p>
                   ) : null}
@@ -1203,6 +3676,106 @@ export default function OrderDetailPage() {
                   ) : (
                     <p>失敗セルなし</p>
                   )}
+                  <div className="reparse-debug-panel">
+                    <p className="subtle">再解析デバッグ</p>
+                    {reparseDebug ? (
+                      <>
+                      <p>
+                        Provider: {reparseDebug.provider || "-"}
+                        {reparseDebug.requested_provider
+                          ? ` / requested=${reparseDebug.requested_provider}`
+                          : ""}
+                      </p>
+                      <p>
+                        行数: OCR {reparseDebug.row_count ?? "-"} / 明細 {reparseDebug.line_count ?? "-"} /{" "}
+                        変更:{" "}
+                        {typeof reparseDebug.changed === "boolean"
+                          ? reparseDebug.changed
+                            ? "あり"
+                            : "なし"
+                          : "-"}
+                      </p>
+                      <p>
+                        件数: {reparseDebug.before_count ?? "-"}→{reparseDebug.after_count ?? "-"} /{" "}
+                        LLM補完:{" "}
+                        {typeof reparseDebug.llm_assist === "boolean"
+                          ? reparseDebug.llm_assist
+                            ? "ON"
+                            : "OFF"
+                          : "-"}
+                      </p>
+                      {reparseDebug.updated_at ? (
+                        <p>更新: {formatTimestamp(reparseDebug.updated_at)}</p>
+                      ) : null}
+                      {reparseDebug.error ? <p>エラー: {reparseDebug.error}</p> : null}
+                      {Array.isArray(reparseDebug.reject_reasons) && reparseDebug.reject_reasons.length ? (
+                        <p>拒否理由: {reparseDebug.reject_reasons.join(" / ")}</p>
+                      ) : null}
+                      {Array.isArray(reparseDebug.warning_reasons) && reparseDebug.warning_reasons.length ? (
+                        <p>
+                          警告理由:{" "}
+                          {reparseDebug.warning_reasons
+                            .map((code) => describeReparseWarningReason(String(code || "")))
+                            .filter(Boolean)
+                            .join(" / ")}
+                        </p>
+                      ) : null}
+                      {Array.isArray(reparseDebug.date_strings) && reparseDebug.date_strings.length ? (
+                        <p>日付候補: {reparseDebug.date_strings.join(", ")}</p>
+                      ) : null}
+                      {typeof reparseDebug.request_prompt === "string" && reparseDebug.request_prompt ? (
+                        <>
+                          <p className="subtle">送信プロンプト</p>
+                          <pre className="raw-output">{reparseDebug.request_prompt}</pre>
+                        </>
+                      ) : null}
+                      {Array.isArray(reparseDebug.sample_rows) && reparseDebug.sample_rows.length ? (
+                        <>
+                          <p className="subtle">OCR行サンプル</p>
+                          <pre className="raw-output">{reparseDebug.sample_rows.map((row) => row.join(" | ")).join("\n")}</pre>
+                        </>
+                      ) : null}
+                      {reparseNormalizedLinesText ? (
+                        <>
+                          <p className="subtle">正規化後行（保存前）</p>
+                          <pre className="raw-output">{reparseNormalizedLinesText}</pre>
+                        </>
+                      ) : null}
+                      {typeof reparseDebug.raw_text === "string" && reparseDebug.raw_text ? (
+                        <>
+                          <p className="subtle">LLM生出力</p>
+                          <pre className="raw-output">{reparseDebug.raw_text}</pre>
+                        </>
+                      ) : null}
+                      {reparseValidationDetailText ? (
+                        <>
+                          <p className="subtle">検証詳細</p>
+                          <pre className="raw-output">{reparseValidationDetailText}</pre>
+                        </>
+                      ) : null}
+                      {reparseWarningDetailText ? (
+                        <>
+                          <p className="subtle">警告詳細</p>
+                          <pre className="raw-output">{reparseWarningDetailText}</pre>
+                        </>
+                      ) : null}
+                      {reparseQuantityMergeText ? (
+                        <>
+                          <p className="subtle">数量専用マージ統計</p>
+                          <pre className="raw-output">{reparseQuantityMergeText}</pre>
+                        </>
+                      ) : null}
+                      {reparseProviderDebugText ? (
+                        <>
+                          <p className="subtle">LLMメタ情報</p>
+                          <pre className="raw-output">{reparseProviderDebugText}</pre>
+                        </>
+                      ) : null}
+                      </>
+                    ) : (
+                      <p>まだ再解析デバッグ情報がありません。LLM補完再解析を実行すると表示されます。</p>
+                    )}
+                  </div>
                   {typeof ocrOutput.table_raw === "string" && ocrOutput.table_raw ? (
                     <>
                       <p className="subtle">OCR生出力</p>
@@ -1212,212 +3785,1087 @@ export default function OrderDetailPage() {
                 </div>
               ) : null}
             </details>
-            {actionMessage && <p className="message">{actionMessage}</p>}
-          </section>
-
-          <section className="panel">
-            <header className="panel-header">
-              <div>
-                <h2>メニュー×区分 サマリー</h2>
-                <p className="subtle">OCRオーバーレイと原本、読み取り結果を確認できます。</p>
-              </div>
-              <div className="panel-actions">
-                <button className="btn ghost" type="button" onClick={loadOcrPages} disabled={ocrPagesLoading}>
-                  {ocrPagesLoading ? "取得中..." : "OCRページを更新"}
-                </button>
-                <button
-                  className="btn primary"
-                  type="button"
-                  onClick={applyOcrPreview}
-                  disabled={ocrTableSaving || !ocrTableRows.length}
-                >
-                  {ocrTableSaving ? "反映中..." : "OCR結果を明細に反映"}
-                </button>
-                <button
-                  className={`btn ${showOcrEdit ? "primary" : "ghost"}`}
-                  type="button"
-                  onClick={() => setShowOcrEdit((prev) => !prev)}
-                >
-                  {showOcrEdit ? "編集を閉じる" : "編集"}
-                </button>
-              </div>
-            </header>
-            {ocrPagesMessage ? <p className="subtle">{ocrPagesMessage}</p> : null}
-            {ocrPages.length > 1 ? (
-              <div className="page-tabs">
-                {ocrPages.map((page, pageIdx) => (
-                  <button
-                    key={`ocr-page-${page.page_index ?? pageIdx}`}
-                    type="button"
-                    className={`page-tab ${pageIdx === activeOcrPageIndex ? "active" : ""}`}
-                    onClick={() => selectOcrPage(pageIdx)}
-                  >
-                    Page {page.page_index ?? pageIdx + 1}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <div className="ocr-showcase">
-              <div className="ocr-preview-card">
-                <div className="preview-header">
-                  <span className="subtle">OCRオーバーレイ</span>
-                  {activeOcrPageLabel != null ? (
-                    <span className="subtle">Page {activeOcrPageLabel}</span>
-                  ) : null}
-                </div>
-                {activeOcrPage?.ocr_overlay_url ? (
-                  <img src={activeOcrPage.ocr_overlay_url} alt="OCR overlay" className="ocr-preview" />
-                ) : (
-                  <div className="preview-placeholder">OCRオーバーレイなし</div>
-                )}
-                {activeOcrPage?.layout_overlay_url ? (
-                  <>
-                    <p className="subtle">レイアウトオーバーレイ</p>
-                    <img src={activeOcrPage.layout_overlay_url} alt="Layout overlay" className="ocr-preview" />
-                  </>
-                ) : null}
-              </div>
-              <div className="ocr-preview-card">
-                <div className="preview-header">
-                  <span className="subtle">原本PDF</span>
-                  {pdfUrl ? (
-                    <a href={pdfUrl} target="_blank" rel="noreferrer" className="ghost-link">
-                      原本を開く
-                    </a>
-                  ) : (
-                    <span className="subtle">{pdfError || "PDFを読み込み中..."}</span>
-                  )}
-                </div>
-                {pdfUrl ? (
-                  <iframe title="order-pdf" src={pdfUrl} className="pdf-frame pdf-frame-compact" />
-                ) : (
-                  <div className="pdf-frame pdf-placeholder">{pdfError || "PDFを読み込み中..."}</div>
-                )}
-              </div>
-            </div>
-            <div className="ocr-result">
-              <div className="ocr-result-header">
-                <p className="subtle">読み取り結果</p>
+            <details className="prompt-panel">
+              <summary>注文操作履歴</summary>
+              <div className="raw-actions">
                 <button
                   className="btn ghost"
                   type="button"
-                  onClick={() => setShowMarkdownRaw((prev) => !prev)}
+                  onClick={() => loadOrderHistory()}
+                  disabled={orderHistoryLoading}
                 >
-                  {showMarkdownRaw ? "全体を閉じる" : "全体を表示"}
+                  {orderHistoryLoading ? "取得中..." : "履歴を更新"}
+                </button>
+                {orderHistoryMessage ? <span className="raw-message">{orderHistoryMessage}</span> : null}
+              </div>
+              {orderHistoryRows.length ? (
+                <div className="order-history-list">
+                  {orderHistoryRows.slice(0, 30).map((item, idx) => (
+                    <div className="order-history-row" key={`order-history-${item.id || idx}`}>
+                      <span>{formatTimestamp(item.created_at)}</span>
+                      <span>{formatOrderAction(item.action)}</span>
+                      <span>{item.actor || "-"}</span>
+                      <span>{item.target || "-"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="subtle">履歴はまだありません。</p>
+              )}
+            </details>
+            {actionMessage && <p className="message">{actionMessage}</p>}
+          </section>
+
+          <section className="panel step-panel">
+            <header className="panel-header">
+              <div>
+                <h2>進行ステップ</h2>
+                <p className="subtle">左から順に進み、必要に応じてタブで戻れます。</p>
+              </div>
+              <span className="step-indicator">
+                Step {activeStepIndex + 1} / {stepCount}
+              </span>
+            </header>
+            <div className="step-tabs">
+              {orderSteps.map((step, idx) => (
+                <button
+                  key={step.id}
+                  type="button"
+                  className={`step-tab${idx === activeStepIndex ? " active" : ""}${
+                    idx < activeStepIndex ? " done" : ""
+                  }`}
+                  onClick={() => goStep(idx)}
+                >
+                  <span className="step-number">{idx + 1}</span>
+                  <span className="step-label">{step.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="step-meta">
+              <div>
+                <p className="step-title">{activeStepMeta.title}</p>
+                <p className="subtle">{activeStepMeta.description}</p>
+              </div>
+              <div className="step-actions">
+                <button className="btn ghost" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
+                  {canStepPrev ? `戻る: ${prevStepLabel}` : "戻る"}
+                </button>
+                <button className="btn primary" type="button" onClick={goNextStep} disabled={!canStepNext}>
+                  {canStepNext ? `次へ: ${nextStepLabel}` : "次へ"}
                 </button>
               </div>
-              {!showMarkdownRaw && activeMarkdownLines.length > previewLineLimit ? (
-                <p className="subtle">先頭10行のみ表示しています。</p>
-              ) : null}
-              <div className="markdown-preview">
-                {displayedOcrBlocks.length ? (
-                  displayedOcrBlocks.map((block, blockIdx) =>
-                    block.type === "table" ? (
-                      <div key={`table-${blockIdx}`} className="markdown-table">
-                        <table>
-                          {block.header.length ? (
-                            <thead>
-                              <tr>
-                                {block.header.map((cell, idx) => (
-                                  <th key={`header-${idx}`}>{cell}</th>
-                                ))}
-                              </tr>
-                            </thead>
+            </div>
+          </section>
+
+          {activeStepIndex === 0 ? (
+            <section className="panel">
+              <header className="panel-header">
+                <div>
+                  <h2>注文書 (FAX PDF)</h2>
+                  <p className="subtle">原本PDFを確認し、施設と週設定を完了してください。</p>
+                </div>
+                {pdfUrl ? (
+                  <a href={pdfUrl} target="_blank" rel="noreferrer" className="ghost-link">
+                    原本を開く
+                  </a>
+                ) : (
+                  <span className="subtle">{pdfError || "PDFを読み込み中..."}</span>
+                )}
+              </header>
+              <div className="step1-facility-block">
+                <div className="summary-actions">
+                  <label className="field">
+                    <span className="field-label">施設 (Step1 必須)</span>
+                    <select
+                      className="input"
+                      value={facility}
+                      onChange={(e) => setFacility(e.target.value)}
+                      disabled={facilityOptionsLoading}
+                    >
+                      <option value="">施設を選択</option>
+                      {facility && !facilityOptions.some((opt) => opt.id === facility) ? (
+                        <option value={facility}>{facility} (未登録)</option>
+                      ) : null}
+                      {facilityOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {formatFacilityLabel(option)}
+                        </option>
+                      ))}
+                    </select>
+                    {facilityOptionsError ? (
+                      <span className="subtle">{facilityOptionsError}</span>
+                    ) : facilityOptionsLoading ? (
+                      <span className="subtle">施設一覧を取得中...</span>
+                    ) : null}
+                  </label>
+                  <label className="field">
+                    <span className="field-label">週 (Step1 必須)</span>
+                    {weekOptions.length ? (
+                      <select
+                        className="input"
+                        value={weekDraft}
+                        onChange={(e) => setWeekDraft(e.target.value)}
+                        disabled={weekOptionsLoading}
+                      >
+                        <option value="">週を選択</option>
+                        {weekDraft && !weekOptions.some((option) => option.week_id === weekDraft) ? (
+                          <option value={weekDraft}>{weekDraft} (現在値)</option>
+                        ) : null}
+                        {weekOptions.map((option) => (
+                          <option key={option.week_id} value={option.week_id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        className="input"
+                        type="month"
+                        value={weekDraft}
+                        onChange={(e) => setWeekDraft(e.target.value)}
+                      />
+                    )}
+                    {weekOptionsError ? (
+                      <span className="subtle">{weekOptionsError}</span>
+                    ) : weekOptionsLoading ? (
+                      <span className="subtle">週候補を取得中...</span>
+                    ) : weekOptions.length ? (
+                      <span className="subtle">メニュー期間から選択できます。</span>
+                    ) : (
+                      <span className="subtle">候補がないため YYYY-MM を手入力してください。</span>
+                    )}
+                  </label>
+                  <button className="btn" onClick={updateStep1} disabled={!canSaveStep1}>
+                    {facilitySelectionPending || weekSelectionPending || step1Incomplete ? "設定を保存" : "設定済み"}
+                  </button>
+                </div>
+                {step1Incomplete ? (
+                  <div className="warning-banner">
+                    {facilityMissing ? <p>この注文は施設が未設定です。Step2 に進む前に施設設定が必要です。</p> : null}
+                    {weekMissing ? <p>この注文は週が未設定です。Step2 に進む前に週設定が必要です。</p> : null}
+                    {facilitySelectionPending ? <p>施設の選択内容が未保存です。「設定を保存」を押してください。</p> : null}
+                    {weekSelectionPending ? <p>週の選択内容が未保存です。「設定を保存」を押してください。</p> : null}
+                  </div>
+                ) : null}
+                {facilityCandidates.length ? (
+                  <div className="facility-suggestions">
+                    <span className="field-label">推定施設</span>
+                    <div className="facility-suggestion-list">
+                      {facilityCandidates.map((candidate) => (
+                        <button
+                          key={`${candidate.facility_id}-${candidate.reason || "auto"}`}
+                          type="button"
+                          className={`facility-chip${candidate.auto ? " auto" : ""}`}
+                          onClick={() => setFacility(candidate.facility_id)}
+                        >
+                          <span className="facility-chip-name">
+                            {candidate.facility_name || candidate.facility_id}
+                          </span>
+                          {candidate.score != null ? (
+                            <span className="facility-chip-score">
+                              {Math.round(candidate.score * 100)}%
+                            </span>
                           ) : null}
+                          {candidate.reason ? (
+                            <span className="facility-chip-reason">
+                              {formatFacilityReason(candidate.reason)}
+                            </span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="facility-suggestion-note">
+                      クリックで施設選択に反映します。反映後に「設定を保存」を押してください。
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+              {pdfUrl ? (
+                <iframe title="order-pdf" src={pdfUrl} className="pdf-frame pdf-frame-wide" />
+              ) : (
+                <div className="pdf-frame pdf-placeholder">{pdfError || "PDFを読み込み中..."}</div>
+              )}
+            </section>
+          ) : null}
+
+          {activeStepIndex === 1 ? (
+            <section className="panel">
+                  <header className="panel-header">
+                    <div>
+                      <h2>OCR修正</h2>
+                      <p className="subtle">標準はシートUIです。オーバーレイ編集とレイアウト調整はレガシーUI（バックアップ）で使えます。</p>
+                    </div>
+                    <div className="panel-actions">
+                      <button className="btn ghost" type="button" onClick={loadOcrPages} disabled={ocrPagesLoading}>
+                        {ocrPagesLoading ? "取得中..." : "OCRページを更新"}
+                      </button>
+                      <div className="ocr-editor-mode-switch" role="tablist" aria-label="OCR editor mode">
+                        <button
+                          className={`btn ${ocrEditorUiMode === "sheet" ? "primary" : "ghost"}`}
+                          type="button"
+                          onClick={switchToSheetMode}
+                        >
+                          シートUI
+                        </button>
+                        <button
+                          className={`btn ${ocrEditorUiMode === "legacy" ? "primary" : "ghost"}`}
+                          type="button"
+                          onClick={switchToLegacyMode}
+                        >
+                          レガシーUI（バックアップ）
+                        </button>
+                      </div>
+                      <button
+                        className="btn primary"
+                        type="button"
+                        onClick={applyOcrAndMoveToDetails}
+                        disabled={ocrTableSaving || step1Incomplete}
+                      >
+                        {ocrTableSaving ? "反映中..." : "修正完了して明細へ"}
+                      </button>
+                    </div>
+                  </header>
+                  {step1Incomplete ? (
+                    <div className="warning-banner">
+                      <p>Step1 の施設または週が未設定、または未保存のため、OCR修正はまだ開始できません。</p>
+                      <p>Step1（注文書）で施設と週を設定して保存してから、このステップを再読込してください。</p>
+                      <div className="panel-actions">
+                        <button
+                          className="btn"
+                          type="button"
+                          onClick={() => {
+                            goStep(0);
+                            if (typeof window !== "undefined") {
+                              window.scrollTo({ top: 0, behavior: "smooth" });
+                            }
+                          }}
+                        >
+                          施設設定へ戻る
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {ocrPagesMessage ? <p className="subtle">{ocrPagesMessage}</p> : null}
+                  {ocrPages.length > 1 ? (
+                    <div className="page-tabs">
+                      {ocrPages.map((page, pageIdx) => (
+                        <button
+                          key={`ocr-page-${page.page_index ?? pageIdx}`}
+                          type="button"
+                          className={`page-tab ${pageIdx === activeOcrPageIndex ? "active" : ""}`}
+                          onClick={() => selectOcrPage(pageIdx)}
+                        >
+                          Page {page.page_index ?? pageIdx + 1}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {weeklyMenuMissingWarning ? (
+                    <p className="warning-banner">
+                      警告: この注文の週次メニューが未設定のため、OCRテーブルを暫定ソースとして表示しています。週次メニュー設定後に再読込してください。
+                    </p>
+                  ) : null}
+                  <div className="ocr-showcase">
+                    <div className="ocr-preview-card">
+                      <div className="preview-header">
+                        <span className="subtle">OCRオーバーレイ</span>
+                        {activeOcrPageLabel != null ? (
+                          <span className="subtle">Page {activeOcrPageLabel}</span>
+                        ) : null}
+                      </div>
+                      <div className={`edit-hint${overlayEditingEnabled ? " active" : ""}`}>
+                        {isLegacyEditor
+                          ? "レガシー編集: セルをクリックして直接修正できます。"
+                          : "シート編集が標準です。オーバーレイ編集はレガシーUIで利用できます。"}
+                      </div>
+                      {showOcrOverlay ? (
+                        <div
+                          className={`ocr-preview-wrapper${overlayEditingEnabled ? " editable" : ""}`}
+                          onClick={() => setOverlayActiveCell(null)}
+                        >
+                          <img
+                            ref={overlayImageRef}
+                            src={ocrOverlayUrl || ""}
+                            alt="OCR overlay"
+                            className="ocr-preview"
+                            onError={() => {
+                              setOcrOverlayError(true);
+                              if (!ocrOverlayRetry && !ocrPagesLoading) {
+                                setOcrOverlayRetry(true);
+                                loadOcrPages();
+                              }
+                            }}
+                          />
+                          {overlayEditingEnabled && overlayBox ? (
+                            <>
+                              <div
+                                className="ocr-overlay-grid"
+                                style={{
+                                  left: `${overlayBox.left}px`,
+                                  top: `${overlayBox.top}px`,
+                                  width: `${overlayBox.width}px`,
+                                  height: `${overlayBox.height}px`,
+                                  gridTemplateColumns: overlayColumnTemplate,
+                                  gridTemplateRows: overlayRowTemplate,
+                                }}
+                              >
+                                {Array.from({ length: overlayRowCount * overlayColumnCount }).map((_, idx) => {
+                                  const row = Math.floor(idx / overlayColumnCount);
+                                  const col = idx % overlayColumnCount;
+                                  const value = getOverlayCellValue(row, col);
+                                  const isActive =
+                                    overlayActiveCell?.row === row && overlayActiveCell?.col === col;
+                                  return (
+                                    <button
+                                      key={`overlay-${row}-${col}`}
+                                      type="button"
+                                      className={`ocr-overlay-cell${isActive ? " active" : ""}`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setOverlayActiveCell({ row, col });
+                                      }}
+                                      title={value}
+                                    >
+                                      <span className="ocr-overlay-text">{value}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              {overlayActiveCell && overlayCellHeight > 0 ? (
+                                <input
+                                  ref={overlayInputRef}
+                                  className="input ocr-overlay-input"
+                                  value={getOverlayCellValue(
+                                    overlayActiveCell.row,
+                                    overlayActiveCell.col,
+                                  )}
+                                  onChange={(event) =>
+                                    updateOverlayCellValue(
+                                      overlayActiveCell.row,
+                                      overlayActiveCell.col,
+                                      event.target.value,
+                                    )
+                                  }
+                                  onClick={(event) => event.stopPropagation()}
+                                  style={{
+                                    left: `${
+                                      overlayColumnEdgesPx
+                                        ? overlayColumnEdgesPx[overlayActiveCell.col]
+                                        : overlayBox.left + (overlayBox.width / overlayColumnCount) * overlayActiveCell.col
+                                    }px`,
+                                    top: `${
+                                      overlayRowEdgesPx
+                                        ? overlayRowEdgesPx[overlayActiveCell.row]
+                                        : overlayBox.top + overlayCellHeight * overlayActiveCell.row
+                                    }px`,
+                                    width: `${
+                                      overlayColumnEdgesPx
+                                        ? (overlayColumnEdgesPx[overlayActiveCell.col + 1] ??
+                                          overlayBox.left + overlayBox.width) -
+                                          overlayColumnEdgesPx[overlayActiveCell.col]
+                                        : overlayBox.width / overlayColumnCount
+                                    }px`,
+                                    height: `${
+                                      overlayRowEdgesPx
+                                        ? (overlayRowEdgesPx[overlayActiveCell.row + 1] ??
+                                          overlayBox.top + overlayBox.height) -
+                                          overlayRowEdgesPx[overlayActiveCell.row]
+                                        : overlayCellHeight
+                                    }px`,
+                                  }}
+                                />
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
+                      )}
+                      <div className="layout-toggle">
+                        <button
+                          className="btn ghost"
+                          type="button"
+                          onClick={() => setShowLayoutOverlay((prev) => !prev)}
+                          disabled={!canToggleLayoutOverlay}
+                        >
+                          {showLayoutOverlay ? "レイアウトを閉じる" : "レイアウトを表示"}
+                        </button>
+                        <span className="subtle">
+                          {canToggleLayoutOverlay ? "レイアウトオーバーレイ" : layoutOverlayPlaceholder}
+                        </span>
+                      </div>
+                      {showLayoutOverlay ? (
+                        showLayoutOverlayImage ? (
+                          <img
+                            src={layoutOverlayUrl || ""}
+                            alt="Layout overlay"
+                            className="ocr-preview"
+                            onError={() => {
+                              setLayoutOverlayError(true);
+                              if (!layoutOverlayRetry && !ocrPagesLoading) {
+                                setLayoutOverlayRetry(true);
+                                loadOcrPages();
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="preview-placeholder">{layoutOverlayPlaceholder}</div>
+                        )
+                      ) : null}
+                      <div className="table-box-editor">
+                        <div className="table-box-header">
+                          <span className="field-label">レイアウト調整</span>
+                          <button
+                            className="btn ghost"
+                            type="button"
+                            onClick={toggleTableBoxEditor}
+                            disabled={!isLegacyEditor || !ocrOverlayUrl}
+                          >
+                            {showTableBoxEditor ? "調整を閉じる" : "調整を開く"}
+                          </button>
+                        </div>
+                        {!isLegacyEditor ? (
+                          <p className="subtle">レイアウト調整はレガシーUI（バックアップ）で利用できます。</p>
+                        ) : showTableBoxEditor ? (
+                          <>
+                            <div className="table-box-primary">
+                              <button
+                                className="btn primary"
+                                type="button"
+                                onClick={detectGridEdges}
+                                disabled={gridDetecting}
+                              >
+                                {gridDetecting ? "自動検出中..." : "自動で合わせる"}
+                              </button>
+                              <button
+                                className="btn ghost"
+                                type="button"
+                                onClick={resetTableBoxDraft}
+                                disabled={!tableBoxReady}
+                              >
+                                元に戻す
+                              </button>
+                              <button
+                                className="btn ghost"
+                                type="button"
+                                onClick={() => setRowCount(overlayRowCount)}
+                                disabled={!overlayRowCount}
+                              >
+                                行境界を均等割
+                              </button>
+                              <button
+                                className="btn primary"
+                                type="button"
+                                onClick={saveTableBox}
+                                disabled={tableBoxSaving || !tableBoxReady}
+                              >
+                                {tableBoxSaving ? "保存中..." : "施設テンプレに保存"}
+                              </button>
+                            </div>
+                            <details className="table-box-advanced">
+                              <summary>詳細調整</summary>
+                              <p className="subtle">単位: {tableBoxUnitsLabel}</p>
+                              <div className="table-box-grid">
+                                <label className="table-box-field">
+                                  <span>x0</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={tableBoxNormalized ? 0.001 : 1}
+                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[0], tableBoxDecimals) : ""}
+                                    onChange={(event) => updateTableBoxIndex(0, event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>y0</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={tableBoxNormalized ? 0.001 : 1}
+                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[1], tableBoxDecimals) : ""}
+                                    onChange={(event) => updateTableBoxIndex(1, event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>x1</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={tableBoxNormalized ? 0.001 : 1}
+                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[2], tableBoxDecimals) : ""}
+                                    onChange={(event) => updateTableBoxIndex(2, event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>y1</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={tableBoxNormalized ? 0.001 : 1}
+                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[3], tableBoxDecimals) : ""}
+                                    onChange={(event) => updateTableBoxIndex(3, event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>微調整幅</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={tableBoxNormalized ? 0.001 : 1}
+                                    value={tableBoxStep}
+                                    onChange={(event) => {
+                                      const parsed = Number(event.target.value);
+                                      if (!Number.isNaN(parsed)) {
+                                        setTableBoxStep(parsed);
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>列数</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    min={2}
+                                    value={
+                                      (activeColumnEdges && activeColumnEdges.length >= 2
+                                        ? activeColumnEdges.length - 1
+                                        : fallbackColumnCount) || ""
+                                    }
+                                    onChange={(event) => {
+                                      const parsed = Number(event.target.value);
+                                      if (!Number.isNaN(parsed)) {
+                                        setColumnCount(parsed);
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>列境界(%)</span>
+                                  <input
+                                    className="input"
+                                    type="text"
+                                    placeholder="例: 12, 28, 45"
+                                    value={columnEdgesText}
+                                    onChange={(event) => {
+                                      const raw = event.target.value;
+                                      setColumnEdgesText(raw);
+                                      updateColumnEdgesText(raw);
+                                    }}
+                                  />
+                                </label>
+                                <div className="table-box-field">
+                                  <span>行数</span>
+                                  <span className="subtle">{overlayRowCount || "-"}</span>
+                                </div>
+                                <label className="table-box-field">
+                                  <span>行境界(%)</span>
+                                  <input
+                                    className="input"
+                                    type="text"
+                                    placeholder="例: 6, 12, 20"
+                                    value={rowEdgesText}
+                                    onChange={(event) => {
+                                      const raw = event.target.value;
+                                      setRowEdgesText(raw);
+                                      updateRowEdgesText(raw);
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                              <p className="subtle">検出パラメータ</p>
+                              <div className="table-box-grid">
+                                <label className="table-box-field">
+                                  <span>DPI</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={1}
+                                    value={gridParamsDraft.grid_dpi}
+                                    onChange={(event) => updateGridParam("grid_dpi", event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>線抽出スケール</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={1}
+                                    value={gridParamsDraft.grid_line_scale}
+                                    onChange={(event) => updateGridParam("grid_line_scale", event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>線抽出閾値</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={0.05}
+                                    value={gridParamsDraft.grid_line_min_ratio}
+                                    onChange={(event) => updateGridParam("grid_line_min_ratio", event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>線結合ギャップ</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={1}
+                                    value={gridParamsDraft.grid_line_merge_gap}
+                                    onChange={(event) => updateGridParam("grid_line_merge_gap", event.target.value)}
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>列結合許容</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={0.005}
+                                    value={gridParamsDraft.grid_line_merge_tolerance}
+                                    onChange={(event) =>
+                                      updateGridParam("grid_line_merge_tolerance", event.target.value)
+                                    }
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>想定列数</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={1}
+                                    value={gridParamsDraft.grid_expected_columns}
+                                    onChange={(event) =>
+                                      updateGridParam("grid_expected_columns", event.target.value)
+                                    }
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>数量列許容</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={0.005}
+                                    value={gridParamsDraft.grid_qty_gap_tolerance}
+                                    onChange={(event) =>
+                                      updateGridParam("grid_qty_gap_tolerance", event.target.value)
+                                    }
+                                  />
+                                </label>
+                                <label className="table-box-field">
+                                  <span>日付列比率</span>
+                                  <input
+                                    className="input"
+                                    type="number"
+                                    step={0.05}
+                                    value={gridParamsDraft.grid_left_date_ratio}
+                                    onChange={(event) =>
+                                      updateGridParam("grid_left_date_ratio", event.target.value)
+                                    }
+                                  />
+                                </label>
+                              </div>
+                              <div className="table-box-nudge">
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => nudgeTableBox(0, -tableBoxNudge)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  上へ
+                                </button>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => nudgeTableBox(0, tableBoxNudge)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  下へ
+                                </button>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => nudgeTableBox(-tableBoxNudge, 0)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  左へ
+                                </button>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => nudgeTableBox(tableBoxNudge, 0)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  右へ
+                                </button>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => expandTableBox(tableBoxNudge)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  広げる
+                                </button>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={() => expandTableBox(-tableBoxNudge)}
+                                  disabled={!tableBoxReady}
+                                >
+                                  縮める
+                                </button>
+                              </div>
+                            </details>
+                            {tableBoxMessage ? <p className="subtle">{tableBoxMessage}</p> : null}
+                            {gridDetectMessage ? <p className="subtle">{gridDetectMessage}</p> : null}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="facility-template-editor">
+                    <div className="table-box-header">
+                      <span className="field-label">施設区分列</span>
+                      <button
+                        className="btn primary"
+                        type="button"
+                        onClick={saveFacilityTemplateColumns}
+                        disabled={!facilityTemplateDirty || facilityTemplateSaving || !facility || step1Incomplete}
+                      >
+                        {facilityTemplateSaving ? "保存中..." : "施設テンプレに保存"}
+                      </button>
+                    </div>
+                    <p className="subtle">
+                      施設区分の列名と数量列定義を施設テンプレートへ保存します。保存先は現在の施設設定です。
+                    </p>
+                    {!facility ? (
+                      <p className="subtle">施設を選択すると施設区分列を編集できます。</p>
+                    ) : facilityTemplateColumnDraft.length ? (
+                      <div className="facility-template-table-wrap">
+                        <table className="ocr-sheet-table facility-template-table">
+                          <thead>
+                            <tr>
+                              <th>列番号</th>
+                              <th>役割</th>
+                              <th>表示名</th>
+                              <th>内部名</th>
+                              <th>diet_type</th>
+                              <th>area_id</th>
+                            </tr>
+                          </thead>
                           <tbody>
-                            {block.rows.map((row, rowIdx) => (
-                              <tr key={`row-${rowIdx}`}>
-                                {row.map((cell, idx) => (
-                                  <td key={`cell-${rowIdx}-${idx}`}>{cell}</td>
-                                ))}
+                            {facilityTemplateColumnDraft.map((column, idx) => (
+                              <tr key={`facility-template-column-${column.index}-${idx}`}>
+                                <td>{column.index + 1}</td>
+                                <td>
+                                  <select
+                                    className="input"
+                                    value={column.role}
+                                    onChange={(event) =>
+                                      updateFacilityTemplateColumn(idx, "role", event.target.value)
+                                    }
+                                  >
+                                    {columnRoleOptions.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.header || ""}
+                                    onChange={(event) =>
+                                      updateFacilityTemplateColumn(idx, "header", event.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.name || ""}
+                                    onChange={(event) =>
+                                      updateFacilityTemplateColumn(idx, "name", event.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.diet_type || ""}
+                                    disabled={!isQuantityRole(column.role)}
+                                    onChange={(event) =>
+                                      updateFacilityTemplateColumn(idx, "diet_type", event.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.area_id || ""}
+                                    disabled={!isQuantityRole(column.role)}
+                                    onChange={(event) =>
+                                      updateFacilityTemplateColumn(idx, "area_id", event.target.value)
+                                    }
+                                  />
+                                </td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
                     ) : (
-                      <div key={`text-${blockIdx}`} className="markdown-text">
-                        {block.lines.map((line, idx) => renderMarkdownLine(line, `${blockIdx}-${idx}`))}
+                      <p className="subtle">施設テンプレートの列定義がありません。</p>
+                    )}
+                    {facilityTemplateMessage ? <p className="subtle">{facilityTemplateMessage}</p> : null}
+                  </div>
+                  <div className="ocr-edit">
+                      <div className="ocr-edit-header">
+                        <div>
+                          <p className="subtle">
+                            編集対象:{" "}
+                            {ocrEditorUiMode === "sheet"
+                              ? "シートテンプレート"
+                              : ocrTablePageIndex != null
+                                ? `Page ${ocrTablePageIndex}`
+                                : "未選択"}
+                          </p>
+                          <p className="subtle">編集UI: {ocrEditorUiMode === "sheet" ? "シートUI（標準）" : "レガシーUI（バックアップ）"}</p>
+                          {ocrEditorUiMode === "sheet" ? (
+                            <p className="subtle">
+                              ソース: {ocrSheetSource || "-"} / 項目: {activeEditorFields.length} / 行:{" "}
+                              {activeEditorRows.length} / 列: {ocrSheetHeaders.length}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="ocr-edit-actions">
+                          {ocrEditorUiMode === "sheet" ? (
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => loadOcrSheet()}
+                              disabled={ocrSheetLoading || step1Incomplete}
+                            >
+                              {ocrSheetLoading ? "再読込中..." : "シート再読込"}
+                            </button>
+                          ) : null}
+                          <button
+                            className="btn ghost"
+                            type="button"
+                            onClick={() => loadOcrHistory()}
+                            disabled={ocrHistoryLoading}
+                          >
+                            {ocrHistoryLoading ? "履歴取得中..." : "履歴更新"}
+                          </button>
+                          <button className="btn ghost" type="button" onClick={addOcrTableRow}>
+                            行を追加
+                          </button>
+                          {ocrEditorUiMode === "sheet" ? (
+                            <button className="btn ghost" type="button" onClick={saveOcrSheetExact} disabled={ocrTableSaving}>
+                              {ocrTableSaving ? "保存中..." : "シートだけ保存"}
+                            </button>
+                          ) : null}
+                          <button className="btn primary" onClick={applyOcrTable} disabled={ocrTableSaving || step1Incomplete}>
+                            {ocrTableSaving ? "反映中..." : "OCRテーブルを反映"}
+                          </button>
+                        </div>
                       </div>
-                    ),
-                  )
-                ) : (
-                  <p className="subtle">Markdownがありません。</p>
-                )}
-              </div>
-            </div>
-            {showOcrEdit ? (
-              <div className="ocr-edit">
-                <div className="ocr-edit-header">
-                  <div>
-                    <p className="subtle">
-                      編集対象: {ocrTablePageIndex != null ? `Page ${ocrTablePageIndex}` : "未選択"}
-                    </p>
-                  </div>
-                  <div className="ocr-edit-actions">
-                    <button className="btn ghost" type="button" onClick={addOcrTableRow}>
-                      行を追加
-                    </button>
-                    <button className="btn primary" onClick={applyOcrTable} disabled={ocrTableSaving}>
-                      {ocrTableSaving ? "反映中..." : "OCRテーブルを反映"}
-                    </button>
-                  </div>
-                </div>
-                {ocrTableMessage ? <p className="subtle">{ocrTableMessage}</p> : null}
-                {ocrTableRows.length ? (
-                  <div className="table-wrap">
-                    <table className="ocr-edit-table">
-                      {ocrTableHeader.length ? (
-                        <thead>
-                          <tr>
-                            {ocrTableHeader.map((cell, idx) => (
-                              <th key={`ocr-header-${idx}`}>{cell}</th>
-                            ))}
-                            <th>操作</th>
-                          </tr>
-                        </thead>
+                      {ocrEditorUiMode === "sheet" && ocrSheetMessage ? (
+                        <p className="subtle">{ocrSheetMessage}</p>
                       ) : null}
-                      <tbody>
-                        {ocrTableRows.map((row, rowIdx) => (
-                          <tr key={`ocr-row-${rowIdx}`}>
-                            {row.map((cell, cellIdx) => (
-                              <td key={`ocr-cell-${rowIdx}-${cellIdx}`}>
-                                <input
-                                  className="input ocr-edit-input"
-                                  value={cell}
-                                  onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
-                                />
-                              </td>
-                            ))}
-                            <td>
-                              <div className="ocr-row-actions">
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => duplicateOcrTableRow(rowIdx)}
-                                >
-                                  複製
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => removeOcrTableRow(rowIdx)}
-                                >
-                                  削除
-                                </button>
+                      {ocrEditorUiMode === "sheet" && ocrReparseBlockedHint ? (
+                        <p className="subtle">{ocrReparseBlockedHint}</p>
+                      ) : null}
+                      {ocrEditorUiMode === "sheet" && reparseWarningReasons.length ? (
+                        <div className="warning-banner">
+                          <p>
+                            再解析は警告付きでシートに反映しました。警告:{" "}
+                            {reparseWarningReasons
+                              .map((code) => describeReparseWarningReason(code))
+                              .filter(Boolean)
+                              .join(" / ")}
+                          </p>
+                          {reparseWarningDetailText ? (
+                            <pre className="raw-output">{reparseWarningDetailText}</pre>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {ocrHistoryMessage ? <p className="subtle">{ocrHistoryMessage}</p> : null}
+                      {ocrHistoryLatest ? (
+                        <div className="ocr-history-summary">
+                          <span>
+                            {latestOcrRevisionActionLabel}: {formatTimestamp(ocrHistoryLatest.edited_at)} / UI: {latestOcrRevisionMode}
+                          </span>
+                          <span>
+                            行数:{" "}
+                            {typeof ocrHistoryLatest.row_count === "number"
+                              ? ocrHistoryLatest.row_count
+                              : ocrHistoryLatest.rows?.length || 0}
+                          </span>
+                          <span>差分: {latestOcrRevisionChanged}</span>
+                          <span>Revision: {ocrHistoryLatest.revision_id || "-"}</span>
+                        </div>
+                      ) : null}
+                      {recentOcrHistory.length ? (
+                        <details className="ocr-history-list">
+                          <summary>反映履歴（最新5件）</summary>
+                          <div className="ocr-history-rows">
+                            {recentOcrHistory.map((item, idx) => (
+                              <div className="ocr-history-row" key={`ocr-history-${item.revision_id || idx}`}>
+                                <span>{formatTimestamp(item.edited_at)}</span>
+                                <span>
+                                  UI:{" "}
+                                  {item.ui_mode === "sheet"
+                                    ? "シートUI"
+                                    : item.ui_mode === "legacy"
+                                      ? "レガシーUI"
+                                      : item.ui_mode || "-"}
+                                </span>
+                                <span>
+                                  行:{" "}
+                                  {typeof item.row_count === "number"
+                                    ? item.row_count
+                                    : item.rows?.length || 0}
+                                </span>
+                                <span>
+                                  差分:{" "}
+                                  {typeof item.changed === "boolean"
+                                    ? item.changed
+                                      ? "あり"
+                                      : "なし"
+                                    : "-"}
+                                </span>
+                                <span>{item.revision_id || "-"}</span>
                               </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
+                            ))}
+                          </div>
+                        </details>
+                      ) : null}
+                      {ocrTableMessage ? <p className="subtle">{ocrTableMessage}</p> : null}
+                      {activeEditorRows.length ? (
+                        ocrEditorUiMode === "sheet" ? (
+                          <div className="ocr-sheet-wrap">
+                            <table className="ocr-sheet-table">
+                              <thead>
+                                <tr>
+                                  <th className="ocr-sheet-row-index ocr-sheet-sticky-top">#</th>
+                                  {ocrSheetHeaders.map((cell, idx) => (
+                                    <th key={`ocr-sheet-header-${idx}`} className="ocr-sheet-sticky-top">
+                                      {cell}
+                                    </th>
+                                  ))}
+                                  <th className="ocr-sheet-sticky-top">操作</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {ocrSheetRows.map((row, rowIdx) => (
+                                  <tr
+                                    key={`ocr-sheet-row-${rowIdx}`}
+                                    className={[
+                                      "ocr-sheet-row",
+                                      ocrSheetRowDateStripeClasses[rowIdx] || "ocr-sheet-row-date-a",
+                                      ocrSheetRowBoundaryClasses[rowIdx] || "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                  >
+                                    <th
+                                      className="ocr-sheet-row-index"
+                                      title={activeEditorRowIds[rowIdx] || ""}
+                                    >
+                                      {rowIdx + 1}
+                                    </th>
+                                    {ocrSheetHeaders.map((_, cellIdx) => (
+                                      <td key={`ocr-sheet-cell-${rowIdx}-${cellIdx}`}>
+                                        <input
+                                          className="input ocr-sheet-input"
+                                          value={row[cellIdx] ?? ""}
+                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
+                                        />
+                                      </td>
+                                    ))}
+                                    <td className="ocr-sheet-action-cell">
+                                      <div className="ocr-row-actions">
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => duplicateOcrTableRow(rowIdx)}
+                                        >
+                                          複製
+                                        </button>
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => removeOcrTableRow(rowIdx)}
+                                        >
+                                          削除
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="table-wrap">
+                            <table className="ocr-edit-table">
+                              {ocrTableHeader.length ? (
+                                <thead>
+                                  <tr>
+                                    {ocrTableHeader.map((cell, idx) => (
+                                      <th key={`ocr-header-${idx}`}>{cell}</th>
+                                    ))}
+                                    <th>操作</th>
+                                  </tr>
+                                </thead>
+                              ) : null}
+                              <tbody>
+                                {ocrTableRows.map((row, rowIdx) => (
+                                  <tr key={`ocr-row-${rowIdx}`}>
+                                    {row.map((cell, cellIdx) => (
+                                      <td key={`ocr-cell-${rowIdx}-${cellIdx}`}>
+                                        <input
+                                          className="input ocr-edit-input"
+                                          value={cell}
+                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
+                                        />
+                                      </td>
+                                    ))}
+                                    <td>
+                                      <div className="ocr-row-actions">
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => duplicateOcrTableRow(rowIdx)}
+                                        >
+                                          複製
+                                        </button>
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => removeOcrTableRow(rowIdx)}
+                                        >
+                                          削除
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )
+                      ) : (
+                        <p className="subtle">編集できる表がありません。</p>
+                      )}
+                    </div>
+                </section>
+          ) : null}
 
-          <section className="panel">
+          {activeStepIndex === 2 ? (
+            <>
+              <section className="panel">
             <header className="panel-header">
               <h2>区分別一覧</h2>
             </header>
@@ -1449,7 +4897,7 @@ export default function OrderDetailPage() {
                             <tr key={`pivot-row-${group.date}-${group.categoryKey}-${rowIdx}`}>
                               <td>{row.menu_name}</td>
                               <td>{row.daypart}</td>
-                              <td>{row.bag_type}</td>
+                              <td>{formatBagTypeLabel(row.bag_type, bagTypeLabelMap)}</td>
                               <td>{row.quantity}</td>
                               <td>{row.notes.size ? Array.from(row.notes).join(" / ") : "-"}</td>
                             </tr>
@@ -1489,6 +4937,7 @@ export default function OrderDetailPage() {
                             <th>OCR</th>
                             <th>修正</th>
                             <th>差分</th>
+                            <th>実量</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1496,7 +4945,7 @@ export default function OrderDetailPage() {
                             <tr key={line.line_id || idx}>
                               <td>{line.menu_name || "-"}</td>
                               <td>{line.daypart || "-"}</td>
-                              <td>{line.bag_type || "-"}</td>
+                              <td>{formatBagTypeLabel(line.bag_type, bagTypeLabelMap)}</td>
                               <td>{line.quantity_original ?? "-"}</td>
                               <td>
                                 <input
@@ -1512,6 +4961,7 @@ export default function OrderDetailPage() {
                                   : (line.quantity_corrected ?? line.quantity_original) -
                                     (line.quantity_original ?? 0)}
                               </td>
+                              <td>{formatActualAmount(line)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1525,19 +4975,20 @@ export default function OrderDetailPage() {
 
           <section className="panel">
             <header className="panel-header">
-              <h2>操作</h2>
+              <h2>明細の保存</h2>
+              <p className="subtle">明細を一時保存して次のステップへ進みます。</p>
             </header>
             <div className="actions">
               <button className="btn ghost" onClick={saveLines}>
                 保存 (要確認のまま)
               </button>
-              <button className="btn primary" onClick={confirm}>
-                確定
-              </button>
             </div>
           </section>
+            </>
+          ) : null}
 
-          <section className="panel">
+          {activeStepIndex === 3 ? (
+            <section className="panel">
             <header className="panel-header">
               <div>
                 <h2>袋分け結果</h2>
@@ -1573,6 +5024,7 @@ export default function OrderDetailPage() {
                             <th>エリア</th>
                             <th>袋</th>
                             <th>数量</th>
+                            <th>総量(計算)</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1582,8 +5034,9 @@ export default function OrderDetailPage() {
                               <td>{bag.menu_name || "-"}</td>
                               <td>{bag.diet_type ? formatDietType(bag.diet_type) : "-"}</td>
                               <td>{bag.area_id || "-"}</td>
-                              <td>{bag.bag_type || "-"}</td>
+                              <td>{formatBagTypeLabel(bag.bag_type, bagTypeLabelMap)}</td>
                               <td>{formatQuantity(bag.quantity)}</td>
+                              <td>{formatBagAmountFromTotals(resolveBagAmountTotals(bag, bagAmountStats))}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1594,64 +5047,109 @@ export default function OrderDetailPage() {
               </div>
             )}
           </section>
+          ) : null}
 
-          <section className="panel">
+          {activeStepIndex === 4 ? (
+            <section className="panel">
             <header className="panel-header">
-              <h2>出力</h2>
+              <div>
+                <h2>出力</h2>
+                <p className="subtle">出力を確認して確定します。</p>
+              </div>
+              <div className="panel-actions">
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={registerTrainingSample}
+                  disabled={trainingSampleSaving}
+                >
+                  {trainingSampleSaving ? "登録中..." : "学習データ登録"}
+                </button>
+                <button className="btn primary" onClick={confirm}>
+                  確定
+                </button>
+              </div>
             </header>
             <div className="outputs">
               <div className="output-card">
+                <span className="output-link">ラベルCSV</span>
                 <button
-                  className="output-link"
+                  className="btn primary"
                   type="button"
-                  onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`)}
+                  onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`, "ラベルCSV")}
                 >
-                  ラベルCSV
+                  ダウンロード
                 </button>
                 <button
                   className="btn ghost"
                   type="button"
-                  onClick={() => loadOutputPreview("labels")}
+                  onClick={(e) => {
+                    loadOutputPreview("labels");
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                    }
+                  }}
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
                 </button>
               </div>
               <div className="output-card">
+                <span className="output-link">納品書Excel</span>
                 <button
-                  className="output-link"
+                  className="btn primary"
                   type="button"
-                  onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`)}
+                  onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`, "納品書Excel")}
                 >
-                  納品書Excel
+                  ダウンロード
                 </button>
                 <button
                   className="btn ghost"
                   type="button"
-                  onClick={() => loadOutputPreview("delivery")}
+                  onClick={(e) => {
+                    loadOutputPreview("delivery");
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                    }
+                  }}
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
                 </button>
               </div>
               <div className="output-card">
+                <span className="output-link">総量CSV</span>
                 <button
-                  className="output-link"
+                  className="btn primary"
                   type="button"
-                  onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`)}
+                  onClick={() =>
+                    openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`, "総量CSV")
+                  }
                 >
-                  総量CSV
+                  ダウンロード
                 </button>
                 <button
                   className="btn ghost"
                   type="button"
-                  onClick={() => loadOutputPreview("aggregate")}
+                  onClick={(e) => {
+                    loadOutputPreview("aggregate");
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                    }
+                  }}
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
                 </button>
               </div>
             </div>
+            {downloadMessage ? <p className="subtle">{downloadMessage}</p> : null}
             {outputPreviewMessage ? <p className="subtle">{outputPreviewMessage}</p> : null}
             {outputPreview ? (
               <details className="output-preview" open>
@@ -1674,7 +5172,9 @@ export default function OrderDetailPage() {
                       {outputPreview.rows.map((row, rowIdx) => (
                         <tr key={`preview-row-${rowIdx}`}>
                           {row.map((cell, idx) => (
-                            <td key={`preview-cell-${rowIdx}-${idx}`}>{cell}</td>
+                            <td key={`preview-cell-${rowIdx}-${idx}`}>
+                              {formatOutputPreviewCell(cell, outputPreview.headers[idx], bagTypeLabelMap)}
+                            </td>
                           ))}
                         </tr>
                       ))}
@@ -1684,6 +5184,16 @@ export default function OrderDetailPage() {
               </details>
             ) : null}
           </section>
+          ) : null}
+
+          <div className="step-footer">
+            <button className="btn ghost" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
+              {canStepPrev ? `戻る: ${prevStepLabel}` : "戻る"}
+            </button>
+            <button className="btn primary" type="button" onClick={goNextStep} disabled={!canStepNext}>
+              {canStepNext ? `次へ: ${nextStepLabel}` : "次へ"}
+            </button>
+          </div>
         </>
       )}
 
@@ -1762,6 +5272,94 @@ export default function OrderDetailPage() {
           margin-bottom: 20px;
         }
 
+        .step-panel {
+          background: #fbfaf6;
+        }
+
+        .step-indicator {
+          font-size: 12px;
+          font-weight: 600;
+          color: #5f7b74;
+        }
+
+        .step-tabs {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 12px;
+        }
+
+        .step-tab {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #ffffff;
+          cursor: pointer;
+          font-size: 13px;
+        }
+
+        .step-tab.done {
+          border-color: rgba(36, 110, 87, 0.35);
+          background: rgba(36, 110, 87, 0.08);
+        }
+
+        .step-tab.active {
+          background: #1f2a2a;
+          color: #f7f2e7;
+          border-color: #1f2a2a;
+        }
+
+        .step-number {
+          width: 26px;
+          height: 26px;
+          border-radius: 50%;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: #f4f1ea;
+          font-weight: 700;
+          font-size: 12px;
+          color: inherit;
+        }
+
+        .step-tab.active .step-number {
+          background: rgba(255, 255, 255, 0.2);
+        }
+
+        .step-label {
+          font-weight: 600;
+        }
+
+        .step-meta {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 16px;
+          flex-wrap: wrap;
+        }
+
+        .step-title {
+          margin: 0 0 4px;
+          font-weight: 600;
+        }
+
+        .step-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .step-footer {
+          display: flex;
+          justify-content: flex-end;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin: 8px 0 28px;
+        }
+
         .panel-header {
           display: flex;
           justify-content: space-between;
@@ -1819,6 +5417,18 @@ export default function OrderDetailPage() {
           margin-top: 12px;
         }
 
+        .step1-facility-block {
+          margin: 14px 0 16px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #f8fbfa;
+        }
+
+        .step1-facility-block .summary-actions {
+          margin-top: 0;
+        }
+
         .summary-actions .field {
           min-width: 220px;
           flex: 1;
@@ -1826,6 +5436,11 @@ export default function OrderDetailPage() {
 
         .summary-actions-right {
           justify-content: flex-end;
+        }
+
+        .llm-provider-select {
+          min-width: 130px;
+          flex: 0 0 auto;
         }
 
         .field {
@@ -1903,6 +5518,16 @@ export default function OrderDetailPage() {
           font-size: 13px;
         }
 
+        .warning-banner {
+          margin-top: 10px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          border: 1px solid rgba(176, 92, 0, 0.28);
+          background: #fff4df;
+          color: #7a4100;
+          font-size: 13px;
+        }
+
         .prompt-panel {
           margin-top: 14px;
           padding: 12px;
@@ -1954,11 +5579,130 @@ export default function OrderDetailPage() {
           font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
 
+        .reparse-debug-panel {
+          margin-top: 10px;
+          padding: 10px;
+          border-radius: 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #ffffff;
+        }
+
+        .reparse-debug-panel p {
+          margin: 0 0 6px;
+          font-size: 12px;
+        }
+
+        .order-history-list {
+          margin-top: 10px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          overflow: hidden;
+        }
+
+        .order-history-row {
+          display: grid;
+          grid-template-columns: minmax(140px, 180px) minmax(100px, 140px) minmax(80px, 120px) 1fr;
+          gap: 10px;
+          padding: 8px 10px;
+          border-bottom: 1px solid rgba(25, 32, 30, 0.08);
+          font-size: 12px;
+          align-items: center;
+          background: #ffffff;
+        }
+
+        .order-history-row:last-child {
+          border-bottom: none;
+        }
+
         .ocr-preview {
           width: 100%;
           border-radius: 10px;
           border: 1px solid rgba(25, 32, 30, 0.12);
           background: #fff;
+          display: block;
+        }
+
+        .ocr-preview-wrapper {
+          position: relative;
+          width: 100%;
+        }
+
+        .ocr-preview-wrapper .ocr-preview {
+          border: none;
+        }
+
+        .ocr-preview-wrapper.editable {
+          cursor: crosshair;
+          box-shadow: 0 0 0 2px rgba(31, 42, 42, 0.35);
+          border-radius: 10px;
+        }
+
+        .ocr-overlay-grid {
+          position: absolute;
+          display: grid;
+          border: 2px solid rgba(31, 42, 42, 0.5);
+          background: rgba(255, 255, 255, 0.08);
+          z-index: 2;
+        }
+
+        .ocr-overlay-cell {
+          border: none;
+          outline: 1px solid rgba(31, 42, 42, 0.25);
+          background: rgba(255, 255, 255, 0.18);
+          padding: 0;
+          margin: 0;
+          text-align: left;
+          font-size: 10px;
+          color: #1f2a2a;
+          overflow: hidden;
+          box-sizing: border-box;
+          cursor: pointer;
+        }
+
+        .ocr-overlay-cell.active {
+          outline-color: rgba(31, 42, 42, 0.9);
+          background: rgba(255, 255, 255, 0.55);
+        }
+
+        .ocr-overlay-text {
+          display: block;
+          padding: 2px 4px;
+          font-size: 10px;
+          line-height: 1.2;
+          opacity: 0.6;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow: hidden;
+        }
+
+        .ocr-overlay-cell:hover .ocr-overlay-text,
+        .ocr-overlay-cell.active .ocr-overlay-text {
+          opacity: 1;
+        }
+
+        .ocr-overlay-input {
+          position: absolute;
+          z-index: 3;
+          padding: 2px 4px;
+          font-size: 12px;
+          border-radius: 6px;
+          box-sizing: border-box;
+        }
+
+        .edit-hint {
+          font-size: 12px;
+          color: #4b5c57;
+          background: rgba(31, 42, 42, 0.06);
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          border-radius: 10px;
+          padding: 8px 10px;
+        }
+
+        .edit-hint.active {
+          color: #1f2a2a;
+          background: rgba(31, 42, 42, 0.12);
+          border-color: rgba(31, 42, 42, 0.3);
+          font-weight: 600;
         }
 
         .page-tabs {
@@ -1981,6 +5725,20 @@ export default function OrderDetailPage() {
           background: #1f2a2a;
           color: #f7f2e7;
           border-color: #1f2a2a;
+        }
+
+        .ocr-summary-grid {
+          display: grid;
+          gap: 16px;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          margin-bottom: 16px;
+        }
+
+        .ocr-summary-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-wrap: wrap;
         }
 
         .ocr-showcase {
@@ -2015,6 +5773,107 @@ export default function OrderDetailPage() {
           color: #6b7b76;
           font-size: 12px;
           text-align: center;
+        }
+
+        .layout-toggle {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .table-box-editor {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding-top: 8px;
+          border-top: 1px dashed rgba(25, 32, 30, 0.12);
+        }
+
+        .table-box-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+
+        .table-box-grid {
+          display: grid;
+          gap: 10px;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        }
+
+        .table-box-primary {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .table-box-advanced {
+          margin-top: 10px;
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px dashed rgba(25, 32, 30, 0.14);
+          background: #ffffff;
+        }
+
+        .table-box-advanced summary {
+          cursor: pointer;
+          font-weight: 600;
+          color: #354341;
+          list-style: none;
+          margin-bottom: 8px;
+        }
+
+        .table-box-advanced summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .table-box-field {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          font-size: 12px;
+          color: #4b5c57;
+        }
+
+        .table-box-nudge {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .table-box-footer {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+
+        .facility-template-editor {
+          margin-top: 16px;
+          padding-top: 12px;
+          border-top: 1px dashed rgba(25, 32, 30, 0.12);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .facility-template-table-wrap {
+          overflow: auto;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 12px;
+          background: #ffffff;
+        }
+
+        .facility-template-table {
+          min-width: 780px;
+        }
+
+        .facility-template-table th,
+        .facility-template-table td {
+          padding: 8px;
         }
 
         .ocr-result {
@@ -2088,10 +5947,63 @@ export default function OrderDetailPage() {
           margin-bottom: 10px;
         }
 
+        .ocr-editor-mode-switch {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
         .ocr-edit-actions {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
+        }
+
+        .ocr-history-summary {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #f9fbfa;
+          font-size: 12px;
+          color: #31423f;
+          margin-bottom: 10px;
+        }
+
+        .ocr-history-list {
+          margin-bottom: 10px;
+          border: 1px dashed rgba(25, 32, 30, 0.12);
+          border-radius: 10px;
+          padding: 8px 10px;
+          background: #fcfcfb;
+        }
+
+        .ocr-history-list summary {
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 600;
+          color: #2f3e3b;
+        }
+
+        .ocr-history-rows {
+          margin-top: 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .ocr-history-row {
+          display: grid;
+          gap: 8px;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          font-size: 12px;
+          color: #3c4b48;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 8px;
+          padding: 6px 8px;
+          background: #ffffff;
         }
 
         .ocr-row-actions {
@@ -2109,6 +6021,93 @@ export default function OrderDetailPage() {
           padding: 6px 8px;
           font-size: 12px;
           min-width: 80px;
+        }
+
+        .ocr-sheet-wrap {
+          overflow: auto;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 12px;
+          background: #ffffff;
+          max-height: 560px;
+        }
+
+        .ocr-sheet-table {
+          border-collapse: separate;
+          border-spacing: 0;
+          min-width: 960px;
+        }
+
+        .ocr-sheet-table th,
+        .ocr-sheet-table td {
+          border-right: 1px solid rgba(25, 32, 30, 0.08);
+          border-bottom: 1px solid rgba(25, 32, 30, 0.08);
+          padding: 0;
+          font-size: 12px;
+          background: #ffffff;
+        }
+
+        .ocr-sheet-table th:last-child,
+        .ocr-sheet-table td:last-child {
+          border-right: none;
+        }
+
+        .ocr-sheet-sticky-top {
+          position: sticky;
+          top: 0;
+          z-index: 3;
+          background: #f3f6f5;
+          padding: 8px;
+          white-space: nowrap;
+        }
+
+        .ocr-sheet-row-index {
+          position: sticky;
+          left: 0;
+          z-index: 4;
+          min-width: 56px;
+          width: 56px;
+          text-align: center;
+          background: #f3f6f5;
+          font-weight: 600;
+          padding: 8px;
+        }
+
+        .ocr-sheet-input {
+          border: none;
+          border-radius: 0;
+          min-width: 88px;
+          background: transparent;
+          padding: 8px;
+          font-size: 12px;
+        }
+
+        .ocr-sheet-input:focus {
+          outline: 2px solid rgba(31, 42, 42, 0.35);
+          outline-offset: -2px;
+        }
+
+        .ocr-sheet-action-cell {
+          min-width: 140px;
+        }
+
+        .ocr-sheet-row.ocr-sheet-row-date-a td,
+        .ocr-sheet-row.ocr-sheet-row-date-a th.ocr-sheet-row-index {
+          background: #ffffff;
+        }
+
+        .ocr-sheet-row.ocr-sheet-row-date-b td,
+        .ocr-sheet-row.ocr-sheet-row-date-b th.ocr-sheet-row-index {
+          background: #f3f4f5;
+        }
+
+        .ocr-sheet-row.ocr-sheet-boundary-date td,
+        .ocr-sheet-row.ocr-sheet-boundary-date th.ocr-sheet-row-index {
+          border-top: 4px solid #8a8f94;
+        }
+
+        .ocr-sheet-row.ocr-sheet-boundary-daypart td,
+        .ocr-sheet-row.ocr-sheet-boundary-daypart th.ocr-sheet-row-index {
+          border-top: 2px solid #aeb4b9;
         }
 
         .failed-list {
@@ -2130,7 +6129,13 @@ export default function OrderDetailPage() {
         }
 
         .pdf-frame-compact {
-          height: 420px;
+          height: auto;
+          aspect-ratio: 1 / 1.414;
+          min-height: 520px;
+        }
+
+        .pdf-frame-wide {
+          min-height: 640px;
         }
 
         .pdf-placeholder {
@@ -2202,6 +6207,11 @@ export default function OrderDetailPage() {
           align-items: center;
           gap: 8px;
           flex-wrap: wrap;
+          padding: 8px;
+          border-radius: 14px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: rgba(255, 255, 255, 0.9);
+          cursor: default;
         }
 
         .output-link {
@@ -2211,7 +6221,7 @@ export default function OrderDetailPage() {
           border: 1px solid rgba(25, 32, 30, 0.08);
           color: inherit;
           font-weight: 600;
-          cursor: pointer;
+          cursor: default;
         }
 
         .output-preview {
@@ -2320,6 +6330,10 @@ export default function OrderDetailPage() {
           .summary-actions {
             flex-direction: column;
             align-items: stretch;
+          }
+          .order-history-row {
+            grid-template-columns: 1fr;
+            gap: 4px;
           }
         }
       `}</style>

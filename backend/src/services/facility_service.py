@@ -161,7 +161,13 @@ def update_facility(facility_id: str, name: str | None, areas: list | None) -> d
 
 def update_config(facility_id: str, config: dict) -> bool:
     with session_scope() as session:
+        _ensure_facility_sync(session)
+        session.flush()
         fac = session.get(Facility, facility_id)
+        if not fac:
+            _sync_facilities_from_master(session)
+            session.flush()
+            fac = session.get(Facility, facility_id)
         if not fac:
             return False
         # replace config

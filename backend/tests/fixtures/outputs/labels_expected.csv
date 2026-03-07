@@ -1,3 +1,3 @@
-facility_name,expiry_date,storage_mode,meal_slot,menu_category,product_name,quantity,details,maker_info,notice
-Test Facility,2025-01-06,chilled,AM,Main,Menu A,10.0,ARE0001 / 100g / hot,TODO,TODO
-Test Facility,2025-01-06,chilled,AM,Main,Menu A,5.0,ARE0002 / 100g / hot,TODO,TODO
+呼び出し番号,発行枚数,賞味期限,時間,メニュー,温・冷,商品名１,商品名２,内容量,内容詳細,,実量,一人前
+,1,2025年1月6日,AM,Main,温菜,Menu A,,1000g,ARE0001 / 100g / hot,10人前,1000g,100g
+,1,2025年1月6日,AM,Main,温菜,Menu A,,500g,ARE0002 / 100g / hot,5人前,500g,100g

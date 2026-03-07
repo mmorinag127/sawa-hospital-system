@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { test, expect } from "@playwright/test";
 
 test("order confirm flow with inline edits and PDF viewer", async ({ page }) => {
@@ -33,7 +34,7 @@ test("order confirm flow with inline edits and PDF viewer", async ({ page }) => 
       },
     ],
   };
-  const pdfBody = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+  const pdfBody = "%PDF-1.4";
 
   let linesPayload: any = null;
 

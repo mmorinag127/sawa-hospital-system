@@ -7,7 +7,7 @@ from src.services.config_validator import validate_facility_master
 router = APIRouter()
 
 
-@router.get("/facility-master", dependencies=[Depends(require_role("admin"))])
+@router.get("/facility-master", dependencies=[Depends(require_role("operator"))])
 def get_facility_master():
     master = facility_master_service.get_master()
     validation = validate_facility_master(master)

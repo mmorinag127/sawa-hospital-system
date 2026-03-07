@@ -1,8 +1,15 @@
 import base64
 import os
+import threading
+import time
+
 from fastapi import Depends, HTTPException, status, Request
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+from sqlalchemy import select
+
+from src.db import session_scope
+from src.models.user import User
 
 
 class UserContext:
@@ -12,6 +19,11 @@ class UserContext:
 
 AUTH_DISABLED = os.getenv("AUTH_DISABLED", "true").lower() == "true"
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+GOOGLE_OAUTH_CLIENT_IDS = [
+    item.strip()
+    for item in os.getenv("GOOGLE_OAUTH_CLIENT_IDS", GOOGLE_OAUTH_CLIENT_ID).split(",")
+    if item.strip()
+]
 
 
 def _parse_emails(env_key: str) -> set[str]:
@@ -23,10 +35,62 @@ def _parse_emails(env_key: str) -> set[str]:
 
 ALLOWED_EMAILS = _parse_emails("ALLOWED_EMAILS")
 ADMIN_EMAILS = _parse_emails("ADMIN_EMAILS") or ALLOWED_EMAILS
+ADMIN_SERVICE_ACCOUNTS = _parse_emails("ADMIN_SERVICE_ACCOUNTS")
+_USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
+_USER_ROLE_CACHE_LOCK = threading.Lock()
+_USER_ROLE_CACHE_EXPIRES_AT = 0.0
+_USER_ROLE_CACHE: dict[str, str] = {}
+
+
+def invalidate_user_cache() -> None:
+    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
+    with _USER_ROLE_CACHE_LOCK:
+        _USER_ROLE_CACHE_EXPIRES_AT = 0.0
+        _USER_ROLE_CACHE = {}
+
+
+def _load_active_user_roles() -> dict[str, str]:
+    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
+
+    now = time.monotonic()
+    with _USER_ROLE_CACHE_LOCK:
+        if now < _USER_ROLE_CACHE_EXPIRES_AT:
+            return dict(_USER_ROLE_CACHE)
+
+    roles: dict[str, str] = {}
+    try:
+        with session_scope() as session:
+            users = session.execute(select(User)).scalars().all()
+            for user in users:
+                account = str(user.account or "").strip().lower()
+                role = str(user.role or "").strip().lower()
+                status_value = str(user.status or "active").strip().lower()
+                if not account or status_value != "active":
+                    continue
+                if role not in {"admin", "operator"}:
+                    continue
+                if roles.get(account) == "admin":
+                    continue
+                roles[account] = role
+    except Exception:  # noqa: BLE001
+        roles = {}
+
+    with _USER_ROLE_CACHE_LOCK:
+        _USER_ROLE_CACHE = roles
+        _USER_ROLE_CACHE_EXPIRES_AT = now + _USER_ROLE_CACHE_TTL_SECONDS
+    return dict(roles)
+
+
+def _auth_header(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth:
+        return auth
+    cookie_auth = request.cookies.get("auth_header", "")
+    return cookie_auth or ""
 
 
 def _basic_credentials(request: Request):
-    auth = request.headers.get("Authorization", "")
+    auth = _auth_header(request)
     if not auth.startswith("Basic "):
         return None, None
     raw = auth.removeprefix("Basic ").strip()
@@ -58,30 +122,48 @@ def _raise_unauthorized():
 
 
 def _get_bearer_token(request: Request) -> str | None:
-    auth = request.headers.get("Authorization", "")
+    auth = _auth_header(request)
     if not auth.startswith("Bearer "):
         return None
     return auth.removeprefix("Bearer ").strip()
 
 
-def _verify_google_token(token: str) -> str:
-    if not GOOGLE_OAUTH_CLIENT_ID:
-        _raise_unauthorized()
+def _audience_candidates(request: Request) -> list[str]:
+    candidates: list[str] = []
+    if GOOGLE_OAUTH_CLIENT_IDS:
+        candidates.extend(GOOGLE_OAUTH_CLIENT_IDS)
     try:
-        payload = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            GOOGLE_OAUTH_CLIENT_ID,
-        )
+        url = str(request.url)
+        if url:
+            candidates.append(url)
+            candidates.append(url.rstrip("/"))
     except Exception:  # noqa: BLE001
+        pass
+    return [c for c in candidates if c]
+
+
+def _verify_google_token(token: str, request: Request) -> str:
+    candidates = _audience_candidates(request)
+    if not candidates:
+        _raise_unauthorized()
+    payload = None
+    for candidate in candidates:
+        try:
+            payload = id_token.verify_oauth2_token(
+                token,
+                google_requests.Request(),
+                candidate,
+            )
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if not payload:
         _raise_unauthorized()
     email = payload.get("email")
     if not email:
         _raise_unauthorized()
     email = str(email).lower()
     if payload.get("email_verified") is False:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return str(email)
 
@@ -93,7 +175,7 @@ def _google_email_or_none(request: Request) -> str | None:
     admin_token = os.getenv("ADMIN_TOKEN", "")
     if admin_token and token == admin_token:
         return "admin-token"
-    return _verify_google_token(token)
+    return _verify_google_token(token, request)
 
 
 def get_current_admin(request: Request) -> UserContext:
@@ -101,6 +183,14 @@ def get_current_admin(request: Request) -> UserContext:
         return UserContext(role="admin")
     google_email = _google_email_or_none(request)
     if google_email:
+        if google_email in ADMIN_SERVICE_ACCOUNTS:
+            return UserContext(role="admin")
+        active_roles = _load_active_user_roles()
+        registered_role = active_roles.get(str(google_email).lower())
+        if registered_role == "admin":
+            return UserContext(role="admin")
+        if registered_role in {"operator"}:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         if not ADMIN_EMAILS or google_email in ADMIN_EMAILS:
             return UserContext(role="admin")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -117,6 +207,14 @@ def get_current_operator(request: Request) -> UserContext:
         return UserContext(role="operator")
     google_email = _google_email_or_none(request)
     if google_email:
+        if google_email in ADMIN_SERVICE_ACCOUNTS:
+            return UserContext(role="operator")
+        active_roles = _load_active_user_roles()
+        registered_role = active_roles.get(str(google_email).lower())
+        if registered_role in {"admin", "operator"}:
+            return UserContext(role="operator")
+        if ALLOWED_EMAILS and google_email not in ALLOWED_EMAILS:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         return UserContext(role="operator")
     username, password = _basic_credentials(request)
     admin_user = os.getenv("ADMIN_USER")

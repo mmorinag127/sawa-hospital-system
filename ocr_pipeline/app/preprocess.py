@@ -7,7 +7,10 @@ def build_images_for_match_and_ocr(png_bytes: bytes):
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("failed to decode PNG bytes")
+    return build_images_for_match_and_ocr_from_bgr(img)
 
+
+def build_images_for_match_and_ocr_from_bgr(img: np.ndarray):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
     _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)

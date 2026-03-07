@@ -12,7 +12,7 @@ def list_facilities():
     return {"facilities": facility_service.list_facilities()}
 
 
-@router.get("/{facility_id}", dependencies=[Depends(require_role("admin"))])
+@router.get("/{facility_id}", dependencies=[Depends(require_role("operator"))])
 def get_facility(facility_id: str):
     facility = facility_service.get_facility(facility_id)
     if not facility:

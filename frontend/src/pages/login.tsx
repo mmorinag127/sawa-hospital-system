@@ -18,18 +18,44 @@ const encodeBasic = (value: string) => {
 
 export default function LoginPage() {
   const router = useRouter();
-  const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
+  const envClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
+  const [clientId, setClientId] = useState(envClientId);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [googleReady, setGoogleReady] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+  const [configMessage, setConfigMessage] = useState("");
 
   const redirectAfterLogin = () => {
     const next = window.sessionStorage.getItem("auth_next") || "/";
     window.sessionStorage.removeItem("auth_next");
     router.push(next);
   };
+
+  useEffect(() => {
+    let active = true;
+    const loadConfig = async () => {
+      try {
+        const res = await fetch("/api/auth/config", { cache: "no-store" });
+        if (!res.ok) throw new Error("config fetch failed");
+        const data = await res.json();
+        const apiClientId = typeof data?.google_client_id === "string" ? data.google_client_id : "";
+        if (active && apiClientId) {
+          setClientId(apiClientId);
+          setConfigMessage("");
+        }
+      } catch (err) {
+        if (active && !envClientId) {
+          setConfigMessage("ログイン設定の取得に失敗しました。");
+        }
+      }
+    };
+    loadConfig();
+    return () => {
+      active = false;
+    };
+  }, [envClientId]);
 
   useEffect(() => {
     if (!clientId) return;
@@ -107,6 +133,7 @@ export default function LoginPage() {
               <div ref={googleButtonRef} />
             </div>
             {!googleReady && <p className="subtle">ボタンを読み込み中...</p>}
+            {configMessage ? <p className="message">{configMessage}</p> : null}
           </>
         ) : (
           <p className="message">

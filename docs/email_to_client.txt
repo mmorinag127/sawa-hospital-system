@@ -1,0 +1,14 @@
+件名: 【Sawa Hospital System】現状ドキュメント／簡易操作ガイドのご共有
+
+お世話になっております。
+Sawa Hospital System の現状ドキュメントと簡易操作ガイドをお送りします。
+運用フローと主要画面の使い方をまとめています。
+
+■ 環境URL
+https://web-prod-167795504375.asia-northeast2.run.app
+
+■ 添付資料
+- Sawa Hospital System 現状ドキュメント & 簡易操作ガイド（current_system_overview.md）
+
+ご不明点や追加のご要望があればお知らせください。
+よろしくお願いいたします。

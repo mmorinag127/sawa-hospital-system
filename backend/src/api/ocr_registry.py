@@ -2,9 +2,10 @@ import os
 import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
+from fastapi.responses import FileResponse
 
 from src.api.auth import require_role
-from src.services import config_service, ocr_registry_service
+from src.services import config_service, ocr_registry_service, ocr_training_dataset_service
 from src.services.storage_service import load_bytes_from_uri, save_bytes_to_gcs
 from src.services.template_builder import build_template_from_pdf
 
@@ -276,3 +277,90 @@ def update_facility(facility_id: str, body: dict):
 def delete_facility(facility_id: str):
     ocr_registry_service.delete_facility(facility_id)
     return {"deleted": True}
+
+
+@router.post(
+    "/ocr/training-samples/from-order/{order_id}",
+    dependencies=[Depends(require_role("operator"))],
+)
+def register_training_sample_from_order(order_id: str, body: dict | None = None):
+    source = "manual"
+    note = None
+    if isinstance(body, dict):
+        raw_source = body.get("source")
+        raw_note = body.get("note")
+        if isinstance(raw_source, str) and raw_source.strip():
+            source = raw_source.strip()
+        if isinstance(raw_note, str) and raw_note.strip():
+            note = raw_note.strip()
+    sample, error = ocr_training_dataset_service.register_order_sample(
+        order_id,
+        source=source,
+        note=note,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error in {"document_not_found", "lines_not_found"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return {"sample": sample}
+
+
+@router.get("/ocr/training-samples", dependencies=[Depends(require_role("operator"))])
+def list_training_samples(limit: int = 100):
+    return {"items": ocr_training_dataset_service.list_samples(limit=limit)}
+
+
+@router.delete("/ocr/training-samples", dependencies=[Depends(require_role("admin"))])
+def clear_training_samples():
+    removed = ocr_training_dataset_service.clear_samples()
+    return {"removed": removed}
+
+
+@router.get("/ocr/training-samples/export", dependencies=[Depends(require_role("admin"))])
+def export_training_samples(file_format: str = "jsonl", limit: int = 1000000):
+    try:
+        output_path, filename, media_type = ocr_training_dataset_service.export_samples(
+            file_format=file_format,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(
+        str(output_path),
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+@router.get("/ocr/training-samples/export-pdfs", dependencies=[Depends(require_role("admin"))])
+def export_training_sample_pdfs(limit: int = 1000000, clear_after_export: bool = False):
+    try:
+        output_path, filename, media_type, summary = ocr_training_dataset_service.export_registered_pdfs(
+            limit=max(1, min(limit, 1000000)),
+            clear_after_export=bool(clear_after_export),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"pdf export failed: {exc}") from exc
+    headers = {
+        "X-OCR-Training-Total-Samples": str(summary.get("total_samples", 0)),
+        "X-OCR-Training-Exported-PDFs": str(summary.get("exported_pdfs", 0)),
+        "X-OCR-Training-Failed-PDFs": str(summary.get("failed_pdfs", 0)),
+        "X-OCR-Training-Removed": str(summary.get("removed", 0)),
+        "X-OCR-Training-Clear-Skipped": "1" if summary.get("clear_skipped") else "0",
+    }
+    return FileResponse(
+        str(output_path),
+        media_type=media_type,
+        filename=filename,
+        headers=headers,
+    )
+
+
+@router.get("/ocr/training-samples/{sample_id}", dependencies=[Depends(require_role("operator"))])
+def get_training_sample(sample_id: str):
+    sample = ocr_training_dataset_service.get_sample(sample_id)
+    if not sample:
+        raise HTTPException(status_code=404, detail="sample not found")
+    return {"sample": sample}

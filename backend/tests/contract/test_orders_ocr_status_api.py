@@ -9,7 +9,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 import src.api.orders as orders_api  # noqa: E402
+from src.db import session_scope  # noqa: E402
 from src.main import app  # noqa: E402
+from src.models.order import Order  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
@@ -118,6 +120,46 @@ def test_list_orders_include_ocr_keeps_running_status():
     rows = res.json().get("orders") or []
     row = next(item for item in rows if item.get("id") == order["id"])
     assert row.get("ocr_status") == "running"
+
+
+def test_list_orders_is_stably_sorted_by_received_at_and_id():
+    order_service.clear_all()
+    received_at = datetime(2026, 2, 15, 9, 0, 0)
+    first_id = "ORDsortB"
+    second_id = "ORDsortA"
+    with session_scope() as session:
+        session.add(
+            Order(
+                id=first_id,
+                facility_code="FAC00001",
+                week_code="2026-02",
+                status="要確認",
+                document_uri="file://dummy-sort-001.pdf",
+                message_id="msg-status-api-sort-001",
+                received_at=received_at,
+            )
+        )
+        session.add(
+            Order(
+                id=second_id,
+                facility_code="FAC00001",
+                week_code="2026-02",
+                status="要確認",
+                document_uri="file://dummy-sort-002.pdf",
+                message_id="msg-status-api-sort-002",
+                received_at=received_at,
+            )
+        )
+
+    expected = [first_id, second_id]
+    expected.sort(reverse=True)
+
+    client = TestClient(app)
+    res = client.get("/orders")
+    assert res.status_code == 200
+    rows = res.json().get("orders") or []
+    ids = [row.get("id") for row in rows[:2]]
+    assert ids == expected
 
 
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
@@ -288,3 +330,53 @@ def test_get_ocr_output_clears_stale_reparse_error_on_success_metrics(tmp_path):
     assert debug.get("error") in {None, ""}
     assert debug.get("reject_reasons") == []
     assert debug.get("validation_detail") == {}
+
+
+def test_get_ocr_output_keeps_reparse_warning_fields_on_success_metrics(tmp_path):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-007")
+    output_path = tmp_path / "ocr_output_warning.json"
+    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
+
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="done")
+    update_job(
+        job_id,
+        status="done",
+        output_reference=f"file://{output_path}",
+        error_message=None,
+        metrics={
+            "provider": "gemini",
+            "requested_provider": "gemini",
+            "row_count": 62,
+            "line_count": 248,
+            "before_count": 78,
+            "after_count": 248,
+            "changed": True,
+            "llm_assist": True,
+            "warning_reasons": ["sheet_column_anomaly"],
+            "warning_detail": {
+                "quality_issue": "column_anomaly",
+                "column_anomaly_count": 1,
+            },
+        },
+    )
+    order_service._save_order_ocr_cache(  # noqa: SLF001
+        order["id"],
+        {
+            "_reparse_debug": {
+                "provider": "gemini",
+                "warning_reasons": [],
+                "warning_detail": {},
+            }
+        },
+    )
+
+    client = TestClient(app)
+    res = client.get(f"/orders/{order['id']}/ocr-output")
+    assert res.status_code == 200
+    payload = res.json()
+    debug = payload.get("_reparse_debug") or {}
+    assert debug.get("provider") == "gemini"
+    assert debug.get("warning_reasons") == ["sheet_column_anomaly"]
+    assert (debug.get("warning_detail") or {}).get("quality_issue") == "column_anomaly"

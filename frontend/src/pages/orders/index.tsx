@@ -3,6 +3,13 @@ import { apiClient } from "../../services/apiClient";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import TopNav from "../../components/TopNav";
+import {
+  fetchFacilityNameMap,
+  fetchOrderFacilityCandidates,
+  pickBestFacilityCandidate,
+  type FacilityHint,
+  type FacilityNameMap,
+} from "../../services/facilityData";
 
 type Order = {
   status: string;
@@ -14,15 +21,38 @@ type Order = {
   message_id?: string | null;
 };
 
+const compareOrdersByReceivedAt = (left: Order, right: Order) => {
+  const leftTime = left.received_at ? new Date(left.received_at).getTime() : 0;
+  const rightTime = right.received_at ? new Date(right.received_at).getTime() : 0;
+  if (rightTime !== leftTime) return rightTime - leftTime;
+  return String(right.id || "").localeCompare(String(left.id || ""), "ja");
+};
+
 export default function OrdersPage() {
   const router = useRouter();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
+  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
   const [reloadToken, setReloadToken] = useState<number>(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchFacilityNameMap()
+      .then((map) => {
+        if (!cancelled) setFacilityNameMap(map);
+      })
+      .catch(() => {
+        if (!cancelled) setFacilityNameMap({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -70,23 +100,82 @@ export default function OrdersPage() {
     };
   }, [statusFilter, reloadToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const unresolved = orders
+      .filter((order) => !order.facility && order.id)
+      .sort(compareOrdersByReceivedAt)
+      .slice(0, 60)
+      .map((order) => String(order.id || ""))
+      .filter((orderId) => orderId && !facilityHints[orderId]);
+
+    if (unresolved.length === 0) return;
+
+    const queue = [...unresolved];
+    const concurrency = 4;
+    const results: Record<string, FacilityHint> = {};
+
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (queue.length > 0) {
+        const orderId = queue.shift();
+        if (!orderId) continue;
+        try {
+          const candidates = await fetchOrderFacilityCandidates(orderId);
+          const best = pickBestFacilityCandidate(candidates);
+          if (best) {
+            results[orderId] = { ...best, order_id: orderId };
+          }
+        } catch {
+          // ignore per-order failures (pending / not-found etc.)
+        }
+      }
+    });
+
+    Promise.all(workers).then(() => {
+      if (cancelled) return;
+      if (Object.keys(results).length === 0) return;
+      setFacilityHints((prev) => ({ ...prev, ...results }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [orders, facilityHints]);
+
+  const facilityLabel = (order: Order) => {
+    const facilityId = order.facility || "";
+    if (facilityId) {
+      const name = facilityNameMap[facilityId];
+      return name ? `${name} (${facilityId})` : facilityId;
+    }
+    const orderId = order.id || "";
+    const hint = orderId ? facilityHints[orderId] : null;
+    if (hint?.facility_name) {
+      const score = hint.score != null ? ` / score=${hint.score}` : "";
+      return `推定: ${hint.facility_name} (${hint.facility_id}${score})`;
+    }
+    return "未確定";
+  };
+
   const filteredOrders = orders.filter((order) => {
     if (unresolvedOnly && order.facility) return false;
     if (!search) return true;
     const token = search.toLowerCase();
+    const facilityId = order.facility || "";
+    const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
+    const hint = order.id ? facilityHints[order.id] : null;
+    const hintName = hint?.facility_name ? String(hint.facility_name) : "";
     return (
       (order.id || "").toLowerCase().includes(token) ||
-      (order.facility || "").toLowerCase().includes(token) ||
+      facilityId.toLowerCase().includes(token) ||
+      facilityName.toLowerCase().includes(token) ||
+      hintName.toLowerCase().includes(token) ||
       (order.week || "").toLowerCase().includes(token) ||
       (order.document || "").toLowerCase().includes(token)
     );
   });
 
-  const sortedOrders = [...filteredOrders].sort((a, b) => {
-    const aTime = a.received_at ? new Date(a.received_at).getTime() : 0;
-    const bTime = b.received_at ? new Date(b.received_at).getTime() : 0;
-    return bTime - aTime;
-  });
+  const sortedOrders = [...filteredOrders].sort(compareOrdersByReceivedAt);
 
   const formatReceivedAt = (value?: string | null) => {
     if (!value) return "不明";
@@ -209,7 +298,13 @@ export default function OrdersPage() {
               ) : (
                 groupedRows.map((row) => (
                   <tr key={`${row.facility}-${row.week}`}>
-                    <td>{row.facility}</td>
+                    <td>
+                      {row.facility === "未確定"
+                        ? "未確定"
+                        : facilityNameMap[row.facility]
+                          ? `${facilityNameMap[row.facility]} (${row.facility})`
+                          : row.facility}
+                    </td>
                     <td>{row.week}</td>
                     <td>{row.counts["未着"]}</td>
                     <td>{row.counts["要確認"]}</td>
@@ -250,11 +345,11 @@ export default function OrdersPage() {
             </p>
           ) : (
             sortedOrders.map((o) => (
-              <div key={o.id || o.document} className="list-item">
+                <div key={o.id || o.document} className="list-item">
                 <div>
                   <p className="list-title">{o.id}</p>
                   <p className="list-meta">
-                    施設: {o.facility || "未確定"} / 月: {o.week || "未確定"} / 受信:{" "}
+                    施設: {facilityLabel(o)} / 月: {o.week || "未確定"} / 受信:{" "}
                     {formatReceivedAt(o.received_at)} / Message: {o.message_id || "不明"}
                   </p>
                 </div>

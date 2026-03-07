@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import date, datetime
 from io import BytesIO
@@ -6,7 +7,12 @@ from typing import Any, Optional
 from src.services.ingest_policy import parse_date_string
 
 
-def _parse_number(value: str) -> Optional[float]:
+def _parse_number(
+    value: str,
+    *,
+    strict_numeric_cell: bool = False,
+    max_abs: float | None = None,
+) -> Optional[float]:
     if value is None:
         return None
     text = str(value).translate(_FULLWIDTH_TRANSLATION)
@@ -17,13 +23,34 @@ def _parse_number(value: str) -> Optional[float]:
         .replace("l", "1")
         .replace("|", "1")
     )
-    cleaned = re.sub(r"[^\d.-]", "", text)
-    if cleaned == "":
-        return None
+    text = (
+        text.replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .replace("，", ",")
+        .replace("．", ".")
+        .replace("。", ".")
+        .replace("－", "-")
+        .replace("ー", "-")
+    )
+    if strict_numeric_cell:
+        cleaned = re.sub(r"[\s　]+", "", text)
+        cleaned = cleaned.replace(",", "").strip("()[]（）")
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?", cleaned):
+            return None
+    else:
+        cleaned = re.sub(r"[^\d.-]", "", text)
+        if cleaned == "":
+            return None
     try:
-        return float(cleaned)
+        parsed = float(cleaned)
     except ValueError:
         return None
+    if strict_numeric_cell and parsed < 0:
+        return None
+    if max_abs is not None and max_abs > 0 and abs(parsed) > max_abs:
+        return None
+    return parsed
 
 
 def _normalize_cell(value: Any, normalize_whitespace: bool) -> str:
@@ -71,25 +98,68 @@ def _group_tokens_by_row(tokens: list[dict], tolerance: float) -> list[list[dict
     return rows
 
 
-def _rows_from_grouped_tokens(grouped_rows: list[list[dict]], columns: list[dict]) -> list[list[str]]:
+def _assign_tokens_to_columns(
+    row_tokens: list[dict],
+    columns: list[dict],
+    snap_tolerance: float,
+) -> list[str]:
+    ranges: list[tuple[float, float] | None] = []
+    centers: list[float | None] = []
+    for col in columns:
+        x_range = col.get("x_range")
+        if not x_range or len(x_range) != 2:
+            ranges.append(None)
+            centers.append(None)
+            continue
+        x0, x1 = x_range
+        ranges.append((x0, x1))
+        centers.append((x0 + x1) / 2)
+    buckets: list[list[dict]] = [[] for _ in columns]
+    for token in row_tokens:
+        x = token.get("x")
+        if x is None:
+            continue
+        chosen = None
+        for idx, span in enumerate(ranges):
+            if not span:
+                continue
+            if span[0] <= x <= span[1]:
+                chosen = idx
+                break
+        if chosen is None and snap_tolerance > 0:
+            best_idx = None
+            best_dist = None
+            for idx, center in enumerate(centers):
+                if center is None:
+                    continue
+                dist = abs(x - center)
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            if best_dist is not None and best_dist <= snap_tolerance:
+                chosen = best_idx
+        if chosen is None:
+            continue
+        buckets[chosen].append(token)
+    cells: list[str] = []
+    for cell_tokens in buckets:
+        if not cell_tokens:
+            cells.append("")
+            continue
+        cell_tokens.sort(key=lambda t: t.get("x", 0))
+        cell_text = " ".join(token.get("text", "") for token in cell_tokens).strip()
+        cells.append(cell_text)
+    return cells
+
+
+def _rows_from_grouped_tokens(
+    grouped_rows: list[list[dict]],
+    columns: list[dict],
+    snap_tolerance: float,
+) -> list[list[str]]:
     rows: list[list[str]] = []
     for row_tokens in grouped_rows:
-        cells: list[str] = []
-        for col in columns:
-            x_range = col.get("x_range")
-            if not x_range or len(x_range) != 2:
-                cells.append("")
-                continue
-            x0, x1 = x_range
-            selected = [
-                token
-                for token in row_tokens
-                if token.get("x") is not None and x0 <= token["x"] <= x1
-            ]
-            selected.sort(key=lambda t: t.get("x", 0))
-            cell_text = " ".join(token.get("text", "") for token in selected).strip()
-            cells.append(cell_text)
-        rows.append(cells)
+        rows.append(_assign_tokens_to_columns(row_tokens, columns, snap_tolerance))
     return rows
 
 
@@ -200,6 +270,7 @@ def _rows_from_grid(
     row_padding: float = 0.0,
     min_row_height: float = 0.0,
     max_rows: int = 0,
+    snap_tolerance: float = 0.0,
 ) -> tuple[list[list[str]], list[tuple[float, float]]]:
     row_edges = grid.get("row_edges") or []
     if len(row_edges) < 2:
@@ -222,26 +293,47 @@ def _rows_from_grid(
             and y0 <= token["y"]
             and (token["y"] < y1 or row_idx == len(row_edges) - 2)
         ]
-        cells: list[str] = []
-        for col in columns:
-            x_range = col.get("x_range")
-            if not x_range or len(x_range) != 2:
-                cells.append("")
-                continue
-            x0, x1 = x_range
-            selected = [
-                token
-                for token in row_tokens
-                if token.get("x") is not None
-                and x0 <= token["x"]
-                and (token["x"] < x1 or col is columns[-1])
-            ]
-            selected.sort(key=lambda t: t.get("x", 0))
-            cell_text = " ".join(token.get("text", "") for token in selected).strip()
-            cells.append(cell_text)
-        rows.append(cells)
+        rows.append(_assign_tokens_to_columns(row_tokens, columns, snap_tolerance))
         row_bounds.append((y0, y1))
     return rows, row_bounds
+
+
+def _grid_rows_are_reliable(
+    rows: list[list[str]],
+    columns: list[dict],
+    header_rows: int,
+    min_numeric_ratio: float,
+    min_rows_ratio: float,
+) -> bool:
+    qty_indexes = [
+        idx for idx, col in enumerate(columns) if col.get("role") in {"quantity", "quantity_change"}
+    ]
+    if not qty_indexes:
+        return True
+    data_rows = rows[header_rows:] if header_rows < len(rows) else []
+    if not data_rows:
+        return False
+    total_cells = len(data_rows) * len(qty_indexes)
+    if total_cells <= 0:
+        return True
+    numeric_cells = 0
+    rows_with_numeric = 0
+    for row in data_rows:
+        row_has_numeric = False
+        for idx in qty_indexes:
+            if idx >= len(row):
+                continue
+            cell = _normalize_cell(row[idx], True)
+            if _parse_number(cell) is not None:
+                numeric_cells += 1
+                row_has_numeric = True
+        if row_has_numeric:
+            rows_with_numeric += 1
+    numeric_ratio = numeric_cells / total_cells if total_cells else 0.0
+    rows_ratio = rows_with_numeric / len(data_rows) if data_rows else 0.0
+    if numeric_ratio < min_numeric_ratio or rows_ratio < min_rows_ratio:
+        return False
+    return True
 
 
 def _is_numeric_token(text: str) -> bool:
@@ -479,11 +571,26 @@ def parse_order_lines(
     quantity_rules = quantity_rules or {}
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     use_change_column = quantity_rules.get("use_change_column_if_present", True)
+    strict_numeric_quantity_cell = bool(quantity_rules.get("strict_numeric_quantity_cell", False))
+    allow_blank_structure_rows = bool(quantity_rules.get("allow_blank_structure_rows", False))
+    max_quantity_abs_raw = quantity_rules.get("max_quantity_abs")
+    if max_quantity_abs_raw is None and strict_numeric_quantity_cell:
+        max_quantity_abs_raw = os.getenv("OCR_SHEET_MAX_QTY", "150")
+    try:
+        max_quantity_abs = (
+            float(max_quantity_abs_raw)
+            if max_quantity_abs_raw is not None
+            else None
+        )
+    except Exception:
+        max_quantity_abs = None
 
     header_rows = int(template.get("header_rows", 0))
     columns = template.get("columns", []) or []
     token_columns = template.get("token_columns") or []
     token_row_tolerance = float(template.get("token_row_tolerance", 0.008))
+    raw_snap = template.get("grid_column_snap_tolerance")
+    snap_tolerance = float(raw_snap) if raw_snap is not None else 0.003
     if tokens and (token_columns or template.get("grid_columns")):
         grid_columns = _columns_from_grid(grid, template)
         auto_columns = _auto_columns_from_headers(tokens, template) if template.get("auto_headers") else []
@@ -516,25 +623,41 @@ def parse_order_lines(
                 row_padding=float(template.get("grid_row_padding", 0.0)),
                 min_row_height=float(template.get("grid_min_row_height", 0.0)),
                 max_rows=int(template.get("grid_max_rows", 0) or 0),
+                snap_tolerance=snap_tolerance,
             )
             min_rows = int(template.get("grid_min_rows", 0))
-            if grid_rows and (not min_rows or len(grid_rows) >= min_rows):
+            grid_min_numeric_ratio = float(template.get("grid_min_numeric_ratio", 0.12) or 0.12)
+            grid_min_rows_ratio = float(template.get("grid_min_rows_ratio", 0.08) or 0.08)
+            grid_ok = _grid_rows_are_reliable(
+                grid_rows,
+                columns,
+                int(template.get("grid_header_rows", header_rows)),
+                grid_min_numeric_ratio,
+                grid_min_rows_ratio,
+            )
+            if grid_rows and (not min_rows or len(grid_rows) >= min_rows) and grid_ok:
                 rows = grid_rows
                 header_rows = int(template.get("grid_header_rows", header_rows))
             else:
                 row_bounds = []
         if not row_bounds:
             grouped_rows = _group_tokens_by_row(tokens, token_row_tolerance)
-            rows = _rows_from_grouped_tokens(grouped_rows, columns)
+            rows = _rows_from_grouped_tokens(grouped_rows, columns, snap_tolerance)
             row_bounds = _row_bounds_from_grouped_tokens(
                 grouped_rows, float(template.get("token_row_padding", 0.006))
             )
         rows = _apply_ocr_fallback(rows, row_bounds, columns, template, pdf_bytes)
     if not columns:
         columns = _columns_from_row_fields(template)
+    large_cell_mode = bool(template.get("large_cell_mode", False))
     fill_forward_roles = set(template.get("fill_forward_roles") or [])
+    if large_cell_mode:
+        fill_forward_roles.update({"date", "daypart", "menu_name"})
     fill_missing_date_with_hint = bool(template.get("fill_missing_date_with_hint", False))
-    fill_missing_date_with_first_seen = bool(template.get("fill_missing_date_with_first_seen", False))
+    if "fill_missing_date_with_first_seen" in template:
+        fill_missing_date_with_first_seen = bool(template.get("fill_missing_date_with_first_seen"))
+    else:
+        fill_missing_date_with_first_seen = large_cell_mode
     normalize_whitespace = bool(template.get("normalize_whitespace", True))
     carry_forward: dict[str, Any] = {role: None for role in fill_forward_roles}
     first_date_in_table: Optional[date] = None
@@ -564,12 +687,15 @@ def parse_order_lines(
         col for col in columns if col.get("role") == "quantity_change"
     ]
 
-    qty_ffill = bool(template.get("grid_quantity_ffill", False))
+    if "grid_quantity_ffill" in template:
+        qty_ffill = bool(template.get("grid_quantity_ffill"))
+    else:
+        qty_ffill = False
     qty_ffill_scope = template.get("grid_quantity_ffill_scope", "date")
     qty_carry: dict[int, float] = {}
     qty_carry_key = None
 
-    for row in rows[header_rows:]:
+    for source_row_index, row in enumerate(rows[header_rows:]):
         base = {
             "date": None,
             "daypart": None,
@@ -593,7 +719,11 @@ def parse_order_lines(
             elif role == "note":
                 base["change_note"] = None if _is_numeric_note_noise(cell) else cell or None
             elif role == "quantity":
-                qty = _parse_number(cell)
+                qty = _parse_number(
+                    cell,
+                    strict_numeric_cell=strict_numeric_quantity_cell,
+                    max_abs=max_quantity_abs,
+                )
                 if qty == 0 and zero_as_empty:
                     qty = None
                 quantities[idx] = {
@@ -629,7 +759,11 @@ def parse_order_lines(
                 if idx is None or idx >= len(row):
                     continue
                 cell = _normalize_cell(row[idx], normalize_whitespace)
-                qty = _parse_number(cell)
+                qty = _parse_number(
+                    cell,
+                    strict_numeric_cell=strict_numeric_quantity_cell,
+                    max_abs=max_quantity_abs,
+                )
                 if qty == 0 and zero_as_empty:
                     qty = None
                 source_index = col.get("source_index")
@@ -647,7 +781,12 @@ def parse_order_lines(
                     qty_carry[idx] = current_value
 
         for qty_info in quantities.values():
-            if not base["date"] and not base["menu_name"] and not base["daypart"]:
+            if (
+                not allow_blank_structure_rows
+                and not base["date"]
+                and not base["menu_name"]
+                and not base["daypart"]
+            ):
                 continue
             if qty_info.get("quantity_original") is None and qty_info.get("quantity_corrected") is None:
                 continue
@@ -662,6 +801,7 @@ def parse_order_lines(
                     "quantity_original": qty_info.get("quantity_original"),
                     "quantity_corrected": qty_info.get("quantity_corrected"),
                     "change_note": base.get("change_note"),
+                    "source_row_index": source_row_index,
                 }
             )
 

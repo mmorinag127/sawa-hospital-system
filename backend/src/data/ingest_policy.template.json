@@ -9,7 +9,8 @@
   },
   "backlog_policy": {
     "skip_ocr_for_stale": false,
-    "max_age_days": 14
+    "max_age_days": 14,
+    "chunk_delay_seconds": 120
   },
   "retention_days": 60,
   "menu_match_min_ratio": 0.72,

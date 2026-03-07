@@ -23,9 +23,18 @@ from src.models.order_ocr_cache import OrderOcrCache
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.models.ingest_job import IngestJob  # noqa: F401
 from src.models.user import AuditLog
+from src.models.facility import FacilityConfig
 from src.services.notification_service import record_event
-from src.services import config_service, menu_service
-from src.services.fax_extractor import extract_fax_data, filter_tokens_by_box, rows_from_markdown
+from src.services import config_service, menu_service, facility_service
+from src.services.config_validator import validate_facility_config
+from src.services.fax_extractor import (
+    extract_fax_data,
+    filter_tokens_by_box,
+    rows_from_markdown,
+    rows_from_pipeline_payload,
+    rows_from_structured_payload,
+    structured_cell_issues_from_payload,
+)
 from src.services.fax_parser import parse_order_lines
 from src.services.ingest_policy import parse_date_string, month_id_from_dates
 from src.services.storage_service import load_bytes_from_uri
@@ -58,13 +67,15 @@ def _run_roi_ocr_pipeline(
     facility_id: str | None,
     input_reference: str | None,
     preferred_template_id: str | None,
+    preferred_template_ids: list[str] | None = None,
 ) -> str | None:
     try:
         logger.info(
-            "ROI OCR pipeline start job_id={} facility_id={} template_id={} input_reference={}",
+            "ROI OCR pipeline start job_id={} facility_id={} template_id={} template_ids={} input_reference={}",
             job_id,
             facility_id,
             preferred_template_id,
+            preferred_template_ids,
             input_reference,
         )
         output = run_ocr_pipeline(
@@ -73,6 +84,7 @@ def _run_roi_ocr_pipeline(
             facility_id=facility_id,
             input_reference=input_reference,
             preferred_template_id=preferred_template_id,
+            preferred_template_ids=preferred_template_ids,
             force_upload=True,
             wait_for_output=False,
         )
@@ -112,16 +124,40 @@ def _run_roi_ocr_pipeline(
         return None
 
 
+def _resolve_preferred_template_ids(facility_config: dict[str, Any] | None) -> tuple[str | None, list[str]]:
+    if not isinstance(facility_config, dict):
+        return None, []
+    template_id = facility_config.get("fax_template_id")
+    if isinstance(template_id, str):
+        template_id = template_id.strip() or None
+    template_ids_raw = facility_config.get("fax_template_ids")
+    template_ids: list[str] = []
+    if isinstance(template_ids_raw, list):
+        for item in template_ids_raw:
+            token = str(item or "").strip()
+            if token and token not in template_ids:
+                template_ids.append(token)
+    if template_id and template_id not in template_ids:
+        template_ids.insert(0, template_id)
+    if not template_id and template_ids:
+        template_id = template_ids[0]
+    return template_id, template_ids
+
+
 def clear_all():
     with session_scope() as session:
         session.execute(delete(LabelRow))
         session.execute(delete(Bag))
         session.execute(delete(DeliveryNote))
         session.execute(delete(ManufacturingAggregateRow))
+        session.execute(delete(FacilityConfig))
+        session.execute(delete(OrderOcrCache))
         session.execute(delete(OrderDocument))
         session.execute(delete(OrderLine))
         session.execute(delete(OrderMenuSnapshot))
         session.execute(delete(Order))
+        session.execute(delete(IngestJob))
+    _invalidate_orders_cache()
 
 
 def delete_orders_by_message_prefix(prefix: str) -> int:
@@ -138,10 +174,16 @@ def delete_orders_by_message_prefix(prefix: str) -> int:
             session.execute(delete(LabelRow).where(LabelRow.order_id == order.id))
             session.execute(delete(Bag).where(Bag.order_id == order.id))
             session.execute(delete(DeliveryNote).where(DeliveryNote.order_id == order.id))
+            session.execute(delete(OrderOcrCache).where(OrderOcrCache.order_id == order.id))
+            session.execute(delete(OrderDocument).where(OrderDocument.order_id == order.id))
             session.execute(delete(OrderMenuSnapshot).where(OrderMenuSnapshot.order_id == order.id))
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
             session.execute(delete(Order).where(Order.id == order.id))
             removed += 1
+        if removed:
+            session.execute(delete(IngestJob).where(IngestJob.id.like(f"{prefix}%")))
+    if removed:
+        _invalidate_orders_cache()
     return removed
 
 
@@ -437,6 +479,11 @@ def _resolve_sheet_payload_for_menu_entries(payload: dict[str, Any] | None) -> d
         return None
     edited = payload.get("_edited_ocr")
     if isinstance(edited, dict):
+        latest = edited.get("latest")
+        llm_review = latest.get("llm_review") if isinstance(latest, dict) else None
+        output_payload = llm_review.get("output_payload") if isinstance(llm_review, dict) else None
+        if isinstance(output_payload, dict):
+            return output_payload
         raw_output = edited.get("raw_output")
         if isinstance(raw_output, dict):
             return raw_output
@@ -951,22 +998,6 @@ def _resolve_llm_expected_row_count(
 
     pipeline_count = len([row for row in (pipeline_rows or []) if isinstance(row, list)])
     observed_count = len([row for row in (observed_rows or []) if isinstance(row, list)])
-    if pipeline_count <= 0:
-        if expected <= 0:
-            return observed_count
-        # If menu scope is clearly over-broad (for example month-wide 224 rows)
-        # while observed rows are week-sized and no reliable pipeline rows exist,
-        # use observed row count to avoid false row-coverage failures.
-        if observed_count > 0 and expected >= observed_count * 3:
-            return observed_count
-        return expected
-    if expected <= 0:
-        return pipeline_count
-
-    # Existing persisted anchors can be partial (for example only 1-2 dates kept
-    # after a previous failed reparse). In that case menu expectation becomes too
-    # small and row-coverage gating misses obvious shortfalls. When pipeline rows
-    # are significantly larger than this small expectation, trust observable rows.
     partial_anchor_max = _read_reparse_int_env(
         "OCR_REPARSE_PARTIAL_ANCHOR_MAX_ROWS",
         24,
@@ -977,6 +1008,31 @@ def _resolve_llm_expected_row_count(
         12,
         min_value=1,
     )
+    if pipeline_count <= 0:
+        if expected <= 0:
+            return observed_count
+        # If menu scope is clearly over-broad (for example month-wide 224 rows)
+        # while observed rows are week-sized and no reliable pipeline rows exist,
+        # use observed row count to avoid false row-coverage failures.
+        if observed_count > 0 and expected >= observed_count * 3:
+            return observed_count
+        # Existing anchors can also be too narrow (for example stale 1-2 day
+        # scope after a failed save). When observed OCR rows are significantly
+        # larger than this small expectation, trust observed rows.
+        if (
+            observed_count > 0
+            and expected <= partial_anchor_max
+            and observed_count >= (expected + partial_anchor_min_gap)
+        ):
+            return observed_count
+        return expected
+    if expected <= 0:
+        return pipeline_count
+
+    # Existing persisted anchors can be partial (for example only 1-2 dates kept
+    # after a previous failed reparse). In that case menu expectation becomes too
+    # small and row-coverage gating misses obvious shortfalls. When pipeline rows
+    # are significantly larger than this small expectation, trust observable rows.
     if (
         expected <= partial_anchor_max
         and pipeline_count >= (expected + partial_anchor_min_gap)
@@ -1243,10 +1299,14 @@ def _collect_numeric_source_rows_for_reparse(
 
 
 def _template_quantity_column_indexes(template: dict[str, Any]) -> list[int]:
+    return [item["index"] for item in _template_quantity_columns(template)]
+
+
+def _template_quantity_columns(template: dict[str, Any]) -> list[dict[str, str | int]]:
     columns = template.get("columns")
     if not isinstance(columns, list):
         return []
-    indexes: set[int] = set()
+    unique_by_index: dict[int, dict[str, str | int]] = {}
     for col in columns:
         if not isinstance(col, dict):
             continue
@@ -1255,8 +1315,172 @@ def _template_quantity_column_indexes(template: dict[str, Any]) -> list[int]:
         index_raw = col.get("index")
         if not isinstance(index_raw, int):
             continue
-        indexes.add(index_raw)
-    return sorted(indexes)
+        item = {
+            "index": int(index_raw),
+            "diet_type": str(col.get("diet_type") or "").strip(),
+            "area_id": str(col.get("area_id") or "").strip(),
+            "bag_type": str(col.get("bag_type") or "").strip(),
+        }
+        unique_by_index[int(index_raw)] = item
+    return [unique_by_index[idx] for idx in sorted(unique_by_index.keys())]
+
+
+def _analyze_quantity_pair_similarity(
+    *,
+    rows: list[list[str]],
+    left_index: int,
+    right_index: int,
+) -> dict[str, Any]:
+    overlap = 0
+    equal_count = 0
+    non_zero_overlap = 0
+    distinct_pairs: set[tuple[str, str]] = set()
+    sample_rows: list[int] = []
+    for row_idx, row in enumerate(rows):
+        if not isinstance(row, list):
+            continue
+        if left_index < 0 or right_index < 0:
+            continue
+        if left_index >= len(row) or right_index >= len(row):
+            continue
+        left_qty = _parse_strict_numeric_cell(row[left_index])
+        right_qty = _parse_strict_numeric_cell(row[right_index])
+        if left_qty is None or right_qty is None:
+            continue
+        overlap += 1
+        if abs(left_qty) > 1e-9 or abs(right_qty) > 1e-9:
+            non_zero_overlap += 1
+        left_repr = _format_merged_quantity_cell(left_qty)
+        right_repr = _format_merged_quantity_cell(right_qty)
+        distinct_pairs.add((left_repr, right_repr))
+        if abs(left_qty - right_qty) <= 1e-9:
+            equal_count += 1
+            if len(sample_rows) < 12:
+                sample_rows.append(row_idx)
+    equal_ratio = float(equal_count) / float(overlap) if overlap > 0 else 0.0
+    return {
+        "overlap": overlap,
+        "equal_count": equal_count,
+        "equal_ratio": equal_ratio,
+        "non_zero_overlap": non_zero_overlap,
+        "distinct_pairs": len(distinct_pairs),
+        "sample_row_indexes": sample_rows,
+    }
+
+
+def _detect_mirrored_quantity_column_anomalies(
+    *,
+    rows: list[list[str]],
+    quantity_columns: list[dict[str, str | int]],
+    reference_rows: list[list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    if len(quantity_columns) < 2:
+        return []
+    min_overlap = _read_reparse_int_env("OCR_REPARSE_COLUMN_MIRROR_MIN_OVERLAP", 10, min_value=2)
+    min_non_zero_overlap = _read_reparse_int_env(
+        "OCR_REPARSE_COLUMN_MIRROR_MIN_NONZERO_OVERLAP",
+        4,
+        min_value=1,
+    )
+    min_equal_ratio = _read_reparse_float_env(
+        "OCR_REPARSE_COLUMN_MIRROR_MIN_EQUAL_RATIO",
+        0.98,
+        min_value=0.0,
+    )
+    if min_equal_ratio > 1.0:
+        min_equal_ratio = 1.0
+    min_distinct_pairs = _read_reparse_int_env(
+        "OCR_REPARSE_COLUMN_MIRROR_MIN_DISTINCT_PAIRS",
+        3,
+        min_value=1,
+    )
+
+    anomalies: list[dict[str, Any]] = []
+    for left_pos, left_col in enumerate(quantity_columns):
+        left_index_raw = left_col.get("index")
+        left_index = int(left_index_raw) if isinstance(left_index_raw, int) else -1
+        left_area = str(left_col.get("area_id") or "").strip().lower()
+        left_diet = str(left_col.get("diet_type") or "").strip().lower()
+        left_bag = str(left_col.get("bag_type") or "").strip().lower()
+        if left_index < 0 or not left_area:
+            continue
+        for right_col in quantity_columns[left_pos + 1 :]:
+            right_index_raw = right_col.get("index")
+            right_index = int(right_index_raw) if isinstance(right_index_raw, int) else -1
+            right_area = str(right_col.get("area_id") or "").strip().lower()
+            right_diet = str(right_col.get("diet_type") or "").strip().lower()
+            right_bag = str(right_col.get("bag_type") or "").strip().lower()
+            if right_index < 0 or not right_area:
+                continue
+            if left_area == right_area:
+                continue
+            if left_diet != right_diet or left_bag != right_bag:
+                continue
+
+            stats = _analyze_quantity_pair_similarity(
+                rows=rows,
+                left_index=left_index,
+                right_index=right_index,
+            )
+            overlap = int(stats.get("overlap") or 0)
+            equal_ratio = float(stats.get("equal_ratio") or 0.0)
+            non_zero_overlap = int(stats.get("non_zero_overlap") or 0)
+            distinct_pairs = int(stats.get("distinct_pairs") or 0)
+            if overlap < min_overlap:
+                continue
+            if non_zero_overlap < min_non_zero_overlap:
+                continue
+            if distinct_pairs < min_distinct_pairs:
+                continue
+            if equal_ratio < min_equal_ratio:
+                continue
+
+            if isinstance(reference_rows, list) and reference_rows:
+                reference_stats = _analyze_quantity_pair_similarity(
+                    rows=reference_rows,
+                    left_index=left_index,
+                    right_index=right_index,
+                )
+                ref_overlap = int(reference_stats.get("overlap") or 0)
+                ref_equal_ratio = float(reference_stats.get("equal_ratio") or 0.0)
+                ref_non_zero_overlap = int(reference_stats.get("non_zero_overlap") or 0)
+                ref_distinct_pairs = int(reference_stats.get("distinct_pairs") or 0)
+                # When reference rows show the same mirror pattern, treat it as valid
+                # sheet structure and avoid false positives.
+                if (
+                    ref_overlap >= min_overlap
+                    and ref_non_zero_overlap >= min_non_zero_overlap
+                    and ref_distinct_pairs >= min_distinct_pairs
+                    and ref_equal_ratio >= min_equal_ratio
+                ):
+                    continue
+
+            anomalies.append(
+                {
+                    "index": right_index,
+                    "reason": "mirrored_sibling_columns",
+                    "mirror_with_index": left_index,
+                    "pair_signature": {
+                        "diet_type": str(left_col.get("diet_type") or ""),
+                        "bag_type": str(left_col.get("bag_type") or ""),
+                        "left_area_id": str(left_col.get("area_id") or ""),
+                        "right_area_id": str(right_col.get("area_id") or ""),
+                    },
+                    "overlap": overlap,
+                    "equal_count": int(stats.get("equal_count") or 0),
+                    "equal_ratio": round(equal_ratio, 4),
+                    "non_zero_overlap": non_zero_overlap,
+                    "distinct_pairs": distinct_pairs,
+                    "sample_row_indexes": list(stats.get("sample_row_indexes") or []),
+                    "thresholds": {
+                        "min_overlap": min_overlap,
+                        "min_non_zero_overlap": min_non_zero_overlap,
+                        "min_equal_ratio": min_equal_ratio,
+                        "min_distinct_pairs": min_distinct_pairs,
+                    },
+                }
+            )
+    return anomalies
 
 
 def _format_merged_quantity_cell(value: float) -> str:
@@ -1403,6 +1627,112 @@ def _read_reparse_bool_env(name: str, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _resolve_reparse_soft_warning_codes() -> set[str]:
+    raw = str(
+        os.getenv(
+            "OCR_REPARSE_SOFT_WARNING_CODES",
+            "sheet_column_anomaly",
+        )
+        or ""
+    ).strip()
+    if not raw:
+        return set()
+    return {
+        token.strip().lower()
+        for token in raw.split(",")
+        if token and token.strip()
+    }
+
+
+def _is_soft_warning_validation_error(error_code: str | None) -> bool:
+    if not _read_reparse_bool_env("OCR_REPARSE_ENABLE_SOFT_WARNINGS", True):
+        return False
+    normalized = str(error_code or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized in _resolve_reparse_soft_warning_codes()
+
+
+def _coerce_reparse_quantity_value(value: object, *, max_abs: float) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed < 0:
+        return None
+    # Meal counts are integers; OCR/LLM can emit split digits like "2.1".
+    if not float(parsed).is_integer():
+        scaled = parsed * 10.0
+        if 0 < parsed < 10 and abs(scaled - round(scaled)) < 1e-9:
+            parsed = float(round(scaled))
+        else:
+            return None
+    current = int(round(parsed))
+    if max_abs > 0 and current > max_abs:
+        digits = str(abs(current))
+        candidates: list[int] = []
+        if len(digits) > 1 and digits.endswith("0"):
+            candidates.append(int(digits[:-1]))
+        if len(digits) >= 3 and digits.startswith("1"):
+            candidates.append(int(digits[1:]))
+        if len(digits) > 1 and digits.endswith("9"):
+            candidates.append(int(digits[:-1]))
+        if len(digits) >= 2:
+            candidates.append(int(digits[-2:]))
+        if len(digits) >= 1:
+            candidates.append(int(digits[-1]))
+        picked: int | None = None
+        for candidate in candidates:
+            if 0 < candidate <= max_abs:
+                picked = candidate
+                break
+        if picked is None:
+            return None
+        current = picked
+    return float(current)
+
+
+def _sanitize_reparse_line_quantities(lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    max_abs = _read_reparse_float_env("OCR_REPARSE_MAX_QTY", 50.0, min_value=1.0)
+    stats = {
+        "max_abs_qty": int(max_abs),
+        "lines_in": len(lines),
+        "lines_out": 0,
+        "quantity_adjusted": 0,
+        "quantity_dropped": 0,
+        "lines_dropped": 0,
+    }
+    sanitized: list[dict[str, Any]] = []
+    for raw in lines:
+        if not isinstance(raw, dict):
+            continue
+        line = dict(raw)
+        for key in ("quantity_corrected", "quantity_original"):
+            if key not in line:
+                continue
+            original = line.get(key)
+            if original is None:
+                continue
+            coerced = _coerce_reparse_quantity_value(original, max_abs=max_abs)
+            if coerced is None:
+                line[key] = None
+                stats["quantity_dropped"] += 1
+                continue
+            if isinstance(original, (int, float)) and abs(float(original) - coerced) < 1e-9:
+                line[key] = coerced
+                continue
+            line[key] = coerced
+            stats["quantity_adjusted"] += 1
+        if line.get("quantity_corrected") is None and line.get("quantity_original") is None:
+            stats["lines_dropped"] += 1
+            continue
+        sanitized.append(line)
+    stats["lines_out"] = len(sanitized)
+    return sanitized, stats
 
 
 def _coerce_usage_int(value: object) -> int:
@@ -1620,70 +1950,116 @@ def _evaluate_quantity_only_rows_quality(
     if str(os.getenv("OCR_REPARSE_ENABLE_COLUMN_ANOMALY_GATE", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return None, detail
 
-    quantity_indexes = _template_quantity_column_indexes(template)
+    quantity_columns = _template_quantity_columns(template)
+    quantity_indexes: list[int] = []
+    for item in quantity_columns:
+        index_raw = item.get("index")
+        if not isinstance(index_raw, int):
+            continue
+        if index_raw < 0:
+            continue
+        quantity_indexes.append(index_raw)
     reference_normalized = (
         [list(row) for row in reference_rows if isinstance(row, list)]
         if isinstance(reference_rows, list)
         else []
     )
-    if not quantity_indexes or not reference_normalized:
+    if not quantity_indexes:
         return None, detail
 
     llm_counts = _quantity_column_non_empty_counts(
         rows=normalized_rows,
         quantity_indexes=quantity_indexes,
     )
-    ref_counts = _quantity_column_non_empty_counts(
-        rows=reference_normalized,
-        quantity_indexes=quantity_indexes,
-    )
-    min_ratio = _read_reparse_float_env("OCR_REPARSE_COLUMN_NONEMPTY_MIN_RATIO", 0.25, min_value=0.0)
-    max_ratio = _read_reparse_float_env("OCR_REPARSE_COLUMN_NONEMPTY_MAX_RATIO", 3.0, min_value=0.1)
-    if max_ratio < min_ratio:
-        max_ratio = min_ratio
-    unexpected_abs = _read_reparse_int_env("OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_ABS", 4, min_value=1)
-    unexpected_ratio = _read_reparse_float_env(
-        "OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_RATIO",
-        0.12,
-        min_value=0.0,
-    )
+    detail["column_non_empty"] = {
+        "llm": {str(idx): int(llm_counts.get(idx, 0)) for idx in quantity_indexes},
+    }
 
     anomaly_columns: list[dict[str, Any]] = []
-    expected_for_threshold = max(effective_expected, len(reference_normalized))
-    unexpected_threshold = max(unexpected_abs, int(expected_for_threshold * unexpected_ratio))
-    for idx in quantity_indexes:
-        llm_count = int(llm_counts.get(idx, 0))
-        ref_count = int(ref_counts.get(idx, 0))
-        if ref_count <= 0:
-            if llm_count >= unexpected_threshold:
+    if not reference_normalized:
+        detail["column_reference_missing"] = True
+    else:
+        detail["column_reference_missing"] = False
+        ref_counts = _quantity_column_non_empty_counts(
+            rows=reference_normalized,
+            quantity_indexes=quantity_indexes,
+        )
+        detail["column_non_empty"]["reference"] = {
+            str(idx): int(ref_counts.get(idx, 0)) for idx in quantity_indexes
+        }
+        min_ratio = _read_reparse_float_env("OCR_REPARSE_COLUMN_NONEMPTY_MIN_RATIO", 0.25, min_value=0.0)
+        max_ratio = _read_reparse_float_env("OCR_REPARSE_COLUMN_NONEMPTY_MAX_RATIO", 3.0, min_value=0.1)
+        if max_ratio < min_ratio:
+            max_ratio = min_ratio
+        min_reference_count = _read_reparse_int_env(
+            "OCR_REPARSE_COLUMN_RATIO_MIN_REFERENCE_COUNT",
+            6,
+            min_value=1,
+        )
+        enable_unexpected_nonempty = _read_reparse_bool_env(
+            "OCR_REPARSE_ENABLE_COLUMN_UNEXPECTED_NONEMPTY_GATE",
+            False,
+        )
+        unexpected_abs = _read_reparse_int_env("OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_ABS", 4, min_value=1)
+        unexpected_ratio = _read_reparse_float_env(
+            "OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_RATIO",
+            0.12,
+            min_value=0.0,
+        )
+
+        expected_for_threshold = max(effective_expected, len(reference_normalized))
+        unexpected_threshold = max(unexpected_abs, int(expected_for_threshold * unexpected_ratio))
+        ratio_skipped_low_reference: dict[str, int] = {}
+        for idx in quantity_indexes:
+            llm_count = int(llm_counts.get(idx, 0))
+            ref_count = int(ref_counts.get(idx, 0))
+            if ref_count <= 0:
+                if enable_unexpected_nonempty and llm_count >= unexpected_threshold:
+                    anomaly_columns.append(
+                        {
+                            "index": idx,
+                            "reason": "unexpected_non_empty",
+                            "llm_non_empty": llm_count,
+                            "reference_non_empty": ref_count,
+                            "threshold": unexpected_threshold,
+                        }
+                    )
+                continue
+            if ref_count < min_reference_count:
+                ratio_skipped_low_reference[str(idx)] = ref_count
+                continue
+            ratio = float(llm_count) / float(ref_count)
+            if ratio < min_ratio or ratio > max_ratio:
                 anomaly_columns.append(
                     {
                         "index": idx,
-                        "reason": "unexpected_non_empty",
+                        "reason": "non_empty_ratio_out_of_range",
                         "llm_non_empty": llm_count,
                         "reference_non_empty": ref_count,
-                        "threshold": unexpected_threshold,
+                        "ratio": round(ratio, 4),
+                        "min_ratio": min_ratio,
+                        "max_ratio": max_ratio,
                     }
                 )
-            continue
-        ratio = float(llm_count) / float(ref_count)
-        if ratio < min_ratio or ratio > max_ratio:
-            anomaly_columns.append(
-                {
-                    "index": idx,
-                    "reason": "non_empty_ratio_out_of_range",
-                    "llm_non_empty": llm_count,
-                    "reference_non_empty": ref_count,
-                    "ratio": round(ratio, 4),
-                    "min_ratio": min_ratio,
-                    "max_ratio": max_ratio,
-                }
-            )
+        detail["column_ratio_min_reference_count"] = int(min_reference_count)
+        detail["column_ratio_skipped_low_reference"] = ratio_skipped_low_reference
+        detail["column_unexpected_nonempty_enabled"] = bool(enable_unexpected_nonempty)
 
-    detail["column_non_empty"] = {
-        "llm": {str(idx): int(llm_counts.get(idx, 0)) for idx in quantity_indexes},
-        "reference": {str(idx): int(ref_counts.get(idx, 0)) for idx in quantity_indexes},
-    }
+    enable_mirror_gate = _read_reparse_bool_env("OCR_REPARSE_ENABLE_COLUMN_MIRROR_GATE", True)
+    mirrored_column_anomalies: list[dict[str, Any]] = []
+    if enable_mirror_gate:
+        mirrored_column_anomalies = _detect_mirrored_quantity_column_anomalies(
+            rows=normalized_rows,
+            quantity_columns=quantity_columns,
+            reference_rows=reference_normalized if reference_normalized else None,
+        )
+    if mirrored_column_anomalies:
+        anomaly_columns.extend(mirrored_column_anomalies)
+    detail["column_mirror_anomaly_count"] = len(mirrored_column_anomalies)
+
+    if "reference" not in detail["column_non_empty"]:
+        detail["column_non_empty"]["reference"] = {}
+
     detail["column_anomaly_count"] = len(anomaly_columns)
     if anomaly_columns:
         detail["quality_issue"] = "column_anomaly"
@@ -2013,11 +2389,18 @@ def create_order_from_ingest(
                 )
             order.lines_updated_at = datetime.utcnow()
         session.refresh(order)
-        return serialize_order(order)
+        serialized = serialize_order(order)
+    _invalidate_orders_cache()
+    return serialized
 
 
 _orders_cache_lock = threading.Lock()
 _orders_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _invalidate_orders_cache() -> None:
+    with _orders_cache_lock:
+        _orders_cache.clear()
 
 
 def _fetch_orders(status: Optional[str]) -> list[dict]:
@@ -2026,7 +2409,15 @@ def _fetch_orders(status: Optional[str]) -> list[dict]:
         if status:
             query = query.where(Order.status == status)
         orders = session.execute(query).scalars().all()
-        return [serialize_order_summary(o) for o in orders]
+        payloads = [serialize_order_summary(o) for o in orders]
+        payloads.sort(
+            key=lambda item: (
+                item.get("received_at") or datetime.min,
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        return payloads
 
 
 def list_orders(status: Optional[str] = None):
@@ -2088,6 +2479,7 @@ def list_orders_by_line_date(
 
 
 def update_lines(order_id: str, lines: list) -> bool:
+    event_context: dict[str, Any] | None = None
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -2114,15 +2506,22 @@ def update_lines(order_id: str, lines: list) -> bool:
             )
         order.lines_updated_at = datetime.utcnow()
         logger.info("Order lines updated", order_id=order_id)
+        event_context = {
+            "fac": order.facility_code,
+            "wek": order.week_code,
+            "line_count": len(normalized_lines),
+        }
+    if event_context:
         record_event(
             "order_lines_update",
             actor="system",
             target=order_id,
-            fac=order.facility_code,
-            wek=order.week_code,
-            metadata={"line_count": len(normalized_lines)},
+            fac=event_context.get("fac"),
+            wek=event_context.get("wek"),
+            metadata={"line_count": event_context.get("line_count", 0)},
         )
-        return True
+    _invalidate_orders_cache()
+    return True
 
 
 def _is_blank_menu_value(value: object) -> bool:
@@ -2251,6 +2650,69 @@ def get_order_by_id(order_id: str):
         if not order:
             return None
         return serialize_order(order)
+
+
+def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        received_at = order.received_at or datetime.utcnow()
+        current_week_id = _to_sheet_month_id(order.week_code)
+
+    candidate_months: list[str] = []
+
+    def _append(value: object) -> None:
+        month_id = _to_sheet_month_id(value)
+        if month_id and month_id not in candidate_months:
+            candidate_months.append(month_id)
+
+    base_month = received_at.strftime("%Y-%m")
+    _append(current_week_id)
+    _append(base_month)
+    for delta in (-1, 1, -2, 2, -3, 3):
+        _append(_shift_sheet_month_id(base_month, delta))
+
+    options: list[dict[str, Any]] = []
+    for month_id in candidate_months:
+        menu = menu_service.get_menu(month_id)
+        if not isinstance(menu, dict):
+            continue
+        entries = menu.get("entries")
+        if not isinstance(entries, list) or not entries:
+            continue
+        menu_dates: list[date] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_date = entry.get("menu_date")
+            if not isinstance(raw_date, str) or not raw_date.strip():
+                continue
+            try:
+                parsed = date.fromisoformat(raw_date.strip())
+            except Exception:
+                continue
+            menu_dates.append(parsed)
+        if menu_dates:
+            start_date = min(menu_dates)
+            end_date = max(menu_dates)
+            label = f"{month_id} ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')})"
+            start_iso = start_date.isoformat()
+            end_iso = end_date.isoformat()
+        else:
+            label = month_id
+            start_iso = None
+            end_iso = None
+        options.append(
+            {
+                "week_id": month_id,
+                "label": label,
+                "date_from": start_iso,
+                "date_to": end_iso,
+                "selected": month_id == current_week_id,
+            }
+        )
+    return options, None
 
 
 def get_bag_summary(order_id: str):
@@ -2583,6 +3045,10 @@ def _normalize_sheet_diet(value: object) -> str | None:
     token = _normalize_sheet_text(value).lower()
     if not token:
         return None
+    if ("袋" in token or "bag" in token) and (
+        "regular" in token or "常食" in token or "通常" in token or "常" in token
+    ):
+        return "regular_bag"
     if "regular" in token or "常食" in token or "通常" in token:
         return "regular"
     if "soft" in token or "軟菜" in token or "やわ" in token:
@@ -2650,6 +3116,7 @@ def _field_label(field: str) -> str:
     if diet and area:
         diet_label = {
             "regular": "常食",
+            "regular_bag": "常食(袋分け)",
             "soft": "軟菜",
             "mixer": "ミキサー",
             "daycare": "通所",
@@ -2738,9 +3205,20 @@ def _snapshot_raw_ocr_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "facility_id",
         "table_raw",
         "rows",
+        "pages",
+        "tables",
+        "cell_issues",
+        "yomitoku_cell_issues",
+        "roi_cell_issues",
+        "roi_extraction",
+        "roi_overlay_rows",
+        "roi_overlay_policy",
         "warnings",
         "failed_cells",
         "combined",
+        "classification",
+        "classification_confidence",
+        "metrics",
     ]
     snapshot: dict[str, Any] = {}
     for key in snapshot_keys:
@@ -2769,6 +3247,131 @@ def _sanitize_revision_rows(
     return sanitized
 
 
+def _normalize_sheet_revision_snapshot(
+    *,
+    fields: object,
+    header: object,
+    rows_payload: object,
+    row_ids: object,
+) -> dict[str, Any]:
+    normalized_fields = [str(field).strip() for field in fields] if isinstance(fields, list) else []
+    input_rows = rows_payload if isinstance(rows_payload, list) else []
+    max_width = max(
+        (len(row) for row in input_rows if isinstance(row, list)),
+        default=0,
+    )
+    if isinstance(header, list):
+        max_width = max(max_width, len(header))
+    if not normalized_fields:
+        normalized_fields = [f"col{idx + 1}" for idx in range(max(max_width, 1))]
+    elif len(normalized_fields) < max_width:
+        normalized_fields.extend(
+            [f"col{idx + 1}" for idx in range(len(normalized_fields), max_width)]
+        )
+
+    normalized_rows = _sanitize_revision_rows(rows_payload=rows_payload, fields=normalized_fields)
+    normalized_header = (
+        [str(cell or "").strip() for cell in header]
+        if isinstance(header, list)
+        else [_field_label(field) for field in normalized_fields]
+    )
+    if len(normalized_header) < len(normalized_fields):
+        normalized_header.extend(
+            [_field_label(field) for field in normalized_fields[len(normalized_header) :]]
+        )
+
+    normalized_row_ids = (
+        [str(item).strip() for item in row_ids if str(item).strip()]
+        if isinstance(row_ids, list)
+        else []
+    )
+    if len(normalized_row_ids) < len(normalized_rows):
+        normalized_row_ids.extend(
+            [f"row-{idx + 1}" for idx in range(len(normalized_row_ids), len(normalized_rows))]
+        )
+
+    return {
+        "fields": normalized_fields,
+        "header": normalized_header,
+        "rows": normalized_rows,
+        "row_ids": normalized_row_ids[: len(normalized_rows)],
+    }
+
+
+def _sheet_digest(
+    *,
+    fields: object,
+    header: object,
+    rows_payload: object,
+    row_ids: object,
+) -> str:
+    snapshot = _normalize_sheet_revision_snapshot(
+        fields=fields,
+        header=header,
+        rows_payload=rows_payload,
+        row_ids=row_ids,
+    )
+    payload = json.dumps(snapshot, ensure_ascii=True, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _select_edited_sheet_revision(
+    payload: dict[str, Any] | None,
+    *,
+    exact_only: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    edited = payload.get("_edited_ocr")
+    if not isinstance(edited, dict):
+        return None
+    candidates: list[dict[str, Any]] = []
+    revisions = edited.get("revisions")
+    if isinstance(revisions, list):
+        candidates.extend(item for item in revisions if isinstance(item, dict))
+    latest = edited.get("latest")
+    if isinstance(latest, dict):
+        candidates.append(latest)
+    for revision in reversed(candidates):
+        if str(revision.get("ui_mode") or "").strip().lower() != "sheet":
+            continue
+        if not isinstance(revision.get("rows"), list):
+            continue
+        if exact_only:
+            is_exact = bool(revision.get("sheet_save_only")) or (
+                str(revision.get("sheet_save_mode") or "").strip().lower() == "exact"
+            )
+            if not is_exact:
+                continue
+        return revision
+    return None
+
+
+def _build_sheet_payload_from_revision(
+    *,
+    order_id: str,
+    revision: dict[str, Any],
+    fallback_sheet: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    snapshot = _normalize_sheet_revision_snapshot(
+        fields=revision.get("fields"),
+        header=revision.get("header"),
+        rows_payload=revision.get("rows"),
+        row_ids=revision.get("row_ids"),
+    )
+    if not snapshot["rows"]:
+        return None
+    payload = dict(fallback_sheet) if isinstance(fallback_sheet, dict) else {"order_id": order_id}
+    payload["order_id"] = order_id
+    payload["fields"] = snapshot["fields"]
+    payload["header"] = snapshot["header"]
+    payload["rows"] = snapshot["rows"]
+    payload["row_ids"] = snapshot["row_ids"]
+    if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
+        payload["source"] = "edited_sheet"
+    return payload
+
+
 def _append_edited_ocr_revision(
     *,
     order_id: str,
@@ -2779,9 +3382,16 @@ def _append_edited_ocr_revision(
     row_ids: list[str],
     before_digest: str,
     after_digest: str,
+    revision_meta: dict[str, Any] | None = None,
 ) -> None:
     if not fields:
         return
+    resolved_revision_meta = dict(revision_meta) if isinstance(revision_meta, dict) else {}
+    raw_output_override = (
+        resolved_revision_meta.pop("raw_output_override", None)
+        if isinstance(resolved_revision_meta.get("raw_output_override"), dict)
+        else None
+    )
     revision_rows = _sanitize_revision_rows(rows_payload=rows_payload, fields=fields)
     revision_header = [str(cell or "").strip() for cell in (header or fields)]
     if len(revision_header) < len(fields):
@@ -2801,6 +3411,8 @@ def _append_edited_ocr_revision(
         "changed": before_digest != after_digest,
         "markdown": revision_markdown,
     }
+    if resolved_revision_meta:
+        revision.update(resolved_revision_meta)
     try:
         with session_scope() as session:
             cache = session.get(OrderOcrCache, order_id)
@@ -2812,7 +3424,9 @@ def _append_edited_ocr_revision(
             if not isinstance(edited, dict):
                 edited = {}
             raw_output = edited.get("raw_output")
-            if not isinstance(raw_output, dict):
+            if isinstance(raw_output_override, dict):
+                raw_output = raw_output_override
+            elif not isinstance(raw_output, dict):
                 raw_output = _snapshot_raw_ocr_payload(payload)
             revisions = edited.get("revisions")
             if not isinstance(revisions, list):
@@ -2949,6 +3563,7 @@ def apply_ocr_table(
     ui_mode: str | None = None,
     fields: object = None,
     row_ids: object = None,
+    revision_meta: dict[str, Any] | None = None,
 ):
     config_service.reload_configs()
     has_markdown = isinstance(markdown, str) and bool(markdown.strip())
@@ -3220,6 +3835,7 @@ def apply_ocr_table(
         row_ids=revision_row_ids,
         before_digest=before_digest,
         after_digest=after_digest,
+        revision_meta=revision_meta,
     )
     serialized["reparse"] = {
         "before_count": before_count,
@@ -3231,6 +3847,1162 @@ def apply_ocr_table(
     }
     serialized["ocr_job_id"] = f"OCR-{order_id}"
     return serialized, None
+
+
+def save_ocr_sheet_exact(
+    order_id: str,
+    *,
+    header: object = None,
+    rows: object = None,
+    fields: object = None,
+    row_ids: object = None,
+    ui_mode: str | None = None,
+):
+    snapshot = _normalize_sheet_revision_snapshot(
+        fields=fields,
+        header=header,
+        rows_payload=rows,
+        row_ids=row_ids,
+    )
+    if not snapshot["rows"]:
+        return None, "rows_empty"
+
+    facility_id: str | None = None
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        facility_id = order.facility_code
+
+    current_payload = _load_order_ocr_cache(order_id)
+    previous_revision = _select_edited_sheet_revision(current_payload, exact_only=False)
+    if isinstance(previous_revision, dict):
+        before_digest = _sheet_digest(
+            fields=previous_revision.get("fields"),
+            header=previous_revision.get("header"),
+            rows_payload=previous_revision.get("rows"),
+            row_ids=previous_revision.get("row_ids"),
+        )
+    else:
+        current_sheet, current_error = get_ocr_sheet(order_id)
+        if current_error or not isinstance(current_sheet, dict):
+            before_digest = _sheet_digest(
+                fields=snapshot["fields"],
+                header=snapshot["header"],
+                rows_payload=snapshot["rows"],
+                row_ids=snapshot["row_ids"],
+            )
+        else:
+            before_digest = _sheet_digest(
+                fields=current_sheet.get("fields"),
+                header=current_sheet.get("header"),
+                rows_payload=current_sheet.get("rows"),
+                row_ids=current_sheet.get("row_ids"),
+            )
+    after_digest = _sheet_digest(
+        fields=snapshot["fields"],
+        header=snapshot["header"],
+        rows_payload=snapshot["rows"],
+        row_ids=snapshot["row_ids"],
+    )
+
+    resolved_ui_mode = str(ui_mode or "").strip().lower() or "sheet"
+    _append_edited_ocr_revision(
+        order_id=order_id,
+        ui_mode=resolved_ui_mode,
+        fields=snapshot["fields"],
+        header=snapshot["header"],
+        rows_payload=snapshot["rows"],
+        row_ids=snapshot["row_ids"],
+        before_digest=before_digest,
+        after_digest=after_digest,
+        revision_meta={
+            "sheet_save_only": True,
+            "sheet_save_mode": "exact",
+        },
+    )
+    record_event(
+        "ocr_sheet_save",
+        actor="system",
+        target=order_id,
+        fac=facility_id,
+        metadata={
+            "row_count": len(snapshot["rows"]),
+            "changed": before_digest != after_digest,
+            "mode": "exact",
+        },
+    )
+    history, history_error = get_ocr_edit_history(order_id)
+    if history_error:
+        return None, history_error
+    latest = history.get("latest") if isinstance(history, dict) else None
+    return {
+        "order_id": order_id,
+        "revision": latest if isinstance(latest, dict) else None,
+    }, None
+
+
+def _parse_llm_review_confidence(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = float(text)
+    except Exception:
+        return 0.0
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
+def _parse_llm_review_int(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text or not re.fullmatch(r"-?\d+", text):
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
+def _resolve_llm_review_baseline(
+    *,
+    payload: dict[str, Any],
+    template: dict[str, Any],
+) -> dict[str, Any]:
+    edited = payload.get("_edited_ocr")
+    latest = edited.get("latest") if isinstance(edited, dict) else None
+    raw_output = edited.get("raw_output") if isinstance(edited, dict) else None
+    if not isinstance(raw_output, dict):
+        raw_output = _snapshot_raw_ocr_payload(payload)
+
+    if isinstance(latest, dict):
+        latest_llm_review = latest.get("llm_review")
+        latest_output_payload = (
+            latest_llm_review.get("output_payload")
+            if isinstance(latest_llm_review, dict)
+            else None
+        )
+        if isinstance(latest_output_payload, dict):
+            raw_output = latest_output_payload
+        fields = [str(field).strip() for field in (latest.get("fields") or []) if str(field).strip()]
+        rows = _sanitize_revision_rows(rows_payload=latest.get("rows"), fields=fields)
+        row_ids = [str(item).strip() for item in (latest.get("row_ids") or []) if str(item).strip()]
+        header = [str(cell or "").strip() for cell in (latest.get("header") or [])]
+        if len(row_ids) < len(rows):
+            row_ids.extend([f"row-{idx + 1}" for idx in range(len(row_ids), len(rows))])
+        if len(header) < len(fields):
+            header.extend([_field_label(field) for field in fields[len(header) :]])
+        return {
+            "fields": fields,
+            "header": header,
+            "rows": rows,
+            "row_ids": row_ids[: len(rows)],
+            "baseline_revision_id": str(latest.get("revision_id") or "").strip() or None,
+            "raw_output": raw_output,
+            "baseline_source": "edited",
+        }
+
+    fields = _row_fields_from_template(template)
+    rows = _extract_first_pass_rows_from_payload(payload, template)
+    if not fields:
+        width = max((len(row) for row in rows), default=0)
+        fields = [f"col{idx + 1}" for idx in range(max(width, 1))]
+    header = [_field_label(field) for field in fields]
+    row_ids = [f"row-{idx + 1}" for idx in range(len(rows))]
+    return {
+        "fields": fields,
+        "header": header,
+        "rows": rows,
+        "row_ids": row_ids,
+        "baseline_revision_id": None,
+        "raw_output": raw_output,
+        "baseline_source": "yomitoku",
+    }
+
+
+def _build_llm_review_prompt_rows(
+    *,
+    fields: list[str],
+    rows: list[list[str]],
+    row_ids: list[str],
+) -> list[dict[str, Any]]:
+    prompt_rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        row_id = row_ids[idx] if idx < len(row_ids) and row_ids[idx] else f"row-{idx + 1}"
+        entry: dict[str, Any] = {"row_id": row_id}
+        for col_idx, field in enumerate(fields):
+            entry[field] = row[col_idx] if col_idx < len(row) else ""
+        prompt_rows.append(entry)
+    return prompt_rows
+
+
+def _build_llm_review_payload_rows(
+    *,
+    fields: list[str],
+    rows: list[list[str]],
+) -> list[dict[str, str]]:
+    payload_rows: list[dict[str, str]] = []
+    for row in rows:
+        entry = {
+            field: row[idx] if idx < len(row) else ""
+            for idx, field in enumerate(fields)
+        }
+        if any(str(value or "").strip() for value in entry.values()):
+            payload_rows.append(entry)
+    return payload_rows
+
+
+def _resolve_llm_review_row_ids(
+    *,
+    baseline_row_ids: list[str],
+    row_count: int,
+) -> list[str]:
+    resolved: list[str] = []
+    for idx in range(max(row_count, 0)):
+        candidate = str(baseline_row_ids[idx] if idx < len(baseline_row_ids) else "").strip()
+        resolved.append(candidate or f"row-{idx + 1}")
+    return resolved
+
+
+def _build_llm_review_response_schema(fields: list[str]) -> dict[str, Any]:
+    row_properties: dict[str, Any] = {}
+    for field in fields:
+        row_properties[field] = {"type": "string"}
+    issue_schema = {
+        "type": "object",
+        "properties": {
+            "issue_id": {"type": "string"},
+            "row_id": {"type": "string"},
+            "row_index": {"type": "integer"},
+            "field": {"type": "string"},
+            "issue_code": {"type": "string"},
+            "status": {"type": "string"},
+            "page_index": {"type": "integer"},
+            "table_id": {"type": "string"},
+            "current_text": {"type": "string"},
+            "confidence": {"type": "number"},
+            "evidence": {"type": "string"},
+            "reason": {"type": "string"},
+            "severity": {"type": "string"},
+        },
+        "required": ["field"],
+    }
+    table_schema = {
+        "type": "object",
+        "properties": {
+            "table_id": {"type": "string"},
+            "page_index": {"type": "integer"},
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        },
+        "required": ["rows"],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "facility_name": {"type": "string"},
+            "date_strings": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": row_properties,
+                    "required": list(fields),
+                },
+            },
+            "table_raw": {"type": "string"},
+            "tables": {
+                "type": "array",
+                "items": table_schema,
+            },
+            "cell_issues": {
+                "type": "array",
+                "items": issue_schema,
+            },
+            "llm_review": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "needs_more_review": {"type": "boolean"},
+                    "notes": {"type": "string"},
+                    "issues": {
+                        "type": "array",
+                        "items": issue_schema,
+                    },
+                },
+                "required": ["status", "needs_more_review", "notes"],
+            },
+        },
+        "required": ["facility_name", "date_strings", "rows", "llm_review"],
+    }
+
+
+def _build_llm_review_prompts(
+    *,
+    provider: str,
+    template: dict[str, Any],
+    baseline: dict[str, Any],
+    pdf_variant_requested: str = "raw",
+    pdf_variant_used: str = "raw",
+    pdf_variant_fallback_reason: str | None = None,
+    prompt_override: str | None = None,
+) -> tuple[str, str]:
+    prompt_key = "openai_ocr_prompt" if provider == "openai" else "gemini_ocr_prompt"
+    user_key = "openai_ocr_user_prompt" if provider == "openai" else "gemini_ocr_user_prompt"
+    base_system_prompt = str(template.get(prompt_key) or "").strip()
+    base_user_prompt = str(prompt_override or template.get(user_key) or "").strip()
+    baseline_fields = [str(field).strip() for field in (baseline.get("fields") or []) if str(field).strip()]
+    baseline_rows = _build_llm_review_prompt_rows(
+        fields=baseline_fields,
+        rows=baseline.get("rows") or [],
+        row_ids=baseline.get("row_ids") or [],
+    )
+    raw_output = baseline.get("raw_output") if isinstance(baseline.get("raw_output"), dict) else {}
+
+    system_sections: list[str] = []
+    if base_system_prompt:
+        system_sections.append(base_system_prompt)
+    system_sections.append(
+        "You are validating yomitoku OCR against the attached fax PDF/image.\n"
+        "You will receive the fax PDF/image, the current baseline rows shown to the user, and the previous yomitoku/LLM OCR payload.\n"
+        "Review the baseline against the fax and return a revised OCR payload in yomitoku-compatible JSON.\n"
+        "Return strict JSON only with shape:\n"
+        '{"facility_name":"","date_strings":[],"rows":[{}],"table_raw":"","tables":[{"table_id":"","page_index":1,"rows":[[]]}],"cell_issues":[{"issue_id":"","row_id":"","row_index":0,"field":"","issue_code":"","status":"","page_index":1,"table_id":"","current_text":"","confidence":0.0,"evidence":"","reason":"","severity":"warning"}],"llm_review":{"status":"","needs_more_review":false,"notes":"","issues":[{"issue_id":"","row_id":"","row_index":0,"field":"","issue_code":"","status":"","page_index":1,"table_id":"","current_text":"","confidence":0.0,"evidence":"","reason":"","severity":"warning"}]}}\n'
+        "Rules:\n"
+        "- Keep the row order aligned with the baseline rows.\n"
+        "- Use only field names from the baseline schema in rows and issues.\n"
+        "- rows, table_raw, and tables must describe the same reviewed table content.\n"
+        "- Correct cells only when the fax image clearly supports the change.\n"
+        "- If a cell remains unreadable or ambiguous, keep the safest value in rows and add an issue in cell_issues and llm_review.issues.\n"
+        "- Use row_id values from the baseline rows when you report issues. If you cannot infer row_id, include row_index.\n"
+        "- Confidence must be 0.00-1.00.\n"
+        "- Return JSON only."
+    )
+
+    user_sections: list[str] = []
+    if base_user_prompt:
+        user_sections.append(base_user_prompt)
+    user_sections.append(
+        f"Attached fax variant requested: {pdf_variant_requested}\n"
+        f"Attached fax variant used: {pdf_variant_used}"
+    )
+    if pdf_variant_fallback_reason:
+        user_sections.append(f"Attached fax fallback reason: {pdf_variant_fallback_reason}")
+    baseline_revision_id = str(baseline.get("baseline_revision_id") or "").strip()
+    if baseline_revision_id:
+        user_sections.append(f"Current baseline revision_id: {baseline_revision_id}")
+    user_sections.append(
+        f"Current baseline source: {str(baseline.get('baseline_source') or 'yomitoku').strip()}"
+    )
+    if baseline_fields:
+        user_sections.append(
+            "Valid baseline fields:\n"
+            f"{json.dumps(baseline_fields, ensure_ascii=False)}"
+        )
+    user_sections.append(
+        "Current baseline rows:\n"
+        f"{_truncate_assist_text(json.dumps(baseline_rows[:200], ensure_ascii=False), max_chars=12000)}"
+    )
+    user_sections.append(
+        "Return rows using this exact baseline field schema:\n"
+        f"{json.dumps(baseline_fields, ensure_ascii=False)}"
+    )
+    table_raw = raw_output.get("table_raw")
+    if isinstance(table_raw, str) and table_raw.strip():
+        user_sections.append(
+            "Previous yomitoku/LLM markdown:\n"
+            f"{_truncate_assist_text(table_raw.strip(), max_chars=7000)}"
+        )
+    tables = _compact_prompt_tables(raw_output)
+    if tables:
+        user_sections.append(
+            "Previous yomitoku/LLM structured tables/cells:\n"
+            f"{_truncate_assist_text(json.dumps(tables, ensure_ascii=False), max_chars=10000)}"
+        )
+    issues = _compact_prompt_cell_issues(raw_output, template)
+    if issues:
+        user_sections.append(
+            "Existing suspicious cells from yomitoku/LLM:\n"
+            f"{_truncate_assist_text(json.dumps(issues, ensure_ascii=False), max_chars=6000)}"
+        )
+    user_sections.append(
+        "Review the baseline against the fax image and return a revised yomitoku-compatible payload only."
+    )
+    return "\n\n".join(system_sections), "\n\n".join(user_sections)
+
+
+def _extract_llm_review_json_object(raw_text: object) -> dict[str, Any] | None:
+    text = str(raw_text or "").strip()
+    if not text:
+        return None
+
+    candidates: list[str] = []
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    candidates.append(text)
+
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            char = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+                continue
+            if char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(text[start : idx + 1].strip())
+                    break
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _normalize_llm_review_json_value(value: object, *, depth: int = 0) -> Any:
+    if depth >= 3:
+        return _field_value_to_str(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        normalized_items: list[Any] = []
+        for item in value[:20]:
+            normalized_item = _normalize_llm_review_json_value(item, depth=depth + 1)
+            if normalized_item is not None:
+                normalized_items.append(normalized_item)
+        return normalized_items
+    if isinstance(value, dict):
+        normalized_dict: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:20]:
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            normalized_value = _normalize_llm_review_json_value(raw_value, depth=depth + 1)
+            if normalized_value is None:
+                continue
+            normalized_dict[key] = normalized_value
+        return normalized_dict
+    return _field_value_to_str(value)
+
+
+def _normalize_llm_review_summary(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        normalized = _normalize_llm_review_json_value(value)
+        if isinstance(normalized, dict):
+            return normalized
+    if isinstance(value, str) and value.strip():
+        return {"text": value.strip()}
+    return {}
+
+
+def _normalize_llm_review_issue(item: object, *, issue_id: str) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    row_id = str(item.get("row_id") or "").strip()
+    field = str(item.get("field") or "").strip()
+    if not row_id or not field:
+        return None
+    normalized: dict[str, Any] = {
+        "issue_id": issue_id,
+        "row_id": row_id,
+        "field": field,
+        "issue_code": str(item.get("issue_code") or item.get("status") or item.get("reason") or "review_required").strip()
+        or "review_required",
+        "status": str(item.get("status") or "").strip(),
+        "current_text": _field_value_to_str(item.get("current_text")),
+        "confidence": round(_parse_llm_review_confidence(item.get("confidence")), 4),
+        "evidence": str(item.get("evidence") or "").strip(),
+        "reason": str(item.get("reason") or "").strip(),
+        "severity": str(item.get("severity") or "warning").strip() or "warning",
+        "source": "llm_review",
+    }
+    table_id = str(item.get("table_id") or "").strip()
+    if table_id:
+        normalized["table_id"] = table_id
+    page_index = _parse_llm_review_int(item.get("page_index"))
+    if page_index is not None:
+        normalized["page_index"] = page_index
+    return normalized
+
+
+def _normalize_llm_review_output_issue(
+    item: object,
+    *,
+    issue_id: str,
+    fields: list[str],
+    row_ids: list[str],
+    current_rows: list[list[str]],
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    field = str(item.get("field") or "").strip()
+    if not field or field not in fields:
+        return None
+    row_id = str(item.get("row_id") or "").strip()
+    row_index = _parse_llm_review_int(item.get("row_index"))
+    if row_index is None:
+        row_index = _parse_llm_review_int(item.get("source_row_index"))
+    if not row_id and row_index is not None and 0 <= row_index < len(row_ids):
+        row_id = row_ids[row_index]
+    if not row_id:
+        return None
+    if row_index is None and row_id in row_ids:
+        row_index = row_ids.index(row_id)
+    normalized = _normalize_llm_review_issue(
+        {
+            **item,
+            "row_id": row_id,
+            "field": field,
+        },
+        issue_id=issue_id,
+    )
+    if not isinstance(normalized, dict):
+        return None
+    if row_index is not None and 0 <= row_index < len(current_rows):
+        normalized["row_index"] = int(row_index)
+        normalized["source_row_index"] = int(row_index)
+        try:
+            col_index = fields.index(field)
+        except ValueError:
+            col_index = None
+        if col_index is not None:
+            normalized["column_index"] = int(col_index)
+            normalized["col_index"] = int(col_index)
+            normalized.setdefault("current_text", current_rows[row_index][col_index])
+    return normalized
+
+
+def _normalize_llm_review_overwrite(item: object, *, issue_id: str) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    row_id = str(item.get("row_id") or "").strip()
+    field = str(item.get("field") or "").strip()
+    if not row_id or not field:
+        return None
+    current_text = _field_value_to_str(item.get("current_text"))
+    old_text = item.get("old_text")
+    normalized: dict[str, Any] = {
+        "issue_id": issue_id,
+        "row_id": row_id,
+        "field": field,
+        "status": str(item.get("status") or "").strip(),
+        "current_text": current_text,
+        "old_text": _field_value_to_str(old_text if old_text is not None else current_text),
+        "new_text": _field_value_to_str(item.get("new_text")),
+        "confidence": round(_parse_llm_review_confidence(item.get("confidence")), 4),
+        "evidence": str(item.get("evidence") or "").strip(),
+        "reason": str(item.get("reason") or "").strip(),
+        "source": "llm_review",
+    }
+    table_id = str(item.get("table_id") or "").strip()
+    if table_id:
+        normalized["table_id"] = table_id
+    page_index = _parse_llm_review_int(item.get("page_index"))
+    if page_index is not None:
+        normalized["page_index"] = page_index
+    return normalized
+
+
+def _parse_llm_review_response(raw_text: object) -> dict[str, Any] | None:
+    payload = _extract_llm_review_json_object(raw_text)
+    if not isinstance(payload, dict):
+        return None
+
+    if any(key in payload for key in ("rows", "tables", "table_raw", "llm_review")) and "overwrites" not in payload:
+        llm_review_payload = payload.get("llm_review") if isinstance(payload.get("llm_review"), dict) else {}
+        return {
+            "summary": _normalize_llm_review_summary(llm_review_payload or payload.get("summary")),
+            "issues": [],
+            "overwrites": [],
+            "output_payload": payload,
+        }
+
+    issues_payload = payload.get("issues")
+    if isinstance(issues_payload, dict):
+        issues_payload = [issues_payload]
+    if not isinstance(issues_payload, list):
+        issues_payload = []
+
+    overwrites_payload = payload.get("overwrites")
+    if isinstance(overwrites_payload, dict):
+        overwrites_payload = [overwrites_payload]
+    if not isinstance(overwrites_payload, list):
+        overwrites_payload = []
+
+    issues: list[dict[str, Any]] = []
+    overwrites: list[dict[str, Any]] = []
+    generated_issue_seq = 0
+
+    def _next_issue_id(raw_item: object) -> str:
+        nonlocal generated_issue_seq
+        if isinstance(raw_item, dict):
+            existing = str(raw_item.get("issue_id") or "").strip()
+            if existing:
+                return existing
+        generated_issue_seq += 1
+        return f"llm-review-{generated_issue_seq}"
+
+    for item in issues_payload:
+        normalized = _normalize_llm_review_issue(item, issue_id=_next_issue_id(item))
+        if normalized:
+            issues.append(normalized)
+    for item in overwrites_payload:
+        normalized = _normalize_llm_review_overwrite(item, issue_id=_next_issue_id(item))
+        if normalized:
+            overwrites.append(normalized)
+
+    return {
+        "summary": _normalize_llm_review_summary(payload.get("summary")),
+        "issues": issues,
+        "overwrites": overwrites,
+    }
+
+
+def _prepare_llm_review_output_payload(
+    *,
+    payload: dict[str, Any],
+    baseline: dict[str, Any],
+    template: dict[str, Any],
+    pdf_variant_requested: str,
+    pdf_variant_used: str,
+    pdf_variant_fallback_reason: str | None = None,
+) -> dict[str, Any] | None:
+    fields = [str(field).strip() for field in (baseline.get("fields") or []) if str(field).strip()]
+    if not fields:
+        return None
+    header = [str(cell or "").strip() for cell in (baseline.get("header") or [])]
+    if len(header) < len(fields):
+        header.extend([_field_label(field) for field in fields[len(header) :]])
+    baseline_rows = _sanitize_revision_rows(rows_payload=baseline.get("rows"), fields=fields)
+    current_rows = _sanitize_revision_rows(rows_payload=payload.get("rows"), fields=fields)
+    if not current_rows:
+        current_rows = _extract_first_pass_rows_from_payload(payload, template)
+    if not current_rows:
+        return None
+
+    normalized_payload = dict(payload)
+    normalized_payload["rows"] = _build_llm_review_payload_rows(fields=fields, rows=current_rows)
+    if not isinstance(normalized_payload.get("table_raw"), str) or not str(normalized_payload.get("table_raw") or "").strip():
+        normalized_payload["table_raw"] = _build_markdown_table_string(header, current_rows)
+
+    existing_tables = _collect_structured_tables_from_payload(normalized_payload)
+    if not existing_tables:
+        baseline_table = _collect_structured_tables_from_payload(
+            baseline.get("raw_output") if isinstance(baseline.get("raw_output"), dict) else {}
+        )
+        template_table = baseline_table[0] if baseline_table else {}
+        table_id = str(template_table.get("table_id") or "").strip() or "llm_review_table_1"
+        page_index = _parse_llm_review_int(template_table.get("page_index"))
+        normalized_payload["tables"] = [
+            {
+                "table_id": table_id,
+                "page_index": page_index if page_index is not None else 1,
+                "rows": [header, *current_rows],
+            }
+        ]
+
+    llm_review_payload = normalized_payload.get("llm_review")
+    llm_review_payload = dict(llm_review_payload) if isinstance(llm_review_payload, dict) else {}
+    summary = _normalize_llm_review_summary(llm_review_payload or normalized_payload.get("summary"))
+    status = str(
+        llm_review_payload.get("status")
+        or summary.get("status")
+        or summary.get("review_status")
+        or "verified"
+    ).strip() or "verified"
+    notes = str(llm_review_payload.get("notes") or summary.get("notes") or "").strip()
+    needs_more_review = _llm_review_summary_needs_more_review(
+        {
+            **summary,
+            "status": status,
+            "needs_more_review": llm_review_payload.get("needs_more_review"),
+        }
+    )
+
+    row_ids = _resolve_llm_review_row_ids(
+        baseline_row_ids=[str(item) for item in (baseline.get("row_ids") or [])],
+        row_count=len(current_rows),
+    )
+    raw_issue_candidates: list[object] = []
+    for candidate in (
+        llm_review_payload.get("issues"),
+        normalized_payload.get("issues"),
+        normalized_payload.get("cell_issues"),
+    ):
+        if isinstance(candidate, list):
+            raw_issue_candidates.extend(candidate)
+        elif isinstance(candidate, dict):
+            raw_issue_candidates.append(candidate)
+    normalized_issues: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_issue_candidates, start=1):
+        normalized = _normalize_llm_review_output_issue(
+            item,
+            issue_id=f"llm-review-{idx}",
+            fields=fields,
+            row_ids=row_ids,
+            current_rows=current_rows,
+        )
+        if normalized:
+            normalized_issues.append(normalized)
+
+    issue_by_target = {
+        (
+            str(issue.get("row_id") or "").strip(),
+            str(issue.get("field") or "").strip(),
+        ): issue
+        for issue in normalized_issues
+    }
+    applied_overwrites: list[dict[str, Any]] = []
+    changed_targets: set[tuple[str, str]] = set()
+    for row_index, row in enumerate(current_rows):
+        row_id = row_ids[row_index] if row_index < len(row_ids) else f"row-{row_index + 1}"
+        baseline_row = baseline_rows[row_index] if row_index < len(baseline_rows) else [""] * len(fields)
+        for col_index, field in enumerate(fields):
+            old_text = baseline_row[col_index] if col_index < len(baseline_row) else ""
+            new_text = row[col_index] if col_index < len(row) else ""
+            if old_text == new_text:
+                continue
+            changed_targets.add((row_id, field))
+            issue = issue_by_target.get((row_id, field), {})
+            overwrite = {
+                "issue_id": str(issue.get("issue_id") or f"llm-review-change-{row_index + 1}-{col_index + 1}").strip(),
+                "row_id": row_id,
+                "row_index": int(row_index),
+                "source_row_index": int(row_index),
+                "field": field,
+                "column_index": int(col_index),
+                "col_index": int(col_index),
+                "current_text": old_text,
+                "old_text": old_text,
+                "new_text": new_text,
+                "status": str(issue.get("status") or "").strip(),
+                "confidence": round(_parse_llm_review_confidence(issue.get("confidence")), 4),
+                "evidence": str(issue.get("evidence") or "").strip(),
+                "reason": str(issue.get("reason") or "").strip(),
+                "source": "llm_review",
+            }
+            table_id = str(issue.get("table_id") or "").strip()
+            if table_id:
+                overwrite["table_id"] = table_id
+            page_index = _parse_llm_review_int(issue.get("page_index"))
+            if page_index is not None:
+                overwrite["page_index"] = page_index
+            applied_overwrites.append(overwrite)
+
+    unresolved_issues = [
+        issue
+        for issue in normalized_issues
+        if (str(issue.get("row_id") or "").strip(), str(issue.get("field") or "").strip()) not in changed_targets
+    ]
+    needs_more_review = bool(needs_more_review or unresolved_issues)
+    llm_review_payload.update(
+        {
+            "status": status,
+            "needs_more_review": needs_more_review,
+            "notes": notes,
+            "issues": unresolved_issues,
+            "pdf_variant_requested": pdf_variant_requested,
+            "pdf_variant_used": pdf_variant_used,
+        }
+    )
+    if pdf_variant_fallback_reason:
+        llm_review_payload["pdf_variant_fallback_reason"] = pdf_variant_fallback_reason
+    normalized_payload["cell_issues"] = unresolved_issues
+    normalized_payload["llm_review"] = llm_review_payload
+
+    return {
+        "summary": {
+            **summary,
+            "status": status,
+            "needs_more_review": needs_more_review,
+            "notes": notes,
+        },
+        "issues": unresolved_issues,
+        "applied_overwrites": applied_overwrites,
+        "rejected_overwrites": [],
+        "rows": current_rows,
+        "row_ids": row_ids,
+        "output_payload": normalized_payload,
+        "needs_more_review": needs_more_review,
+    }
+
+
+def _llm_review_summary_needs_more_review(summary: dict[str, Any] | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    direct = summary.get("needs_more_review")
+    if isinstance(direct, bool):
+        return direct
+    status = str(summary.get("status") or summary.get("review_status") or "").strip().lower()
+    return status in {"needs_review", "needs_more_review", "review_required", "unresolved"}
+
+
+def _apply_llm_review_overwrites(
+    *,
+    fields: list[str],
+    rows: list[list[str]],
+    row_ids: list[str],
+    issues: list[dict[str, Any]],
+    overwrites: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_fields = [str(field).strip() for field in fields if str(field).strip()]
+    if not normalized_fields:
+        return {
+            "rows": [],
+            "applied_overwrites": [],
+            "rejected_overwrites": [],
+            "issues": list(issues or []),
+            "needs_more_review": bool(issues),
+        }
+
+    updated_rows: list[list[str]] = []
+    for row in rows:
+        current = [_field_value_to_str(cell) for cell in list(row)[: len(normalized_fields)]]
+        if len(current) < len(normalized_fields):
+            current.extend([""] * (len(normalized_fields) - len(current)))
+        updated_rows.append(current)
+
+    resolved_row_ids: list[str] = []
+    for idx in range(len(updated_rows)):
+        row_id = str(row_ids[idx] if idx < len(row_ids) else "").strip()
+        resolved_row_ids.append(row_id or f"row-{idx + 1}")
+
+    row_index_by_id = {row_id: idx for idx, row_id in enumerate(resolved_row_ids) if row_id}
+    field_index = {
+        field: idx
+        for idx, field in enumerate(normalized_fields)
+        if field
+    }
+    min_confidence = _read_reparse_float_env(
+        "OCR_LLM_REVIEW_OVERWRITE_MIN_CONFIDENCE",
+        0.75,
+        min_value=0.0,
+    )
+    applied: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    applied_issue_ids: set[str] = set()
+    applied_targets: set[tuple[str, str]] = set()
+
+    def _issue_with_mapping(item: dict[str, Any], *, reject_reason: str | None = None) -> dict[str, Any]:
+        normalized = dict(item)
+        row_id = str(item.get("row_id") or "").strip()
+        field = str(item.get("field") or "").strip()
+        target_row_index = row_index_by_id.get(row_id)
+        target_col_index = field_index.get(field)
+        if target_row_index is not None:
+            normalized["source_row_index"] = int(target_row_index)
+            normalized["row_index"] = int(target_row_index)
+        if target_col_index is not None:
+            normalized["column_index"] = int(target_col_index)
+            normalized["col_index"] = int(target_col_index)
+        if target_row_index is not None and target_col_index is not None:
+            current_value = updated_rows[target_row_index][target_col_index]
+            normalized.setdefault("current_text", current_value)
+        if reject_reason:
+            normalized["reject_reason"] = reject_reason
+            normalized["issue_code"] = "overwrite_rejected"
+            normalized.setdefault("reason", reject_reason)
+            normalized.setdefault("severity", "warning")
+        return normalized
+
+    for overwrite in overwrites:
+        row_id = str(overwrite.get("row_id") or "").strip()
+        field = str(overwrite.get("field") or "").strip()
+        reject_reason = ""
+        target_row_index = row_index_by_id.get(row_id)
+        if target_row_index is None:
+            reject_reason = "row_id_not_found"
+        target_col_index = field_index.get(field)
+        if not reject_reason and target_col_index is None:
+            reject_reason = "field_not_found"
+        confidence = _parse_llm_review_confidence(overwrite.get("confidence"))
+        if not reject_reason and confidence < min_confidence:
+            reject_reason = "low_confidence"
+        evidence = str(overwrite.get("evidence") or "").strip()
+        if not reject_reason and not evidence:
+            reject_reason = "missing_evidence"
+        current_value = ""
+        if not reject_reason and target_row_index is not None and target_col_index is not None:
+            current_value = updated_rows[target_row_index][target_col_index]
+            old_text = _field_value_to_str(overwrite.get("old_text"))
+            if old_text != current_value:
+                reject_reason = "old_text_mismatch"
+            new_text = _field_value_to_str(overwrite.get("new_text"))
+            if not reject_reason and field.startswith("qty.") and new_text and not re.fullmatch(r"\d+", new_text):
+                reject_reason = "invalid_quantity_text"
+        if reject_reason:
+            rejected.append(_issue_with_mapping(overwrite, reject_reason=reject_reason))
+            continue
+        new_text = _field_value_to_str(overwrite.get("new_text"))
+        updated_rows[target_row_index][target_col_index] = new_text
+        applied_item = _issue_with_mapping(overwrite)
+        applied_item["old_text"] = current_value
+        applied_item["new_text"] = new_text
+        applied.append(applied_item)
+        issue_id = str(overwrite.get("issue_id") or "").strip()
+        if issue_id:
+            applied_issue_ids.add(issue_id)
+        applied_targets.add((row_id, field))
+
+    unresolved_issues: list[dict[str, Any]] = []
+    for issue in issues:
+        issue_id = str(issue.get("issue_id") or "").strip()
+        issue_target = (
+            str(issue.get("row_id") or "").strip(),
+            str(issue.get("field") or "").strip(),
+        )
+        if issue_id and issue_id in applied_issue_ids:
+            continue
+        if issue_target in applied_targets:
+            continue
+        unresolved_issues.append(_issue_with_mapping(issue))
+    unresolved_issues.extend(rejected)
+
+    return {
+        "rows": updated_rows,
+        "row_ids": resolved_row_ids,
+        "applied_overwrites": applied,
+        "rejected_overwrites": rejected,
+        "issues": unresolved_issues,
+        "needs_more_review": bool(unresolved_issues),
+    }
+
+
+def _resolve_llm_review_pdf_bytes(
+    *,
+    document_uri: str,
+    requested_variant: str | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    requested = str(requested_variant or "raw").strip().lower() or "raw"
+    used = "raw"
+    fallback_reason: str | None = None
+    if requested not in {"raw", "corrected"}:
+        requested = "raw"
+    if requested == "corrected":
+        fallback_reason = "corrected_pdf_unavailable_in_backend_cache"
+    pdf_bytes = load_bytes_from_uri(document_uri)
+    return pdf_bytes, {
+        "requested": requested,
+        "used": used,
+        "fallback_reason": fallback_reason,
+    }
+
+
+def review_ocr_table_with_llm(
+    order_id: str,
+    *,
+    provider: str | None = None,
+    prompt: str | None = None,
+    pdf_variant: str | None = None,
+):
+    config_service.reload_configs()
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        if not order.facility_code:
+            return None, "facility_missing"
+        if not order.document_uri:
+            return None, "document_missing"
+        facility_id = order.facility_code
+        document_uri = order.document_uri
+
+    master = config_service.load_facility_master()
+    base_template = master.get("fax_template_base", {})
+    facility_config = None
+    try:
+        facility_config = config_service.get_facility_config(facility_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Facility config lookup failed", facility_id=facility_id, error=str(exc))
+    if not facility_config:
+        facility_config = next(
+            (
+                fac
+                for fac in master.get("facilities", [])
+                if fac.get("facility_id") == facility_id
+            ),
+            None,
+        )
+    if not facility_config:
+        return None, "facility_not_found"
+
+    template = facility_config.get("fax_template") or config_service._merge_template(
+        base_template,
+        facility_config.get("fax_template_override"),
+    )
+    payload = _load_order_ocr_cache(order_id)
+    if not isinstance(payload, dict):
+        return None, "ocr_payload_missing"
+
+    baseline = _resolve_llm_review_baseline(payload=payload, template=template)
+    baseline_rows = baseline.get("rows") if isinstance(baseline, dict) else []
+    baseline_fields = baseline.get("fields") if isinstance(baseline, dict) else []
+    baseline_row_ids = baseline.get("row_ids") if isinstance(baseline, dict) else []
+    baseline_header = baseline.get("header") if isinstance(baseline, dict) else []
+    if not isinstance(baseline_rows, list) or not baseline_rows:
+        return None, "rows_empty"
+    if not isinstance(baseline_fields, list) or not baseline_fields:
+        return None, "fields_empty"
+
+    resolved_provider = _normalize_reparse_provider(provider)
+    effective_provider = (
+        resolved_provider
+        or str(template.get("main_ocr_provider") or os.getenv("OCR_MAIN_PROVIDER") or "gemini").strip().lower()
+    )
+    if effective_provider not in {"openai", "gemini"}:
+        effective_provider = "gemini"
+
+    pdf_bytes, pdf_variant_meta = _resolve_llm_review_pdf_bytes(
+        document_uri=document_uri,
+        requested_variant=pdf_variant,
+    )
+    system_prompt, user_prompt = _build_llm_review_prompts(
+        provider=effective_provider,
+        template=template,
+        baseline=baseline,
+        pdf_variant_requested=str(pdf_variant_meta.get("requested") or "raw"),
+        pdf_variant_used=str(pdf_variant_meta.get("used") or "raw"),
+        pdf_variant_fallback_reason=(
+            str(pdf_variant_meta.get("fallback_reason")).strip()
+            if pdf_variant_meta.get("fallback_reason")
+            else None
+        ),
+        prompt_override=prompt,
+    )
+    review_template = dict(template)
+    review_template["main_ocr_provider"] = effective_provider
+    review_template["_force_main_ocr_provider"] = effective_provider
+    review_template["llm_quantity_only_mode"] = False
+    review_template["main_ocr_row_fields"] = baseline_fields
+    if effective_provider == "openai":
+        review_template["openai_ocr_enabled"] = True
+        review_template["openai_ocr_fallback_provider"] = "disabled"
+        review_template["openai_ocr_prompt"] = system_prompt
+        review_template["openai_ocr_user_prompt"] = user_prompt
+    else:
+        review_template["gemini_ocr_enabled"] = True
+        review_template["gemini_ocr_fallback_provider"] = "disabled"
+        review_template["gemini_ocr_prompt"] = system_prompt
+        review_template["gemini_ocr_user_prompt"] = user_prompt
+        review_template["gemini_ocr_response_schema"] = _build_llm_review_response_schema(
+            [str(field) for field in baseline_fields]
+        )
+
+    extracted = extract_fax_data(
+        pdf_bytes,
+        review_template,
+        facility_id=facility_id,
+    )
+    parsed_review = _parse_llm_review_response(getattr(extracted, "raw_text", None))
+    if not isinstance(parsed_review, dict):
+        return None, "llm_review_invalid_json"
+    provider_debug = extracted.provider_debug if isinstance(extracted.provider_debug, dict) else {}
+    model_name = str(provider_debug.get("model") or "").strip() or None
+    prepared_payload = None
+    if isinstance(parsed_review.get("output_payload"), dict):
+        prepared_payload = _prepare_llm_review_output_payload(
+            payload=parsed_review["output_payload"],
+            baseline=baseline,
+            template=template,
+            pdf_variant_requested=str(pdf_variant_meta.get("requested") or "raw"),
+            pdf_variant_used=str(pdf_variant_meta.get("used") or "raw"),
+            pdf_variant_fallback_reason=(
+                str(pdf_variant_meta.get("fallback_reason")).strip()
+                if pdf_variant_meta.get("fallback_reason")
+                else None
+            ),
+        )
+        if prepared_payload is None:
+            return None, "llm_review_invalid_json"
+    if prepared_payload is None:
+        prepared_payload = _apply_llm_review_overwrites(
+            fields=baseline_fields,
+            rows=[list(row) for row in baseline_rows if isinstance(row, list)],
+            row_ids=[str(item) for item in baseline_row_ids],
+            issues=parsed_review.get("issues") or [],
+            overwrites=parsed_review.get("overwrites") or [],
+        )
+        prepared_payload["summary"] = parsed_review.get("summary") or {}
+        prepared_payload["output_payload"] = None
+    needs_more_review = bool(
+        prepared_payload.get("needs_more_review")
+        or _llm_review_summary_needs_more_review(prepared_payload.get("summary"))
+    )
+    review_mode = "llm_yomitoku_payload_review" if prepared_payload.get("output_payload") else "llm_verify_overwrite"
+    review_meta = {
+        "review_mode": review_mode,
+        "llm_review": {
+            "provider": effective_provider,
+            "model": model_name,
+            "summary": prepared_payload.get("summary") or {},
+            "baseline_source": baseline.get("baseline_source"),
+            "baseline_revision_id": baseline.get("baseline_revision_id"),
+            "issues": prepared_payload.get("issues") or [],
+            "proposed_overwrites": prepared_payload.get("applied_overwrites") or parsed_review.get("overwrites") or [],
+            "applied_overwrites": prepared_payload.get("applied_overwrites") or [],
+            "rejected_overwrites": prepared_payload.get("rejected_overwrites") or [],
+            "applied_count": len(prepared_payload.get("applied_overwrites") or []),
+            "rejected_count": len(prepared_payload.get("rejected_overwrites") or []),
+            "needs_more_review": needs_more_review,
+            "pdf_variant_requested": str(pdf_variant_meta.get("requested") or "raw"),
+            "pdf_variant_used": str(pdf_variant_meta.get("used") or "raw"),
+        },
+    }
+    if pdf_variant_meta.get("fallback_reason"):
+        review_meta["llm_review"]["pdf_variant_fallback_reason"] = str(pdf_variant_meta["fallback_reason"])
+    if isinstance(prepared_payload.get("output_payload"), dict):
+        review_meta["llm_review"]["output_payload"] = prepared_payload["output_payload"]
+    updated, error = apply_ocr_table(
+        order_id,
+        header=baseline_header,
+        rows=prepared_payload.get("rows") or baseline_rows,
+        ui_mode="sheet",
+        fields=baseline_fields,
+        row_ids=prepared_payload.get("row_ids") or baseline_row_ids,
+        revision_meta=review_meta,
+    )
+    if error:
+        return None, error
+    if isinstance(updated, dict):
+        updated["llm_review"] = review_meta["llm_review"]
+    return updated, None
 
 
 def _signed_url_from_uri(uri: str | None) -> str | None:
@@ -3400,6 +5172,18 @@ def _sync_reparse_debug_from_job_metrics(
         _set_value("validation_detail", normalized_validation_detail)
     elif job_status in {"done", "success"} and "validation_detail" in next_debug:
         _set_value("validation_detail", {})
+    warning_reasons = metrics.get("warning_reasons")
+    if isinstance(warning_reasons, list):
+        normalized_warning_reasons = [str(item).strip() for item in warning_reasons if str(item).strip()]
+        _set_value("warning_reasons", normalized_warning_reasons[:20])
+    elif job_status in {"done", "success"} and "warning_reasons" in next_debug:
+        _set_value("warning_reasons", [])
+    warning_detail = metrics.get("warning_detail")
+    if "warning_detail" in metrics:
+        normalized_warning_detail = warning_detail if isinstance(warning_detail, dict) else {}
+        _set_value("warning_detail", normalized_warning_detail)
+    elif job_status in {"done", "success"} and "warning_detail" in next_debug:
+        _set_value("warning_detail", {})
     llm_quantity_only_merge = metrics.get("llm_quantity_only_merge")
     if isinstance(llm_quantity_only_merge, dict) and llm_quantity_only_merge:
         _set_value("llm_quantity_only_merge", llm_quantity_only_merge)
@@ -3703,6 +5487,8 @@ def _build_rows_from_menu_entries(
     line_dates: set[date],
     source: str,
     payload_dates: set[date] | None = None,
+    payload_row_count: int = 0,
+    scope_anchor_date: date | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     should_filter_by_line_dates = source == "weekly_menu"
     if should_filter_by_line_dates and line_dates:
@@ -3778,6 +5564,52 @@ def _build_rows_from_menu_entries(
             filtered = list(entries)
     else:
         filtered = list(entries)
+    if (
+        source == "weekly_menu"
+        and not line_dates
+        and not payload_dates
+        and payload_row_count > 0
+        and len(filtered) > payload_row_count
+        and len(filtered) >= payload_row_count * 2
+    ):
+        window = int(max(payload_row_count, 1))
+        window = min(window, len(filtered))
+        best_start = 0
+        best_score: tuple[int, int, int, int] | None = None
+        for start in range(0, len(filtered) - window + 1):
+            candidate = filtered[start : start + window]
+            candidate_dates = [
+                item.get("menu_date")
+                for item in candidate
+                if isinstance(item, dict) and isinstance(item.get("menu_date"), date)
+            ]
+            if not candidate_dates:
+                continue
+            min_date = min(candidate_dates)
+            max_date = max(candidate_dates)
+            span_days = (max_date - min_date).days
+            if scope_anchor_date is None:
+                distance_days = 0
+                contains_anchor = True
+            elif min_date <= scope_anchor_date <= max_date:
+                distance_days = 0
+                contains_anchor = True
+            elif scope_anchor_date < min_date:
+                distance_days = (min_date - scope_anchor_date).days
+                contains_anchor = False
+            else:
+                distance_days = (scope_anchor_date - max_date).days
+                contains_anchor = False
+            score = (
+                0 if contains_anchor else 1,
+                int(distance_days),
+                int(span_days),
+                int(start),
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_start = start
+        filtered = filtered[best_start : best_start + window]
     if not filtered:
         return [], source
     date_field = next((field for field in fields if field.startswith("date")), None)
@@ -4043,57 +5875,300 @@ def _sanitize_payload_table_raw(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _extract_sheet_rows_from_payload(payload: dict[str, Any], template: dict[str, Any]) -> list[list[str]]:
     payload = _sanitize_payload_table_raw(payload)
-    block_rows_payload = payload.get("_table_raw_blocks")
-    if isinstance(block_rows_payload, list) and block_rows_payload:
-        merged_rows: list[list[str]] = []
-        for block in block_rows_payload:
-            if not isinstance(block, str) or not block.strip():
-                continue
-            rows = rows_from_markdown(block, template)
-            if not rows:
-                continue
-            merged_rows.extend([[_field_value_to_str(cell) for cell in row] for row in rows])
-        if merged_rows:
-            return merged_rows
+    rows = rows_from_pipeline_payload(payload, template)
+    if not rows:
+        return []
+    return [[_field_value_to_str(cell) for cell in row] for row in rows]
 
-    table_rows = payload.get("table_rows")
-    if isinstance(table_rows, list):
-        normalized: list[list[str]] = []
-        for row in table_rows:
-            if not isinstance(row, list):
-                continue
-            normalized.append([_field_value_to_str(cell) for cell in row])
-        if normalized:
-            return normalized
 
-    table_raw = payload.get("table_raw")
-    if isinstance(table_raw, str) and table_raw.strip():
-        table_raw = _normalize_table_raw_text(table_raw)
-        rows = rows_from_markdown(table_raw, template)
-        if rows:
-            return [[_field_value_to_str(cell) for cell in row] for row in rows]
-
-    rows_payload = payload.get("rows")
-    if isinstance(rows_payload, list):
-        normalized = []
-        for row in rows_payload:
-            if isinstance(row, list):
+def _extract_first_pass_rows_from_payload(
+    payload: dict[str, Any],
+    template: dict[str, Any],
+) -> list[list[str]]:
+    payload = _sanitize_payload_table_raw(payload)
+    rows = rows_from_structured_payload(payload, template)
+    if not rows:
+        table_raw = payload.get("table_raw")
+        if isinstance(table_raw, str) and table_raw.strip():
+            rows = rows_from_markdown(table_raw, template) or []
+    if not rows:
+        raw_rows = payload.get("rows")
+        if isinstance(raw_rows, list):
+            normalized: list[list[str]] = []
+            for row in raw_rows:
+                if not isinstance(row, list):
+                    continue
                 normalized.append([_field_value_to_str(cell) for cell in row])
-        if normalized:
-            return normalized
+            rows = normalized
+    if not rows:
+        return []
+    return [[_field_value_to_str(cell) for cell in row] for row in rows]
 
-    nested = payload.get("table")
-    if isinstance(nested, dict):
-        nested_rows = nested.get("rows")
-        if isinstance(nested_rows, list):
-            normalized = []
-            for row in nested_rows:
-                if isinstance(row, list):
-                    normalized.append([_field_value_to_str(cell) for cell in row])
-            if normalized:
-                return normalized
 
-    return []
+def _resolve_payload_sheet_template(payload: dict[str, Any], template: dict[str, Any] | None) -> dict[str, Any]:
+    resolved = template if isinstance(template, dict) else {}
+    if not isinstance(payload, dict):
+        return resolved
+    template_id = payload.get("template_id")
+    if not isinstance(template_id, str):
+        classification = payload.get("classification")
+        if isinstance(classification, dict):
+            template_id = classification.get("matched_template_id")
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        return resolved
+    if resolved.get("template_id") == template_id:
+        return resolved
+    try:
+        registry = config_service.load_fax_template_registry()
+    except Exception:
+        return resolved
+    matched = registry.get(template_id)
+    if isinstance(matched, dict) and matched:
+        return matched
+    return resolved
+
+
+def _collect_structured_tables_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    tables: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def _push(table_payload: object) -> None:
+        if not isinstance(table_payload, dict):
+            return
+        table_id = str(table_payload.get("table_id") or "").strip()
+        try:
+            page_index = int(table_payload.get("page_index") or -1)
+        except Exception:
+            page_index = -1
+        key = (table_id, page_index)
+        if table_id and key in seen:
+            return
+        if table_id:
+            seen.add(key)
+        tables.append(table_payload)
+
+    raw_tables = payload.get("tables")
+    if isinstance(raw_tables, list):
+        for table_payload in raw_tables:
+            _push(table_payload)
+    pages = payload.get("pages")
+    if isinstance(pages, list):
+        for page_payload in pages:
+            if not isinstance(page_payload, dict):
+                continue
+            page_tables = page_payload.get("tables")
+            if not isinstance(page_tables, list):
+                continue
+            for table_payload in page_tables:
+                _push(table_payload)
+    return tables
+
+
+def _collect_raw_payload_cell_issues(
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[object] = []
+    for key in ("cell_issues", "yomitoku_cell_issues", "roi_cell_issues"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    roi_extraction = payload.get("roi_extraction")
+    if isinstance(roi_extraction, dict):
+        roi_issues = roi_extraction.get("cell_issues")
+        if isinstance(roi_issues, list):
+            candidates.extend(roi_issues)
+    edited = payload.get("_edited_ocr")
+    latest = edited.get("latest") if isinstance(edited, dict) else None
+    llm_review = latest.get("llm_review") if isinstance(latest, dict) else None
+    if isinstance(llm_review, dict):
+        for key in ("issues", "rejected_overwrites"):
+            value = llm_review.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+    candidates.extend(structured_cell_issues_from_payload(payload, template or {}))
+
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for issue in candidates:
+        if not isinstance(issue, dict):
+            continue
+        try:
+            dedupe_key = json.dumps(issue, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            dedupe_key = str(issue)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        collected.append(dict(issue))
+    return collected
+
+
+def _sheet_identity_from_values(
+    row: list[str],
+    *,
+    date_idx: int | None,
+    daypart_idx: int | None,
+    menu_idx: int | None,
+) -> tuple[str, str, str]:
+    date_value = row[date_idx] if date_idx is not None and date_idx < len(row) else ""
+    daypart_value = row[daypart_idx] if daypart_idx is not None and daypart_idx < len(row) else ""
+    menu_value = row[menu_idx] if menu_idx is not None and menu_idx < len(row) else ""
+    return _sheet_row_identity(date_value, daypart_value, menu_value)
+
+
+def _extract_payload_cell_issues(
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    template = _resolve_payload_sheet_template(payload, template)
+    if not isinstance(template, dict) or not template:
+        return []
+
+    raw_issues = _collect_raw_payload_cell_issues(payload, template)
+    if not raw_issues:
+        return []
+
+    fields, field_index = _build_sheet_fields_and_indexes(template)
+    if not fields:
+        return []
+    payload_rows = _extract_first_pass_rows_from_payload(payload, template)
+    date_idx = field_index.get("date_mmdd")
+    if date_idx is None:
+        date_idx = field_index.get("date")
+    daypart_idx = field_index.get("daypart")
+    menu_idx = field_index.get("menu")
+    if menu_idx is None:
+        menu_idx = field_index.get("menu_name")
+
+    issues: list[dict[str, Any]] = []
+    for issue in raw_issues:
+        if not isinstance(issue, dict):
+            continue
+        field = str(issue.get("field") or "").strip()
+        column_index = issue.get("column_index")
+        try:
+            resolved_column_index = int(column_index) if column_index is not None else None
+        except Exception:
+            resolved_column_index = None
+        if not field:
+            col_key = str(issue.get("col") or "").strip()
+            if col_key:
+                field = f"qty.{col_key}"
+        if field:
+            resolved_column_index = field_index.get(field, resolved_column_index)
+        if resolved_column_index is None:
+            try:
+                fallback_column_index = int(column_index) if column_index is not None else -1
+            except Exception:
+                fallback_column_index = -1
+            if 0 <= fallback_column_index < len(fields):
+                resolved_column_index = fallback_column_index
+        if resolved_column_index is None:
+            continue
+        if not field and 0 <= resolved_column_index < len(fields):
+            field = fields[resolved_column_index]
+        try:
+            source_row_index = int(
+                issue.get("source_row_index")
+                if issue.get("source_row_index") is not None
+                else issue.get("row_index")
+                if issue.get("row_index") is not None
+                else -1
+            )
+        except Exception:
+            source_row_index = -1
+        source_identity = ("", "", "")
+        if 0 <= source_row_index < len(payload_rows):
+            source_identity = _sheet_identity_from_values(
+                payload_rows[source_row_index],
+                date_idx=date_idx,
+                daypart_idx=daypart_idx,
+                menu_idx=menu_idx,
+            )
+        normalized = {
+            "source_row_index": source_row_index,
+            "column_index": resolved_column_index,
+            "field": field,
+            "issue_code": str(issue.get("issue_code") or issue.get("reason") or "review_required").strip(),
+            "severity": str(issue.get("severity") or "warning").strip() or "warning",
+            "source": str(issue.get("source") or "ocr_payload").strip() or "ocr_payload",
+            "route": str(issue.get("route") or "").strip(),
+            "row_key": str(issue.get("row_key") or "").strip(),
+            "col": str(issue.get("col") or "").strip(),
+            "date_key": source_identity[0],
+            "daypart_key": source_identity[1],
+            "menu_key": source_identity[2],
+        }
+        for key in (
+            "confidence",
+            "votes",
+            "value",
+            "max_allowed",
+            "raw",
+            "reason",
+            "bbox",
+            "text",
+            "page_index",
+            "table_id",
+            "row_span",
+            "col_span",
+        ):
+            if key in issue:
+                normalized[key] = issue.get(key)
+        raw_texts = issue.get("raw_texts")
+        if isinstance(raw_texts, list):
+            normalized["raw_texts"] = [str(text) for text in raw_texts if str(text).strip()][:5]
+        issues.append(normalized)
+    return issues
+
+
+def _map_payload_cell_issues_to_sheet_rows(
+    *,
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+) -> list[dict[str, Any]]:
+    issues = _extract_payload_cell_issues(payload, template)
+    if not issues or not rows:
+        return []
+    has_daypart_field = "daypart" in fields
+    lookup_exact: dict[tuple[str, str, str], int] = {}
+    lookup_date_menu: dict[tuple[str, str], int] = {}
+    for row_index, row in enumerate(rows):
+        identity = row.get("identity")
+        if not isinstance(identity, tuple) or len(identity) != 3:
+            continue
+        lookup_exact[identity] = row_index
+        lookup_date_menu[(identity[0], identity[2])] = row_index
+
+    mapped: list[dict[str, Any]] = []
+    for issue in issues:
+        date_key = str(issue.get("date_key") or "")
+        daypart_key = str(issue.get("daypart_key") or "")
+        menu_key = str(issue.get("menu_key") or "")
+        target_row_index: int | None = None
+        if date_key or daypart_key or menu_key:
+            target_row_index = lookup_exact.get((date_key, daypart_key, menu_key))
+            if target_row_index is None and not has_daypart_field:
+                target_row_index = lookup_date_menu.get((date_key, menu_key))
+        if target_row_index is None:
+            source_row_index = issue.get("source_row_index")
+            if isinstance(source_row_index, int) and 0 <= source_row_index < len(rows):
+                target_row_index = source_row_index
+        normalized = dict(issue)
+        normalized["row_index"] = target_row_index if target_row_index is not None else -1
+        normalized["mapped"] = target_row_index is not None
+        mapped.append(normalized)
+    return mapped
 
 
 def _extract_payload_unstructured_quantity_candidates(payload: dict[str, Any] | None) -> list[str]:
@@ -4401,6 +6476,116 @@ def _count_non_empty_quantity_cells(
     return count
 
 
+def _count_non_empty_quantity_rows(
+    *,
+    rows: list[dict[str, Any]],
+    quantity_index: dict[tuple[str, str], int],
+) -> int:
+    if not rows or not quantity_index:
+        return 0
+    quantity_columns = sorted(set(quantity_index.values()))
+    count = 0
+    for row in rows:
+        values = row.get("values")
+        if not isinstance(values, list):
+            continue
+        has_qty = False
+        for col_idx in quantity_columns:
+            if col_idx < len(values) and str(values[col_idx] or "").strip():
+                has_qty = True
+                break
+        if has_qty:
+            count += 1
+    return count
+
+
+def _select_dominant_quantity_columns_from_rows(
+    *,
+    rows: list[dict[str, Any]],
+    quantity_index: dict[tuple[str, str], int],
+) -> list[int]:
+    if not rows or not quantity_index:
+        return []
+    quantity_columns = sorted(set(quantity_index.values()))
+    if not quantity_columns:
+        return []
+    hits: dict[int, int] = {col_idx: 0 for col_idx in quantity_columns}
+    for row in rows:
+        values = row.get("values")
+        if not isinstance(values, list):
+            continue
+        for col_idx in quantity_columns:
+            if col_idx < 0 or col_idx >= len(values):
+                continue
+            if _row_quantity_value(values, col_idx) is None:
+                continue
+            hits[col_idx] = int(hits.get(col_idx, 0)) + 1
+    max_hit = max((int(hits.get(col_idx, 0)) for col_idx in quantity_columns), default=0)
+    if max_hit <= 0:
+        return []
+    return [col_idx for col_idx in quantity_columns if int(hits.get(col_idx, 0)) == max_hit]
+
+
+def _apply_weekly_menu_order_line_cluster_consensus_fill(
+    *,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+    quantity_index: dict[tuple[str, str], int],
+) -> int:
+    if not rows or not fields or not quantity_index:
+        return 0
+    dominant_columns = _select_dominant_quantity_columns_from_rows(
+        rows=rows,
+        quantity_index=quantity_index,
+    )
+    if not dominant_columns:
+        return 0
+    # Keep this pass conservative for order-line based sheets.
+    # Use only one dominant quantity column to avoid cross-column side effects.
+    target_columns = [min(dominant_columns)]
+    return _fill_cluster_consensus_quantities(
+        rows=rows,
+        fields=fields,
+        quantity_columns=target_columns,
+    )
+
+
+def _llm_allows_order_line_cluster_consensus_fill(ocr_payload: dict[str, Any] | None) -> bool:
+    if not isinstance(ocr_payload, dict):
+        return False
+
+    def _parse_decision(value: object) -> bool | None:
+        if isinstance(value, bool):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        if text in {"1", "true", "yes", "allow", "allowed", "approve", "approved", "ok"}:
+            return True
+        if text in {"0", "false", "no", "deny", "denied", "reject", "rejected"}:
+            return False
+        return None
+
+    candidates: list[object] = [
+        ocr_payload.get("_sheet_fill_decision"),
+    ]
+    reparse_debug = ocr_payload.get("_reparse_debug")
+    if isinstance(reparse_debug, dict):
+        candidates.append(reparse_debug.get("sheet_cluster_fill_decision"))
+        candidates.append(reparse_debug.get("order_line_cluster_fill_decision"))
+    ocr_debug = ocr_payload.get("_ocr_debug")
+    if isinstance(ocr_debug, dict):
+        candidates.append(ocr_debug.get("sheet_cluster_fill_decision"))
+        candidates.append(ocr_debug.get("order_line_cluster_fill_decision"))
+
+    for candidate in candidates:
+        parsed = _parse_decision(candidate)
+        if parsed is None:
+            continue
+        return parsed
+    return False
+
+
 def _build_sheet_trace_rows(
     *,
     rows: list[dict[str, Any]],
@@ -4638,17 +6823,91 @@ def _parse_sheet_quantity_cell(value: object) -> float | None:
         parsed = float(token)
     except Exception:
         return None
+    # Meal counts are integers. OCR often emits split digits as "2.1"/"1.5";
+    # when the token is a single-digit decimal pair, restore it as two digits.
+    if not float(parsed).is_integer():
+        if re.fullmatch(r"\d\.\d", token):
+            parsed = float(token.replace(".", ""))
+        else:
+            return None
     # Guard against OCR garbage values (e.g. 3000/8000) that frequently appear
     # in free text/noisy rows and must not be applied as meal counts.
     try:
-        max_abs = float(os.getenv("OCR_SHEET_MAX_QTY", "150"))
+        max_abs = float(os.getenv("OCR_SHEET_MAX_QTY", "50"))
     except Exception:
-        max_abs = 150.0
+        max_abs = 50.0
     if parsed < 0:
         return None
     if max_abs > 0 and abs(parsed) > max_abs:
         return None
     return parsed
+
+
+def _cell_contains_explicit_span_marker(value: object) -> bool:
+    text = _field_value_to_str(value).strip()
+    if not text:
+        return False
+    normalized = (
+        text.replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .translate(_SHEET_TRANSLATION)
+    )
+    compact = re.sub(r"[\s　]+", "", normalized)
+    if not compact:
+        return False
+    if "->" in compact or "→" in compact or "←" in compact or "↔" in compact or "↕" in compact:
+        return True
+    marker_count = 0
+    for marker in (")", "）", "]", "】", "}", "｝", "|", "｜", "¦"):
+        marker_count += compact.count(marker)
+    return marker_count >= 2
+
+
+def _parse_explicit_span_quantity_cell(value: object) -> tuple[float, int] | None:
+    if not _cell_contains_explicit_span_marker(value):
+        return None
+    text = _field_value_to_str(value).strip()
+    if not text:
+        return None
+    normalized = (
+        text.replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .translate(_SHEET_TRANSLATION)
+    )
+    compact = re.sub(r"[\s　]+", "", normalized)
+    compact = compact.replace(",", "").replace("，", "")
+    compact = compact.replace("．", ".").replace("。", ".")
+    if not compact:
+        return None
+    # Ignore plain "(20)" style tokens that do not represent a span.
+    stripped = compact.strip("()[]{}（）［］【】｛｝")
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", stripped):
+        return None
+
+    raw_tokens = re.findall(r"-?\d+(?:\.\d+)?", compact)
+    if not raw_tokens:
+        return None
+    parsed_tokens: list[float] = []
+    for token in raw_tokens:
+        parsed = _parse_sheet_quantity_cell(token)
+        if parsed is None:
+            continue
+        parsed_tokens.append(parsed)
+    if not parsed_tokens:
+        return None
+
+    counts: dict[float, int] = {}
+    for parsed in parsed_tokens:
+        counts[parsed] = int(counts.get(parsed, 0)) + 1
+    dominant_qty, dominant_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    if len(counts) == 1:
+        return dominant_qty, dominant_count
+    total = len(parsed_tokens)
+    if dominant_count >= 2 and (dominant_count / max(total, 1)) >= 0.6:
+        return dominant_qty, dominant_count
+    return None
 
 
 def _apply_payload_quantities_by_row_index(
@@ -5045,9 +7304,11 @@ def _payload_row_has_numeric_quantity(
         if col_idx < 0 or col_idx >= len(payload_row):
             continue
         qty = _parse_sheet_quantity_cell(payload_row[col_idx])
-        if qty is None:
-            continue
-        return True
+        if qty is not None:
+            return True
+        span_candidate = _parse_explicit_span_quantity_cell(payload_row[col_idx])
+        if span_candidate is not None:
+            return True
     return False
 
 
@@ -5108,6 +7369,48 @@ def _payload_row_numeric_candidates(
             seen.add(token)
             values.append(token)
     return values
+
+
+def _extract_payload_row_span_hint(
+    payload_row: list[Any],
+    *,
+    quantity_columns: list[int],
+) -> int:
+    if not isinstance(payload_row, list) or not payload_row:
+        return 0
+    skip_columns = set(quantity_columns)
+    hint = 0
+    has_arrow = False
+    for idx, cell in enumerate(payload_row):
+        if idx in skip_columns:
+            continue
+        text = _field_value_to_str(cell).strip()
+        if not text:
+            continue
+        normalized = (
+            text.replace("<br>", " ")
+            .replace("<br/>", " ")
+            .replace("<br />", " ")
+            .translate(_SHEET_TRANSLATION)
+        )
+        compact = re.sub(r"[\s　]+", "", normalized)
+        if not compact:
+            continue
+        for match in re.finditer(r"[（(]\s*(\d{1,2})\s*[)）]", compact):
+            try:
+                parsed = int(match.group(1))
+            except Exception:
+                continue
+            if 1 <= parsed <= 8:
+                hint = max(hint, parsed)
+        if "->" in compact or "→" in compact or "←" in compact:
+            has_arrow = True
+        marker_count = compact.count(")") + compact.count("）")
+        if marker_count >= 2 and hint <= 0:
+            hint = max(hint, 2)
+    if hint <= 0 and has_arrow:
+        hint = 2
+    return hint
 
 
 def _select_trusted_payload_quantity_columns(
@@ -5287,8 +7590,9 @@ def _fill_cluster_consensus_quantities(
             best_qty, best_count = max(counts.items(), key=lambda item: (item[1], item[0]))
             should_fill = False
             if non_empty == 1:
-                # Only allow tiny 2-row clusters to be mirrored from the known row.
-                should_fill = cluster_len == 2 and missing == 1
+                # Span-written fax styles frequently place one quantity for a
+                # 2-3 row daypart cluster. Mirror only for small clusters.
+                should_fill = cluster_len in {2, 3} and missing == (cluster_len - 1)
             else:
                 dominance = best_count / max(non_empty, 1)
                 should_fill = best_count >= 2 and dominance >= 0.8
@@ -5303,6 +7607,276 @@ def _fill_cluster_consensus_quantities(
                     continue
                 _set_row_quantity_value(values, col_idx, best_qty)
                 filled += 1
+    return filled
+
+
+def _fill_blank_daypart_clusters_by_consensus(
+    *,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+    quantity_columns: list[int],
+) -> int:
+    if not rows or not quantity_columns:
+        return 0
+    _date_idx, daypart_idx, _menu_idx = _resolve_sheet_field_indexes(fields)
+    if daypart_idx is None:
+        return 0
+
+    cluster_starts = _build_sheet_cluster_starts(rows, fields)
+    cluster_ranges: list[tuple[int, int]] = []
+    if rows:
+        start = 0
+        current_cluster = cluster_starts.get(0, 0)
+        for idx in range(1, len(rows)):
+            if cluster_starts.get(idx) != current_cluster:
+                cluster_ranges.append((start, idx - 1))
+                start = idx
+                current_cluster = cluster_starts.get(idx, idx)
+        cluster_ranges.append((start, len(rows) - 1))
+    if not cluster_ranges:
+        return 0
+
+    try:
+        min_dominance = float(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_MIN_DOMINANCE", "0.85"))
+    except Exception:
+        min_dominance = 0.85
+    if min_dominance <= 0:
+        min_dominance = 0.85
+    if min_dominance > 1:
+        min_dominance = 1.0
+    try:
+        edge_min_support = max(2, int(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_EDGE_MIN_SUPPORT", "3")))
+    except Exception:
+        edge_min_support = 3
+    try:
+        edge_min_dominance = float(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_EDGE_MIN_DOMINANCE", "0.95"))
+    except Exception:
+        edge_min_dominance = 0.95
+    if edge_min_dominance <= 0:
+        edge_min_dominance = 0.95
+    if edge_min_dominance > 1:
+        edge_min_dominance = 1.0
+
+    cluster_infos: list[dict[str, Any]] = []
+    daypart_clusters: dict[str, list[int]] = {}
+    for start_idx, end_idx in cluster_ranges:
+        sample_values = rows[start_idx].get("values")
+        if not isinstance(sample_values, list):
+            sample_values = []
+        daypart_key = _normalize_sheet_text(_safe_row_get(sample_values, daypart_idx))
+        cluster_idx = len(cluster_infos)
+        daypart_clusters.setdefault(daypart_key, []).append(cluster_idx)
+
+        non_empty_by_col: dict[int, int] = {}
+        representative_by_col: dict[int, float | None] = {}
+        for col_idx in quantity_columns:
+            counts: dict[float, int] = {}
+            non_empty = 0
+            for row_idx in range(start_idx, end_idx + 1):
+                values = rows[row_idx].get("values")
+                if not isinstance(values, list):
+                    continue
+                qty = _row_quantity_value(values, col_idx)
+                if qty is None:
+                    continue
+                non_empty += 1
+                counts[qty] = int(counts.get(qty, 0)) + 1
+            non_empty_by_col[col_idx] = non_empty
+            if not counts:
+                representative_by_col[col_idx] = None
+                continue
+            best_qty, best_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+            if non_empty == 1:
+                representative_by_col[col_idx] = best_qty
+                continue
+            dominance = best_count / max(non_empty, 1)
+            representative_by_col[col_idx] = best_qty if best_count >= 2 and dominance >= 0.8 else None
+
+        cluster_infos.append(
+            {
+                "start": start_idx,
+                "end": end_idx,
+                "non_empty_by_col": non_empty_by_col,
+                "representative_by_col": representative_by_col,
+            }
+        )
+
+    filled = 0
+    for col_idx in quantity_columns:
+        for daypart_key, cluster_indexes in daypart_clusters.items():
+            if not daypart_key:
+                continue
+            observed: list[tuple[int, float]] = []
+            for cluster_idx in cluster_indexes:
+                representative = cluster_infos[cluster_idx]["representative_by_col"].get(col_idx)
+                if representative is None or representative <= 0:
+                    continue
+                observed.append((cluster_idx, float(representative)))
+            if len(observed) < 2:
+                continue
+
+            observed_counts: dict[float, int] = {}
+            for _cluster_idx, quantity in observed:
+                observed_counts[quantity] = int(observed_counts.get(quantity, 0)) + 1
+            dominant_qty, dominant_count = max(observed_counts.items(), key=lambda item: (item[1], item[0]))
+            dominance = dominant_count / max(len(observed), 1)
+            if dominance < min_dominance:
+                continue
+
+            for cluster_idx in cluster_indexes:
+                non_empty = int(cluster_infos[cluster_idx]["non_empty_by_col"].get(col_idx, 0))
+                if non_empty > 0:
+                    continue
+
+                start_idx = int(cluster_infos[cluster_idx]["start"])
+                end_idx = int(cluster_infos[cluster_idx]["end"])
+                cluster_len = end_idx - start_idx + 1
+                if cluster_len not in {2, 3}:
+                    continue
+
+                prev_qty: float | None = None
+                next_qty: float | None = None
+                for observed_idx, observed_qty in reversed(observed):
+                    if observed_idx < cluster_idx:
+                        prev_qty = observed_qty
+                        break
+                for observed_idx, observed_qty in observed:
+                    if observed_idx > cluster_idx:
+                        next_qty = observed_qty
+                        break
+
+                should_fill = False
+                if prev_qty is not None and next_qty is not None:
+                    should_fill = (
+                        abs(prev_qty - dominant_qty) <= 0.0001 and abs(next_qty - dominant_qty) <= 0.0001
+                    )
+                elif prev_qty is None and next_qty is not None:
+                    should_fill = (
+                        abs(next_qty - dominant_qty) <= 0.0001
+                        and len(observed) >= edge_min_support
+                        and dominance >= edge_min_dominance
+                    )
+                elif next_qty is None and prev_qty is not None:
+                    should_fill = (
+                        abs(prev_qty - dominant_qty) <= 0.0001
+                        and len(observed) >= edge_min_support
+                        and dominance >= edge_min_dominance
+                    )
+                if not should_fill:
+                    continue
+
+                for row_idx in range(start_idx, end_idx + 1):
+                    values = rows[row_idx].get("values")
+                    if not isinstance(values, list):
+                        continue
+                    if _row_quantity_value(values, col_idx) is not None:
+                        continue
+                    _set_row_quantity_value(values, col_idx, dominant_qty)
+                    filled += 1
+
+    return filled
+
+
+def _apply_explicit_span_quantity_copy(
+    *,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+    span_copy_hints: dict[tuple[int, int], int],
+) -> int:
+    if not rows or not span_copy_hints:
+        return 0
+    cluster_starts = _build_sheet_cluster_starts(rows, fields)
+    cluster_end_by_start: dict[int, int] = {}
+    for row_idx in range(len(rows)):
+        start = int(cluster_starts.get(row_idx, row_idx))
+        cluster_end_by_start[start] = row_idx
+
+    filled = 0
+    for (row_idx, col_idx), repeat_count in sorted(span_copy_hints.items()):
+        if row_idx < 0 or row_idx >= len(rows):
+            continue
+        values = rows[row_idx].get("values")
+        if not isinstance(values, list):
+            continue
+        qty = _row_quantity_value(values, col_idx)
+        if qty is None:
+            continue
+        start_idx = int(cluster_starts.get(row_idx, row_idx))
+        end_idx = int(cluster_end_by_start.get(start_idx, row_idx))
+        if end_idx <= row_idx:
+            continue
+        remaining = max(0, int(repeat_count) - 1)
+        if remaining <= 0:
+            continue
+        for target_idx in range(row_idx + 1, end_idx + 1):
+            if remaining <= 0:
+                break
+            target_values = rows[target_idx].get("values")
+            if not isinstance(target_values, list):
+                continue
+            if _row_quantity_value(target_values, col_idx) is not None:
+                continue
+            _set_row_quantity_value(target_values, col_idx, qty)
+            filled += 1
+            remaining -= 1
+    return filled
+
+
+def _apply_payload_row_span_hints(
+    *,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+    quantity_columns: list[int],
+    span_row_hints: dict[int, int],
+) -> int:
+    if not rows or not quantity_columns or not span_row_hints:
+        return 0
+    cluster_starts = _build_sheet_cluster_starts(rows, fields)
+    cluster_end_by_start: dict[int, int] = {}
+    for row_idx in range(len(rows)):
+        start = int(cluster_starts.get(row_idx, row_idx))
+        cluster_end_by_start[start] = row_idx
+
+    filled = 0
+    for row_idx, span_len_raw in sorted(span_row_hints.items()):
+        if row_idx < 0 or row_idx >= len(rows):
+            continue
+        span_len = max(1, int(span_len_raw))
+        start_idx = int(cluster_starts.get(row_idx, row_idx))
+        end_idx = int(cluster_end_by_start.get(start_idx, row_idx))
+        if end_idx < row_idx:
+            continue
+        current_values = rows[row_idx].get("values")
+        if not isinstance(current_values, list):
+            continue
+        prev_values = None
+        if row_idx - 1 >= start_idx:
+            maybe_prev = rows[row_idx - 1].get("values")
+            if isinstance(maybe_prev, list):
+                prev_values = maybe_prev
+        for col_idx in quantity_columns:
+            anchor_qty = _row_quantity_value(current_values, col_idx)
+            current_has_qty = anchor_qty is not None
+            if anchor_qty is None and isinstance(prev_values, list):
+                anchor_qty = _row_quantity_value(prev_values, col_idx)
+            if anchor_qty is None:
+                continue
+            if current_has_qty:
+                cursor = row_idx + 1
+                remaining = max(0, span_len - 1)
+            else:
+                cursor = row_idx
+                remaining = span_len
+            while cursor <= end_idx and remaining > 0:
+                target_values = rows[cursor].get("values")
+                if not isinstance(target_values, list):
+                    cursor += 1
+                    continue
+                if _row_quantity_value(target_values, col_idx) is None:
+                    _set_row_quantity_value(target_values, col_idx, anchor_qty)
+                    filled += 1
+                    remaining -= 1
+                cursor += 1
     return filled
 
 
@@ -5477,6 +8051,7 @@ def _apply_payload_cells_by_menu_priority(
     stage_counts.setdefault("loose_cell", 0)
     stage_counts.setdefault("gap_fill", 0)
     stage_counts.setdefault("unstructured", 0)
+    stage_counts.setdefault("span_copy", 0)
     if not row_mapping:
         return stage_counts
 
@@ -5515,6 +8090,7 @@ def _apply_payload_cells_by_menu_priority(
         max_hit = max(quantity_hits.values()) if quantity_hits else 0
         if max_hit > 0:
             dominant_quantity_columns = {col for col, count in quantity_hits.items() if count == max_hit}
+    span_copy_hints: dict[tuple[int, int], int] = {}
 
     def _apply_payload_row_to_sheet_row(row_idx: int, payload_idx: int) -> None:
         if row_idx < 0 or row_idx >= len(rows):
@@ -5542,11 +8118,20 @@ def _apply_payload_cells_by_menu_priority(
         for col_idx in apply_quantity_columns:
             if col_idx >= len(payload_row):
                 continue
+            span_repeat = 0
+            span_candidate = _parse_explicit_span_quantity_cell(payload_row[col_idx])
             qty = _parse_sheet_quantity_cell(payload_row[col_idx])
+            if qty is None and span_candidate is not None:
+                qty = span_candidate[0]
             if qty is None:
                 continue
             _set_row_quantity_value(values, col_idx, qty)
             applied_qty = True
+            if span_candidate is not None:
+                span_repeat = int(span_candidate[1])
+            if span_repeat >= 2:
+                key = (row_idx, col_idx)
+                span_copy_hints[key] = max(int(span_copy_hints.get(key, 0)), int(span_repeat))
 
         if allow_heuristics and not applied_qty and trusted_quantity_columns:
             loose_candidates = _payload_row_numeric_candidates(
@@ -5575,6 +8160,14 @@ def _apply_payload_cells_by_menu_priority(
 
     for row_idx, payload_idx in row_mapping.items():
         _apply_payload_row_to_sheet_row(row_idx, payload_idx)
+
+    span_filled = _apply_explicit_span_quantity_copy(
+        rows=rows,
+        fields=fields,
+        span_copy_hints=span_copy_hints,
+    )
+    if span_filled > 0:
+        stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_filled
 
     if allow_heuristics:
         preferred_columns = (
@@ -5689,6 +8282,8 @@ def _build_payload_row_mapping_by_row_index_numeric_only(
             return False
         if _payload_row_has_numeric_quantity(payload_row, quantity_columns):
             return True
+        if _extract_payload_row_span_hint(payload_row, quantity_columns=quantity_columns) > 0:
+            return True
         return bool(_payload_row_numeric_candidates(payload_row, skip_columns=skip_columns))
 
     def _payload_row_is_row_index_eligible(payload_idx: int, *, sheet_idx: int | None = None) -> bool:
@@ -5763,6 +8358,7 @@ def _apply_payload_quantities_numeric_only(
     payload_rows: list[list[str]],
     payload_unstructured_qty: list[str] | None = None,
     allow_heuristics: bool = False,
+    enable_daypart_consensus: bool = True,
 ) -> dict[str, int]:
     stage_counts = {
         "exact": 0,
@@ -5773,6 +8369,7 @@ def _apply_payload_quantities_numeric_only(
         "gap_fill": 0,
         "unstructured": 0,
         "cluster_fill": 0,
+        "span_copy": 0,
     }
     if not rows or not fields or not payload_rows:
         return stage_counts
@@ -5812,6 +8409,8 @@ def _apply_payload_quantities_numeric_only(
     )
     for key, value in mapping_counts.items():
         stage_counts[key] = int(value)
+    span_copy_hints: dict[tuple[int, int], int] = {}
+    span_row_hints: dict[int, int] = {}
 
     for row_idx, payload_idx in row_mapping.items():
         if row_idx < 0 or row_idx >= len(rows):
@@ -5821,36 +8420,51 @@ def _apply_payload_quantities_numeric_only(
         payload_row = payload_rows[payload_idx]
         if not isinstance(payload_row, list):
             continue
+        row_span_hint = _extract_payload_row_span_hint(
+            payload_row,
+            quantity_columns=mapped_quantity_columns,
+        )
+        if row_span_hint > 0:
+            span_row_hints[row_idx] = max(int(span_row_hints.get(row_idx, 0)), int(row_span_hint))
         target = rows[row_idx]
         values = target.get("values")
         if not isinstance(values, list):
             continue
 
-        parsed_quantities: list[tuple[int, float]] = []
+        parsed_quantities: list[tuple[int, float, int]] = []
         for col_idx in mapped_quantity_columns:
             if col_idx >= len(payload_row):
                 continue
+            span_repeat = 0
+            span_candidate = _parse_explicit_span_quantity_cell(payload_row[col_idx])
             qty = _parse_sheet_quantity_cell(payload_row[col_idx])
+            if qty is None and span_candidate is not None:
+                qty = span_candidate[0]
             if qty is None:
                 continue
-            parsed_quantities.append((col_idx, qty))
+            if span_candidate is not None:
+                span_repeat = int(span_candidate[1])
+            parsed_quantities.append((col_idx, qty, span_repeat))
 
-        filtered_quantities: list[tuple[int, float]] = []
-        for col_idx, qty in parsed_quantities:
-            others = [value for other_col, value in parsed_quantities if other_col != col_idx and value > 0]
+        filtered_quantities: list[tuple[int, float, int]] = []
+        for col_idx, qty, span_repeat in parsed_quantities:
+            others = [value for other_col, value, _ in parsed_quantities if other_col != col_idx and value > 0]
             col_hits = int(quantity_hits.get(col_idx, 0))
             is_sparse_column = max_hit > 0 and col_hits < sparse_threshold
             is_spike = bool(others) and qty >= 10 and qty > (max(others) * 2.5)
             if is_sparse_column and is_spike:
                 continue
-            filtered_quantities.append((col_idx, qty))
+            filtered_quantities.append((col_idx, qty, span_repeat))
         if not filtered_quantities:
             filtered_quantities = parsed_quantities
 
         applied_qty = False
-        for col_idx, qty in filtered_quantities:
+        for col_idx, qty, span_repeat in filtered_quantities:
             _set_row_quantity_value(values, col_idx, qty)
             applied_qty = True
+            if span_repeat >= 2:
+                key = (row_idx, col_idx)
+                span_copy_hints[key] = max(int(span_copy_hints.get(key, 0)), int(span_repeat))
 
         if allow_heuristics and not applied_qty:
             loose_candidates = _payload_row_numeric_candidates(
@@ -5866,13 +8480,43 @@ def _apply_payload_quantities_numeric_only(
                 _set_row_quantity_value(values, target_columns[0], loose_candidates[0])
                 stage_counts["loose_cell"] = int(stage_counts.get("loose_cell", 0)) + 1
 
-    cluster_filled = _fill_cluster_consensus_quantities(
+    span_filled = _apply_explicit_span_quantity_copy(
+        rows=rows,
+        fields=fields,
+        span_copy_hints=span_copy_hints,
+    )
+    if span_filled > 0:
+        stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_filled
+
+    span_row_filled = _apply_payload_row_span_hints(
         rows=rows,
         fields=fields,
         quantity_columns=mapped_quantity_columns,
+        span_row_hints=span_row_hints,
     )
-    if cluster_filled > 0:
-        stage_counts["cluster_fill"] = int(stage_counts.get("cluster_fill", 0)) + cluster_filled
+    if span_row_filled > 0:
+        stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_row_filled
+
+    if enable_daypart_consensus:
+        cluster_filled = _fill_cluster_consensus_quantities(
+            rows=rows,
+            fields=fields,
+            quantity_columns=mapped_quantity_columns,
+        )
+        if cluster_filled > 0:
+            stage_counts["cluster_fill"] = int(stage_counts.get("cluster_fill", 0)) + cluster_filled
+        daypart_consensus_columns: list[int] = []
+        if dominant_quantity_columns:
+            daypart_consensus_columns = [min(dominant_quantity_columns)]
+        elif mapped_quantity_columns:
+            daypart_consensus_columns = [mapped_quantity_columns[0]]
+        daypart_consensus_filled = _fill_blank_daypart_clusters_by_consensus(
+            rows=rows,
+            fields=fields,
+            quantity_columns=daypart_consensus_columns,
+        )
+        if daypart_consensus_filled > 0:
+            stage_counts["cluster_fill"] = int(stage_counts.get("cluster_fill", 0)) + daypart_consensus_filled
 
     if allow_heuristics:
         preferred_columns = (
@@ -6094,6 +8738,15 @@ def get_ocr_sheet(order_id: str):
     if not entries:
         return None, "menu_entries_missing"
 
+    payload_rows: list[list[str]] = []
+    payload_unstructured_qty: list[str] = []
+    payload_has_structured_table_rows = False
+    if isinstance(ocr_payload, dict):
+        payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
+        payload_unstructured_qty = _extract_payload_unstructured_quantity_candidates(ocr_payload)
+        table_rows_payload = ocr_payload.get("table_rows")
+        payload_has_structured_table_rows = isinstance(table_rows_payload, list) and bool(table_rows_payload)
+
     line_dates = {
         line.get("date")
         for line in order_lines
@@ -6116,6 +8769,8 @@ def get_ocr_sheet(order_id: str):
         line_dates=line_dates,
         source=entry_source,
         payload_dates=payload_dates,
+        payload_row_count=len(payload_rows),
+        scope_anchor_date=received_at.date(),
     )
     if not rows:
         return None, "menu_entries_missing"
@@ -6135,12 +8790,6 @@ def get_ocr_sheet(order_id: str):
                 missing_dates=[item.isoformat() for item in missing_week_dates],
             )
             return None, "sheet_week_dates_incomplete"
-    payload_rows: list[list[str]] = []
-    payload_unstructured_qty: list[str] = []
-    if isinstance(ocr_payload, dict):
-        payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
-        payload_unstructured_qty = _extract_payload_unstructured_quantity_candidates(ocr_payload)
-
     base_rows = _clone_sheet_rows(rows)
     mapped_count = 0
     mapped_mode = "identity"
@@ -6151,6 +8800,8 @@ def get_ocr_sheet(order_id: str):
         token = str(code or "").strip()
         if token and token not in sheet_warnings:
             sheet_warnings.append(token)
+
+    llm_allows_cluster_fill = _llm_allows_order_line_cluster_consensus_fill(ocr_payload)
 
     # Weekly menu + template is the primary source of truth.
     # When weekly menu is available, keep non-numeric cells from weekly menu only.
@@ -6191,7 +8842,12 @@ def get_ocr_sheet(order_id: str):
                 key=lambda item: (item[0], item[1]),
             )
             rows = mapped_rows
-            if mapped_count == 0 and payload_rows:
+            mapped_row_count = _count_non_empty_quantity_rows(
+                rows=rows,
+                quantity_index=quantity_index,
+            )
+
+            if payload_rows:
                 rows_by_payload_index = _clone_sheet_rows(base_rows)
                 payload_match_stats = _apply_payload_quantities_numeric_only(
                     rows=rows_by_payload_index,
@@ -6200,22 +8856,54 @@ def get_ocr_sheet(order_id: str):
                     payload_rows=payload_rows,
                     payload_unstructured_qty=payload_unstructured_qty,
                     allow_heuristics=False,
+                    enable_daypart_consensus=(
+                        not payload_has_structured_table_rows and llm_allows_cluster_fill
+                    ),
                 )
                 payload_mapped_count = _count_non_empty_quantity_cells(
                     rows=rows_by_payload_index,
                     quantity_index=quantity_index,
                 )
-                if payload_mapped_count > 0:
+                payload_mapped_row_count = _count_non_empty_quantity_rows(
+                    rows=rows_by_payload_index,
+                    quantity_index=quantity_index,
+                )
+                try:
+                    min_row_gain_abs = max(
+                        1,
+                        int(os.getenv("OCR_SHEET_WEEKLY_MENU_PAYLOAD_OVERRIDE_MIN_ROW_GAIN_ABS", "8")),
+                    )
+                except Exception:
+                    min_row_gain_abs = 8
+                try:
+                    min_row_gain_ratio = float(
+                        os.getenv("OCR_SHEET_WEEKLY_MENU_PAYLOAD_OVERRIDE_MIN_ROW_GAIN_RATIO", "1.5")
+                    )
+                except Exception:
+                    min_row_gain_ratio = 1.5
+                if min_row_gain_ratio < 1.0:
+                    min_row_gain_ratio = 1.0
+                allow_payload_override = mapped_row_count <= 0
+                if not allow_payload_override and payload_mapped_row_count > 0:
+                    row_gain = payload_mapped_row_count - mapped_row_count
+                    row_gain_ratio = payload_mapped_row_count / max(mapped_row_count, 1)
+                    allow_payload_override = row_gain >= min_row_gain_abs and row_gain_ratio >= min_row_gain_ratio
+                if allow_payload_override and payload_mapped_count > mapped_count:
                     logger.warning(
-                        "Applied OCR payload numeric-only fallback after empty order-line quantity mapping",
+                        "Selected OCR payload numeric-only mapping over order-line mapping",
                         order_id=order_id,
                         facility_id=facility_id,
                         week_id=resolved_week_id,
                         source=source,
+                        mapped_count=mapped_count,
+                        mapped_row_count=mapped_row_count,
+                        payload_mapped_count=payload_mapped_count,
+                        payload_mapped_row_count=payload_mapped_row_count,
                         match_exact=payload_match_stats.get("exact", 0),
                         match_partial=payload_match_stats.get("partial", 0),
                         match_neighbor=payload_match_stats.get("neighbor", 0),
                         match_row_index=payload_match_stats.get("row_index", 0),
+                        match_span_copy=payload_match_stats.get("span_copy", 0),
                         match_loose_cell=payload_match_stats.get("loose_cell", 0),
                         match_gap_fill=payload_match_stats.get("gap_fill", 0),
                         match_unstructured=payload_match_stats.get("unstructured", 0),
@@ -6233,6 +8921,9 @@ def get_ocr_sheet(order_id: str):
                 payload_rows=payload_rows,
                 payload_unstructured_qty=payload_unstructured_qty,
                 allow_heuristics=False,
+                enable_daypart_consensus=(
+                    not payload_has_structured_table_rows and llm_allows_cluster_fill
+                ),
             )
             mapped_count = _count_non_empty_quantity_cells(
                 rows=rows_by_payload_index,
@@ -6332,6 +9023,32 @@ def get_ocr_sheet(order_id: str):
         )
         _append_sheet_warning("sheet_quantity_column_unmapped")
 
+    if (
+        source == "weekly_menu"
+        and mapped_mode in {"identity", "source_row"}
+        and llm_allows_cluster_fill
+    ):
+        order_line_cluster_filled = _apply_weekly_menu_order_line_cluster_consensus_fill(
+            rows=rows,
+            fields=fields,
+            quantity_index=quantity_index,
+        )
+        if order_line_cluster_filled > 0:
+            mapped_count = _count_non_empty_quantity_cells(
+                rows=rows,
+                quantity_index=quantity_index,
+            )
+            logger.info(
+                "Applied weekly-menu order-line cluster consensus fill",
+                order_id=order_id,
+                facility_id=facility_id,
+                week_id=resolved_week_id,
+                source=source,
+                mapped_mode=mapped_mode,
+                filled_cells=order_line_cluster_filled,
+                mapped_count=mapped_count,
+            )
+
     # If we are not using payload-row mapping, validate order-line column compatibility.
     if order_lines and mapped_mode != "payload_row":
         unmapped_quantity_lines = _collect_unmapped_quantity_lines(
@@ -6353,6 +9070,15 @@ def get_ocr_sheet(order_id: str):
         source = "weekly_menu+ocr_payload"
     if source == "ocr_table" and mapped_mode == "payload_row":
         source = "ocr_table+ocr_payload"
+
+    cell_issues = _map_payload_cell_issues_to_sheet_rows(
+        payload=ocr_payload,
+        template=template,
+        rows=rows,
+        fields=fields,
+    )
+    if cell_issues:
+        _append_sheet_warning("sheet_ocr_review_required")
 
     trace_rows = _build_sheet_trace_rows(
         rows=rows,
@@ -6376,6 +9102,17 @@ def get_ocr_sheet(order_id: str):
             "source": source,
             "legacy_available": True,
             "warnings": list(sheet_warnings),
+            "cell_issues": cell_issues,
+            "issue_summary": {
+                "review_required_cell_count": len(cell_issues),
+                "issue_codes": sorted(
+                    {
+                        str(issue.get("issue_code") or "").strip()
+                        for issue in cell_issues
+                        if str(issue.get("issue_code") or "").strip()
+                    }
+                ),
+            },
             "trace": {
                 "rows": trace_rows,
                 "mapped_mode": mapped_mode,
@@ -6383,6 +9120,48 @@ def get_ocr_sheet(order_id: str):
         },
         None,
     )
+
+
+def export_ocr_sheet_label(
+    order_id: str,
+    *,
+    output_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+):
+    sheet, error = get_ocr_sheet(order_id)
+    if error:
+        return None, error
+    if not isinstance(sheet, dict):
+        return None, "sheet_missing"
+    payload = _load_order_ocr_cache(order_id)
+    exact_revision = _select_edited_sheet_revision(payload, exact_only=True)
+    if isinstance(exact_revision, dict):
+        sheet_from_revision = _build_sheet_payload_from_revision(
+            order_id=order_id,
+            revision=exact_revision,
+            fallback_sheet=sheet,
+        )
+        if isinstance(sheet_from_revision, dict):
+            sheet = sheet_from_revision
+
+    if output_path is not None:
+        resolved_path = Path(output_path)
+    else:
+        if output_dir is not None:
+            base_dir = Path(output_dir)
+        else:
+            base_dir = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "ocr_sheet_corpus" / "manual_labels"
+        resolved_path = base_dir / f"{order_id}.expected_sheet.json"
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text(
+        json.dumps(sheet, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "order_id": order_id,
+        "output_path": str(resolved_path),
+        "sheet": sheet,
+    }, None
 
 
 def get_ocr_edit_history(order_id: str):
@@ -6798,6 +9577,96 @@ def _truncate_assist_text(value: str, max_chars: int = 6000) -> str:
     return f"{text[:max_chars]}\n...(truncated)"
 
 
+def _compact_prompt_tables(pipeline_output: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(pipeline_output, dict):
+        return []
+    collected: list[dict[str, Any]] = []
+    seen_table_ids: set[str] = set()
+
+    def _push(table_payload: object) -> None:
+        if not isinstance(table_payload, dict):
+            return
+        table_id = str(table_payload.get("table_id") or "").strip()
+        if table_id and table_id in seen_table_ids:
+            return
+        if table_id:
+            seen_table_ids.add(table_id)
+        rows = table_payload.get("rows")
+        cells = table_payload.get("cells")
+        entry: dict[str, Any] = {
+            "table_id": table_id,
+            "page_index": table_payload.get("page_index"),
+            "row_count": table_payload.get("row_count"),
+            "col_count": table_payload.get("col_count"),
+        }
+        if isinstance(rows, list) and rows:
+            entry["rows_preview"] = rows[:12]
+        if isinstance(cells, list) and cells:
+            compact_cells: list[dict[str, Any]] = []
+            for cell in cells[:24]:
+                if not isinstance(cell, dict):
+                    continue
+                compact_cells.append(
+                    {
+                        "row_index": cell.get("row_index"),
+                        "col_index": cell.get("col_index"),
+                        "row_span": cell.get("row_span"),
+                        "col_span": cell.get("col_span"),
+                        "text": cell.get("text"),
+                        "bbox": cell.get("bbox"),
+                    }
+                )
+            if compact_cells:
+                entry["cells_preview"] = compact_cells
+        if entry.get("rows_preview") or entry.get("cells_preview"):
+            collected.append(entry)
+
+    top_tables = pipeline_output.get("tables")
+    if isinstance(top_tables, list):
+        for table_payload in top_tables[:6]:
+            _push(table_payload)
+    pages = pipeline_output.get("pages")
+    if isinstance(pages, list):
+        for page_payload in pages[:4]:
+            if not isinstance(page_payload, dict):
+                continue
+            page_tables = page_payload.get("tables")
+            if not isinstance(page_tables, list):
+                continue
+            for table_payload in page_tables[:4]:
+                _push(table_payload)
+    return collected[:6]
+
+
+def _compact_prompt_cell_issues(
+    pipeline_output: dict[str, Any] | None,
+    template: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(pipeline_output, dict):
+        return []
+    raw_issues = _collect_raw_payload_cell_issues(pipeline_output, template)
+    compact: list[dict[str, Any]] = []
+    for issue in raw_issues[:60]:
+        compact.append(
+            {
+                "table_id": issue.get("table_id"),
+                "source_row_index": issue.get("source_row_index", issue.get("row_index")),
+                "column_index": issue.get("column_index"),
+                "field": issue.get("field"),
+                "issue_code": issue.get("issue_code"),
+                "severity": issue.get("severity"),
+                "bbox": issue.get("bbox"),
+                "text": issue.get("text"),
+                "value": issue.get("value"),
+                "row_span": issue.get("row_span"),
+                "col_span": issue.get("col_span"),
+                "max_allowed": issue.get("max_allowed"),
+                "source": issue.get("source"),
+            }
+        )
+    return compact
+
+
 def _build_llm_assist_prompt(
     *,
     provider: str,
@@ -6812,9 +9681,9 @@ def _build_llm_assist_prompt(
         sections.append(f"Facility-specific instruction:\n{base_custom}")
     if llm_assist:
         sections.append(
-            "Second-pass OCR mode:\n"
-            "- Use the fax image as the primary source of truth.\n"
-            "- Use the first-pass OCR result only as a hint.\n"
+            "Second-pass repair mode:\n"
+            "- Treat the first-pass yomitoku output as the baseline draft.\n"
+            "- Use the fax image to repair or confirm that draft, not to replace the whole table unnecessarily.\n"
             "- Keep row order stable.\n"
             "- Fill missing cells when readable; keep empty string when unreadable.\n"
             "- If a handwritten quantity is unreadable, infer only from nearby recognized quantities when continuity is clear; otherwise keep empty string.\n"
@@ -6822,26 +9691,39 @@ def _build_llm_assist_prompt(
             "- If arrows/vertical range lines indicate a number applies to a span, copy that number to all cells in that span.\n"
             "- Apply copying/inference only within the clearly indicated range.\n"
             "- Quantity cells must contain digits only.\n"
+            "- Structured table cells and suspicious-cell diagnostics are provided below; use them when deciding what to repair.\n"
             "- Return strict JSON only."
         )
         if isinstance(pipeline_output, dict):
             table_raw = pipeline_output.get("table_raw")
             if isinstance(table_raw, str) and table_raw.strip():
                 sections.append(
-                    "First-pass OCR hint (markdown table):\n"
+                    "First-pass yomitoku markdown:\n"
                     f"{_truncate_assist_text(table_raw.strip(), max_chars=7000)}"
                 )
-            rows = pipeline_output.get("rows")
-            if isinstance(rows, list) and rows:
+            rows = _extract_first_pass_rows_from_payload(pipeline_output, template)
+            if rows:
                 try:
                     rows_text = json.dumps(rows[:80], ensure_ascii=False)
                 except TypeError:
                     rows_text = ""
                 if rows_text:
                     sections.append(
-                        "First-pass OCR hint (structured rows):\n"
+                        "First-pass yomitoku structured rows:\n"
                         f"{_truncate_assist_text(rows_text, max_chars=4000)}"
                     )
+            tables = _compact_prompt_tables(pipeline_output)
+            if tables:
+                sections.append(
+                    "First-pass yomitoku structured tables/cells:\n"
+                    f"{_truncate_assist_text(json.dumps(tables, ensure_ascii=False), max_chars=10000)}"
+                )
+            issues = _compact_prompt_cell_issues(pipeline_output, template)
+            if issues:
+                sections.append(
+                    "Suspicious first-pass cells (review before changing):\n"
+                    f"{_truncate_assist_text(json.dumps(issues, ensure_ascii=False), max_chars=6000)}"
+                )
     if not sections:
         return None
     return "\n\n".join(sections)
@@ -7114,6 +9996,494 @@ def _build_quantity_only_repair_prompts(
     return "\n\n".join(system_sections), "\n\n".join(user_sections)
 
 
+def _parse_audit_int(value: object) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"-?\d+", text):
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
+def _parse_audit_confidence(value: object) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = float(text)
+    except Exception:
+        return 0.0
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
+def _normalize_audit_issue_code(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    normalized = normalized.replace("-", "_").replace(" ", "_")
+    normalized = re.sub(r"[^a-z0-9_]+", "", normalized)
+    return normalized
+
+
+def _parse_llm_reparse_audit_issues(
+    *,
+    rows: list[list[str]],
+    fields: list[str],
+) -> list[dict[str, Any]]:
+    if not rows or not fields:
+        return []
+    field_index = {field: idx for idx, field in enumerate(fields)}
+    issues: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        issue_code = _normalize_audit_issue_code(
+            row[field_index["issue_code"]]
+            if "issue_code" in field_index and field_index["issue_code"] < len(row)
+            else ""
+        )
+        severity = str(
+            row[field_index["severity"]]
+            if "severity" in field_index and field_index["severity"] < len(row)
+            else ""
+        ).strip().lower()
+        evidence = str(
+            row[field_index["evidence"]]
+            if "evidence" in field_index and field_index["evidence"] < len(row)
+            else ""
+        ).strip()
+        reason = str(
+            row[field_index["reason"]]
+            if "reason" in field_index and field_index["reason"] < len(row)
+            else ""
+        ).strip()
+        row_index = _parse_audit_int(
+            row[field_index["row_index"]]
+            if "row_index" in field_index and field_index["row_index"] < len(row)
+            else None
+        )
+        column_index = _parse_audit_int(
+            row[field_index["column_index"]]
+            if "column_index" in field_index and field_index["column_index"] < len(row)
+            else None
+        )
+        confidence = _parse_audit_confidence(
+            row[field_index["confidence"]]
+            if "confidence" in field_index and field_index["confidence"] < len(row)
+            else None
+        )
+        if not issue_code and not reason:
+            continue
+        issue: dict[str, Any] = {
+            "issue_code": issue_code or "unknown_issue",
+            "severity": severity or "medium",
+            "confidence": round(confidence, 4),
+            "evidence": evidence,
+            "reason": reason,
+        }
+        if row_index is not None:
+            issue["row_index"] = int(row_index)
+        if column_index is not None:
+            issue["column_index"] = int(column_index)
+        issues.append(issue)
+    return issues
+
+
+def _resolve_llm_audit_provider(
+    *,
+    primary_provider: str,
+    template: dict[str, Any],
+) -> str:
+    normalized_primary = str(primary_provider or "").strip().lower()
+    if normalized_primary not in {"gemini", "openai"}:
+        normalized_primary = "gemini"
+
+    def _alternate(provider: str) -> str:
+        return "openai" if provider == "gemini" else "gemini"
+
+    configured = (
+        str(template.get("llm_audit_provider") or "").strip().lower()
+        or str(os.getenv("OCR_REPARSE_AUDIT_PROVIDER", "alternate")).strip().lower()
+    )
+    if configured in {"", "same", "alternate", "other", "cross", "opposite"}:
+        return _alternate(normalized_primary)
+    if configured in {"gemini", "openai"}:
+        if configured == normalized_primary:
+            # Enforce cross-model verification to avoid self-approval.
+            return _alternate(normalized_primary)
+        return configured
+    return _alternate(normalized_primary)
+
+
+def _has_openai_api_key() -> bool:
+    return bool(str(os.getenv("OPENAI_API_KEY", "")).strip())
+
+
+def _has_gemini_api_key() -> bool:
+    return bool(
+        str(os.getenv("GEMINI_API_KEY", "")).strip()
+        or str(os.getenv("GOOGLE_API_KEY", "")).strip()
+    )
+
+
+def _resolve_gemini_audit_model(
+    *,
+    primary_provider: str,
+    primary_model: str,
+    template: dict[str, Any],
+) -> str:
+    configured = str(
+        template.get("gemini_ocr_audit_model")
+        or os.getenv("OCR_REPARSE_GEMINI_AUDIT_MODEL", "")
+    ).strip()
+    if configured:
+        candidate = configured
+    else:
+        primary_model_lower = str(primary_model or "").strip().lower()
+        if primary_provider == "gemini" and "flash" in primary_model_lower:
+            candidate = "gemini-2.5-pro"
+        elif primary_provider == "gemini" and "pro" in primary_model_lower:
+            candidate = "gemini-2.5-flash"
+        else:
+            candidate = (
+                str(os.getenv("GEMINI_OCR_MODEL", "")).strip()
+                or "gemini-2.5-flash"
+            )
+    if (
+        primary_provider == "gemini"
+        and candidate.strip().lower() == str(primary_model or "").strip().lower()
+    ):
+        if "flash" in candidate.lower():
+            return "gemini-2.5-pro"
+        if "pro" in candidate.lower():
+            return "gemini-2.5-flash"
+    return candidate
+
+
+def _build_llm_reparse_audit_prompts(
+    *,
+    candidate_rows: list[list[str]],
+    reference_rows: list[list[str]] | None,
+    quantity_columns: list[dict[str, str | int]],
+    expected_row_count: int,
+) -> tuple[str, str, list[str]]:
+    fields = [
+        "issue_code",
+        "severity",
+        "row_index",
+        "column_index",
+        "confidence",
+        "evidence",
+        "reason",
+    ]
+    system_prompt = (
+        "You are an OCR quality auditor for Japanese fax order sheets.\n"
+        "Your task is defect finding only. Do NOT correct OCR rows.\n"
+        "Use the fax image as primary evidence and candidate OCR rows as a draft.\n"
+        "Return strict JSON only with shape:\n"
+        '{"facility_name":"", "date_strings":[], "rows":[{"issue_code":"","severity":"","row_index":"","column_index":"","confidence":"","evidence":"","reason":""}]}\n'
+        "If no clear defect is found, return rows as [].\n"
+        "Rules:\n"
+        "- issue_code should be one of: row_count_shortfall, week_scope_mismatch, date_anchor_drift, mirrored_sibling_columns, column_swap, invalid_numeric_spike, all_quantity_blank.\n"
+        "- severity should be one of: critical, high, medium, low.\n"
+        "- confidence must be 0.00-1.00.\n"
+        "- evidence must quote concrete visual evidence from the image (short text).\n"
+        "- row_index/column_index should be digits when identifiable, otherwise empty string.\n"
+        "- Never output markdown or explanations."
+    )
+    user_payload = {
+        "expected_row_count": int(expected_row_count) if expected_row_count > 0 else None,
+        "candidate_rows": candidate_rows[:260],
+        "reference_rows_hint": (reference_rows or [])[:120],
+        "quantity_columns": quantity_columns,
+    }
+    user_prompt = (
+        "Audit the OCR candidate rows and list only defects with evidence.\n"
+        f"{_truncate_assist_text(json.dumps(user_payload, ensure_ascii=False), max_chars=18000)}"
+    )
+    return system_prompt, user_prompt, fields
+
+
+def _run_llm_reparse_audit(
+    *,
+    pdf_bytes: bytes,
+    provider: str,
+    template: dict[str, Any],
+    facility_id: str | None,
+    preferred_template_id: str | None,
+    candidate_rows: list[list[str]],
+    reference_rows: list[list[str]] | None,
+    expected_row_count: int,
+) -> dict[str, Any] | None:
+    if provider not in {"gemini", "openai"}:
+        return None
+    if not _read_reparse_bool_env("OCR_REPARSE_ENABLE_LLM_AUDIT_GATE", True):
+        return None
+
+    primary_provider = str(provider or "").strip().lower()
+    primary_model = _resolve_provider_model_name(
+        provider=primary_provider,
+        template=template,
+    )
+    quantity_columns = _template_quantity_columns(template)
+    requested_audit_provider = _resolve_llm_audit_provider(
+        primary_provider=provider,
+        template=template,
+    )
+    audit_provider = str(requested_audit_provider or "").strip().lower() or "gemini"
+    fail_closed = _read_reparse_bool_env("OCR_REPARSE_LLM_AUDIT_FAIL_CLOSED", False)
+    provider_switch_reason: str | None = None
+    if audit_provider == "openai" and not _has_openai_api_key():
+        if _has_gemini_api_key():
+            audit_provider = "gemini"
+            provider_switch_reason = "openai_api_key_missing_fallback_gemini"
+        else:
+            return {
+                "status": "fail" if fail_closed else "unknown",
+                "provider": requested_audit_provider,
+                "requested_provider": requested_audit_provider,
+                "actual_provider": None,
+                "provider_switch_reason": "openai_api_key_missing",
+                "model": None,
+                "issue_count": 0,
+                "blocking_issue_count": 0,
+                "issues": [],
+                "blocking_issues": [],
+                "error": "openai_api_key_missing",
+            }
+    elif audit_provider == "gemini" and not _has_gemini_api_key():
+        if _has_openai_api_key():
+            audit_provider = "openai"
+            provider_switch_reason = "gemini_api_key_missing_fallback_openai"
+        else:
+            return {
+                "status": "fail" if fail_closed else "unknown",
+                "provider": requested_audit_provider,
+                "requested_provider": requested_audit_provider,
+                "actual_provider": None,
+                "provider_switch_reason": "gemini_api_key_missing",
+                "model": None,
+                "issue_count": 0,
+                "blocking_issue_count": 0,
+                "issues": [],
+                "blocking_issues": [],
+                "error": "gemini_api_key_missing",
+            }
+
+    system_prompt, user_prompt, row_fields = _build_llm_reparse_audit_prompts(
+        candidate_rows=candidate_rows,
+        reference_rows=reference_rows,
+        quantity_columns=quantity_columns,
+        expected_row_count=expected_row_count,
+    )
+
+    audit_template = dict(template)
+    audit_template["main_ocr_provider"] = audit_provider
+    audit_template["_force_main_ocr_provider"] = audit_provider
+    audit_template["llm_quantity_only_mode"] = False
+    audit_template["main_ocr_row_fields"] = row_fields
+    if audit_provider == "openai":
+        audit_template["openai_ocr_enabled"] = True
+        audit_template["openai_ocr_prompt"] = system_prompt
+        audit_template["openai_ocr_user_prompt"] = user_prompt
+        model_override = str(
+            audit_template.get("openai_ocr_audit_model")
+            or os.getenv("OCR_REPARSE_OPENAI_AUDIT_MODEL", "")
+        ).strip()
+        if model_override:
+            audit_template["openai_ocr_model"] = model_override
+    else:
+        audit_template["gemini_ocr_enabled"] = True
+        audit_template["gemini_ocr_prompt"] = system_prompt
+        audit_template["gemini_ocr_user_prompt"] = user_prompt
+        model_override = _resolve_gemini_audit_model(
+            primary_provider=primary_provider,
+            primary_model=primary_model,
+            template=audit_template,
+        )
+        if model_override:
+            audit_template["gemini_ocr_model"] = model_override
+
+    min_confidence = _read_reparse_float_env(
+        "OCR_REPARSE_LLM_AUDIT_MIN_CONFIDENCE",
+        0.75,
+        min_value=0.0,
+    )
+    if min_confidence > 1.0:
+        min_confidence = 1.0
+    blocking_codes = {
+        _normalize_audit_issue_code(token)
+        for token in str(
+            os.getenv(
+                "OCR_REPARSE_LLM_AUDIT_BLOCKING_CODES",
+                (
+                    "row_count_shortfall,week_scope_mismatch,date_anchor_drift,"
+                    "mirrored_sibling_columns,column_swap,invalid_numeric_spike,all_quantity_blank"
+                ),
+            )
+        ).split(",")
+        if str(token).strip()
+    }
+    blocking_severity = {
+        str(token).strip().lower()
+        for token in str(
+            os.getenv("OCR_REPARSE_LLM_AUDIT_BLOCKING_SEVERITY", "critical,high")
+        ).split(",")
+        if str(token).strip()
+    }
+
+    try:
+        extracted = extract_fax_data(
+            pdf_bytes,
+            audit_template,
+            facility_id=facility_id,
+            preferred_template_id=preferred_template_id,
+        )
+        provider_debug = (
+            extracted.provider_debug
+            if isinstance(extracted.provider_debug, dict)
+            else {}
+        )
+        actual_provider = str(
+            extracted.ocr_provider
+            or provider_debug.get("provider")
+            or audit_provider
+        ).strip().lower()
+        if actual_provider.endswith("_fallback_pipeline"):
+            return {
+                "status": "fail" if fail_closed else "unknown",
+                "provider": audit_provider,
+                "requested_provider": requested_audit_provider,
+                "actual_provider": actual_provider,
+                "provider_switch_reason": provider_switch_reason,
+                "model": str(provider_debug.get("model") or "").strip() or None,
+                "issue_count": 0,
+                "blocking_issue_count": 0,
+                "issues": [],
+                "blocking_issues": [],
+                "error": "audit_provider_fallback_pipeline",
+            }
+
+        parsed_rows = [list(row) for row in (extracted.table_rows or []) if isinstance(row, list)]
+        issues = _parse_llm_reparse_audit_issues(
+            rows=parsed_rows,
+            fields=row_fields,
+        )
+        blocking_issues: list[dict[str, Any]] = []
+        for issue in issues:
+            evidence = str(issue.get("evidence") or "").strip()
+            if not evidence:
+                continue
+            confidence = float(issue.get("confidence") or 0.0)
+            if confidence < min_confidence:
+                continue
+            issue_code = _normalize_audit_issue_code(issue.get("issue_code"))
+            severity = str(issue.get("severity") or "").strip().lower()
+            if issue_code in blocking_codes or severity in blocking_severity:
+                blocking_issues.append(issue)
+        status = "pass"
+        if blocking_issues:
+            status = "fail"
+        elif issues:
+            status = "unknown"
+        return {
+            "status": status,
+            "provider": audit_provider,
+            "requested_provider": requested_audit_provider,
+            "actual_provider": actual_provider,
+            "provider_switch_reason": provider_switch_reason,
+            "model": str(provider_debug.get("model") or "").strip() or None,
+            "issue_count": len(issues),
+            "blocking_issue_count": len(blocking_issues),
+            "issues": issues[:40],
+            "blocking_issues": blocking_issues[:20],
+            "threshold": {
+                "min_confidence": min_confidence,
+                "blocking_codes": sorted(token for token in blocking_codes if token),
+                "blocking_severity": sorted(token for token in blocking_severity if token),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "fail" if fail_closed else "unknown",
+            "provider": audit_provider,
+            "requested_provider": requested_audit_provider,
+            "actual_provider": None,
+            "provider_switch_reason": provider_switch_reason,
+            "model": None,
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "issues": [],
+            "blocking_issues": [],
+            "error": str(exc),
+            "threshold": {
+                "min_confidence": min_confidence,
+                "blocking_codes": sorted(token for token in blocking_codes if token),
+                "blocking_severity": sorted(token for token in blocking_severity if token),
+            },
+        }
+
+
+def _evaluate_reparse_line_count_regression(
+    *,
+    provider: str,
+    llm_quantity_only_active: bool,
+    before_count: int,
+    after_count: int,
+) -> tuple[str | None, dict[str, Any] | None]:
+    if provider not in {"gemini", "openai"}:
+        return None, None
+    if not llm_quantity_only_active:
+        return None, None
+    if before_count <= 0:
+        return None, None
+
+    min_before = _read_reparse_int_env(
+        "OCR_REPARSE_LINE_COUNT_GUARD_MIN_BEFORE",
+        24,
+        min_value=1,
+    )
+    if before_count < min_before:
+        return None, None
+
+    min_ratio = _read_reparse_float_env(
+        "OCR_REPARSE_LINE_COUNT_MIN_RATIO",
+        0.70,
+        min_value=0.0,
+    )
+    if min_ratio > 1.0:
+        min_ratio = 1.0
+    max_drop_abs = _read_reparse_int_env(
+        "OCR_REPARSE_LINE_COUNT_MAX_DROP_ABS",
+        24,
+        min_value=1,
+    )
+    ratio = float(after_count) / float(before_count) if before_count > 0 else 1.0
+    drop_abs = max(before_count - after_count, 0)
+    detail = {
+        "before_count": int(before_count),
+        "after_count": int(after_count),
+        "line_count_ratio": round(ratio, 4),
+        "drop_abs": int(drop_abs),
+        "min_ratio": float(min_ratio),
+        "max_drop_abs": int(max_drop_abs),
+        "min_before_count": int(min_before),
+    }
+    if ratio < min_ratio and drop_abs > max_drop_abs:
+        detail["quality_issue"] = "line_count_regression"
+        return "sheet_line_count_regression", detail
+    return None, detail
+
+
 def _build_reparse_quantity_rules(
     base_rules: dict[str, Any] | None,
     *,
@@ -7124,6 +10494,10 @@ def _build_reparse_quantity_rules(
         return rules
     rules["zero_as_empty"] = False
     rules["strict_numeric_quantity_cell"] = True
+    # LLM quantity-only mode can intentionally omit non-quantity columns.
+    # Keep these rows so source_row_index-based position mapping can restore
+    # date/daypart/menu from weekly menu entries.
+    rules["allow_blank_structure_rows"] = True
     if rules.get("max_quantity_abs") is None:
         try:
             rules["max_quantity_abs"] = float(os.getenv("OCR_SHEET_MAX_QTY", "150"))
@@ -7225,8 +10599,11 @@ def _build_reparse_debug_payload(
     normalized_lines: list[dict[str, Any]] | None = None,
     reject_reasons: list[str] | None = None,
     validation_detail: dict[str, Any] | None = None,
+    warning_reasons: list[str] | None = None,
+    warning_detail: dict[str, Any] | None = None,
     llm_quantity_only_merge: dict[str, Any] | None = None,
     llm_cost: dict[str, Any] | None = None,
+    llm_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_limit = _debug_text_max_chars()
     payload: dict[str, Any] = {
@@ -7253,10 +10630,23 @@ def _build_reparse_debug_payload(
             payload["reject_reasons"] = reasons[:20]
     if isinstance(validation_detail, dict) and validation_detail:
         payload["validation_detail"] = validation_detail
+    if isinstance(warning_reasons, list):
+        reasons = [str(item).strip() for item in warning_reasons if str(item).strip()]
+        if reasons:
+            payload["warning_reasons"] = reasons[:20]
+    if isinstance(warning_detail, dict) and warning_detail:
+        payload["warning_detail"] = warning_detail
     if isinstance(llm_quantity_only_merge, dict) and llm_quantity_only_merge:
         payload["llm_quantity_only_merge"] = llm_quantity_only_merge
     if isinstance(llm_cost, dict) and llm_cost:
         payload["llm_cost"] = llm_cost
+    if isinstance(llm_audit, dict) and llm_audit:
+        payload["llm_audit"] = llm_audit
+        audit_status = str(llm_audit.get("status") or "").strip().lower()
+        if audit_status == "pass":
+            payload["order_line_cluster_fill_decision"] = "allow"
+        elif audit_status == "fail":
+            payload["order_line_cluster_fill_decision"] = "deny"
     provider_debug = getattr(extracted, "provider_debug", None) if extracted is not None else None
     if isinstance(provider_debug, dict) and provider_debug:
         payload["provider_debug"] = provider_debug
@@ -7412,13 +10802,14 @@ def reparse_order(
             metrics=None,
             input_reference=document_uri,
         )
-    preferred_template_id = facility_config.get("fax_template_id")
+    preferred_template_id, preferred_template_ids = _resolve_preferred_template_ids(facility_config)
     pipeline_output_ref = _run_roi_ocr_pipeline(
         job_id=ocr_job_id,
         pdf_bytes=pdf_bytes,
         facility_id=facility_id,
         input_reference=document_uri,
         preferred_template_id=preferred_template_id,
+        preferred_template_ids=preferred_template_ids,
     )
     pipeline_output_payload: dict | None = None
     pipeline_rows_for_rescue: list[list[str]] = []
@@ -7437,7 +10828,19 @@ def reparse_order(
     if llm_assist or requested_provider in {"openai", "gemini"} or (ocr_prompt and main_provider in {"openai", "gemini"}):
         pipeline_output_payload = _load_pipeline_output_with_retry(pipeline_output_ref)
         if isinstance(pipeline_output_payload, dict):
-            pipeline_rows_for_rescue = _extract_sheet_rows_from_payload(pipeline_output_payload, template_to_use)
+            pipeline_rows_for_rescue = _extract_first_pass_rows_from_payload(
+                pipeline_output_payload,
+                template_to_use,
+            )
+            if not pipeline_rows_for_rescue:
+                pipeline_rows_for_rescue = _extract_sheet_rows_from_payload(
+                    pipeline_output_payload,
+                    template_to_use,
+                )
+            if not pipeline_rows_for_rescue:
+                table_raw = pipeline_output_payload.get("table_raw")
+                if isinstance(table_raw, str) and table_raw.strip():
+                    pipeline_rows_for_rescue = rows_from_markdown(table_raw, template_to_use) or []
             pipeline_anchor_dates = {
                 item
                 for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at)
@@ -7458,6 +10861,36 @@ def reparse_order(
                 pipeline_rows=pipeline_rows_for_rescue,
                 anchor_date_count=len(pipeline_anchor_dates),
             )
+        if not pipeline_rows_for_rescue:
+            cached_reference_payload = _load_order_ocr_cache(order_id)
+            if isinstance(cached_reference_payload, dict):
+                cached_rows = _extract_first_pass_rows_from_payload(
+                    cached_reference_payload,
+                    template_to_use,
+                )
+                if not cached_rows:
+                    cached_rows = _extract_sheet_rows_from_payload(
+                        cached_reference_payload,
+                        template_to_use,
+                    )
+                if cached_rows:
+                    pipeline_rows_for_rescue = cached_rows
+                    cached_anchor_dates = {
+                        item
+                        for item in _collect_sheet_dates_from_payload(cached_reference_payload, received_at)
+                        if isinstance(item, date)
+                    }
+                    pipeline_anchor_dates = set(pipeline_anchor_dates) | cached_anchor_dates
+                    expected_weekly_row_count = _resolve_llm_expected_row_count(
+                        menu_expected_row_count=expected_weekly_row_count,
+                        pipeline_rows=pipeline_rows_for_rescue,
+                        anchor_date_count=len(pipeline_anchor_dates),
+                    )
+                    logger.info(
+                        "Reparse using cached OCR rows as rescue reference order_id={} rows={}",
+                        order_id,
+                        len(pipeline_rows_for_rescue),
+                    )
         effective_provider = requested_provider or main_provider
         if effective_provider in {"openai", "gemini"}:
             if ocr_prompt and ocr_prompt.strip():
@@ -7502,6 +10935,8 @@ def reparse_order(
     llm_primary_model: str | None = None
     llm_repair_pass_model: str | None = None
     reparse_cost_info: dict[str, Any] | None = None
+    llm_audit_result: dict[str, Any] | None = None
+    quantity_sanitize_stats: dict[str, int] | None = None
     try:
         extracted = extract_fax_data(
             pdf_bytes,
@@ -7538,7 +10973,11 @@ def reparse_order(
         if llm_quantity_only_active:
             provider_debug["quantity_only_mode"] = True
             extracted.provider_debug = provider_debug
-        if llm_quantity_only_active and pipeline_rows_for_rescue:
+        merge_with_pipeline_enabled = _read_reparse_bool_env(
+            "OCR_REPARSE_ENABLE_PIPELINE_QUANTITY_MERGE",
+            False,
+        )
+        if llm_quantity_only_active and pipeline_rows_for_rescue and merge_with_pipeline_enabled:
             merged_rows, merge_stats = _merge_llm_quantity_only_rows_with_pipeline(
                 llm_rows=[list(row) for row in rows if isinstance(row, list)],
                 pipeline_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
@@ -7549,6 +10988,9 @@ def reparse_order(
                 llm_quantity_only_merge_stats = merge_stats
                 provider_debug["quantity_only_merge"] = merge_stats
                 extracted.provider_debug = provider_debug
+        elif llm_quantity_only_active and pipeline_rows_for_rescue and not merge_with_pipeline_enabled:
+            provider_debug["quantity_only_merge_disabled"] = True
+            extracted.provider_debug = provider_debug
         llm_finish_reason = _extract_llm_finish_reason(extracted)
         llm_truncated_output = (
             main_provider in {"openai", "gemini"} and _is_truncated_llm_output(extracted)
@@ -7881,6 +11323,7 @@ def reparse_order(
             reject_reasons=[lines_empty_error],
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
             llm_cost=reparse_cost_info,
+            llm_audit=llm_audit_result,
         )
         try:
             cache_payload: dict[str, Any] = {}
@@ -7916,6 +11359,7 @@ def reparse_order(
                 "quality_error": reparse_quality_error,
                 "quality_detail": reparse_quality_detail or {},
                 "llm_cost": reparse_cost_info or None,
+                "llm_audit": llm_audit_result or None,
             },
         )
         return None, "lines_empty"
@@ -7992,6 +11436,16 @@ def reparse_order(
                 expected_row_count=quality_expected_row_count,
                 reference_rows=pipeline_rows_for_rescue,
             )
+            llm_audit_result = _run_llm_reparse_audit(
+                pdf_bytes=pdf_bytes,
+                provider=main_provider,
+                template=template_to_use,
+                facility_id=facility_id,
+                preferred_template_id=preferred_template_id,
+                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                expected_row_count=quality_expected_row_count,
+            )
     enable_position_mapping = bool(template_to_use.get("map_menu_by_position", True))
     mapped_rows = 0
     if enable_position_mapping:
@@ -8002,6 +11456,20 @@ def reparse_order(
         )
     if mapped_rows <= 0:
         lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
+    lines, quantity_sanitize_stats = _sanitize_reparse_line_quantities(lines)
+    if quantity_sanitize_stats and (
+        quantity_sanitize_stats.get("quantity_adjusted", 0) > 0
+        or quantity_sanitize_stats.get("quantity_dropped", 0) > 0
+        or quantity_sanitize_stats.get("lines_dropped", 0) > 0
+    ):
+        logger.info(
+            "Reparse quantity sanitize applied order_id={} adjusted={} dropped={} lines_dropped={} max_abs={}",
+            order_id,
+            quantity_sanitize_stats.get("quantity_adjusted", 0),
+            quantity_sanitize_stats.get("quantity_dropped", 0),
+            quantity_sanitize_stats.get("lines_dropped", 0),
+            quantity_sanitize_stats.get("max_abs_qty"),
+        )
     validation_error, validation_detail = _validate_reparse_lines_against_weekly_menu(
         lines=lines,
         week_id=week_id,
@@ -8026,6 +11494,25 @@ def reparse_order(
     if not validation_error and reparse_quality_error:
         validation_error = reparse_quality_error
         validation_detail = reparse_quality_detail or {}
+    line_count_error, line_count_detail = _evaluate_reparse_line_count_regression(
+        provider=main_provider,
+        llm_quantity_only_active=llm_quantity_only_active,
+        before_count=before_count,
+        after_count=len(lines),
+    )
+    if not validation_error and line_count_error:
+        validation_error = line_count_error
+        validation_detail = line_count_detail or {}
+    if (
+        not validation_error
+        and isinstance(llm_audit_result, dict)
+        and str(llm_audit_result.get("status") or "").lower() == "fail"
+    ):
+        validation_error = "sheet_llm_audit_failed"
+        validation_detail = {
+            "quality_issue": "llm_audit",
+            "llm_audit": llm_audit_result,
+        }
     if (
         not validation_error
         and isinstance(reparse_cost_info, dict)
@@ -8042,6 +11529,23 @@ def reparse_order(
             "usage": reparse_cost_info.get("usage"),
             "pricing": reparse_cost_info.get("pricing"),
         }
+    validation_warning_reasons: list[str] = []
+    validation_warning_detail: dict[str, Any] | None = None
+    if validation_error and _is_soft_warning_validation_error(validation_error):
+        normalized_warning = str(validation_error).strip()
+        if normalized_warning:
+            validation_warning_reasons = [normalized_warning]
+        validation_warning_detail = validation_detail if isinstance(validation_detail, dict) else {}
+        logger.warning(
+            "Reparse validation warned but accepted",
+            order_id=order_id,
+            provider=main_provider,
+            warning_reasons=validation_warning_reasons,
+            detail=validation_warning_detail,
+        )
+        validation_error = None
+        validation_detail = None
+
     if validation_error:
         logger.warning(
             "Reparse validation rejected",
@@ -8069,6 +11573,7 @@ def reparse_order(
             validation_detail=validation_detail,
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
             llm_cost=reparse_cost_info,
+            llm_audit=llm_audit_result,
         )
         try:
             cache_payload: dict[str, Any] = {}
@@ -8110,6 +11615,7 @@ def reparse_order(
                 "quality_error": reparse_quality_error,
                 "quality_detail": reparse_quality_detail or {},
                 "llm_cost": reparse_cost_info or None,
+                "llm_audit": llm_audit_result or None,
             },
         )
         return None, validation_error
@@ -8195,7 +11701,10 @@ def reparse_order(
             "repair_pass_model": llm_repair_pass_model,
             "quality_error": reparse_quality_error,
             "quality_detail": reparse_quality_detail or {},
+            "warning_reasons": validation_warning_reasons or [],
+            "warning_detail": validation_warning_detail or {},
             "llm_cost": reparse_cost_info or None,
+            "llm_audit": llm_audit_result or None,
             "before_count": before_count,
             "after_count": after_count,
             "before_digest": before_digest,
@@ -8219,8 +11728,11 @@ def reparse_order(
         request_prompt=effective_prompt,
         normalized_lines=lines,
         validation_detail=reparse_quality_detail,
+        warning_reasons=validation_warning_reasons or None,
+        warning_detail=validation_warning_detail or None,
         llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
         llm_cost=reparse_cost_info,
+        llm_audit=llm_audit_result,
     )
     try:
         cache_ref = pipeline_output_ref
@@ -8246,6 +11758,8 @@ def reparse_order(
         "after_digest": after_digest,
         "provider": main_provider,
         "changed": reparse_changed,
+        "warning_reasons": validation_warning_reasons or [],
+        "warning_detail": validation_warning_detail or {},
         "llm_cost": reparse_cost_info or None,
     }
     serialized["ocr_job_id"] = ocr_job_id
@@ -8308,7 +11822,63 @@ def set_facility(order_id: str, facility_code: str) -> bool:
             fac=facility_code,
             wek=order.week_code,
         )
-        return True
+    _invalidate_orders_cache()
+    return True
+
+
+def set_week(order_id: str, week_code: str) -> bool:
+    normalized_week = _to_sheet_month_id(week_code)
+    if not normalized_week:
+        raise ValueError("week_code_invalid")
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return False
+        order.week_code = normalized_week
+        logger.info("Order week set", order_id=order_id, week_code=normalized_week)
+        record_event(
+            "order_week_set",
+            actor="system",
+            target=order_id,
+            fac=order.facility_code,
+            wek=normalized_week,
+        )
+    _invalidate_orders_cache()
+    return True
+
+
+def save_order_facility_template_columns(
+    order_id: str,
+    columns: list[dict[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(columns, list) or not columns:
+        return None, "columns_invalid"
+
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        facility_id = str(order.facility_code or "").strip()
+
+    if not facility_id:
+        return None, "facility_missing"
+
+    config = facility_service.get_facility_config(facility_id) or {}
+    next_config = dict(config)
+    override = dict(next_config.get("fax_template_override") or {})
+    override["columns"] = columns
+    override.pop("main_ocr_row_fields", None)
+    next_config["fax_template_override"] = override
+
+    validation = validate_facility_config(next_config)
+    if validation["errors"]:
+        return {"validation": validation}, "validation_error"
+
+    updated = facility_service.update_config(facility_id, next_config)
+    if not updated:
+        return None, "facility_not_found"
+    resolved = config_service.get_facility_config(facility_id)
+    return {"updated": True, "validation": validation, "resolved_config": resolved}, None
 
 
 def set_status(order_id: str, status: str) -> bool:

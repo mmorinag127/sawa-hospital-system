@@ -166,6 +166,15 @@ def should_skip_ocr(received_at: datetime, policy: Optional[dict] = None) -> boo
     return datetime.utcnow() - received_at > timedelta(days=max_age_days)
 
 
+def ingest_chunk_delay_seconds(index: int, policy: Optional[dict] = None) -> int:
+    policy = policy or load_ingest_policy()
+    backlog_cfg = policy.get("backlog_policy", {})
+    base = int(backlog_cfg.get("chunk_delay_seconds", 0) or 0)
+    if base <= 0:
+        return 0
+    return max(0, base * max(0, index))
+
+
 def retry_backoff_seconds(attempt: int, policy: Optional[dict] = None) -> int:
     policy = policy or load_ingest_policy()
     retry_cfg = policy.get("retry_policy", {})

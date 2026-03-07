@@ -1,0 +1,17 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/frontend:prod-frontend-20260204-215923"
+      - "--build-arg"
+      - "NEXT_PUBLIC_API_BASE_URL=https://worker-prod-avlnzjjrca-dt.a.run.app"
+      - "--build-arg"
+      - "NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
+      - "--build-arg"
+      - "API_PROXY_TARGET=https://worker-prod-avlnzjjrca-dt.a.run.app"
+      - "-f"
+      - "frontend/Dockerfile"
+      - "frontend"
+images:
+  - "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/frontend:prod-frontend-20260204-215923"

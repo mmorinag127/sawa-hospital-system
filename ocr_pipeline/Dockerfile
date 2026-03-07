@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
+    tesseract-ocr \
     libgl1 \
     libglib2.0-0 \
   && rm -rf /var/lib/apt/lists/*
@@ -17,6 +18,7 @@ RUN mkdir -p "${HF_HOME}" \
   && python -c "import os; os.environ['HF_HOME']=os.environ.get('HF_HOME','/opt/hf'); from yomitoku import DocumentAnalyzer; configs={'ocr':{'text_detector':{},'text_recognizer':{}},'layout_analyzer':{'layout_parser':{},'table_structure_recognizer':{}}}; DocumentAnalyzer(configs=configs, device='cpu', visualize=False); print('yomitoku models cached')"
 
 COPY app/ ./app
+COPY src/data ./src/data
 
 ENV PORT=8080
 ENV GUNICORN_TIMEOUT=600

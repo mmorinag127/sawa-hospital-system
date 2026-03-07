@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, String, Float, ForeignKey, Date, DateTime, Integer, Boolean
+from sqlalchemy import Column, String, Float, ForeignKey, Date, DateTime, Integer, Boolean, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.db import Base
@@ -44,6 +44,7 @@ class MenuMaster(Base):
     temp_type = Column(String, nullable=True)
     daypart = Column(String, nullable=True)
     category = Column(String, nullable=True)
+    condiments = Column(JSON, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     overrides = relationship(
@@ -55,6 +56,7 @@ class MenuMaster(Base):
 
 class MenuFacilityOverride(Base):
     __tablename__ = "menu_facility_overrides"
+    __table_args__ = (UniqueConstraint("menu_master_id", "facility_id", name="uq_menu_facility_override_scope"),)
 
     id = Column(String, primary_key=True)
     menu_master_id = Column(String, ForeignKey("menu_masters.id"), nullable=False)
@@ -86,9 +88,13 @@ class MonthlyMenu(Base):
 
 class MonthlyMenuItem(Base):
     __tablename__ = "monthly_menu_items"
+    __table_args__ = (
+        UniqueConstraint("monthly_menu_id", "name", "facility_override", name="uq_monthly_menu_item_scope"),
+    )
 
     id = Column(String, primary_key=True)
     monthly_menu_id = Column(String, ForeignKey("monthly_menus.id"), nullable=False)
+    menu_master_id = Column(String, ForeignKey("menu_masters.id"), nullable=True)
     name = Column(String, nullable=False)
     unit_type = Column(String, nullable=True)
     qty_per_serving = Column(Float, nullable=True)
@@ -133,3 +139,15 @@ class MenuRule(Base):
     active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BaseMenuCycleItem(Base):
+    __tablename__ = "base_menu_cycle_items"
+
+    id = Column(String, primary_key=True)
+    cycle_day = Column(Integer, nullable=False)
+    daypart = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    name = Column(String, nullable=False)
+    diet_type = Column(String, nullable=True)
+    slot_index = Column(Integer, nullable=True)

@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -70,9 +71,27 @@ def test_line_corrections_zero_suppression_and_change_column():
     saved = order_service.get_order_by_id(order["id"])
     assert saved["lines"][1]["quantity_corrected"] == 7
     outputs = output_builder.build_outputs(order["id"])
-    with open(outputs["aggregate"], newline="", encoding="utf-8") as f:
+    with open(outputs["aggregate"], newline="", encoding="cp932", errors="replace") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 2
-    quantities = {row["menu_name"]: float(row["quantity"]) for row in rows}
+
+    def _resolve_menu_name(row: dict) -> str:
+        for key in ("menu_name", "商品名１", "商品名1", "メニュー"):
+            value = row.get(key)
+            if value:
+                return str(value).strip()
+        return ""
+
+    def _resolve_quantity(row: dict) -> float:
+        for key in ("quantity", "数量", "", "内容量"):
+            value = row.get(key)
+            if value is None:
+                continue
+            match = re.search(r"\d+(?:\.\d+)?", str(value))
+            if match:
+                return float(match.group(0))
+        raise AssertionError(f"quantity not found in row: {row}")
+
+    quantities = {_resolve_menu_name(row): _resolve_quantity(row) for row in rows}
     assert quantities["Menu A"] == 10.0
     assert quantities["Menu B"] == 7.0

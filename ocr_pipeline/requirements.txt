@@ -7,3 +7,5 @@ numpy==2.0.2
 Pillow==10.4.0
 pypdfium2==4.30.0
 yomitoku
+pytesseract==0.3.13
+PyYAML==6.0.2

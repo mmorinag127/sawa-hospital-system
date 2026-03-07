@@ -36,4 +36,6 @@ tests/
 - Do not use partial `gcloud run services update` that can drop env vars. If Cloud Run env changes are required, update all env vars in one operation or use IaC only.
 - Do not change behavior in areas already working. Only modify what the user explicitly requests.
 - Before touching Cloud Run settings, enumerate and verify all required env vars; do not proceed if any are missing.
+- For GCP Console guidance, always specify exact navigation paths (menu names) and precise click targets; avoid vague directions.
+- Always read this `workspace/AGENTS.md` before starting any task. Do not simplify or reinterpret user requirements; confirm them explicitly if anything is ambiguous, and implement exactly what was requested.
 <!-- MANUAL ADDITIONS END -->

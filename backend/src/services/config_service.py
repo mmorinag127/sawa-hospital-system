@@ -43,6 +43,39 @@ _CORP_TOKENS = [
 ]
 _PHONE_PATTERN = re.compile(r"(?:\+?81[-\s]?)?(?:0?\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})")
 
+_DEFAULT_ORDER_FORM_PATTERNS: list[dict[str, Any]] = [
+    {
+        "pattern_id": "PATTERN_A",
+        "label": "標準A",
+        "description": "Placeholder pattern A (TBD)",
+        "marker_cells": ["A1", "L1", "A40", "L40"],
+    },
+    {
+        "pattern_id": "PATTERN_B",
+        "label": "標準B",
+        "description": "Placeholder pattern B (TBD)",
+        "marker_cells": ["A1", "M1", "A42", "M42"],
+    },
+    {
+        "pattern_id": "PATTERN_C",
+        "label": "標準C",
+        "description": "Placeholder pattern C (TBD)",
+        "marker_cells": ["A1", "K1", "A38", "K38"],
+    },
+    {
+        "pattern_id": "PATTERN_D",
+        "label": "標準D",
+        "description": "Placeholder pattern D (TBD)",
+        "marker_cells": ["A1", "N1", "A44", "N44"],
+    },
+    {
+        "pattern_id": "PATTERN_E",
+        "label": "標準E",
+        "description": "Placeholder pattern E (TBD)",
+        "marker_cells": ["A1", "J1", "A36", "J36"],
+    },
+]
+
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -54,6 +87,47 @@ def _load_yaml(path: Path) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("pyyaml is required for fax template registry") from exc
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _default_fax_template_id_for_facility(
+    facility_id: str | None,
+    registry: dict[str, Any],
+) -> str | None:
+    if not facility_id or not isinstance(registry, dict) or not registry:
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", "", str(facility_id).lower())
+    if not normalized:
+        return None
+    matcher = re.compile(rf"^fax_{re.escape(normalized)}(?:_v(\d+))?$", re.IGNORECASE)
+    candidates: list[tuple[int, str]] = []
+    for template_id in registry.keys():
+        key = str(template_id or "").strip()
+        if not key:
+            continue
+        hit = matcher.match(key)
+        if not hit:
+            continue
+        version = int(hit.group(1) or 0)
+        candidates.append((version, key))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][1]
+
+
+def _normalize_fax_template_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
 
 
 @lru_cache(maxsize=1)
@@ -93,13 +167,244 @@ def _merge_template(base: Optional[dict], override: Optional[dict]) -> dict:
         return result
     for key, value in override.items():
         if key == "columns" and isinstance(value, list):
-            result.setdefault("columns", [])
-            result["columns"] = result["columns"] + value
+            # `columns` is a schema definition. Appending base+override creates
+            # duplicated/contradicting fields and breaks OCR row mapping.
+            # When override provides columns, treat it as authoritative.
+            result["columns"] = deepcopy(value)
         elif isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = _merge_template(result.get(key), value)
         else:
             result[key] = value
     return result
+
+
+def _facility_has_explicit_areas(facility: dict[str, Any]) -> bool:
+    areas = facility.get("areas")
+    if not isinstance(areas, list) or not areas:
+        return False
+    for area in areas:
+        if isinstance(area, dict):
+            area_id = str(area.get("area_id") or area.get("id") or "").strip()
+            area_name = str(area.get("name") or "").strip()
+            if area_id or area_name:
+                return True
+        else:
+            if str(area or "").strip():
+                return True
+    return False
+
+
+def _strip_area_suffix(label: str) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return text
+    text = re.sub(r"\s*[0-9０-９]+\s*[FfＦｆ階]\s*$", "", text)
+    return text.strip() or str(label or "").strip()
+
+
+def _normalize_fax_template_for_area_mismatch(
+    *,
+    template: dict[str, Any],
+    facility: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(template, dict):
+        return template
+    # Auto-collapsing area-specific quantity columns was causing destructive
+    # schema changes for facilities with template-specific 2F/3F columns.
+    # Keep original template unless explicitly opted in per facility.
+    if not bool(facility.get("collapse_area_columns_when_no_areas", False)):
+        return template
+    if _facility_has_explicit_areas(facility):
+        return template
+    raw_columns = template.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        return template
+
+    has_area_quantity = any(
+        isinstance(col, dict)
+        and str(col.get("role") or "").strip().lower() == "quantity"
+        and str(col.get("area_id") or "").strip()
+        for col in raw_columns
+    )
+    if not has_area_quantity:
+        return template
+
+    changed = False
+    normalized_columns: list[dict[str, Any]] = []
+    seen_quantity: set[str] = set()
+
+    for raw_col in raw_columns:
+        if not isinstance(raw_col, dict):
+            continue
+        col = deepcopy(raw_col)
+        role = str(col.get("role") or "").strip().lower()
+        if role == "quantity":
+            diet_key = str(col.get("diet_type") or "").strip().lower()
+            area_token = str(col.get("area_id") or "").strip()
+            if area_token:
+                col.pop("area_id", None)
+                changed = True
+                for key in ("name", "header", "label"):
+                    if key in col:
+                        col[key] = _strip_area_suffix(str(col.get(key) or ""))
+            dedupe_key = diet_key or str(col.get("name") or col.get("header") or "")
+            if dedupe_key and dedupe_key in seen_quantity:
+                changed = True
+                continue
+            if dedupe_key:
+                seen_quantity.add(dedupe_key)
+        normalized_columns.append(col)
+
+    if not changed:
+        return template
+
+    for idx, col in enumerate(normalized_columns):
+        col["index"] = idx
+
+    normalized = deepcopy(template)
+    normalized["columns"] = normalized_columns
+    if isinstance(normalized.get("main_ocr_row_fields"), list):
+        rebuilt_fields: list[str] = []
+        for col in normalized_columns:
+            role = str(col.get("role") or "").strip().lower()
+            if role == "date":
+                rebuilt_fields.append("date_mmdd")
+            elif role == "daypart":
+                rebuilt_fields.append("daypart")
+            elif role == "menu_name":
+                rebuilt_fields.append("menu")
+            elif role == "note":
+                rebuilt_fields.append("remarks")
+            elif role == "quantity":
+                diet = str(col.get("diet_type") or "").strip() or "unknown"
+                rebuilt_fields.append(f"qty.{diet}_x")
+        if rebuilt_fields:
+            normalized["main_ocr_row_fields"] = rebuilt_fields
+    return normalized
+
+
+def _normalize_field_diet_token(value: object) -> str:
+    token = str(value or "").strip().lower()
+    token = re.sub(r"[\s　]+", "", token)
+    if not token:
+        return "unknown"
+    if "regular" in token or "常食" in token or "通常" in token:
+        return "regular"
+    if "soft" in token or "軟菜" in token or "やわ" in token:
+        return "soft"
+    if "mixer" in token or "ミキサ" in token:
+        return "mixer"
+    if "daycare" in token or "通所" in token:
+        return "daycare"
+    if "staff" in token or "職員" in token:
+        return "staff"
+    if "nomeat" in token or ("禁" in token and "肉" in token):
+        return "no_meat"
+    if "nofish" in token or ("禁" in token and "魚" in token):
+        return "no_fish"
+    sanitized = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    return sanitized or "unknown"
+
+
+def _normalize_field_area_token(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "x"
+    token = raw.translate(_NAME_TRANSLATION).lower()
+    token = re.sub(r"[\s　]+", "", token)
+    if not token:
+        return "x"
+    if re.fullmatch(r"\d+", token):
+        return f"{token}f"
+    match = re.search(r"(\d)(?:f|階)", token)
+    if match:
+        return f"{match.group(1)}f"
+    if token in {"x", "all", "common", "共通"}:
+        return "x"
+    sanitized = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    return sanitized or "x"
+
+
+def _derive_row_fields_from_columns(columns: list[dict[str, Any]]) -> list[str]:
+    fields: list[str] = []
+    for col in sorted(columns, key=lambda item: int(item.get("index") or 0)):
+        role = str(col.get("role") or "").strip().lower()
+        if role == "date":
+            fields.append("date_mmdd")
+        elif role == "daypart":
+            fields.append("daypart")
+        elif role == "menu_name":
+            fields.append("menu")
+        elif role == "note":
+            fields.append("remarks")
+        elif role == "quantity":
+            diet = _normalize_field_diet_token(col.get("diet_type"))
+            area = _normalize_field_area_token(col.get("area_id"))
+            fields.append(f"qty.{diet}_{area}")
+    return fields
+
+
+def _harmonize_main_ocr_row_fields(template: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(template, dict):
+        return template
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return template
+    normalized_columns = [col for col in columns if isinstance(col, dict)]
+    if not normalized_columns:
+        return template
+    derived_fields = _derive_row_fields_from_columns(normalized_columns)
+    if not derived_fields:
+        return template
+    existing_fields = template.get("main_ocr_row_fields")
+    existing = (
+        [str(item).strip() for item in existing_fields if str(item).strip()]
+        if isinstance(existing_fields, list)
+        else []
+    )
+    if existing == derived_fields:
+        return template
+    normalized = deepcopy(template)
+    normalized["main_ocr_row_fields"] = derived_fields
+    return normalized
+
+
+def _normalize_order_form_patterns(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    patterns: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pattern_id = str(item.get("pattern_id") or "").strip()
+        if not pattern_id or pattern_id in seen:
+            continue
+        seen.add(pattern_id)
+        normalized = dict(item)
+        normalized["pattern_id"] = pattern_id
+        patterns.append(normalized)
+    return patterns
+
+
+def get_order_form_patterns() -> list[dict[str, Any]]:
+    master = load_facility_master()
+    patterns = _normalize_order_form_patterns(master.get("order_form_patterns"))
+    if patterns:
+        return patterns
+    return [dict(item) for item in _DEFAULT_ORDER_FORM_PATTERNS]
+
+
+def get_order_form_pattern(pattern_id: str | None) -> Optional[dict[str, Any]]:
+    if not pattern_id:
+        return None
+    target = pattern_id.strip()
+    if not target:
+        return None
+    for pattern in get_order_form_patterns():
+        if str(pattern.get("pattern_id") or "").strip() == target:
+            return dict(pattern)
+    return None
 
 
 def _normalize_facility_text(value: str) -> str:
@@ -348,14 +653,37 @@ def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
 
     fax_template_override = facility.get("fax_template_override")
     fax_template = None
+    registry = load_fax_template_registry()
+    template_ids = _normalize_fax_template_ids(facility.get("fax_template_ids"))
     template_id = facility.get("fax_template_id")
+    if isinstance(template_id, str):
+        template_id = template_id.strip() or None
+    if not template_id:
+        template_id = _default_fax_template_id_for_facility(facility_id, registry)
+    if template_id and template_id not in template_ids:
+        template_ids.insert(0, template_id)
+    if not template_id and template_ids:
+        template_id = template_ids[0]
     if template_id:
-        registry = load_fax_template_registry()
         fax_template = registry.get(template_id)
     if not fax_template:
         fax_template = facility.get("fax_template")
     fax_template = _merge_template(master.get("fax_template_base"), fax_template)
     fax_template = _merge_template(fax_template, fax_template_override)
+    fax_template = _normalize_fax_template_for_area_mismatch(
+        template=fax_template,
+        facility=facility,
+    )
+    fax_template = _harmonize_main_ocr_row_fields(fax_template)
+    explicit_row_fields = (
+        [str(item).strip() for item in fax_template_override.get("main_ocr_row_fields") if str(item).strip()]
+        if isinstance(fax_template_override, dict)
+        and isinstance(fax_template_override.get("main_ocr_row_fields"), list)
+        else []
+    )
+    if explicit_row_fields:
+        fax_template = deepcopy(fax_template)
+        fax_template["main_ocr_row_fields"] = explicit_row_fields
     facility_prompt = (
         facility.get("main_ocr_facility_prompt")
         or facility.get("ocr_prompt")
@@ -364,6 +692,29 @@ def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
     if isinstance(facility_prompt, str) and facility_prompt.strip():
         fax_template = deepcopy(fax_template)
         fax_template["main_ocr_facility_prompt"] = facility_prompt.strip()
+    for key in (
+        "main_ocr_provider",
+        "openai_ocr_enabled",
+        "openai_ocr_model",
+        "openai_ocr_prompt",
+        "openai_ocr_max_tokens",
+        "openai_ocr_timeout_seconds",
+        "openai_ocr_retry_on_truncation",
+        "openai_ocr_retry_max_tokens",
+        "openai_ocr_fallback_provider",
+        "gemini_ocr_enabled",
+        "gemini_ocr_model",
+        "gemini_ocr_prompt",
+        "gemini_ocr_max_tokens",
+        "gemini_ocr_timeout_seconds",
+        "gemini_ocr_retry_on_truncation",
+        "gemini_ocr_retry_max_tokens",
+        "gemini_ocr_fallback_provider",
+        "large_cell_mode",
+    ):
+        if key in facility:
+            fax_template = deepcopy(fax_template)
+            fax_template[key] = facility.get(key)
     packaging_policy_override = facility.get("packaging_policy_override")
     packaging_policy = facility.get("packaging_policy") or _merge_template(
         master.get("packaging_policy_base"),
@@ -374,9 +725,24 @@ def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
         master.get("label_profile_base"),
         label_profile_override,
     )
+    bag_types = facility.get("bag_types") or master.get("bag_types") or []
+    bagging_exceptions = facility.get("bagging_exceptions") or []
 
     merged = {**facility}
+    if template_id:
+        merged["fax_template_id"] = template_id
+    if template_ids:
+        merged["fax_template_ids"] = template_ids
     merged["fax_template"] = fax_template
     merged["packaging_policy"] = packaging_policy
     merged["label_profile"] = label_profile
+    merged["bag_types"] = bag_types
+    merged["bagging_exceptions"] = bagging_exceptions
+    pattern_id = merged.get("order_form_pattern_id")
+    if isinstance(pattern_id, str) and pattern_id.strip():
+        resolved_pattern_id = pattern_id.strip()
+        merged["order_form_pattern_id"] = resolved_pattern_id
+        pattern = get_order_form_pattern(resolved_pattern_id)
+        if pattern:
+            merged["order_form_pattern"] = pattern
     return merged

@@ -426,6 +426,83 @@ def apply_ocr_markdown(order_id: str, body: dict):
     return order
 
 
+@router.post("/{order_id}/ocr-sheet-save", dependencies=[Depends(require_role("operator"))])
+def save_ocr_sheet(order_id: str, body: dict):
+    header = body.get("header") if isinstance(body, dict) else None
+    rows = body.get("rows") if isinstance(body, dict) else None
+    fields = body.get("fields") if isinstance(body, dict) else None
+    row_ids = body.get("row_ids") if isinstance(body, dict) else None
+    ui_mode = body.get("ui_mode") if isinstance(body, dict) else None
+    has_rows = isinstance(rows, list) and len(rows) > 0
+    if not has_rows:
+        raise HTTPException(status_code=400, detail="rows is required")
+    data, error = order_service.save_ocr_sheet_exact(
+        order_id,
+        header=header,
+        rows=rows,
+        fields=fields,
+        row_ids=row_ids,
+        ui_mode=ui_mode if isinstance(ui_mode, str) else None,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error == "rows_empty":
+        raise HTTPException(status_code=400, detail="rows_empty")
+    if error:
+        raise HTTPException(status_code=500, detail="ocr sheet save failed")
+    return data
+
+
+@router.post("/{order_id}/ocr-review", dependencies=[Depends(require_role("operator"))])
+def review_ocr_sheet(order_id: str, body: dict | None = None):
+    ocr_prompt = None
+    ocr_provider = None
+    pdf_variant = None
+    if isinstance(body, dict):
+        raw_prompt = body.get("ocr_prompt")
+        if not isinstance(raw_prompt, str):
+            raw_prompt = body.get("prompt")
+        if isinstance(raw_prompt, str) and raw_prompt.strip():
+            ocr_prompt = raw_prompt.strip()
+        raw_provider = body.get("ocr_provider")
+        if not isinstance(raw_provider, str):
+            raw_provider = body.get("provider")
+        if isinstance(raw_provider, str) and raw_provider.strip():
+            normalized_provider = raw_provider.strip().lower()
+            if normalized_provider not in {"openai", "gemini"}:
+                raise HTTPException(status_code=400, detail="ocr_provider must be one of openai|gemini")
+            ocr_provider = normalized_provider
+        raw_pdf_variant = body.get("pdf_variant")
+        if not isinstance(raw_pdf_variant, str):
+            raw_pdf_variant = body.get("pdfVariant")
+        if isinstance(raw_pdf_variant, str) and raw_pdf_variant.strip():
+            normalized_pdf_variant = raw_pdf_variant.strip().lower()
+            if normalized_pdf_variant not in {"raw", "corrected"}:
+                raise HTTPException(status_code=400, detail="pdf_variant must be one of raw|corrected")
+            pdf_variant = normalized_pdf_variant
+    order, error = order_service.review_ocr_table_with_llm(
+        order_id,
+        provider=ocr_provider,
+        prompt=ocr_prompt,
+        pdf_variant=pdf_variant,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error in {
+        "facility_missing",
+        "document_missing",
+        "ocr_payload_missing",
+        "rows_empty",
+        "fields_empty",
+    }:
+        raise HTTPException(status_code=400, detail=error)
+    if error:
+        raise HTTPException(status_code=500, detail="ocr review failed")
+    return order
+
+
 @router.delete(
     "/by-message-prefix/{prefix}",
     dependencies=[Depends(require_role("admin"))],
@@ -444,6 +521,50 @@ def set_facility(order_id: str, body: dict):
     if not updated:
         raise HTTPException(status_code=404, detail="order not found")
     return {"updated": True}
+
+
+@router.get("/{order_id}/week-options", dependencies=[Depends(require_role("operator"))])
+def get_week_options(order_id: str):
+    options, error = order_service.get_order_week_options(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    return {"options": options or []}
+
+
+@router.post("/{order_id}/week", status_code=status.HTTP_200_OK, dependencies=[Depends(require_role("operator"))])
+def set_week(order_id: str, body: dict):
+    week = body.get("week")
+    if not week:
+        raise HTTPException(status_code=400, detail="week missing")
+    try:
+        updated = order_service.set_week(order_id, str(week))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="week invalid") from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="order not found")
+    return {"updated": True}
+
+
+@router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("operator"))])
+def save_facility_template_columns(order_id: str, body: dict):
+    columns = body.get("columns") if isinstance(body, dict) else None
+    result, error = order_service.save_order_facility_template_columns(order_id, columns)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error == "facility_missing":
+        raise HTTPException(status_code=400, detail="facility missing")
+    if error == "columns_invalid":
+        raise HTTPException(status_code=400, detail="columns invalid")
+    if error == "validation_error":
+        raise HTTPException(
+            status_code=400,
+            detail=(result or {}).get("validation", {}).get("errors") or ["facility template invalid"],
+        )
+    if error:
+        raise HTTPException(status_code=500, detail="facility template update failed")
+    return result
 
 
 @router.put("/{order_id}/lines", dependencies=[Depends(require_role("operator"))])

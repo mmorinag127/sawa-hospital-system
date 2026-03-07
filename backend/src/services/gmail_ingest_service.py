@@ -1,9 +1,10 @@
 import base64
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
@@ -84,6 +85,24 @@ def _gmail_user() -> str:
     return os.getenv("GMAIL_WATCH_USER", "me")
 
 
+def get_gmail_profile_email() -> str | None:
+    try:
+        session = _gmail_session()
+    except Exception:
+        return None
+    user_id = _gmail_user()
+    url = f"https://gmail.googleapis.com/gmail/v1/users/{user_id}/profile"
+    try:
+        response = session.get(url, timeout=20)
+        if response.status_code >= 300:
+            return None
+        data = response.json()
+        email = data.get("emailAddress")
+        return str(email) if email else None
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class GmailAttachment:
     message_id: str
@@ -134,18 +153,33 @@ def _get_message_received_at(message: dict) -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _list_messages(session: AuthorizedSession, user_id: str, query: str, label_ids: list[str], max_results: int) -> list[str]:
+def _list_messages(
+    session: AuthorizedSession,
+    user_id: str,
+    query: str,
+    label_ids: list[str],
+    max_results: int,
+) -> list[str]:
     url = f"https://gmail.googleapis.com/gmail/v1/users/{user_id}/messages"
     params: dict[str, Any] = {"maxResults": max_results}
     if query:
         params["q"] = query
     if label_ids:
         params["labelIds"] = label_ids
-    response = session.get(url, params=params, timeout=30)
-    if response.status_code >= 300:
-        raise RuntimeError(f"gmail list failed: {response.status_code} {response.text}")
-    data = response.json()
-    return [m["id"] for m in data.get("messages", []) if isinstance(m, dict) and m.get("id")]
+    for attempt in range(1, 4):
+        response = session.get(url, params=params, timeout=30)
+        if response.status_code == 429:
+            time.sleep(1.5 * attempt)
+            continue
+        if response.status_code >= 300:
+            raise RuntimeError(f"gmail list failed: {response.status_code} {response.text}")
+        data = response.json()
+        return [
+            m["id"]
+            for m in data.get("messages", [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+    raise RuntimeError("gmail list failed: 429 rate limit")
 
 
 def _list_history_message_ids(
@@ -225,13 +259,64 @@ def mark_message_read(message_id: str) -> None:
     _mark_message_read(session, user_id, message_id)
 
 
+def _parse_override_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _parse_bool(value)
+    return None
+
+
+def _parse_override_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _parse_override_list(value: Any) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return _parse_csv(value)
+    return None
+
+
 def ingest_from_notification(notification: dict) -> list[dict[str, str]]:
     raw_bucket = _get_env("RAW_BUCKET")
+    override_query = notification.get("query") if isinstance(notification, dict) else None
+    override_label_ids = notification.get("label_ids") if isinstance(notification, dict) else None
+    override_max_results = notification.get("max_results") if isinstance(notification, dict) else None
+    override_mark_read = notification.get("mark_read") if isinstance(notification, dict) else None
+    override_prefix = notification.get("prefix") if isinstance(notification, dict) else None
+    force_full_scan = _parse_override_bool(
+        notification.get("force_full_scan") if isinstance(notification, dict) else None
+    )
+
     query = os.getenv("GMAIL_INGEST_QUERY", "is:unread has:attachment")
+    if isinstance(override_query, str) and override_query.strip():
+        query = override_query.strip()
     label_ids = _parse_csv(os.getenv("GMAIL_INGEST_LABEL_IDS"))
+    override_labels = _parse_override_list(override_label_ids)
+    if override_labels is not None:
+        label_ids = override_labels
     max_results = int(os.getenv("GMAIL_INGEST_MAX_RESULTS", "10"))
+    override_max = _parse_override_int(override_max_results)
+    if override_max is not None:
+        max_results = override_max
     mark_read = _parse_bool(os.getenv("GMAIL_INGEST_MARK_READ"), default=True)
+    override_mark = _parse_override_bool(override_mark_read)
+    if override_mark is not None:
+        mark_read = override_mark
     prefix = _sanitize_segment(os.getenv("GMAIL_INGEST_PREFIX", "gmail"), "gmail")
+    if isinstance(override_prefix, str) and override_prefix.strip():
+        prefix = _sanitize_segment(override_prefix.strip(), "gmail")
 
     session = _gmail_session()
     user_id = _gmail_user()
@@ -246,7 +331,9 @@ def ingest_from_notification(notification: dict) -> list[dict[str, str]]:
 
     message_ids: list[str]
     latest_history_id: str | None = None
-    if notification_history_id and stored_history_id:
+    if force_full_scan:
+        message_ids = _list_messages(session, user_id, query, label_ids, max_results)
+    elif notification_history_id and stored_history_id:
         try:
             message_ids, latest_history_id = _list_history_message_ids(
                 session,
@@ -263,11 +350,14 @@ def ingest_from_notification(notification: dict) -> list[dict[str, str]]:
     else:
         message_ids = _list_messages(session, user_id, query, label_ids, max_results)
 
+    if notification_history_id and stored_history_id and not message_ids:
+        logger.warning("History scan empty; falling back to query scan")
+        message_ids = _list_messages(session, user_id, query, label_ids, max_results)
+
     logger.info(
-        "Gmail ingest scan",
+        f"Gmail ingest scan: messages={len(message_ids)} query={query!r} labels={label_ids}",
         notification_email=notification.get("emailAddress"),
         notification_history_id=notification_history_id,
-        messages=len(message_ids),
     )
 
     ingests: list[dict[str, str | bool]] = []
@@ -277,14 +367,21 @@ def ingest_from_notification(notification: dict) -> list[dict[str, str]]:
         attachments = _extract_pdf_attachments(message)
         if not attachments:
             continue
+        seen_filenames: dict[str, int] = {}
         for idx, attachment in enumerate(attachments, start=1):
             blob_bytes = _get_attachment_bytes(session, user_id, message_id, attachment)
             name_hint = attachment.filename or attachment.attachment_id or f"attachment-{idx}"
             safe_filename = _sanitize_filename(name_hint, f"attachment-{idx}")
+            count = seen_filenames.get(safe_filename, 0) + 1
+            seen_filenames[safe_filename] = count
+            if count > 1:
+                stem, dot, suffix = safe_filename.rpartition(".")
+                stem = stem or safe_filename
+                safe_filename = f"{stem}-{count}{dot}{suffix}" if dot else f"{stem}-{count}"
             safe_message = _sanitize_segment(message_id, "message")
             object_path = f"{prefix}/{safe_message}/{safe_filename}"
             pdf_uri = save_bytes_to_gcs(raw_bucket, object_path, blob_bytes, attachment.mime_type)
-            ingest_message_id = f"{message_id}:{_sanitize_segment(name_hint, str(idx))}"
+            ingest_message_id = f"{message_id}:{_sanitize_segment(safe_filename, str(idx))}"
             ingests.append(
                 {
                     "message_id": ingest_message_id,
@@ -294,7 +391,7 @@ def ingest_from_notification(notification: dict) -> list[dict[str, str]]:
                     "received_at": received_at,
                 }
             )
-    logger.info("Gmail ingest prepared", enqueued=len(ingests))
+    logger.info(f"Gmail ingest prepared: enqueued={len(ingests)}")
     if notification_history_id:
         try:
             save_watch_state(

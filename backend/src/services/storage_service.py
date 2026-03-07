@@ -57,7 +57,7 @@ def save_bytes_to_gcs(bucket: str, object_path: str, data: bytes, content_type: 
     return f"gs://{bucket}/{object_path}"
 
 
-def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 900) -> str:
+def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 3600) -> str:
     try:
         from google.cloud import storage  # type: ignore
         import google.auth

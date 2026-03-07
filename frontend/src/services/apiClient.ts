@@ -46,11 +46,26 @@ export const clearAuth = () => {
   setStoredAuthHeader("");
 };
 
-const fallbackBaseUrl =
-  typeof window === "undefined" ? "http://localhost:8000" : "/api";
+const inferBaseUrl = () => {
+  if (typeof window === "undefined") {
+    return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+  }
+  const envBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (envBase && envBase !== "/api") {
+    return envBase;
+  }
+  const origin = window.location.origin;
+  if (origin.includes("web-prod")) {
+    return "/api";
+  }
+  if (origin.includes("web-dev")) {
+    return origin.replace("web-dev", "worker-dev");
+  }
+  return "/api";
+};
 
 export const apiClient = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_BASE_URL || fallbackBaseUrl,
+  baseURL: inferBaseUrl(),
   timeout: 30000,
 });
 

@@ -17,6 +17,7 @@ class Order(Base):
     document_uri = Column(String, nullable=False)
     message_id = Column(String, nullable=False)
     received_at = Column(DateTime, default=datetime.utcnow)
+    lines_updated_at = Column(DateTime, nullable=True)
 
     lines = relationship("OrderLine", back_populates="order", cascade="all, delete-orphan")
 

@@ -14,6 +14,7 @@ class IngestEmailPayload:
     date_hints: Optional[Iterable[str]] = None
     gmail_message_id: Optional[str] = None
     gmail_mark_read: Optional[bool] = None
+    skip_ocr: Optional[bool] = None
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -31,6 +32,7 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         date_hints=data.get("date_hints"),
         gmail_message_id=data.get("gmail_message_id"),
         gmail_mark_read=data.get("gmail_mark_read"),
+        skip_ocr=data.get("skip_ocr"),
     )
 
 
@@ -46,4 +48,5 @@ def to_job_kwargs(payload: IngestEmailPayload) -> dict:
         "date_hints": payload.date_hints,
         "gmail_message_id": payload.gmail_message_id,
         "gmail_mark_read": payload.gmail_mark_read,
+        "skip_ocr": payload.skip_ocr,
     }

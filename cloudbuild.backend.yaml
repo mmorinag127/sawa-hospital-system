@@ -1,0 +1,9 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:prod-backend-20260207-115342'
+      - '.'
+images:
+  - 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:prod-backend-20260207-115342'

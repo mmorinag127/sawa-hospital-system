@@ -33,7 +33,29 @@ async def upload_menu(month_id: str, file: UploadFile = File(...), sheet_name: s
 
 @router.put("/{month_id}/items/{item_id}", dependencies=[Depends(require_role("admin"))])
 def update_menu_item(month_id: str, item_id: str, body: dict):
-    updated = menu_service.update_item(month_id, item_id, body)
-    if not updated:
+    result = menu_service.update_item_status(month_id, item_id, body)
+    if result == "updated":
+        return {"updated": True}
+    if result in {"not_found", "month_mismatch"}:
         raise HTTPException(status_code=404, detail="not found")
+    if result == "conflict":
+        raise HTTPException(status_code=409, detail="duplicate monthly menu item")
+    if result == "invalid_name":
+        raise HTTPException(status_code=400, detail="name is required")
     return {"updated": True}
+
+
+@router.post("/condiments", dependencies=[Depends(require_role("admin"))])
+async def upload_condiments(file: UploadFile = File(...), sheet_name: str | None = None):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        result = menu_service.import_condiments(
+            file_bytes=content,
+            filename=file.filename,
+            sheet_name=sheet_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result

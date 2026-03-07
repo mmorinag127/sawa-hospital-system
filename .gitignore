@@ -1,5 +1,6 @@
 # OS
 .DS_Store
+.vscode/
 
 # Node.js
 **/node_modules/
@@ -14,7 +15,10 @@
 **/__pycache__/
 **/*.py[cod]
 **/.venv/
+**/.venv*/
 **/venv/
+**/*.egg-info/
+**/.pytest_cache/
 
 # Local env files
 .env
@@ -24,6 +28,7 @@
 
 # Local databases
 *.db
+*.db-journal
 *.sqlite
 *.sqlite3
 
@@ -53,3 +58,5 @@ cloud-sql-proxy
 logs/
 tmp/
 secrets/
+**/*.tsbuildinfo
+last_*.txt

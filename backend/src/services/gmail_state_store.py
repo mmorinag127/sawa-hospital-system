@@ -71,6 +71,9 @@ def save_watch_state(history_id: str | None, expiration: str | None = None) -> N
         "historyId": history_id,
         "expiration": expiration,
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "status": "ok",
+        "error_code": None,
+        "error_message": None,
     }
     uri = _state_uri()
     parsed = urlparse(uri)
@@ -86,5 +89,32 @@ def save_watch_state(history_id: str | None, expiration: str | None = None) -> N
             raise GmailStateConfigError(f"invalid watch state uri: {uri}")
         _save_gs(bucket, object_name, payload)
         logger.info("Gmail watch state saved", uri=uri)
+        return
+    raise GmailStateConfigError(f"unsupported watch state uri: {uri}")
+
+
+def save_watch_error(error_code: str, error_message: str | None = None) -> None:
+    payload = {
+        "historyId": None,
+        "expiration": None,
+        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "status": "error",
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+    uri = _state_uri()
+    parsed = urlparse(uri)
+    if parsed.scheme in ("", "file"):
+        path = parsed.path if parsed.scheme else uri
+        _save_file(path, payload)
+        logger.info("Gmail watch error state saved", uri=uri, error_code=error_code)
+        return
+    if parsed.scheme == "gs":
+        bucket = parsed.netloc
+        object_name = parsed.path.lstrip("/")
+        if not bucket or not object_name:
+            raise GmailStateConfigError(f"invalid watch state uri: {uri}")
+        _save_gs(bucket, object_name, payload)
+        logger.info("Gmail watch error state saved", uri=uri, error_code=error_code)
         return
     raise GmailStateConfigError(f"unsupported watch state uri: {uri}")

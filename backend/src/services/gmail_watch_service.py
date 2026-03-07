@@ -2,10 +2,15 @@ import os
 from typing import Any
 
 from google.auth.transport.requests import AuthorizedSession
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from loguru import logger
 
-from src.services.gmail_state_store import GmailStateConfigError, save_watch_state
+from src.services.gmail_state_store import (
+    GmailStateConfigError,
+    save_watch_state,
+    save_watch_error,
+)
 
 
 class GmailWatchConfigError(RuntimeError):
@@ -61,8 +66,26 @@ def refresh_gmail_watch() -> dict[str, Any]:
         payload["includeSpamTrash"] = True
 
     url = f"https://gmail.googleapis.com/gmail/v1/users/{user_id}/watch"
-    response = session.post(url, json=payload, timeout=30)
+    try:
+        response = session.post(url, json=payload, timeout=30)
+    except RefreshError as exc:
+        logger.error("Gmail watch refresh failed", error="invalid_grant", detail=str(exc))
+        try:
+            save_watch_error("invalid_grant", str(exc))
+        except GmailStateConfigError as state_exc:
+            logger.warning("Watch error save skipped", error=str(state_exc))
+        raise
     if response.status_code >= 300:
+        logger.error(
+            "Gmail watch refresh failed",
+            error="http_error",
+            status=response.status_code,
+            detail=response.text,
+        )
+        try:
+            save_watch_error("http_error", response.text)
+        except GmailStateConfigError as state_exc:
+            logger.warning("Watch error save skipped", error=str(state_exc))
         raise RuntimeError(f"watch refresh failed: {response.status_code} {response.text}")
     data = response.json()
     try:

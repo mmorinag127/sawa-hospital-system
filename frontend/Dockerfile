@@ -6,8 +6,9 @@ RUN npm install
 FROM node:20-slim AS builder
 WORKDIR /app
 ARG NEXT_PUBLIC_API_BASE_URL=/api
-ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID=161384524548-q3e2vo8ioftajv79dg8j5g4ch73oaltg.apps.googleusercontent.com
-ENV API_PROXY_TARGET=https://worker-dev-m3j47i2tgq-an.a.run.app
+ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com
+ARG API_PROXY_TARGET=https://worker-dev-m3j47i2tgq-an.a.run.app
+ENV API_PROXY_TARGET=${API_PROXY_TARGET}
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 ENV NEXT_PUBLIC_GOOGLE_CLIENT_ID=${NEXT_PUBLIC_GOOGLE_CLIENT_ID}
 COPY --from=deps /app/node_modules ./node_modules

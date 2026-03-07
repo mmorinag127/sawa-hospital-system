@@ -2,6 +2,7 @@ import base64
 import json
 
 from fastapi import APIRouter, HTTPException, Request, status
+from google.auth.exceptions import RefreshError
 from loguru import logger
 
 from src.workers.ingest_worker import enqueue_ingest_async
@@ -47,7 +48,7 @@ async def pubsub_push(request: Request):
             return {"ok": True}
         for payload in ingests:
             enqueue_ingest_async(payload)
-        logger.info("Gmail ingest enqueued", items=len(ingests))
+        logger.info(f"Gmail ingest enqueued: items={len(ingests)}")
     else:
         logger.info(
             "Pub/Sub message received",
@@ -64,6 +65,9 @@ async def watch_refresh():
     except GmailWatchConfigError as exc:
         logger.warning("Watch refresh skipped", error=str(exc))
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except RefreshError as exc:
+        logger.warning("Watch refresh invalid_grant", error=str(exc))
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="invalid_grant")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Watch refresh failed")
         raise HTTPException(status_code=500, detail="watch refresh failed") from exc

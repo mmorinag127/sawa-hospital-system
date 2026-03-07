@@ -20,6 +20,12 @@ variable "push_sa_email" {
   description = "Service account email for push authentication"
 }
 
+variable "topic_publisher_members" {
+  type        = list(string)
+  description = "IAM members granted Pub/Sub publisher on the topic."
+  default     = []
+}
+
 resource "google_pubsub_topic" "topic" {
   name    = var.topic_name
   project = var.project_id
@@ -36,6 +42,13 @@ resource "google_pubsub_subscription" "subscription" {
       service_account_email = var.push_sa_email
     }
   }
+}
+
+resource "google_pubsub_topic_iam_member" "publisher" {
+  for_each = toset(var.topic_publisher_members)
+  topic    = google_pubsub_topic.topic.name
+  role     = "roles/pubsub.publisher"
+  member   = each.value
 }
 
 output "topic" {
