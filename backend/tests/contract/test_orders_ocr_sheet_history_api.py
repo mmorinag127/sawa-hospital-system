@@ -308,6 +308,80 @@ def test_orders_facility_template_columns_save_api_flow():
         assert facility_service.update_config(order["facility"], previous_config)
 
 
+def test_orders_facility_template_columns_save_updates_ocr_sheet_header():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-sheet-001")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        resolved_columns = (
+            (((previous_config.get("fax_template") or {}).get("columns")) or [])
+        )
+        columns = []
+        for item in resolved_columns:
+            if not isinstance(item, dict):
+                continue
+            column = dict(item)
+            if (
+                str(column.get("role") or "").strip().lower() == "quantity"
+                and str(column.get("diet_type") or "").strip().lower() == "regular"
+                and str(column.get("area_id") or "").strip().lower() == "2f"
+            ):
+                column["header"] = "新常食2F"
+            columns.append(column)
+
+        save_res = client.put(f"/orders/{order['id']}/facility-template-columns", json={"columns": columns})
+        assert save_res.status_code == 200
+
+        sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
+        assert sheet_res.status_code == 200
+        sheet = sheet_res.json()
+        field_idx = sheet["fields"].index("qty.regular_2f")
+        assert sheet["header"][field_idx] == "新常食2F"
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
+
+
+def test_orders_facility_template_columns_save_canonicalizes_invalid_quantity_tokens():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-canonical-001")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        columns = [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "regular"},
+            {"index": 4, "role": "quantity", "header": "None", "diet_type": "regular", "area_id": "none"},
+            {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "reglur", "area_id": "niku-kin"},
+            {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "reglur", "area_id": "sakana-kin"},
+            {"index": 7, "role": "quantity", "header": "変更1", "diet_type": "regular", "area_id": "henkou1"},
+            {"index": 8, "role": "quantity", "header": "変更2", "diet_type": "regular", "area_id": "henkou2"},
+            {"index": 9, "role": "note", "header": "備考"},
+        ]
+
+        save_res = client.put(f"/orders/{order['id']}/facility-template-columns", json={"columns": columns})
+        assert save_res.status_code == 200
+
+        sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
+        assert sheet_res.status_code == 200
+        sheet = sheet_res.json()
+        assert sheet["header"][3:9] == ["常食", "None", "肉禁", "魚禁", "変更1", "変更2"]
+        assert sheet["fields"][3:9] == [
+            "qty.regular_x",
+            "qty.unknown_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+        ]
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
+
+
 def test_orders_activity_history_api_flow():
     order_service.clear_all()
     client = TestClient(app)

@@ -240,20 +240,37 @@ const normalizeDietTypeToken = (value?: string | null) => {
     .replace(/[／/・+＋-]/g, "")
     .replace(/[()（）\[\]【】]/g, "");
   if (!compact) return "";
-  if (compact === "regular" || compact === "常食") return "regular";
-  if (compact === "daycare" || compact === "通所") return "daycare";
-  if (compact === "staff" || compact === "職員") return "staff";
-  if (compact === "nomeat" || compact === "nobeef" || compact === "禁食肉禁" || compact === "肉禁") return "no_meat";
-  if (compact === "nofish" || compact === "禁食魚禁" || compact === "魚禁") return "no_fish";
-  if (compact === "unknown" || compact === "不明") return "unknown";
-  if (compact === "change1" || compact === "変更1") return "change_1";
-  if (compact === "change2" || compact === "変更2") return "change_2";
+  if (compact.includes("regular") || compact.includes("常食") || compact.includes("通常")) return "regular";
+  if (compact.includes("daycare") || compact.includes("通所")) return "daycare";
+  if (compact.includes("staff") || compact.includes("職員")) return "staff";
+  if (compact.includes("nomeat") || compact.includes("nobeef") || compact.includes("禁食肉禁") || compact.includes("肉禁")) return "no_meat";
+  if (compact.includes("nofish") || compact.includes("禁食魚禁") || compact.includes("魚禁")) return "no_fish";
+  if (compact === "unknown" || compact === "不明" || compact === "none") return "unknown";
+  if (compact.includes("change1") || compact.includes("変更1")) return "change_1";
+  if (compact.includes("change2") || compact.includes("変更2")) return "change_2";
   const hasSoft = compact.includes("soft") || compact.includes("軟");
   const hasMixer = compact.includes("mixer") || compact.includes("mix") || compact.includes("ミキサ");
   if (hasSoft && hasMixer) return "soft_mixer";
   if (hasSoft) return "soft";
   if (hasMixer) return "mixer";
   return compact;
+};
+
+const normalizeFacilityAreaToken = (value?: string | null) => {
+  const raw = (value || "").trim();
+  if (!raw) return "X";
+  const compact = raw
+    .toLowerCase()
+    .replace(/[\s　]+/g, "")
+    .replace(/[()（）\[\]【】]/g, "");
+  if (!compact) return "X";
+  if (/^\d+$/.test(compact)) return `${compact}F`;
+  const floorMatch = compact.match(/(\d)(?:f|階)/);
+  if (floorMatch) return `${floorMatch[1]}F`;
+  if (["x", "all", "common", "共通", "none", "null", "na", "n/a", "なし"].includes(compact)) {
+    return "X";
+  }
+  return "X";
 };
 
 const formatDietType = (value?: string | null) => {
@@ -273,6 +290,29 @@ const formatDietType = (value?: string | null) => {
   return value;
 };
 
+const defaultHeaderForFacilityTemplateColumn = (column: {
+  role?: string;
+  header?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+}) => {
+  const role = String(column.role || "").trim().toLowerCase();
+  const header = String(column.header || "").trim();
+  if (header) return header;
+  if (role === "date") return "日付";
+  if (role === "daypart") return "区分";
+  if (role === "menu_name") return "メニュー";
+  if (role === "note") return "備考";
+  if (role === "quantity") {
+    const diet = normalizeDietTypeToken(column.header || column.name || column.diet_type || "") || "unknown";
+    const area = normalizeFacilityAreaToken(column.area_id || column.header || column.name || "");
+    const base = formatDietType(diet);
+    return area === "X" ? base : `${base}${area}`;
+  }
+  return "";
+};
+
 const normalizeWeekId = (value?: string | null) => {
   const text = String(value || "").trim();
   const match = text.match(/^(\d{4})-(\d{2})$/);
@@ -288,17 +328,30 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
   if (!Array.isArray(columns)) return [];
   return columns
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
-    .map((item, idx) => ({
-      index:
-        typeof item.index === "number" && Number.isFinite(item.index)
-          ? Number(item.index)
-          : idx,
-      role: String(item.role || "").trim().toLowerCase() || "quantity",
-      header: String(item.header || ""),
-      name: String(item.name || ""),
-      diet_type: String(item.diet_type || ""),
-      area_id: String(item.area_id || ""),
-    }))
+    .map((item, idx) => {
+      const role = String(item.role || "").trim().toLowerCase() || "quantity";
+      const header = String(item.header || "").trim();
+      const name = String(item.name || "").trim();
+      const dietType =
+        role === "quantity"
+          ? normalizeDietTypeToken(header || name || String(item.diet_type || "")) || "unknown"
+          : String(item.diet_type || "");
+      const areaId =
+        role === "quantity"
+          ? normalizeFacilityAreaToken(String(item.area_id || "") || header || name)
+          : String(item.area_id || "");
+      return {
+        index:
+          typeof item.index === "number" && Number.isFinite(item.index)
+            ? Number(item.index)
+            : idx,
+        role,
+        header: header || defaultHeaderForFacilityTemplateColumn({ role, header, name, diet_type: dietType, area_id: areaId }),
+        name,
+        diet_type: dietType,
+        area_id: areaId,
+      };
+    })
     .sort((left, right) => left.index - right.index);
 };
 
@@ -314,10 +367,10 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
     if (header) payload.header = header;
     if (name) payload.name = name;
     if (role === "quantity") {
-      const dietType = String(column.diet_type || "").trim();
-      const areaId = String(column.area_id || "").trim();
-      if (dietType) payload.diet_type = dietType;
-      if (areaId) payload.area_id = areaId;
+      const dietType = normalizeDietTypeToken(header || name || String(column.diet_type || "").trim()) || "unknown";
+      const areaId = normalizeFacilityAreaToken(String(column.area_id || "").trim() || header || name);
+      payload.diet_type = dietType;
+      payload.area_id = areaId;
     }
     return payload;
   });
@@ -1466,7 +1519,47 @@ export default function OrderDetailPage() {
         revision.sheet_save_only || revision.sheet_save_mode === "exact"
           ? "edited_sheet_exact"
           : "edited_sheet",
+      });
+  };
+
+  const rebaseSavedSheetRevisionOntoPayload = (
+    basePayload: NormalizedEditorSheetPayload,
+    revision: OcrEditRevision | null,
+  ): NormalizedEditorSheetPayload | null => {
+    const revisionPayload = getSheetEditorPayloadFromRevision(revision);
+    if (!revisionPayload || !basePayload.rows.length) {
+      return revisionPayload;
+    }
+    const revisionRowById = new Map<string, string[]>();
+    revisionPayload.rowIds.forEach((rowId, idx) => {
+      if (!rowId || idx >= revisionPayload.rows.length) return;
+      revisionRowById.set(rowId, revisionPayload.rows[idx]);
     });
+    const rebasedRows = basePayload.rows.map((baseRow, rowIdx) => {
+      const baseRowId = basePayload.rowIds[rowIdx] || "";
+      const revisionRow =
+        revisionRowById.get(baseRowId) ||
+        (rowIdx < revisionPayload.rows.length ? revisionPayload.rows[rowIdx] : null);
+      if (!revisionRow) {
+        return [...baseRow];
+      }
+      const mergedRow = [...baseRow];
+      const limit = Math.min(mergedRow.length, revisionRow.length);
+      for (let colIdx = 0; colIdx < limit; colIdx += 1) {
+        mergedRow[colIdx] = revisionRow[colIdx] ?? "";
+      }
+      return mergedRow;
+    });
+    return {
+      fields: [...basePayload.fields],
+      header: [...basePayload.header],
+      rows: rebasedRows,
+      rowIds: [...basePayload.rowIds],
+      source:
+        revision?.sheet_save_only || revision?.sheet_save_mode === "exact"
+          ? "edited_sheet_exact"
+          : "edited_sheet",
+    };
   };
 
   const refreshOcrOutput = async (orderId: string) => {
@@ -1548,14 +1641,6 @@ export default function OrderDetailPage() {
     setOcrSheetAutoRetryBlocked(false);
     setOcrSheetLoading(true);
     try {
-      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
-      if (savedRevisionPayload) {
-        applyNormalizedSheetEditorPayload(savedRevisionPayload);
-        if (!silent) {
-          setOcrSheetMessage("保存済みシートを読み込みました。");
-        }
-        return savedRevisionPayload;
-      }
       const res = await apiClient.get(`/orders/${order.id}/ocr-sheet`);
       const payload = (res.data || {}) as OcrSheetPayload;
       const normalizedPayload = normalizeSheetEditorPayload({
@@ -1565,8 +1650,9 @@ export default function OrderDetailPage() {
         rowIds: payload.row_ids,
         source: typeof payload.source === "string" ? payload.source : "",
       });
-      const latestRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
-      const effectivePayload = latestRevisionPayload || normalizedPayload;
+      const effectivePayload =
+        rebaseSavedSheetRevisionOntoPayload(normalizedPayload, latestSavedSheetRevisionRef.current) ||
+        normalizedPayload;
       applyNormalizedSheetEditorPayload(effectivePayload);
       setOcrSheetAutoRetryBlocked(false);
       if (!silent) {
@@ -1582,6 +1668,15 @@ export default function OrderDetailPage() {
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
+      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
+      if (savedRevisionPayload) {
+        applyNormalizedSheetEditorPayload(savedRevisionPayload);
+        setOcrSheetAutoRetryBlocked(false);
+        if (!silent) {
+          setOcrSheetMessage("保存済みシートを読み込みました。");
+        }
+        return savedRevisionPayload;
+      }
       setOcrSheetAutoRetryBlocked(true);
       setOcrSheetFields([]);
       setOcrSheetHeader([]);
@@ -1655,9 +1750,21 @@ export default function OrderDetailPage() {
       latestSavedSheetRevisionRef.current = latestSheetRevision;
       setOcrHistoryLatest(latest);
       setOcrHistoryRows(revisions);
-      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSheetRevision);
-      if (savedRevisionPayload) {
-        applyNormalizedSheetEditorPayload(savedRevisionPayload);
+      if (ocrSheetRows.length) {
+        const currentSheetPayload = normalizeSheetEditorPayload({
+          fields: ocrSheetFields,
+          header: ocrSheetHeader,
+          rows: ocrSheetRows,
+          rowIds: ocrSheetRowIds,
+          source: ocrSheetSource,
+        });
+        const rebasedPayload = rebaseSavedSheetRevisionOntoPayload(
+          currentSheetPayload,
+          latestSheetRevision,
+        );
+        if (rebasedPayload) {
+          applyNormalizedSheetEditorPayload(rebasedPayload);
+        }
       }
       if (!silent) {
         setOcrHistoryMessage(

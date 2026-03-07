@@ -302,6 +302,12 @@ def _normalize_field_diet_token(value: object) -> str:
         return "no_meat"
     if "nofish" in token or ("禁" in token and "魚" in token):
         return "no_fish"
+    if token in {"unknown", "none", "null", "na", "n/a", "不明", "なし"}:
+        return "unknown"
+    if token in {"change1", "変更1"}:
+        return "change_1"
+    if token in {"change2", "変更2"}:
+        return "change_2"
     sanitized = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
     return sanitized or "unknown"
 
@@ -319,10 +325,94 @@ def _normalize_field_area_token(value: object) -> str:
     match = re.search(r"(\d)(?:f|階)", token)
     if match:
         return f"{match.group(1)}f"
-    if token in {"x", "all", "common", "共通"}:
+    if token in {"x", "all", "common", "共通", "none", "null", "na", "n/a", "なし"}:
         return "x"
-    sanitized = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
-    return sanitized or "x"
+    return "x"
+
+
+def _default_header_for_role(role: str) -> str:
+    if role == "date":
+        return "日付"
+    if role == "daypart":
+        return "区分"
+    if role == "menu_name":
+        return "メニュー"
+    if role == "note":
+        return "備考"
+    return ""
+
+
+def _default_header_for_quantity(diet: str, area: str) -> str:
+    diet_label = {
+        "regular": "常食",
+        "regular_bag": "常食(袋分け)",
+        "soft": "軟菜",
+        "soft_mixer": "軟菜/ミキサー",
+        "mixer": "ミキサー",
+        "daycare": "通所",
+        "staff": "職員",
+        "no_meat": "禁食(肉禁)",
+        "no_fish": "禁食(魚禁)",
+        "change_1": "変更1",
+        "change_2": "変更2",
+        "unknown": "不明",
+    }.get(diet, diet)
+    if area == "x":
+        return diet_label
+    return f"{diet_label}{area.upper()}"
+
+
+def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
+    if not isinstance(columns, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    ordered = sorted(
+        [col for col in columns if isinstance(col, dict)],
+        key=lambda col: int(col.get("index") or 0),
+    )
+    for idx, raw_col in enumerate(ordered):
+        col = deepcopy(raw_col)
+        role = str(col.get("role") or "").strip().lower()
+        col["index"] = idx
+        col["role"] = role
+        header = str(col.get("header") or "").strip()
+        name = str(col.get("name") or "").strip()
+        if role == "quantity":
+            inferred_diet = _normalize_field_diet_token(header or name or col.get("diet_type"))
+            explicit_diet = _normalize_field_diet_token(col.get("diet_type"))
+            diet = inferred_diet if (header or name) else explicit_diet
+            if not (header or name) and diet in {"", "unknown"} and explicit_diet not in {"", "unknown"}:
+                diet = explicit_diet
+            raw_area = str(col.get("area_id") or "").strip()
+            area = _normalize_field_area_token(raw_area)
+            if area == "x":
+                fallback_area = _normalize_field_area_token(header or name)
+                if fallback_area != "x":
+                    area = fallback_area
+            col["diet_type"] = diet
+            col["area_id"] = area.upper() if area != "x" else "X"
+            if not header:
+                col["header"] = _default_header_for_quantity(diet, area)
+            if not name:
+                col["name"] = f"qty.{diet}_{area}"
+        else:
+            if not header:
+                default_header = _default_header_for_role(role)
+                if default_header:
+                    col["header"] = default_header
+        normalized.append(col)
+    return normalized
+
+
+def _normalize_fax_template_columns_schema(template: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(template, dict):
+        return template
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return template
+    normalized = deepcopy(template)
+    normalized["columns"] = normalize_fax_template_columns(columns)
+    return normalized
 
 
 def _derive_row_fields_from_columns(columns: list[dict[str, Any]]) -> list[str]:
@@ -670,6 +760,7 @@ def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
         fax_template = facility.get("fax_template")
     fax_template = _merge_template(master.get("fax_template_base"), fax_template)
     fax_template = _merge_template(fax_template, fax_template_override)
+    fax_template = _normalize_fax_template_columns_schema(fax_template)
     fax_template = _normalize_fax_template_for_area_mismatch(
         template=fax_template,
         facility=facility,

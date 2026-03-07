@@ -3118,16 +3118,60 @@ def _field_label(field: str) -> str:
             "regular": "常食",
             "regular_bag": "常食(袋分け)",
             "soft": "軟菜",
+            "soft_mixer": "軟菜/ミキサー",
             "mixer": "ミキサー",
             "daycare": "通所",
             "staff": "職員",
             "no_meat": "禁食(肉禁)",
             "no_fish": "禁食(魚禁)",
+            "change_1": "変更1",
+            "change_2": "変更2",
+            "unknown": "不明",
         }.get(diet, diet)
         if area == "X":
             return diet_label
         return f"{diet_label}{area}"
     return field
+
+
+def _field_name_from_template_column(column: dict[str, Any]) -> str | None:
+    role = str(column.get("role") or "").strip().lower()
+    if role == "date":
+        return "date_mmdd"
+    if role == "daypart":
+        return "daypart"
+    if role == "menu_name":
+        return "menu"
+    if role == "note":
+        return "remarks"
+    if role == "quantity":
+        diet = _normalize_sheet_diet(column.get("diet_type")) or "unknown"
+        area = _normalize_sheet_area(column.get("area_id")) or "X"
+        return f"qty.{diet}_{area.lower()}"
+    return None
+
+
+def _sheet_header_from_template(
+    fields: list[str],
+    template: dict[str, Any] | None = None,
+) -> list[str]:
+    normalized_fields = [str(field).strip() for field in (fields or []) if str(field).strip()]
+    if not normalized_fields:
+        return []
+    columns = template.get("columns") if isinstance(template, dict) else None
+    if not isinstance(columns, list):
+        return [_field_label(field) for field in normalized_fields]
+    ordered = sorted(
+        [col for col in columns if isinstance(col, dict)],
+        key=lambda col: int(col.get("index") or 0),
+    )
+    header_by_field: dict[str, str] = {}
+    for col in ordered:
+        field = _field_name_from_template_column(col)
+        if not field or field in header_by_field:
+            continue
+        header_by_field[field] = str(col.get("header") or "").strip() or _field_label(field)
+    return [header_by_field.get(field, _field_label(field)) for field in normalized_fields]
 
 
 def _row_fields_from_template(template: dict[str, Any]) -> list[str]:
@@ -3143,19 +3187,9 @@ def _row_fields_from_template(template: dict[str, Any]) -> list[str]:
     )
     derived: list[str] = []
     for col in ordered:
-        role = str(col.get("role") or "").strip().lower()
-        if role == "date":
-            derived.append("date_mmdd")
-        elif role == "daypart":
-            derived.append("daypart")
-        elif role == "menu_name":
-            derived.append("menu")
-        elif role == "note":
-            derived.append("remarks")
-        elif role == "quantity":
-            diet = _normalize_sheet_diet(col.get("diet_type")) or "unknown"
-            area = _normalize_sheet_area(col.get("area_id")) or "X"
-            derived.append(f"qty.{diet}_{area.lower()}")
+        field = _field_name_from_template_column(col)
+        if field:
+            derived.append(field)
     return derived
 
 
@@ -3363,10 +3397,48 @@ def _build_sheet_payload_from_revision(
         return None
     payload = dict(fallback_sheet) if isinstance(fallback_sheet, dict) else {"order_id": order_id}
     payload["order_id"] = order_id
-    payload["fields"] = snapshot["fields"]
-    payload["header"] = snapshot["header"]
-    payload["rows"] = snapshot["rows"]
-    payload["row_ids"] = snapshot["row_ids"]
+    if isinstance(fallback_sheet, dict):
+        base_snapshot = _normalize_sheet_revision_snapshot(
+            fields=fallback_sheet.get("fields"),
+            header=fallback_sheet.get("header"),
+            rows_payload=fallback_sheet.get("rows"),
+            row_ids=fallback_sheet.get("row_ids"),
+        )
+        if base_snapshot["rows"]:
+            revision_rows_by_id = {
+                row_id: snapshot["rows"][idx]
+                for idx, row_id in enumerate(snapshot["row_ids"])
+                if row_id and idx < len(snapshot["rows"])
+            }
+            rebased_rows: list[list[str]] = []
+            for row_idx, base_row in enumerate(base_snapshot["rows"]):
+                base_row_id = (
+                    base_snapshot["row_ids"][row_idx]
+                    if row_idx < len(base_snapshot["row_ids"])
+                    else ""
+                )
+                revision_row = revision_rows_by_id.get(base_row_id)
+                if revision_row is None and row_idx < len(snapshot["rows"]):
+                    revision_row = snapshot["rows"][row_idx]
+                merged_row = list(base_row)
+                if revision_row is not None:
+                    for col_idx in range(min(len(merged_row), len(revision_row))):
+                        merged_row[col_idx] = revision_row[col_idx]
+                rebased_rows.append(merged_row)
+            payload["fields"] = base_snapshot["fields"]
+            payload["header"] = base_snapshot["header"]
+            payload["rows"] = rebased_rows
+            payload["row_ids"] = base_snapshot["row_ids"][: len(rebased_rows)]
+        else:
+            payload["fields"] = snapshot["fields"]
+            payload["header"] = snapshot["header"]
+            payload["rows"] = snapshot["rows"]
+            payload["row_ids"] = snapshot["row_ids"]
+    else:
+        payload["fields"] = snapshot["fields"]
+        payload["header"] = snapshot["header"]
+        payload["rows"] = snapshot["rows"]
+        payload["row_ids"] = snapshot["row_ids"]
     if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
         payload["source"] = "edited_sheet"
     return payload
@@ -4010,7 +4082,7 @@ def _resolve_llm_review_baseline(
     if not fields:
         width = max((len(row) for row in rows), default=0)
         fields = [f"col{idx + 1}" for idx in range(max(width, 1))]
-    header = [_field_label(field) for field in fields]
+    header = _sheet_header_from_template(fields, template)
     row_ids = [f"row-{idx + 1}" for idx in range(len(rows))]
     return {
         "fields": fields,
@@ -9088,7 +9160,7 @@ def get_ocr_sheet(order_id: str):
         mapped_mode=mapped_mode,
         has_order_lines=bool(order_lines),
     )
-    header = [_field_label(field) for field in fields]
+    header = _sheet_header_from_template(fields, template)
     return (
         {
             "order_id": order_id,
@@ -11853,6 +11925,9 @@ def save_order_facility_template_columns(
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(columns, list) or not columns:
         return None, "columns_invalid"
+    normalized_columns = config_service.normalize_fax_template_columns(columns)
+    if not normalized_columns:
+        return None, "columns_invalid"
 
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -11866,7 +11941,7 @@ def save_order_facility_template_columns(
     config = facility_service.get_facility_config(facility_id) or {}
     next_config = dict(config)
     override = dict(next_config.get("fax_template_override") or {})
-    override["columns"] = columns
+    override["columns"] = normalized_columns
     override.pop("main_ocr_row_fields", None)
     next_config["fax_template_override"] = override
 

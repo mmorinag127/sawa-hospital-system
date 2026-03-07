@@ -123,6 +123,7 @@ def _sync_facilities_from_master(session) -> None:
 
 def create_facility(name: str, areas: list | None):
     fac_id = f"FAC{uuid4().hex[:6]}"
+    serialized: dict | None = None
     with session_scope() as session:
         fac = Facility(id=fac_id, name=name)
         session.add(fac)
@@ -131,11 +132,14 @@ def create_facility(name: str, areas: list | None):
         session.flush()
         session.refresh(fac)
         logger.info("Facility created", fac=fac_id)
-        record_event("facility_create", actor="system", target=fac_id, fac=fac_id)
-        return serialize_facility(fac)
+        serialized = serialize_facility(fac)
+    record_event("facility_create", actor="system", target=fac_id, fac=fac_id)
+    return serialized
 
 
 def update_facility(facility_id: str, name: str | None, areas: list | None) -> dict | None:
+    serialized: dict | None = None
+    event_metadata: dict[str, object] | None = None
     with session_scope() as session:
         fac = session.get(Facility, facility_id)
         if not fac:
@@ -149,17 +153,20 @@ def update_facility(facility_id: str, name: str | None, areas: list | None) -> d
         session.flush()
         session.refresh(fac)
         logger.info("Facility updated", fac=facility_id)
-        record_event(
-            "facility_update",
-            actor="system",
-            target=facility_id,
-            fac=facility_id,
-            metadata={"name": fac.name, "areas": len(fac.areas or [])},
-        )
-        return serialize_facility(fac)
+        serialized = serialize_facility(fac)
+        event_metadata = {"name": fac.name, "areas": len(fac.areas or [])}
+    record_event(
+        "facility_update",
+        actor="system",
+        target=facility_id,
+        fac=facility_id,
+        metadata=event_metadata,
+    )
+    return serialized
 
 
 def update_config(facility_id: str, config: dict) -> bool:
+    updated = False
     with session_scope() as session:
         _ensure_facility_sync(session)
         session.flush()
@@ -174,6 +181,8 @@ def update_config(facility_id: str, config: dict) -> bool:
         session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
         session.add(FacilityConfig(facility_id=facility_id, config_json=config))
         logger.info("Facility config updated", fac=facility_id)
+        updated = True
+    if updated:
         record_event(
             "facility_config_update",
             actor="system",
@@ -181,7 +190,7 @@ def update_config(facility_id: str, config: dict) -> bool:
             fac=facility_id,
             metadata={"keys": list(config.keys())},
         )
-        return True
+    return updated
 
 
 def list_facilities() -> list[dict]:

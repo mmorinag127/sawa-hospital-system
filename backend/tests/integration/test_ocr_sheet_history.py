@@ -15,6 +15,7 @@ from src.models.order import Order  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services import config_service  # noqa: E402
+from src.services import facility_service  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -291,6 +292,72 @@ def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(tmp_path):
     assert saved_json["row_ids"] == row_ids
     assert saved_json["fields"] == fields
     assert saved_json["header"] == header
+
+
+def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_header(tmp_path):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-export-sheet-label-rebase-001")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        current_sheet, current_error = order_service.get_ocr_sheet(order["id"])
+        assert current_error is None
+        assert current_sheet is not None
+        qty_index = current_sheet["fields"].index("qty.regular_2f")
+        saved_row = list(current_sheet["rows"][0])
+        saved_row[qty_index] = "12"
+        saved_row[-1] = "rebased-label"
+
+        saved, error = order_service.save_ocr_sheet_exact(
+            order["id"],
+            header=current_sheet["header"],
+            rows=[saved_row],
+            ui_mode="sheet",
+            fields=current_sheet["fields"],
+            row_ids=[current_sheet["row_ids"][0]],
+        )
+
+        assert error is None
+        assert saved is not None
+
+        resolved_columns = (
+            (((previous_config.get("fax_template") or {}).get("columns")) or [])
+        )
+        columns = []
+        for item in resolved_columns:
+            if not isinstance(item, dict):
+                continue
+            column = dict(item)
+            if (
+                str(column.get("role") or "").strip().lower() == "quantity"
+                and str(column.get("diet_type") or "").strip().lower() == "regular"
+                and str(column.get("area_id") or "").strip().lower() == "2f"
+            ):
+                column["header"] = "新常食2F"
+            columns.append(column)
+
+        update_result, update_error = order_service.save_order_facility_template_columns(
+            order["id"],
+            columns,
+        )
+        assert update_error is None
+        assert isinstance(update_result, dict)
+
+        export_path = tmp_path / "labels" / f"{order['id']}.expected_sheet.json"
+        exported, export_error = order_service.export_ocr_sheet_label(
+            order["id"],
+            output_path=export_path,
+        )
+
+        assert export_error is None
+        assert exported is not None
+        saved_json = json.loads(export_path.read_text(encoding="utf-8"))
+        rebased_index = saved_json["fields"].index("qty.regular_2f")
+        assert saved_json["header"][rebased_index] == "新常食2F"
+        assert saved_json["rows"][0][rebased_index] == "12"
+        assert saved_json["rows"][0][-1] == "rebased-label"
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
 
 
 def test_get_ocr_sheet_exposes_generic_cell_issues():
