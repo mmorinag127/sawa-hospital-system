@@ -60,6 +60,77 @@ def _ensure_orders_lines_updated_at() -> None:
 _ensure_orders_lines_updated_at()
 
 
+def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
+    if not value:
+        return None, None, None
+    text = str(value).strip()
+    if not text:
+        return None, None, None
+    if re.match(r"^\d{4}-\d{2}$", text):
+        return text, None, None
+    match = re.match(r"^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$", text)
+    if not match:
+        return None, None, None
+    month_id = match.group(1)
+    try:
+        start_date = date.fromisoformat(match.group(2))
+        end_date = date.fromisoformat(match.group(3))
+    except Exception:
+        return None, None, None
+    if end_date < start_date:
+        return None, None, None
+    if start_date.strftime("%Y-%m") != month_id or end_date.strftime("%Y-%m") != month_id:
+        return None, None, None
+    return month_id, start_date, end_date
+
+
+def _format_sheet_week_value(
+    month_id: str | None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> str | None:
+    month = _to_sheet_month_id(month_id)
+    if not month:
+        return None
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return month
+    if end_date < start_date:
+        return month
+    if start_date.strftime("%Y-%m") != month or end_date.strftime("%Y-%m") != month:
+        return month
+    return f"{month}@{start_date.isoformat()}~{end_date.isoformat()}"
+
+
+def _normalize_sheet_week_value(value: object) -> str | None:
+    month_id, start_date, end_date = _parse_sheet_week_value(value)
+    if not month_id:
+        return None
+    return _format_sheet_week_value(month_id, start_date, end_date)
+
+
+def _format_sheet_week_label(value: object) -> str:
+    month_id, start_date, end_date = _parse_sheet_week_value(value)
+    if not month_id:
+        return ""
+    if isinstance(start_date, date) and isinstance(end_date, date):
+        return f"{month_id} ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')})"
+    return month_id
+
+
+def _clip_entries_to_sheet_week_range(entries: list[dict[str, Any]], week_value: object) -> list[dict[str, Any]]:
+    month_id, start_date, end_date = _parse_sheet_week_value(week_value)
+    if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
+        return entries
+    clipped: list[dict[str, Any]] = []
+    for entry in entries:
+        menu_date = _normalize_entry_date(entry.get("menu_date"))
+        if not isinstance(menu_date, date):
+            continue
+        if start_date <= menu_date <= end_date:
+            clipped.append(entry)
+    return clipped
+
+
 def _run_roi_ocr_pipeline(
     *,
     job_id: str,
@@ -297,9 +368,10 @@ def _apply_menu_matching(
     facility_id: Optional[str],
     min_ratio: float,
 ) -> list[dict]:
-    if not week_id:
+    month_id = _to_sheet_month_id(week_id)
+    if not month_id:
         return lines
-    items = menu_service.get_menu_items_for_facility(week_id, facility_id)
+    items = menu_service.get_menu_items_for_facility(month_id, facility_id)
     if not items:
         return lines
     candidates = [item.get("name") for item in items if item.get("name")]
@@ -378,7 +450,10 @@ def _normalize_entry_date(value: object) -> date | None:
 
 
 def _build_position_menu_entries(week_id: str) -> list[dict]:
-    menu = menu_service.get_menu(week_id)
+    month_id = _to_sheet_month_id(week_id)
+    if not month_id:
+        return []
+    menu = menu_service.get_menu(month_id)
     if not isinstance(menu, dict):
         return []
     raw_entries = menu.get("entries")
@@ -416,7 +491,7 @@ def _build_position_menu_entries(week_id: str) -> list[dict]:
             int(item.get("order") or 0),
         )
     )
-    return entries
+    return _clip_entries_to_sheet_week_range(entries, week_id)
 
 
 def _build_position_menu_entries_from_orders(week_id: str, facility_id: str | None) -> list[dict]:
@@ -457,11 +532,15 @@ def _build_position_menu_entries_from_orders(week_id: str, facility_id: str | No
         )
         return entries
 
+    month_id = _to_sheet_month_id(week_id)
+    if not month_id:
+        return []
+
     with session_scope() as session:
         q = (
             select(OrderLine.date, OrderLine.daypart, OrderLine.menu_name)
             .join(Order, Order.id == OrderLine.order_id)
-            .where(Order.week_code == week_id, OrderLine.menu_name.is_not(None))
+            .where(Order.week_code.like(f"{month_id}%"), OrderLine.menu_name.is_not(None))
             .order_by(OrderLine.date, OrderLine.daypart, OrderLine.menu_name)
         )
         rows_all = session.execute(q).all()
@@ -470,8 +549,8 @@ def _build_position_menu_entries_from_orders(week_id: str, facility_id: str | No
             rows_fac = session.execute(q_fac).all()
             entries_fac = _serialize_rows(rows_fac)
             if entries_fac:
-                return entries_fac
-        return _serialize_rows(rows_all)
+                return _clip_entries_to_sheet_week_range(entries_fac, week_id)
+        return _clip_entries_to_sheet_week_range(_serialize_rows(rows_all), week_id)
 
 
 def _resolve_sheet_payload_for_menu_entries(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2535,8 +2614,9 @@ def _is_blank_menu_value(value: object) -> bool:
 def _build_menu_snapshot(order: Order) -> dict:
     names = sorted({line.menu_name for line in (order.lines or []) if line.menu_name})
     items: list[dict] = []
-    if order.week_code:
-        items = menu_service.get_menu_items_for_facility(order.week_code, order.facility_code)
+    order_month_id = _to_sheet_month_id(order.week_code)
+    if order_month_id:
+        items = menu_service.get_menu_items_for_facility(order_month_id, order.facility_code)
     item_map = {item.get("name"): item for item in items if item.get("name")}
     defaults = menu_service.resolve_menu_defaults(names, order.facility_code)
     snapshot_items: dict[str, dict] = {}
@@ -2658,7 +2738,26 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
         if not order:
             return None, "order_not_found"
         received_at = order.received_at or datetime.utcnow()
+        current_week_value = _normalize_sheet_week_value(order.week_code) or _to_sheet_month_id(order.week_code)
         current_week_id = _to_sheet_month_id(order.week_code)
+        line_dates = [
+            line.date
+            for line in session.execute(select(OrderLine).where(OrderLine.order_id == order_id)).scalars().all()
+            if isinstance(line.date, date)
+        ]
+
+    inferred_date_from: date | None = None
+    inferred_date_to: date | None = None
+    if line_dates:
+        inferred_date_from = min(line_dates)
+        inferred_date_to = max(line_dates)
+    else:
+        cached_payload = _load_order_ocr_cache(order_id)
+        if isinstance(cached_payload, dict):
+            payload_dates = _collect_sheet_dates_from_payload(cached_payload, received_at)
+            if payload_dates:
+                inferred_date_from = min(payload_dates)
+                inferred_date_to = max(payload_dates)
 
     candidate_months: list[str] = []
 
@@ -2693,25 +2792,61 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
             except Exception:
                 continue
             menu_dates.append(parsed)
-        if menu_dates:
-            start_date = min(menu_dates)
-            end_date = max(menu_dates)
-            label = f"{month_id} ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')})"
-            start_iso = start_date.isoformat()
-            end_iso = end_date.isoformat()
-        else:
-            label = month_id
-            start_iso = None
-            end_iso = None
-        options.append(
-            {
-                "week_id": month_id,
-                "label": label,
-                "date_from": start_iso,
-                "date_to": end_iso,
-                "selected": month_id == current_week_id,
-            }
-        )
+        unique_dates = sorted(set(menu_dates))
+        if not unique_dates:
+            options.append(
+                {
+                    "week_id": month_id,
+                    "label": month_id,
+                    "date_from": None,
+                    "date_to": None,
+                    "selected": month_id == current_week_id,
+                }
+            )
+            continue
+
+        grouped_dates: list[list[date]] = []
+        current_group: list[date] = []
+        previous_date: date | None = None
+        for menu_date in unique_dates:
+            if (
+                previous_date is None
+                or (menu_date - previous_date).days > 1
+                or len(current_group) >= 7
+            ):
+                if current_group:
+                    grouped_dates.append(current_group)
+                current_group = [menu_date]
+            else:
+                current_group.append(menu_date)
+            previous_date = menu_date
+        if current_group:
+            grouped_dates.append(current_group)
+
+        for date_group in grouped_dates:
+            start_date = min(date_group)
+            end_date = max(date_group)
+            week_value = _format_sheet_week_value(month_id, start_date, end_date) or month_id
+            selected = week_value == current_week_value
+            if (
+                not selected
+                and current_week_value == current_week_id
+                and current_week_id == month_id
+                and isinstance(inferred_date_from, date)
+                and isinstance(inferred_date_to, date)
+                and start_date <= inferred_date_from <= end_date
+                and start_date <= inferred_date_to <= end_date
+            ):
+                selected = True
+            options.append(
+                {
+                    "week_id": week_value,
+                    "label": f"{month_id} ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')})",
+                    "date_from": start_date.isoformat(),
+                    "date_to": end_date.isoformat(),
+                    "selected": selected,
+                }
+            )
     return options, None
 
 
@@ -5769,9 +5904,12 @@ def _to_sheet_month_id(value: object) -> str | None:
     if not value:
         return None
     text = str(value).strip()
-    if not re.match(r"^\d{4}-\d{2}$", text):
-        return None
-    return text
+    if re.match(r"^\d{4}-\d{2}$", text):
+        return text
+    match = re.match(r"^(\d{4}-\d{2})@\d{4}-\d{2}-\d{2}~\d{4}-\d{2}-\d{2}$", text)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _shift_sheet_month_id(month_id: str, delta: int) -> str | None:
@@ -6345,6 +6483,7 @@ def _resolve_sheet_week_id(
     week_hints: list[str] | None = None,
 ) -> str | None:
     policy = config_service.load_ingest_policy()
+    normalized_current_week = _normalize_sheet_week_value(current_week_id)
     primary_candidates: list[str] = []
     fallback_candidates: list[str] = []
     stale_hint_candidates: list[str] = []
@@ -6388,6 +6527,9 @@ def _resolve_sheet_week_id(
 
     def _has_menu_entries(month_id: str) -> bool:
         return bool(_build_position_menu_entries(month_id))
+
+    if normalized_current_week and _build_position_menu_entries(normalized_current_week):
+        return normalized_current_week
 
     for month_id in primary_candidates:
         if _has_menu_entries(month_id):
@@ -11899,7 +12041,7 @@ def set_facility(order_id: str, facility_code: str) -> bool:
 
 
 def set_week(order_id: str, week_code: str) -> bool:
-    normalized_week = _to_sheet_month_id(week_code)
+    normalized_week = _normalize_sheet_week_value(week_code)
     if not normalized_week:
         raise ValueError("week_code_invalid")
     with session_scope() as session:
@@ -11983,9 +12125,10 @@ def _build_menu_amount_meta(order: Order) -> dict[str, dict[str, object]]:
         unique_names.append(name)
 
     item_map: dict[str, dict] = {}
-    if order.week_code:
+    order_month_id = _to_sheet_month_id(order.week_code)
+    if order_month_id:
         try:
-            items = menu_service.get_menu_items_for_facility(order.week_code, order.facility_code)
+            items = menu_service.get_menu_items_for_facility(order_month_id, order.facility_code)
         except Exception:
             items = []
         item_map = {
@@ -12069,12 +12212,17 @@ def _serialize_line_with_amount(line: OrderLine, menu_meta: dict[str, dict[str, 
 def serialize_order(order: Order):
     prompt_enabled = False
     menu_meta = _build_menu_amount_meta(order)
+    week_month_id = _to_sheet_month_id(order.week_code)
+    week_value = _normalize_sheet_week_value(order.week_code) or week_month_id
+    week_label = _format_sheet_week_label(order.week_code) or week_month_id
 
     return {
         "id": order.id,
         "ocr_job_id": f"OCR-{order.id}",
         "facility": order.facility_code,
-        "week": order.week_code,
+        "week": week_month_id,
+        "week_value": week_value,
+        "week_label": week_label,
         "status": order.status,
         "document": order.document_uri,
         "message_id": order.message_id,
@@ -12088,11 +12236,16 @@ def serialize_order(order: Order):
 
 
 def serialize_order_summary(order: Order):
+    week_month_id = _to_sheet_month_id(order.week_code)
+    week_value = _normalize_sheet_week_value(order.week_code) or week_month_id
+    week_label = _format_sheet_week_label(order.week_code) or week_month_id
     return {
         "id": order.id,
         "ocr_job_id": f"OCR-{order.id}",
         "facility": order.facility_code,
-        "week": order.week_code,
+        "week": week_month_id,
+        "week_value": week_value,
+        "week_label": week_label,
         "status": order.status,
         "document": order.document_uri,
         "message_id": order.message_id,

@@ -238,19 +238,21 @@ def test_orders_week_options_and_save_api_flow():
     options_res = client.get(f"/orders/{order['id']}/week-options")
     assert options_res.status_code == 200
     options = options_res.json().get("options") or []
-    assert any(item.get("week_id") == "2026-01" for item in options)
-    selected = next(item for item in options if item.get("week_id") == "2026-01")
+    assert any(str(item.get("week_id") or "").startswith("2026-01@") for item in options)
+    selected = next(item for item in options if str(item.get("week_id") or "").startswith("2026-01@"))
     assert str(selected.get("label") or "").startswith("2026-01 (")
-    assert selected.get("date_from")
-    assert selected.get("date_to")
+    assert selected.get("date_from") == "2026-01-08"
+    assert selected.get("date_to") == "2026-01-08"
 
-    save_res = client.post(f"/orders/{order['id']}/week", json={"week": "2026-01"})
+    save_res = client.post(f"/orders/{order['id']}/week", json={"week": selected.get("week_id")})
     assert save_res.status_code == 200
     assert save_res.json().get("updated") is True
 
     order_res = client.get(f"/orders/{order['id']}")
     assert order_res.status_code == 200
     assert order_res.json().get("week") == "2026-01"
+    assert order_res.json().get("week_value") == selected.get("week_id")
+    assert order_res.json().get("week_label") == selected.get("label")
 
 
 def test_orders_week_save_api_rejects_invalid_week():
@@ -258,7 +260,7 @@ def test_orders_week_save_api_rejects_invalid_week():
     client = TestClient(app)
     order = _create_seed_order("msg-api-week-invalid-001")
 
-    res = client.post(f"/orders/{order['id']}/week", json={"week": "2026/01"})
+    res = client.post(f"/orders/{order['id']}/week", json={"week": "2026-01@2026-01-08~2026-02-01"})
     assert res.status_code == 400
     assert res.json().get("detail") == "week invalid"
 

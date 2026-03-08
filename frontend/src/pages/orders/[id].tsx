@@ -9,6 +9,8 @@ type OrderDetail = {
   status: string;
   document: string;
   week?: string | null;
+  week_value?: string | null;
+  week_label?: string | null;
   message_id?: string | null;
   lines: {
     id?: string;
@@ -320,6 +322,43 @@ const normalizeWeekId = (value?: string | null) => {
   const month = Number(match[2]);
   if (!Number.isInteger(month) || month < 1 || month > 12) return "";
   return `${match[1]}-${match[2]}`;
+};
+
+const normalizeWeekValue = (value?: string | null) => {
+  const text = String(value || "").trim();
+  const monthId = normalizeWeekId(text);
+  if (monthId === text) return text;
+  const match = text.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+  if (!match) return "";
+  const normalizedMonth = normalizeWeekId(match[1]);
+  if (!normalizedMonth) return "";
+  if (!match[2].startsWith(`${normalizedMonth}-`) || !match[3].startsWith(`${normalizedMonth}-`)) {
+    return "";
+  }
+  return `${normalizedMonth}@${match[2]}~${match[3]}`;
+};
+
+const extractWeekMonthId = (value?: string | null) => {
+  const normalizedRange = normalizeWeekValue(value);
+  if (!normalizedRange) return normalizeWeekId(value);
+  const directMonth = normalizeWeekId(normalizedRange);
+  if (directMonth) return directMonth;
+  const match = normalizedRange.match(/^(\d{4}-\d{2})@/);
+  return match ? match[1] : "";
+};
+
+const formatWeekLabel = (value?: string | null, fallbackLabel?: string | null) => {
+  const explicit = String(fallbackLabel || "").trim();
+  if (explicit) return explicit;
+  const normalizedRange = normalizeWeekValue(value);
+  if (normalizedRange) {
+    const match = normalizedRange.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+    if (match) {
+      return `${match[1]} (${match[2].slice(5).replace("-", "/")}-${match[3].slice(5).replace("-", "/")})`;
+    }
+    return normalizedRange;
+  }
+  return normalizeWeekId(value) || "";
 };
 
 const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
@@ -1203,7 +1242,7 @@ export default function OrderDetailPage() {
     apiClient.get(`/orders/${id}`).then((res) => {
       setOrder(res.data);
       setFacility(res.data.facility || "");
-      setWeekDraft(normalizeWeekId(res.data.week || ""));
+      setWeekDraft(normalizeWeekValue(res.data.week_value || res.data.week || ""));
     });
     setOcrPrompt(DEFAULT_OCR_PROMPT);
   }, [id]);
@@ -1598,7 +1637,7 @@ export default function OrderDetailPage() {
       const options = Array.isArray(res.data?.options)
         ? res.data.options
             .map((item) => ({
-              week_id: normalizeWeekId(item?.week_id),
+              week_id: normalizeWeekValue(item?.week_id),
               label: String(item?.label || item?.week_id || ""),
               date_from: typeof item?.date_from === "string" ? item.date_from : null,
               date_to: typeof item?.date_to === "string" ? item.date_to : null,
@@ -1607,6 +1646,17 @@ export default function OrderDetailPage() {
             .filter((item) => item.week_id)
         : [];
       setWeekOptions(options);
+      setWeekDraft((current) => {
+        const selectedOption = options.find((item) => item.selected);
+        const normalizedCurrent = normalizeWeekValue(current);
+        if (normalizedCurrent.includes("@")) {
+          return normalizedCurrent;
+        }
+        if (selectedOption?.week_id) {
+          return selectedOption.week_id;
+        }
+        return normalizedCurrent || current;
+      });
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 404) {
@@ -1723,13 +1773,13 @@ export default function OrderDetailPage() {
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で施設設定を完了してください。");
       return;
     }
-    if (!normalizeWeekId(order.week || "")) {
+    if (!normalizeWeekValue(order.week_value || order.week || "")) {
       setOcrSheetAutoRetryBlocked(true);
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で週を設定してください。");
       return;
     }
     loadOcrSheet({ silent: true });
-  }, [order?.id, order?.facility, order?.week]);
+  }, [order?.id, order?.facility, order?.week, order?.week_value]);
 
   const loadOcrHistory = async (options: { silent?: boolean } = {}) => {
     if (!order) return;
@@ -2567,8 +2617,8 @@ export default function OrderDetailPage() {
     }
     const trimmedFacility = facility.trim();
     const persistedFacility = (order.facility || "").trim();
-    const normalizedWeek = normalizeWeekId(weekDraft);
-    const persistedWeek = normalizeWeekId(order.week || "");
+    const normalizedWeek = normalizeWeekValue(weekDraft);
+    const persistedWeek = normalizeWeekValue(order.week_value || order.week || "");
     if (!trimmedFacility && !persistedFacility) {
       const message = "施設が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で施設を設定してください。";
       setOcrTableMessage(message);
@@ -2826,14 +2876,23 @@ export default function OrderDetailPage() {
 
   const saveWeek = async (weekId: string): Promise<boolean> => {
     if (!order) return false;
-    const normalizedWeek = normalizeWeekId(weekId);
+    const normalizedWeek = normalizeWeekValue(weekId);
     if (!normalizedWeek) {
-      setActionMessage("週は YYYY-MM 形式で入力してください。");
+      setActionMessage("週の形式が不正です。候補から選択してください。");
       return false;
     }
     try {
       await apiClient.post(`/orders/${order.id}/week`, { week: normalizedWeek });
-      setOrder((current) => (current ? { ...current, week: normalizedWeek } : current));
+      setOrder((current) =>
+        current
+          ? {
+              ...current,
+              week: extractWeekMonthId(normalizedWeek),
+              week_value: normalizedWeek,
+              week_label: formatWeekLabel(normalizedWeek),
+            }
+          : current,
+      );
       setWeekDraft(normalizedWeek);
       setActionMessage("週を設定しました。");
       return true;
@@ -2842,7 +2901,7 @@ export default function OrderDetailPage() {
       if (status === 404) {
         setActionMessage("注文が見つかりません。");
       } else if (status === 400) {
-        setActionMessage("週の設定に失敗しました。YYYY-MM を確認してください。");
+        setActionMessage("週の設定に失敗しました。候補を確認してください。");
       } else {
         setActionMessage("週の設定に失敗しました。");
       }
@@ -2851,7 +2910,7 @@ export default function OrderDetailPage() {
   };
 
   const updateStep1 = async () => {
-    const normalizedWeek = normalizeWeekId(weekDraft);
+    const normalizedWeek = normalizeWeekValue(weekDraft);
     if (!facility.trim()) {
       setActionMessage("施設を選択してください。");
       return;
@@ -2861,7 +2920,7 @@ export default function OrderDetailPage() {
       return;
     }
     const persistedFacility = (order?.facility || "").trim();
-    const persistedWeek = normalizeWeekId(order?.week || "");
+    const persistedWeek = normalizeWeekValue(order?.week_value || order?.week || "");
     if (facility.trim() !== persistedFacility) {
       const saved = await saveFacility(facility);
       if (!saved) return;
@@ -2935,7 +2994,7 @@ export default function OrderDetailPage() {
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
       setFacilityTemplateMessage("施設テンプレートに保存しました。シート再読込で反映されます。");
-      if (order?.id && normalizeWeekId(order.week || "")) {
+      if (order?.id && normalizeWeekValue(order.week_value || order.week || "")) {
         await loadOcrSheet({ silent: true });
       }
     } catch (err: any) {
@@ -3624,8 +3683,8 @@ export default function OrderDetailPage() {
   })();
   const persistedFacility = (order?.facility || "").trim();
   const selectedFacility = facility.trim();
-  const persistedWeek = normalizeWeekId(order?.week || "");
-  const selectedWeek = normalizeWeekId(weekDraft);
+  const persistedWeek = normalizeWeekValue(order?.week_value || order?.week || "");
+  const selectedWeek = normalizeWeekValue(weekDraft);
   const facilityMissing = !persistedFacility;
   const weekMissing = !persistedWeek;
   const facilitySelectionPending = Boolean(selectedFacility && selectedFacility !== persistedFacility);
@@ -3689,10 +3748,12 @@ export default function OrderDetailPage() {
                 <p className="summary-value">{order.message_id || "不明"}</p>
               </div>
               <div>
-                <p className="field-label">月</p>
+                <p className="field-label">対象週</p>
                 <p className="summary-value">
-                  {order.week || "未確定"}{" "}
-                  {order.week ? <Link href={`/menus/${order.week}`}>メニュー編集</Link> : null}
+                  {formatWeekLabel(order.week_value || order.week || "", order.week_label) || "未確定"}{" "}
+                  {extractWeekMonthId(order.week_value || order.week || "")
+                    ? <Link href={`/menus/${extractWeekMonthId(order.week_value || order.week || "")}`}>メニュー編集</Link>
+                    : null}
                 </p>
               </div>
               <div>
@@ -4016,7 +4077,7 @@ export default function OrderDetailPage() {
                       >
                         <option value="">週を選択</option>
                         {weekDraft && !weekOptions.some((option) => option.week_id === weekDraft) ? (
-                          <option value={weekDraft}>{weekDraft} (現在値)</option>
+                          <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
                         ) : null}
                         {weekOptions.map((option) => (
                           <option key={option.week_id} value={option.week_id}>

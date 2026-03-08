@@ -192,7 +192,12 @@ export default function FacilityMasterPage() {
       aliases: [],
       areas: [],
     };
-    updateFacilityState(nextFacility);
+    const nextFacilities = [...facilities, nextFacility];
+    const nextMaster = { ...master, facilities: nextFacilities };
+    setMaster(nextMaster);
+    setSelectedIndex(nextFacilities.length - 1);
+    setFacilityText(prettyJson(nextFacility));
+    setMasterText(prettyJson(nextMaster));
     setMessage("新規施設を追加しました。");
   };
 
