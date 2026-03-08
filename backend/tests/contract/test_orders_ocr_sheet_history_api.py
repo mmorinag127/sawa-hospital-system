@@ -265,6 +265,22 @@ def test_orders_week_save_api_rejects_invalid_week():
     assert res.json().get("detail") == "week invalid"
 
 
+def test_order_detail_promotes_plain_month_week_to_selected_weekly_range():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-week-display-001")
+
+    save_res = client.post(f"/orders/{order['id']}/week", json={"week": "2026-01"})
+    assert save_res.status_code == 200
+
+    order_res = client.get(f"/orders/{order['id']}")
+    assert order_res.status_code == 200
+    payload = order_res.json()
+    assert payload.get("week") == "2026-01"
+    assert payload.get("week_value") == "2026-01@2026-01-08~2026-01-08"
+    assert payload.get("week_label") == "2026-01 (01/08-01/08)"
+
+
 def test_orders_facility_template_columns_save_api_flow():
     order_service.clear_all()
     client = TestClient(app)

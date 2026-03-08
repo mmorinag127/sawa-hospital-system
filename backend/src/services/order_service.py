@@ -2729,7 +2729,28 @@ def get_order_by_id(order_id: str):
         order = session.get(Order, order_id)
         if not order:
             return None
-        return serialize_order(order)
+        payload = serialize_order(order)
+    raw_week_value = payload.get("week_value")
+    raw_week_month = payload.get("week")
+    if (
+        isinstance(raw_week_value, str)
+        and isinstance(raw_week_month, str)
+        and raw_week_value == raw_week_month
+    ):
+        options, error = get_order_week_options(order_id)
+        if not error and isinstance(options, list):
+            selected_option = next((item for item in options if item.get("selected")), None)
+            if isinstance(selected_option, dict):
+                selected_week_value = selected_option.get("week_id")
+                selected_week_label = selected_option.get("label")
+                if isinstance(selected_week_value, str) and "@" in selected_week_value:
+                    payload["week_value"] = selected_week_value
+                    payload["week_label"] = (
+                        selected_week_label
+                        if isinstance(selected_week_label, str) and selected_week_label.strip()
+                        else _format_sheet_week_label(selected_week_value)
+                    )
+    return payload
 
 
 def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
