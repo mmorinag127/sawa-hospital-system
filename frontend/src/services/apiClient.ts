@@ -1,8 +1,7 @@
 import axios, { AxiosHeaders, type AxiosRequestHeaders } from "axios";
 
 const AUTH_STORAGE_KEY = "auth_header";
-const AUTH_COOKIE_KEY = "auth_header";
-const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 14;
+const LEGACY_AUTH_COOKIE_KEY = "auth_header";
 
 const readCookieValue = (key: string) => {
   if (typeof document === "undefined") return "";
@@ -16,22 +15,47 @@ const readCookieValue = (key: string) => {
   return "";
 };
 
+const clearLegacyAuthStorage = () => {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  document.cookie = `${LEGACY_AUTH_COOKIE_KEY}=; Path=/; Max-Age=0; SameSite=Lax`;
+};
+
+const getSessionAuthHeader = () => {
+  if (typeof window === "undefined") return "";
+  return window.sessionStorage.getItem(AUTH_STORAGE_KEY) || "";
+};
+
 export const getStoredAuthHeader = () => {
   if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(AUTH_STORAGE_KEY) || readCookieValue(AUTH_COOKIE_KEY);
+  const sessionValue = getSessionAuthHeader();
+  if (sessionValue) {
+    return sessionValue;
+  }
+
+  const legacyValue =
+    window.localStorage.getItem(AUTH_STORAGE_KEY) || readCookieValue(LEGACY_AUTH_COOKIE_KEY);
+  if (!legacyValue) {
+    return "";
+  }
+
+  // Migrate old bearer sessions once, but always drop legacy persistence.
+  if (legacyValue.startsWith("Bearer ")) {
+    window.sessionStorage.setItem(AUTH_STORAGE_KEY, legacyValue);
+  }
+  clearLegacyAuthStorage();
+  return legacyValue.startsWith("Bearer ") ? legacyValue : "";
 };
 
 const setStoredAuthHeader = (value: string) => {
   if (typeof window === "undefined") return;
   if (!value) {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
-    document.cookie = `${AUTH_COOKIE_KEY}=; Path=/; Max-Age=0; SameSite=Lax`;
+    window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    clearLegacyAuthStorage();
     return;
   }
-  window.localStorage.setItem(AUTH_STORAGE_KEY, value);
-  document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(
-    value
-  )}; Path=/; Max-Age=${AUTH_COOKIE_MAX_AGE}; SameSite=Lax`;
+  window.sessionStorage.setItem(AUTH_STORAGE_KEY, value);
+  clearLegacyAuthStorage();
 };
 
 export const setBasicAuth = (token: string) => {
@@ -50,13 +74,13 @@ const inferBaseUrl = () => {
   if (typeof window === "undefined") {
     return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   }
-  const envBase = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (envBase && envBase !== "/api") {
-    return envBase;
-  }
   const origin = window.location.origin;
   if (origin.includes("web-prod")) {
     return "/api";
+  }
+  const envBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (envBase && envBase !== "/api") {
+    return envBase;
   }
   if (origin.includes("web-dev")) {
     return origin.replace("web-dev", "worker-dev");

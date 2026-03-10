@@ -582,10 +582,20 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
         )
     if "職員" in token or "staff" in token:
         return _select_field(["qty.staff_x", "staff_x"], fields)
+    if "お茶" in token or "tea" in token:
+        return _select_field(["qty.tea_x", "tea_x"], fields)
+    if "事業" in token or "business" in token:
+        return _select_field(["qty.business_x", "business_x"], fields)
     if "通所" in token or "daycare" in token:
         return _select_field(["qty.daycare_x", "daycare_x"], fields)
     if "糖尿" in token or "diabetes" in token:
         return _select_field(["qty.糖尿_x", "糖尿_x", "qty.diabetes_x", "diabetes_x"], fields)
+    if "妊娠" in token or "pregnancy" in token:
+        return _select_field(["qty.pregnancy_x", "pregnancy_x"], fields)
+    if ("ごま" in token or "ゴマ" in header or "sesame" in token) and (
+        "アレル" in header or "allergy" in token
+    ):
+        return _select_field(["qty.sesame_allergy_x", "sesame_allergy_x"], fields)
     if ("禁" in token and "肉" in token) or "nomeat" in token:
         return _select_field(
             ["qty.no_meat_x", "no_meat_x", "qty.no_meat_2f", "no_meat_2f", "qty.no_meat_3f", "no_meat_3f"],
@@ -598,7 +608,201 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
         )
     if "禁食" in token:
         return _select_field(["qty.禁食_x", "禁食_x", "qty.forbidden_x", "forbidden_x"], fields)
+    if "変更1" in header or "change1" in token:
+        return _select_field(["qty.change_1_x", "change_1_x"], fields)
+    if "変更2" in header or "change2" in token:
+        return _select_field(["qty.change_2_x", "change_2_x"], fields)
+    if token in {"-", "placeholder"}:
+        return _select_field(["qty.placeholder_x", "placeholder_x"], fields)
     return None
+
+
+def _fill_remaining_quantity_mapping_by_order(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+) -> dict[int, int]:
+    if not data or not fields:
+        return mapped_indexes
+    max_columns = max((len(row) for row in data), default=0)
+    if max_columns <= 0:
+        return mapped_indexes
+
+    used_src = set(mapped_indexes.keys())
+    used_dest = set(mapped_indexes.values())
+    remaining_dest_quantity = [
+        idx
+        for idx, field in enumerate(fields)
+        if _is_quantity_field_name(field) and idx not in used_dest
+    ]
+    if not remaining_dest_quantity:
+        return mapped_indexes
+
+    remaining_src_quantity = [
+        idx
+        for idx in range(max_columns)
+        if idx not in used_src
+        and any(idx < len(row) and _looks_like_quantity(str(row[idx] or "")) for row in data)
+    ]
+    if len(remaining_src_quantity) != len(remaining_dest_quantity):
+        return mapped_indexes
+
+    for src_idx, dest_idx in zip(remaining_src_quantity, remaining_dest_quantity):
+        mapped_indexes[src_idx] = dest_idx
+    return mapped_indexes
+
+
+def _realign_quantity_mapping_by_numeric_block(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+    preserve_sparse_full_header_mapping: bool = False,
+) -> dict[int, int]:
+    if not data or not fields:
+        return mapped_indexes
+    max_columns = max((len(row) for row in data), default=0)
+    if max_columns <= 0:
+        return mapped_indexes
+
+    quantity_dest_indexes = [
+        idx for idx, field in enumerate(fields) if _is_quantity_field_name(field)
+    ]
+    if not quantity_dest_indexes:
+        return mapped_indexes
+
+    numeric_hits: dict[int, int] = {idx: 0 for idx in range(max_columns)}
+    non_empty_hits: dict[int, int] = {idx: 0 for idx in range(max_columns)}
+    for row in data:
+        for idx in range(max_columns):
+            if idx >= len(row):
+                continue
+            value = str(row[idx] or "").strip()
+            if not value:
+                continue
+            non_empty_hits[idx] = int(non_empty_hits.get(idx, 0)) + 1
+            if _looks_like_quantity(value):
+                numeric_hits[idx] = int(numeric_hits.get(idx, 0)) + 1
+
+    non_quantity_mapping = {
+        src_idx: dest_idx
+        for src_idx, dest_idx in mapped_indexes.items()
+        if 0 <= dest_idx < len(fields) and not _is_quantity_field_name(fields[dest_idx])
+    }
+    menu_source_indexes = [
+        src_idx
+        for src_idx, dest_idx in non_quantity_mapping.items()
+        if fields[dest_idx] in {"menu", "menu_name"}
+    ]
+    non_note_source_indexes = [
+        src_idx
+        for src_idx, dest_idx in non_quantity_mapping.items()
+        if fields[dest_idx] not in {"remarks", "note"}
+    ]
+    note_source_indexes = [
+        src_idx
+        for src_idx, dest_idx in non_quantity_mapping.items()
+        if fields[dest_idx] in {"remarks", "note"}
+    ]
+    lower_bound = 0
+    if menu_source_indexes:
+        lower_bound = max(menu_source_indexes) + 1
+    elif non_note_source_indexes:
+        lower_bound = max(non_note_source_indexes) + 1
+    upper_bound = max_columns
+    if note_source_indexes:
+        note_src_idx = min(note_source_indexes)
+        note_numeric_hits = int(numeric_hits.get(note_src_idx, 0))
+        note_non_empty_hits = int(non_empty_hits.get(note_src_idx, 0))
+        # Some stale yomitoku markdown shifts the quantity block one cell right
+        # and temporarily places the last quantity inside the nominal remarks slot.
+        if note_numeric_hits > 0 and note_numeric_hits >= note_non_empty_hits:
+            upper_bound = note_src_idx + 1
+        else:
+            upper_bound = note_src_idx
+    if upper_bound <= lower_bound:
+        return mapped_indexes
+
+    candidate_source_indexes = [
+        idx
+        for idx in range(lower_bound, upper_bound)
+        if int(numeric_hits.get(idx, 0)) > 0
+    ]
+    if not candidate_source_indexes:
+        return mapped_indexes
+
+    if len(candidate_source_indexes) > len(quantity_dest_indexes):
+        best_window: list[int] | None = None
+        best_score = -1
+        window_size = len(quantity_dest_indexes)
+        for start_idx in range(len(candidate_source_indexes) - window_size + 1):
+            window = candidate_source_indexes[start_idx : start_idx + window_size]
+            score = sum(
+                (int(numeric_hits.get(src_idx, 0)) * 10) + int(non_empty_hits.get(src_idx, 0))
+                for src_idx in window
+            )
+            if score > best_score:
+                best_score = score
+                best_window = window
+        if best_window:
+            candidate_source_indexes = best_window
+
+    current_quantity_mapping = {
+        src_idx: dest_idx
+        for src_idx, dest_idx in mapped_indexes.items()
+        if dest_idx in quantity_dest_indexes
+    }
+    if (
+        preserve_sparse_full_header_mapping
+        and len(current_quantity_mapping) >= len(quantity_dest_indexes)
+        and len(candidate_source_indexes) < len(quantity_dest_indexes)
+    ):
+        return mapped_indexes
+    current_numeric_score = sum(int(numeric_hits.get(src_idx, 0)) for src_idx in current_quantity_mapping)
+    proposed_numeric_score = sum(int(numeric_hits.get(src_idx, 0)) for src_idx in candidate_source_indexes)
+    current_has_empty_quantity_column = any(
+        int(numeric_hits.get(src_idx, 0)) <= 0 for src_idx in current_quantity_mapping
+    )
+    if (
+        current_quantity_mapping
+        and proposed_numeric_score < current_numeric_score
+        and not current_has_empty_quantity_column
+    ):
+        return mapped_indexes
+
+    normalized = {
+        src_idx: dest_idx
+        for src_idx, dest_idx in mapped_indexes.items()
+        if dest_idx not in quantity_dest_indexes
+    }
+    for src_idx, dest_idx in zip(candidate_source_indexes, quantity_dest_indexes):
+        normalized[src_idx] = dest_idx
+    return normalized
+
+
+def _prefer_positional_quantity_mapping_when_width_matches(
+    *,
+    header: list[str],
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+) -> dict[int, int]:
+    widths = [len(row) for row in data if isinstance(row, list)]
+    if isinstance(header, list):
+        widths.append(len(header))
+    widths = [width for width in widths if width > 0]
+    if not widths:
+        return mapped_indexes
+    max_width = max(widths)
+    min_width = min(widths)
+    if max_width != len(fields) or min_width != len(fields):
+        return mapped_indexes
+    normalized = dict(mapped_indexes)
+    for idx, field in enumerate(fields):
+        if _is_quantity_field_name(field):
+            normalized[idx] = idx
+    return normalized
 
 
 def _split_markdown_cells(content: str) -> list[str]:
@@ -664,7 +868,23 @@ def _is_subheader_row(row: list[str]) -> bool:
     if not row:
         return False
     tokens: list[str] = []
-    known_markers = {"2f", "3f", "2階", "3階", "花", "月"}
+    known_markers = {
+        "2f",
+        "3f",
+        "2階",
+        "3階",
+        "花",
+        "月",
+        "禁食",
+        "通常",
+        "袋分け",
+        "肉禁",
+        "魚禁",
+        "肉",
+        "魚",
+        "変更1",
+        "変更2",
+    }
     for cell in row:
         token = _normalize_header_token(cell)
         if not token:
@@ -675,14 +895,36 @@ def _is_subheader_row(row: list[str]) -> bool:
     if all(token in known_markers for token in tokens):
         return True
     # Support quantity headers like 花/月 repeating in two-tier tables.
-    if len(set(tokens)) <= 3 and all(len(token) <= 2 for token in tokens):
+    if len(set(tokens)) <= 3 and all(len(token) <= 3 for token in tokens):
         return True
     return False
+
+
+def _resolve_forbidden_subheader(group_token: str, secondary_token: str, secondary_value: str) -> str | None:
+    if ("禁" in secondary_token and "肉" in secondary_token) or "nomeat" in secondary_token:
+        return secondary_value
+    if ("禁" in secondary_token and "魚" in secondary_token) or "nofish" in secondary_token:
+        return secondary_value
+    if "禁食" not in group_token and "forbidden" not in group_token:
+        return None
+    if "肉" in secondary_token and "魚" not in secondary_token:
+        return "肉禁"
+    if "魚" in secondary_token and "肉" not in secondary_token:
+        return "魚禁"
+    return None
 
 
 def _merge_header_rows(primary: list[str], secondary: list[str]) -> list[str]:
     combined: list[str] = []
     current_group = ""
+    standalone_secondary_tokens = {
+        "肉禁",
+        "魚禁",
+        "change1",
+        "change2",
+        "変更1",
+        "変更2",
+    }
     max_len = max(len(primary), len(secondary))
     for idx in range(max_len):
         h1 = primary[idx].strip() if idx < len(primary) else ""
@@ -690,6 +932,18 @@ def _merge_header_rows(primary: list[str], secondary: list[str]) -> list[str]:
         if h1:
             current_group = h1
         if h2:
+            secondary_token = _normalize_header_token(h2)
+            current_group_token = _normalize_header_token(current_group)
+            forbidden_header = _resolve_forbidden_subheader(current_group_token, secondary_token, h2)
+            if forbidden_header is not None:
+                combined.append(forbidden_header)
+                continue
+            if secondary_token in standalone_secondary_tokens:
+                combined.append(h2)
+                continue
+            if current_group_token and secondary_token == current_group_token:
+                combined.append(h2)
+                continue
             group = current_group if current_group else h1
             combined.append(f"{group} {h2}".strip() if group else h2)
         else:
@@ -775,7 +1029,7 @@ def _rows_from_header_and_data(
                 header = candidate
                 data = data[idx + 1 :]
                 break
-    if header and data and _is_subheader_row(data[0]):
+    while header and data and _is_subheader_row(data[0]):
         header = _merge_header_rows(header, data[0])
         data = data[1:]
     mapped_indexes: dict[int, int] = {}
@@ -789,12 +1043,37 @@ def _rows_from_header_and_data(
                     continue
                 mapped_indexes[idx] = dest_idx
                 used_dest_indexes.add(dest_idx)
+    header_mapped_quantity_count = sum(
+        1
+        for dest_idx in mapped_indexes.values()
+        if 0 <= dest_idx < len(fields) and _is_quantity_field_name(fields[dest_idx])
+    )
     if not mapped_indexes:
         if header and len(header) == len(fields):
             mapped_indexes = {idx: idx for idx in range(len(header))}
         elif data and len(data[0]) == len(fields):
             mapped_indexes = {idx: idx for idx in range(len(fields))}
     mapped_indexes = _infer_mapped_indexes(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
+        header=header,
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _realign_quantity_mapping_by_numeric_block(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+        preserve_sparse_full_header_mapping=(
+            header_mapped_quantity_count
+            >= sum(1 for field in fields if _is_quantity_field_name(field))
+        ),
+    )
+    mapped_indexes = _fill_remaining_quantity_mapping_by_order(
         data=data,
         fields=fields,
         mapped_indexes=mapped_indexes,
@@ -967,7 +1246,7 @@ def _resolve_structured_table_mapping(
                 header_height += idx + 1
                 data = data[idx + 1 :]
                 break
-    if header and data and _is_subheader_row(data[0]):
+    while header and data and _is_subheader_row(data[0]):
         header = _merge_header_rows(header, data[0])
         header_height += 1
         data = data[1:]
@@ -988,6 +1267,22 @@ def _resolve_structured_table_mapping(
         elif data and len(data[0]) == len(fields):
             mapped_indexes = {idx: idx for idx in range(len(fields))}
     mapped_indexes = _infer_mapped_indexes(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
+        header=header,
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _realign_quantity_mapping_by_numeric_block(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _fill_remaining_quantity_mapping_by_order(
         data=data,
         fields=fields,
         mapped_indexes=mapped_indexes,

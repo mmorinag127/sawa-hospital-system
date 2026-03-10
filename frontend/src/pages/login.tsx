@@ -146,8 +146,11 @@ export default function LoginPage() {
 
       <section className="panel">
         <header className="panel-header">
-          <h2>Basic認証 (暫定)</h2>
+          <h2>Basic認証 (セッションのみ)</h2>
         </header>
+        <p className="subtle">
+          ブラウザを閉じると破棄されます。長期利用は Google ログインを使ってください。
+        </p>
         <form className="form-grid" onSubmit={submit}>
           <label className="field">
             <span className="field-label">Username</span>
@@ -167,7 +170,7 @@ export default function LoginPage() {
             />
           </label>
           <button className="btn primary" type="submit">
-            保存して進む
+            セッションで進む
           </button>
         </form>
         {message && <p className="message">{message}</p>}

@@ -16,6 +16,25 @@ from app.template_match import choose_template_and_warp
 _RIGHT_ANGLE_ROTATIONS = (0, 90, 180, 270)
 
 
+def _empty_correction_summary(*, enabled: bool) -> dict[str, Any]:
+    return {
+        "enabled": enabled,
+        "applied": False,
+        "document_rotation_deg": 0,
+        "applied_page_count": 0,
+        "template_warp_page_count": 0,
+        "deskew_page_count": 0,
+        "position_normalized_page_count": 0,
+        "corrected_page_count": 0,
+        "corrected_pdf_generated": False,
+        "corrected_pdf_changed": False,
+        "corrected_pdf_byte_length": 0,
+        "corrected_pdf_uploaded": False,
+        "corrected_pdf_uri": None,
+        "pages": [],
+    }
+
+
 def _read_bool_env(name: str, default: bool) -> bool:
     value = str(os.environ.get(name, "") or "").strip().lower()
     if not value:
@@ -557,16 +576,7 @@ def correct_page_images(
 ) -> tuple[list[tuple[int, np.ndarray]], dict[str, Any]]:
     pages = [(int(page_index), image.copy()) for page_index, image in page_images if image is not None]
     if not pages:
-        return [], {
-            "enabled": True,
-            "applied": False,
-            "document_rotation_deg": 0,
-            "applied_page_count": 0,
-            "template_warp_page_count": 0,
-            "deskew_page_count": 0,
-            "position_normalized_page_count": 0,
-            "pages": [],
-        }
+        return [], _empty_correction_summary(enabled=True)
     template_ids: list[str] = []
     if preferred_template_id and str(preferred_template_id).strip():
         template_ids.append(str(preferred_template_id).strip())
@@ -623,6 +633,12 @@ def correct_page_images(
         "template_warp_page_count": template_warp_page_count,
         "deskew_page_count": deskew_page_count,
         "position_normalized_page_count": position_normalized_page_count,
+        "corrected_page_count": len(corrected_pages),
+        "corrected_pdf_generated": False,
+        "corrected_pdf_changed": False,
+        "corrected_pdf_byte_length": 0,
+        "corrected_pdf_uploaded": False,
+        "corrected_pdf_uri": None,
         "pages": page_diags,
     }
     return corrected_pages, summary
@@ -637,16 +653,7 @@ def correct_pdf_for_yomitoku(
     preferred_template_ids: list[str] | None = None,
 ) -> tuple[bytes, dict[str, Any], list[tuple[int, np.ndarray]] | None]:
     if not _read_bool_env("OCR_ENABLE_PAGE_CORRECTION", True):
-        return pdf_bytes, {
-            "enabled": False,
-            "applied": False,
-            "document_rotation_deg": 0,
-            "applied_page_count": 0,
-            "template_warp_page_count": 0,
-            "deskew_page_count": 0,
-            "position_normalized_page_count": 0,
-            "pages": [],
-        }, None
+        return pdf_bytes, _empty_correction_summary(enabled=False), None
     page_images = render_pdf_to_page_images(pdf_bytes, dpi)
     corrected_pages, summary = correct_page_images(
         page_images=page_images,
@@ -657,4 +664,7 @@ def correct_pdf_for_yomitoku(
     if not summary.get("applied"):
         return pdf_bytes, summary, None
     corrected_pdf_bytes = _save_pdf([image for _, image in corrected_pages])
+    summary["corrected_pdf_generated"] = bool(corrected_pdf_bytes)
+    summary["corrected_pdf_changed"] = bool(corrected_pdf_bytes and corrected_pdf_bytes != pdf_bytes)
+    summary["corrected_pdf_byte_length"] = int(len(corrected_pdf_bytes or b""))
     return corrected_pdf_bytes or pdf_bytes, summary, corrected_pages

@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import base64
 from fastapi.testclient import TestClient
 from google.auth.exceptions import RefreshError
 
@@ -13,6 +14,11 @@ from src.services import order_service  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.document import OrderDocument  # noqa: E402
 from sqlalchemy import select  # noqa: E402
+
+
+def _basic_header(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def test_ingest_contract_creates_order(tmp_path):
@@ -73,3 +79,39 @@ def test_watch_refresh_returns_503_on_invalid_grant(monkeypatch):
     res = client.post("/watch-refresh")
     assert res.status_code == 503
     assert res.json().get("detail") == "invalid_grant"
+
+
+def test_ingest_email_requires_operator_auth(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+
+    order_service.clear_all()
+    client = TestClient(app)
+    pdf_path = tmp_path / "auth-file1.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = {
+        "message_id": "msg-auth-1",
+        "pdf_uri": str(pdf_path),
+        "received_at": "2025-12-23T10:00:00",
+    }
+
+    unauthorized = client.post("/ingest/email", json=payload)
+    assert unauthorized.status_code == 401
+
+    authorized = client.post(
+        "/ingest/email",
+        json=payload,
+        headers=_basic_header("operator", "secret"),
+    )
+    assert authorized.status_code == 202
+
+
+def test_watch_refresh_requires_operator_auth(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    client = TestClient(app)
+
+    unauthorized = client.post("/watch-refresh")
+    assert unauthorized.status_code == 401

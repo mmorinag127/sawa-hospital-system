@@ -31,6 +31,7 @@
 補足:
 - `task predeploy_prod_checks` は `STRICT_OCR_QUALITY=1` で実行する（fail-fast）。
 - provider行ごとの `gate_status=warming_up` は許容（failではない）。
+- `scope.mode == "explicit_only"` かつ `scope.included_jobs == 0` の場合は、全量が新しい explicit tag へ切り替わるまで `gate.status == "insufficient_data"` を warming-up として警告扱いにする。
 - 直近失敗パターンは `task ocr_reparse_failure_report` で集計し、同時に回帰テスト追加対象を洗い出す。
 
 ## 実行方法

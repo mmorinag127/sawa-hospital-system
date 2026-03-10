@@ -6,6 +6,7 @@ from sqlalchemy import select, update, func, desc
 
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
+from src.models.ocr_job import OcrJob
 
 
 def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -183,13 +184,113 @@ def reset_stale_processing(minutes: int | None = None, limit: int = 100) -> list
 
 
 def summarize_ingest_jobs() -> dict[str, Any]:
+    stale_before = _stale_threshold()
+    now = datetime.utcnow()
     with session_scope() as session:
         rows = session.execute(
             select(IngestJob.status, func.count(IngestJob.id))
             .group_by(IngestJob.status)
         ).all()
         counts = {status: int(count) for status, count in rows if status}
+        oldest_pending_at = session.execute(
+            select(func.min(IngestJob.created_at)).where(IngestJob.status.in_(["pending", "error"]))
+        ).scalar_one_or_none()
+        oldest_processing_at = session.execute(
+            select(func.min(IngestJob.started_at)).where(IngestJob.status == "processing")
+        ).scalar_one_or_none()
+        stale_processing_count = int(
+            session.execute(
+                select(func.count(IngestJob.id)).where(
+                    (IngestJob.status == "processing") & (IngestJob.started_at < stale_before)
+                )
+            ).scalar_one()
+            or 0
+        )
+        eligible_backlog_count = (
+            counts.get("pending", 0)
+            + counts.get("error", 0)
+            + stale_processing_count
+        )
         return {
             "total": sum(counts.values()),
             "counts": counts,
+            "pending_count": counts.get("pending", 0),
+            "error_count": counts.get("error", 0),
+            "processing_count": counts.get("processing", 0),
+            "done_count": counts.get("done", 0),
+            "stale_processing_count": stale_processing_count,
+            "eligible_backlog_count": eligible_backlog_count,
+            "oldest_pending_at": oldest_pending_at.isoformat() if oldest_pending_at else None,
+            "oldest_pending_seconds": (
+                max(int((now - oldest_pending_at).total_seconds()), 0) if oldest_pending_at else None
+            ),
+            "oldest_processing_at": oldest_processing_at.isoformat() if oldest_processing_at else None,
+            "oldest_processing_seconds": (
+                max(int((now - oldest_processing_at).total_seconds()), 0)
+                if oldest_processing_at
+                else None
+            ),
         }
+
+
+def summarize_backlog_metrics() -> dict[str, Any]:
+    ingest_summary = summarize_ingest_jobs()
+    now = datetime.utcnow()
+    recent_since = now - timedelta(hours=int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")))
+    with session_scope() as session:
+        rows = session.execute(
+            select(OcrJob.status, func.count(OcrJob.id)).group_by(OcrJob.status)
+        ).all()
+        counts = {status: int(count) for status, count in rows if status}
+        active_count = counts.get("running", 0) + counts.get("pending", 0)
+        oldest_active_at = session.execute(
+            select(func.min(OcrJob.created_at)).where(OcrJob.status.in_(["running", "pending"]))
+        ).scalar_one_or_none()
+        recent_backlog_skipped_count = int(
+            session.execute(
+                select(func.count(OcrJob.id)).where(
+                    (OcrJob.error_message == "backlog_skipped") & (OcrJob.updated_at >= recent_since)
+                )
+            ).scalar_one()
+            or 0
+        )
+        recent_failed_count = int(
+            session.execute(
+                select(func.count(OcrJob.id)).where(
+                    (OcrJob.status == "failed") & (OcrJob.updated_at >= recent_since)
+                )
+            ).scalar_one()
+            or 0
+        )
+    ingest_queue_depth = int(ingest_summary.get("eligible_backlog_count") or 0)
+    oldest_pending_seconds = ingest_summary.get("oldest_pending_seconds")
+    status = "ok"
+    if ingest_queue_depth > 0 or active_count > 0:
+        status = "warn"
+    if recent_backlog_skipped_count > 0:
+        status = "fail"
+    return {
+        "status": status,
+        "ingest_queue_depth": ingest_queue_depth,
+        "ocr_queue_depth": active_count,
+        "exports_queue_depth": 0,
+        "oldest_pending_seconds": oldest_pending_seconds or 0,
+        "ingest": ingest_summary,
+        "ocr": {
+            "total": sum(counts.values()),
+            "counts": counts,
+            "active_count": active_count,
+            "running_count": counts.get("running", 0),
+            "pending_count": counts.get("pending", 0),
+            "failed_count": counts.get("failed", 0),
+            "done_count": counts.get("done", 0),
+            "completed_count": counts.get("completed", 0),
+            "oldest_active_at": oldest_active_at.isoformat() if oldest_active_at else None,
+            "oldest_active_seconds": (
+                max(int((now - oldest_active_at).total_seconds()), 0) if oldest_active_at else None
+            ),
+            "recent_backlog_skipped_count": recent_backlog_skipped_count,
+            "recent_failed_count": recent_failed_count,
+            "recent_window_hours": int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")),
+        },
+    }

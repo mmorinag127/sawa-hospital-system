@@ -1,0 +1,41 @@
+{
+  "default_statuses": [
+    "trusted"
+  ],
+  "suites": {
+    "yomitoku": {
+      "ORD7499f262": {
+        "status": "trusted",
+        "note": "Reviewed expected_sheet label"
+      },
+      "ORDb266d5d9": {
+        "status": "provisional",
+        "note": "Known label errors in expected_sheet"
+      },
+      "ORDb67687a7": {
+        "status": "provisional",
+        "note": "Known label errors in expected_sheet"
+      }
+    },
+    "llm_row_index_copy": {
+      "ORDb266d5d9": {
+        "status": "provisional",
+        "note": "Depends on provisional base sheet label"
+      },
+      "ORDbabf3c73": {
+        "status": "trusted",
+        "note": "Reviewed row-index copy label"
+      }
+    },
+    "manual_labels": {
+      "ORDc935f9e2": {
+        "status": "trusted",
+        "note": "Enable after exporting manual label and adding matching fixture PDF"
+      },
+      "ORDbabf3c73": {
+        "status": "trusted",
+        "note": "Optional manual-label override path for reviewed case"
+      }
+    }
+  }
+}

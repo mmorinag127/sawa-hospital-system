@@ -17,7 +17,6 @@ class UserContext:
         self.role = role
 
 
-AUTH_DISABLED = os.getenv("AUTH_DISABLED", "true").lower() == "true"
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_IDS = [
     item.strip()
@@ -40,6 +39,10 @@ _USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS"
 _USER_ROLE_CACHE_LOCK = threading.Lock()
 _USER_ROLE_CACHE_EXPIRES_AT = 0.0
 _USER_ROLE_CACHE: dict[str, str] = {}
+
+
+def is_auth_disabled() -> bool:
+    return os.getenv("AUTH_DISABLED", "false").lower() == "true"
 
 
 def invalidate_user_cache() -> None:
@@ -179,7 +182,7 @@ def _google_email_or_none(request: Request) -> str | None:
 
 
 def get_current_admin(request: Request) -> UserContext:
-    if AUTH_DISABLED:
+    if is_auth_disabled():
         return UserContext(role="admin")
     google_email = _google_email_or_none(request)
     if google_email:
@@ -195,15 +198,22 @@ def get_current_admin(request: Request) -> UserContext:
             return UserContext(role="admin")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
-    admin_user = os.getenv("ADMIN_USER") or os.getenv("OPERATOR_USER")
-    admin_pass = os.getenv("ADMIN_PASSWORD") or os.getenv("OPERATOR_PASSWORD")
+    admin_user = os.getenv("ADMIN_USER")
+    admin_pass = os.getenv("ADMIN_PASSWORD")
     if _matches_basic(username, password, admin_user, admin_pass):
         return UserContext(role="admin")
+    if (
+        username
+        and password
+        and username == os.getenv("OPERATOR_USER")
+        and password == os.getenv("OPERATOR_PASSWORD")
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     _raise_basic_unauthorized("Admin")
 
 
 def get_current_operator(request: Request) -> UserContext:
-    if AUTH_DISABLED:
+    if is_auth_disabled():
         return UserContext(role="operator")
     google_email = _google_email_or_none(request)
     if google_email:

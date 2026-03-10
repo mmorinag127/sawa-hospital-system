@@ -1,14 +1,18 @@
 import pathlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
-
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
+from src.db import session_scope  # noqa: E402
+from src.models.ingest_job import IngestJob  # noqa: E402
+from src.models.ocr_job import OcrJob  # noqa: E402
 from src.services import order_service  # noqa: E402
+from src.services.ingest_job_service import create_ingest_job  # noqa: E402
+from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -46,6 +50,12 @@ def test_system_status_and_admin_endpoints():
     quality = status_payload.get("ocr_reparse_quality") or {}
     assert isinstance(quality.get("gate"), dict)
     assert quality.get("gate", {}).get("status") in {"pass", "fail", "insufficient_data", "error"}
+    assert (quality.get("scope") or {}).get("job_type") == "llm_reparse_only"
+    assert (quality.get("scope") or {}).get("mode") in {"explicit_only", "legacy_heuristic"}
+    pipeline = status_payload.get("ocr_pipeline") or {}
+    assert pipeline.get("trigger_mode") in {"gcs_only", "gcs_http", "http_only"}
+    assert pipeline.get("wait_strategy") == "poll_output_gcs"
+    assert isinstance(pipeline.get("sync_wait_supported"), bool)
 
     quota_res = client.get("/system/db/quota")
     assert quota_res.status_code == 200
@@ -65,3 +75,64 @@ def test_system_status_and_admin_endpoints():
     assert clear_res.status_code == 200
     clear_payload = clear_res.json()
     assert clear_payload.get("result", {}).get("total_removed", 0) >= 1
+
+
+def test_health_backlog_returns_real_ingest_and_ocr_metrics():
+    order_service.clear_all()
+    now = datetime.utcnow()
+    create_ingest_job(
+        {
+            "message_id": "msg-backlog-pending",
+            "pdf_uri": "file://pending.pdf",
+            "received_at": now.isoformat(),
+        }
+    )
+    create_ingest_job(
+        {
+            "message_id": "msg-backlog-processing",
+            "pdf_uri": "file://processing.pdf",
+            "received_at": now.isoformat(),
+        }
+    )
+    create_job("OCR-backlog-running", input_reference="file://ocr-running.pdf", status="running")
+    create_job("OCR-backlog-skipped", input_reference="file://ocr-skipped.pdf", status="failed")
+    update_job("OCR-backlog-skipped", status="failed", error_message="backlog_skipped")
+
+    with session_scope() as session:
+        pending_job = session.get(IngestJob, "msg-backlog-pending")
+        processing_job = session.get(IngestJob, "msg-backlog-processing")
+        running_job = session.get(OcrJob, "OCR-backlog-running")
+        skipped_job = session.get(OcrJob, "OCR-backlog-skipped")
+        assert pending_job is not None
+        assert processing_job is not None
+        assert running_job is not None
+        assert skipped_job is not None
+
+        pending_job.created_at = now - timedelta(minutes=15)
+        pending_job.updated_at = now - timedelta(minutes=15)
+        processing_job.status = "processing"
+        processing_job.created_at = now - timedelta(hours=1)
+        processing_job.started_at = now - timedelta(minutes=45)
+        processing_job.updated_at = now - timedelta(minutes=45)
+        running_job.created_at = now - timedelta(minutes=20)
+        running_job.updated_at = now - timedelta(minutes=20)
+        skipped_job.created_at = now - timedelta(minutes=10)
+        skipped_job.updated_at = now - timedelta(minutes=5)
+
+    client = TestClient(app)
+    res = client.get("/health/backlog")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload.get("status") == "fail"
+    assert payload.get("ingest_queue_depth") == 2
+    assert payload.get("ocr_queue_depth") == 1
+    assert payload.get("oldest_pending_seconds", 0) >= 60
+    ingest = payload.get("ingest") or {}
+    ocr = payload.get("ocr") or {}
+    assert ingest.get("pending_count") == 1
+    assert ingest.get("processing_count") == 1
+    assert ingest.get("stale_processing_count") == 1
+    assert ingest.get("eligible_backlog_count") == 2
+    assert ocr.get("active_count") == 1
+    assert ocr.get("recent_backlog_skipped_count") == 1

@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import base64
 from datetime import date, datetime
 
 from fastapi.testclient import TestClient
@@ -14,6 +15,11 @@ from src.services import config_service  # noqa: E402
 from src.services import facility_service  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+
+
+def _basic_header(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def _seed_monthly_menu_2026_01() -> None:
@@ -324,6 +330,43 @@ def test_orders_facility_template_columns_save_api_flow():
         )
     finally:
         assert facility_service.update_config(order["facility"], previous_config)
+
+
+def test_orders_facility_template_columns_requires_admin_auth(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ADMIN_USER", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-secret")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "operator-secret")
+
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-admin-001")
+    columns = [
+        {"index": 0, "role": "date", "header": "日付", "name": "date"},
+        {
+            "index": 1,
+            "role": "quantity",
+            "header": "常食2F",
+            "name": "qty.regular_2f",
+            "diet_type": "regular",
+            "area_id": "2F",
+        },
+    ]
+
+    operator_res = client.put(
+        f"/orders/{order['id']}/facility-template-columns",
+        json={"columns": columns},
+        headers=_basic_header("operator", "operator-secret"),
+    )
+    assert operator_res.status_code == 403
+
+    admin_res = client.put(
+        f"/orders/{order['id']}/facility-template-columns",
+        json={"columns": columns},
+        headers=_basic_header("admin", "admin-secret"),
+    )
+    assert admin_res.status_code == 200
 
 
 def test_orders_facility_template_columns_save_updates_ocr_sheet_header():

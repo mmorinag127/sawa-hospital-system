@@ -101,20 +101,43 @@ if not strict_watch and watch_status not in {"ok"}:
 
 quality = data.get("ocr_reparse_quality")
 gate_status = ""
+scope_mode = ""
+included_jobs = 0
 if isinstance(quality, dict):
     gate = quality.get("gate")
     if isinstance(gate, dict):
         gate_status = str(gate.get("status") or "").strip().lower()
+    scope = quality.get("scope")
+    if isinstance(scope, dict):
+        scope_mode = str(scope.get("mode") or "").strip().lower()
+        try:
+            included_jobs = int(scope.get("included_jobs") or 0)
+        except Exception:
+            included_jobs = 0
 
 if strict_quality:
-    if gate_status not in {"pass"}:
+    allow_warming_up = (
+        gate_status == "insufficient_data"
+        and scope_mode == "explicit_only"
+        and included_jobs == 0
+    )
+    if gate_status not in {"pass"} and not allow_warming_up:
         fail_detail = ""
         if isinstance(quality, dict):
             gate = quality.get("gate")
             if isinstance(gate, dict):
-                fail_detail = f" fail_providers={gate.get('fail_providers')} warming_up={gate.get('warming_up_providers')}"
+                fail_detail = (
+                    f" fail_providers={gate.get('fail_providers')}"
+                    f" warming_up={gate.get('warming_up_providers')}"
+                    f" scope_mode={scope_mode or 'missing'} included_jobs={included_jobs}"
+                )
         print(f"[FAIL] ocr_reparse_quality.gate.status is {gate_status or 'missing'}{fail_detail}")
         raise SystemExit(1)
+    if allow_warming_up:
+        print(
+            "[WARN] ocr_reparse_quality.gate.status is insufficient_data "
+            f"(explicit_only warming up; included_jobs={included_jobs})"
+        )
 else:
     if gate_status and gate_status != "pass":
         print(f"[WARN] ocr_reparse_quality.gate.status is {gate_status} (non-blocking)")

@@ -45,6 +45,49 @@ def _normalize_provider(value: Any) -> str:
     return value.strip().lower()
 
 
+def _looks_like_reparse_quality_job(
+    metrics: dict[str, Any],
+    *,
+    status: str | None = None,
+    error_message: str | None = None,
+) -> tuple[bool, str]:
+    if not isinstance(metrics, dict):
+        return False, "metrics_missing"
+    quality_track = _normalize_provider(metrics.get("quality_track"))
+    if quality_track:
+        if quality_track == "llm_reparse":
+            return True, "quality_track"
+        return False, f"quality_track_{quality_track}"
+    provider = _normalize_provider(metrics.get("provider") or metrics.get("requested_provider"))
+    if provider not in {"openai", "gemini"}:
+        return False, "provider_not_llm"
+    status_norm = str(status or "").strip().lower()
+    if status_norm in {"done", "empty"}:
+        return True, f"status_{status_norm}"
+    if status_norm == "failed" and (
+        _normalize_provider(metrics.get("error"))
+        or str(metrics.get("error") or "").strip()
+    ):
+        return True, "failed_with_error"
+    if isinstance(metrics.get("llm_assist"), bool) and metrics.get("llm_assist") is True:
+        return True, "llm_assist"
+    if _normalize_provider(metrics.get("requested_provider")) in {"openai", "gemini"}:
+        return True, "requested_provider"
+    if any(
+        key in metrics
+        for key in (
+            "llm_audit",
+            "llm_pre_inference_audit",
+            "llm_second_pass_audit",
+            "repair_pass_applied",
+            "before_count",
+            "after_count",
+        )
+    ):
+        return True, "reparse_metrics"
+    return False, "non_reparse_llm_job"
+
+
 def _new_provider_bucket(provider: str) -> dict[str, Any]:
     return {
         "provider": provider,
@@ -58,6 +101,10 @@ def _new_provider_bucket(provider: str) -> dict[str, Any]:
         "validation_failed": 0,
         "last_updated_at": None,
     }
+
+
+def _job_has_explicit_quality_track(metrics: dict[str, Any]) -> bool:
+    return _normalize_provider(metrics.get("quality_track")) in {"llm_reparse", "non_llm_reparse"}
 
 
 def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
@@ -77,6 +124,9 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
 
     buckets: dict[str, dict[str, Any]] = defaultdict(dict)
     evaluated_jobs = 0
+    included_jobs = 0
+    skipped_non_reparse_jobs = 0
+    skipped_reasons: dict[str, int] = defaultdict(int)
 
     with session_scope() as session:
         rows = (
@@ -89,22 +139,52 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
                 )
                 .where(OcrJob.updated_at >= since)
                 .order_by(OcrJob.updated_at.desc())
-                .limit(max(sample_limit * 4, sample_limit))
+                .limit(max(sample_limit * 6, sample_limit))
             )
             .all()
         )
+
+    explicit_quality_track_jobs = 0
+    for _status_value, metrics_value, _error_message_value, _updated_at_value in rows:
+        metrics = metrics_value if isinstance(metrics_value, dict) else {}
+        if _job_has_explicit_quality_track(metrics):
+            explicit_quality_track_jobs += 1
+
+    use_explicit_quality_track_only = explicit_quality_track_jobs > 0
 
     for status_value, metrics_value, error_message_value, updated_at_value in rows:
         if evaluated_jobs >= sample_limit:
             break
         metrics = metrics_value if isinstance(metrics_value, dict) else {}
+        if use_explicit_quality_track_only and not _job_has_explicit_quality_track(metrics):
+            skipped_non_reparse_jobs += 1
+            skipped_reasons["legacy_untagged_job"] += 1
+            continue
+        status_value = str(status_value or "").strip().lower()
+        error_message_text = (
+            str(error_message_value or "").strip()
+            if not isinstance(error_message_value, str)
+            else error_message_value.strip()
+        )
+        include_job, skip_reason = _looks_like_reparse_quality_job(
+            metrics,
+            status=status_value,
+            error_message=error_message_text,
+        )
+        if not include_job:
+            skipped_non_reparse_jobs += 1
+            skipped_reasons[skip_reason] += 1
+            continue
         provider = _normalize_provider(metrics.get("provider") or metrics.get("requested_provider"))
         if not provider:
+            skipped_non_reparse_jobs += 1
+            skipped_reasons["provider_missing"] += 1
             continue
         if provider not in buckets:
             buckets[provider] = _new_provider_bucket(provider)
         bucket = buckets[provider]
         evaluated_jobs += 1
+        included_jobs += 1
         bucket["total"] += 1
 
         status = str(status_value or "").strip().lower()
@@ -214,8 +294,20 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
             "sample_limit": sample_limit,
             "min_samples": min_samples,
             "evaluated_jobs": evaluated_jobs,
+            "included_jobs": included_jobs,
+            "skipped_non_reparse_jobs": skipped_non_reparse_jobs,
+            "explicit_quality_track_jobs": explicit_quality_track_jobs,
+            "scope_mode": "explicit_only" if use_explicit_quality_track_only else "legacy_heuristic",
             "since": since.isoformat(),
             "generated_at": now_dt.isoformat(),
+        },
+        "scope": {
+            "job_type": "llm_reparse_only",
+            "mode": "explicit_only" if use_explicit_quality_track_only else "legacy_heuristic",
+            "included_jobs": included_jobs,
+            "skipped_non_reparse_jobs": skipped_non_reparse_jobs,
+            "explicit_quality_track_jobs": explicit_quality_track_jobs,
+            "skipped_reasons": dict(sorted(skipped_reasons.items())),
         },
         "thresholds": {
             "min_success_rate": min_success_rate,

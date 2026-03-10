@@ -40,6 +40,40 @@ def _template_staff_daycare() -> dict:
     }
 
 
+def _template_staff_forbidden_sesame() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.sesame_allergy_x",
+            "qty.change_1_x",
+            "remarks",
+        ]
+    }
+
+
+def _template_diabetes_forbidden_change() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.diabetes_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+            "remarks",
+        ]
+    }
+
+
 def _template_mixed() -> dict:
     return {
         "main_ocr_row_fields": [
@@ -258,6 +292,90 @@ def test_rows_from_structured_payload_maps_mixed_regular_bag_and_forbidden_subhe
 
     assert rows == [
         ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+    ]
+
+
+def test_rows_from_structured_payload_prefers_quantity_column_order_when_header_family_is_stale():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+                            ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_staff_forbidden_sesame())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+    ]
+
+
+def test_rows_from_structured_payload_prefers_quantity_column_order_for_diabetes_family():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+                            ["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", "8", "note"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_diabetes_forbidden_change())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", "8", "note"],
+    ]
+
+
+def test_rows_from_pipeline_payload_realigns_stale_floor_family_quantity_block_for_staff_facility():
+    payload = {
+        "table_raw": """
+|日付|区 分||献立|常食||軟菜||ミキサー||備考欄|
+|-|-|-|-|-|-|-|-|-|-|-|
+|||||2F|3F|2F|3F|2F|3F||
+|2/15|朝|副|Menu A||12|1|2|3|4||
+""".strip()
+    }
+
+    rows = _rows_from_pipeline_payload(payload, _template_staff_forbidden_sesame())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "", ""],
+    ]
+
+
+def test_rows_from_pipeline_payload_realigns_split_forbidden_headers_by_numeric_block_order():
+    payload = {
+        "table_raw": """
+|日付|区分|メニュー|常食|禁食|||変更1||備考欄|
+|-|-|-|-|-|-|-|-|-|-|
+|||||肉禁|魚禁||変更2||
+|2/15|朝|Menu A||20|4|5|6|7||
+""".strip()
+    }
+
+    rows = _rows_from_pipeline_payload(payload, _template_diabetes_forbidden_change())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", "", ""],
     ]
 
 

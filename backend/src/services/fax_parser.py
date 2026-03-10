@@ -573,6 +573,7 @@ def parse_order_lines(
     use_change_column = quantity_rules.get("use_change_column_if_present", True)
     strict_numeric_quantity_cell = bool(quantity_rules.get("strict_numeric_quantity_cell", False))
     allow_blank_structure_rows = bool(quantity_rules.get("allow_blank_structure_rows", False))
+    rows_are_body_only = bool(quantity_rules.get("rows_are_body_only", False))
     max_quantity_abs_raw = quantity_rules.get("max_quantity_abs")
     if max_quantity_abs_raw is None and strict_numeric_quantity_cell:
         max_quantity_abs_raw = os.getenv("OCR_SHEET_MAX_QTY", "150")
@@ -586,6 +587,7 @@ def parse_order_lines(
         max_quantity_abs = None
 
     header_rows = int(template.get("header_rows", 0))
+    effective_header_rows = 0 if rows_are_body_only else header_rows
     columns = template.get("columns", []) or []
     token_columns = template.get("token_columns") or []
     token_row_tolerance = float(template.get("token_row_tolerance", 0.008))
@@ -665,7 +667,7 @@ def parse_order_lines(
         date_indexes = [
             col.get("index") for col in columns if col.get("role") == "date"
         ]
-        for row in rows[header_rows:]:
+        for row in rows[effective_header_rows:]:
             for idx in date_indexes:
                 if idx is None or idx >= len(row):
                     continue
@@ -695,7 +697,7 @@ def parse_order_lines(
     qty_carry: dict[int, float] = {}
     qty_carry_key = None
 
-    for source_row_index, row in enumerate(rows[header_rows:]):
+    for source_row_index, row in enumerate(rows[effective_header_rows:]):
         base = {
             "date": None,
             "daypart": None,

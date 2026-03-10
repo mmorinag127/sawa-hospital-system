@@ -288,6 +288,14 @@ def _normalize_field_diet_token(value: object) -> str:
     token = re.sub(r"[\s　]+", "", token)
     if not token:
         return "unknown"
+    if ("bag" in token or "袋" in token) and (
+        "regular" in token or "常食" in token or "通常" in token
+    ):
+        return "regular_bag"
+    if ("soft" in token or "軟菜" in token or "やわ" in token) and (
+        "mixer" in token or "ミキサ" in token
+    ):
+        return "soft_mixer"
     if "regular" in token or "常食" in token or "通常" in token:
         return "regular"
     if "soft" in token or "軟菜" in token or "やわ" in token:
@@ -310,6 +318,12 @@ def _normalize_field_diet_token(value: object) -> str:
         return "change_2"
     sanitized = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
     return sanitized or "unknown"
+
+
+def _is_explicit_unknown_marker(value: object) -> bool:
+    token = str(value or "").strip().lower()
+    token = re.sub(r"[\s　]+", "", token)
+    return token in {"unknown", "none", "null", "na", "n/a", "不明", "なし"}
 
 
 def _normalize_field_area_token(value: object) -> str:
@@ -378,10 +392,20 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
         header = str(col.get("header") or "").strip()
         name = str(col.get("name") or "").strip()
         if role == "quantity":
-            inferred_diet = _normalize_field_diet_token(header or name or col.get("diet_type"))
+            label_token = header or name
+            inferred_diet = _normalize_field_diet_token(label_token or col.get("diet_type"))
             explicit_diet = _normalize_field_diet_token(col.get("diet_type"))
             diet = inferred_diet if (header or name) else explicit_diet
-            if not (header or name) and diet in {"", "unknown"} and explicit_diet not in {"", "unknown"}:
+            if (
+                explicit_diet not in {"", "unknown"}
+                and (
+                    not label_token
+                    or (
+                        inferred_diet in {"", "unknown"}
+                        and not _is_explicit_unknown_marker(label_token)
+                    )
+                )
+            ):
                 diet = explicit_diet
             raw_area = str(col.get("area_id") or "").strip()
             area = _normalize_field_area_token(raw_area)

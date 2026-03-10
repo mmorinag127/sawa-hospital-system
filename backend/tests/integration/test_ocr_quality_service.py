@@ -54,6 +54,7 @@ def test_summarize_reparse_quality_detects_provider_gate_fail(monkeypatch):
             job_id=f"OCR-ORD-QA-OPENAI-{idx}",
             provider="openai",
             status="done",
+            metrics={"llm_assist": True, "requested_provider": "openai"},
             updated_at=now - timedelta(minutes=idx),
         )
     for idx in range(2):
@@ -61,6 +62,7 @@ def test_summarize_reparse_quality_detects_provider_gate_fail(monkeypatch):
             job_id=f"OCR-ORD-QA-GEMINI-DONE-{idx}",
             provider="gemini",
             status="done",
+            metrics={"llm_assist": True, "requested_provider": "gemini"},
             updated_at=now - timedelta(minutes=10 + idx),
         )
     for idx in range(3):
@@ -68,7 +70,11 @@ def test_summarize_reparse_quality_detects_provider_gate_fail(monkeypatch):
             job_id=f"OCR-ORD-QA-GEMINI-FAIL-{idx}",
             provider="gemini",
             status="failed",
-            metrics={"error": "sheet_canonical_mismatch"},
+            metrics={
+                "llm_assist": True,
+                "requested_provider": "gemini",
+                "error": "sheet_canonical_mismatch",
+            },
             error_message="sheet_canonical_mismatch",
             updated_at=now - timedelta(minutes=20 + idx),
         )
@@ -96,6 +102,7 @@ def test_summarize_reparse_quality_marks_insufficient_data(monkeypatch):
         job_id="OCR-ORD-QA-OPENAI-ONLY-1",
         provider="openai",
         status="done",
+        metrics={"llm_assist": True, "requested_provider": "openai"},
         updated_at=now - timedelta(minutes=1),
     )
     monkeypatch.setenv("OCR_REPARSE_QUALITY_MIN_SAMPLES", "2")
@@ -115,3 +122,118 @@ def test_summarize_reparse_quality_reports_insufficient_data_when_no_samples():
     payload = summarize_reparse_quality()
     assert payload.get("gate", {}).get("status") == "insufficient_data"
     assert payload.get("providers") == []
+
+
+def test_summarize_reparse_quality_excludes_non_reparse_llm_jobs(monkeypatch):
+    _clear_ocr_jobs()
+    now = datetime.utcnow()
+    _seed_job(
+        job_id="OCR-ORD-NON-REPARSE-1",
+        provider="gemini",
+        status="failed",
+        metrics={"changed": False},
+        error_message="sheet_canonical_mismatch",
+        updated_at=now - timedelta(minutes=3),
+    )
+    _seed_job(
+        job_id="OCR-ORD-REPARSE-1",
+        provider="gemini",
+        status="done",
+        metrics={"llm_assist": True, "requested_provider": "gemini", "changed": True},
+        updated_at=now - timedelta(minutes=1),
+    )
+    monkeypatch.setenv("OCR_REPARSE_QUALITY_MIN_SAMPLES", "1")
+
+    payload = summarize_reparse_quality(now=now)
+
+    assert payload.get("gate", {}).get("status") == "pass"
+    scope = payload.get("scope") or {}
+    assert scope.get("job_type") == "llm_reparse_only"
+    assert scope.get("included_jobs") == 1
+    assert scope.get("skipped_non_reparse_jobs") == 1
+    assert (scope.get("skipped_reasons") or {}).get("non_reparse_llm_job") == 1
+    providers = {row.get("provider"): row for row in payload.get("providers") or []}
+    assert providers["gemini"]["total"] == 1
+
+
+def test_summarize_reparse_quality_prefers_explicit_quality_track_over_llm_provider_heuristics(monkeypatch):
+    _clear_ocr_jobs()
+    now = datetime.utcnow()
+    _seed_job(
+        job_id="OCR-ORD-NON-LLM-TRACKED",
+        provider="gemini",
+        status="failed",
+        metrics={
+            "quality_track": "non_llm_reparse",
+            "requested_provider": "gemini",
+            "llm_assist": True,
+            "error": "sheet_canonical_mismatch",
+        },
+        error_message="sheet_canonical_mismatch",
+        updated_at=now - timedelta(minutes=2),
+    )
+    _seed_job(
+        job_id="OCR-ORD-LLM-TRACKED",
+        provider="gemini",
+        status="done",
+        metrics={
+            "quality_track": "llm_reparse",
+            "reparse_origin": "llm_assist",
+            "feedback_retry_depth": 1,
+            "requested_provider": "gemini",
+        },
+        updated_at=now - timedelta(minutes=1),
+    )
+    monkeypatch.setenv("OCR_REPARSE_QUALITY_MIN_SAMPLES", "1")
+
+    payload = summarize_reparse_quality(now=now)
+
+    assert payload.get("gate", {}).get("status") == "pass"
+    scope = payload.get("scope") or {}
+    assert scope.get("mode") == "explicit_only"
+    assert scope.get("explicit_quality_track_jobs") == 2
+    assert scope.get("included_jobs") == 1
+    assert scope.get("skipped_non_reparse_jobs") == 1
+    assert (scope.get("skipped_reasons") or {}).get("quality_track_non_llm_reparse") == 1
+    providers = {row.get("provider"): row for row in payload.get("providers") or []}
+    assert providers["gemini"]["total"] == 1
+
+
+def test_summarize_reparse_quality_ignores_legacy_untagged_jobs_when_explicit_track_exists(monkeypatch):
+    _clear_ocr_jobs()
+    now = datetime.utcnow()
+    _seed_job(
+        job_id="OCR-ORD-LEGACY-UNTAGGED-FAIL",
+        provider="gemini",
+        status="failed",
+        metrics={
+            "requested_provider": "gemini",
+            "llm_assist": True,
+            "error": "sheet_blank_anchor_drift",
+        },
+        error_message="sheet_blank_anchor_drift",
+        updated_at=now - timedelta(minutes=3),
+    )
+    _seed_job(
+        job_id="OCR-ORD-TAGGED-DONE",
+        provider="gemini",
+        status="done",
+        metrics={
+            "quality_track": "llm_reparse",
+            "requested_provider": "gemini",
+            "reparse_origin": "llm_assist",
+            "feedback_retry_depth": 0,
+        },
+        updated_at=now - timedelta(minutes=1),
+    )
+    monkeypatch.setenv("OCR_REPARSE_QUALITY_MIN_SAMPLES", "1")
+
+    payload = summarize_reparse_quality(now=now)
+
+    assert payload.get("gate", {}).get("status") == "pass"
+    scope = payload.get("scope") or {}
+    assert scope.get("mode") == "explicit_only"
+    assert scope.get("included_jobs") == 1
+    assert (scope.get("skipped_reasons") or {}).get("legacy_untagged_job") == 1
+    providers = {row.get("provider"): row for row in payload.get("providers") or []}
+    assert providers["gemini"]["failed"] == 0

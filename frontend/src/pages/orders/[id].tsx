@@ -3,6 +3,28 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
+import {
+  buildBagSummaryRows,
+  extractWeekMonthId,
+  formatBagCalculationResult,
+  formatBagSplitBreakdown,
+  formatWeekLabel,
+  groupBagSummaryRowsByDate,
+  normalizeBagGroupToken,
+  normalizeWeekId,
+  normalizeWeekValue,
+  type BagRow,
+  type BagSummaryRow,
+} from "./orderDetailUtils";
+import {
+  buildMarkdownTable,
+  buildPreviewBlocks,
+  countMarkdownLines,
+  extractFirstTable,
+  extractTableFromPage,
+  getOcrSheetColumnSpec,
+  normalizeHeaderToken,
+} from "./orderDetailOcrUtils";
 
 type OrderDetail = {
   id: string;
@@ -10,6 +32,7 @@ type OrderDetail = {
   document: string;
   week?: string | null;
   week_value?: string | null;
+  persisted_week_value?: string | null;
   week_label?: string | null;
   message_id?: string | null;
   lines: {
@@ -101,6 +124,9 @@ type OcrPage = {
   ocr_overlay_url?: string | null;
   layout_overlay_url?: string | null;
   figure_urls?: string[];
+  synthetic?: boolean | null;
+  synthetic_source?: string | null;
+  pdf_variant_used?: string | null;
 };
 
 type OcrPagesMeta = {
@@ -118,7 +144,6 @@ type OcrSheetPayload = {
   row_ids?: string[];
   source?: string;
   quantity_column_count?: number;
-  legacy_available?: boolean;
   warnings?: string[];
 };
 
@@ -179,19 +204,6 @@ type GridParams = {
   grid_expected_columns: number;
   grid_qty_gap_tolerance: number;
   grid_left_date_ratio: number;
-};
-
-type OcrEditorUiMode = "sheet" | "legacy";
-
-type BagRow = {
-  id: string;
-  date?: string | null;
-  daypart?: string | null;
-  menu_name?: string | null;
-  diet_type?: string | null;
-  area_id?: string | null;
-  bag_type?: string | null;
-  quantity?: number | null;
 };
 
 type OutputPreview = {
@@ -313,52 +325,6 @@ const defaultHeaderForFacilityTemplateColumn = (column: {
     return area === "X" ? base : `${base}${area}`;
   }
   return "";
-};
-
-const normalizeWeekId = (value?: string | null) => {
-  const text = String(value || "").trim();
-  const match = text.match(/^(\d{4})-(\d{2})$/);
-  if (!match) return "";
-  const month = Number(match[2]);
-  if (!Number.isInteger(month) || month < 1 || month > 12) return "";
-  return `${match[1]}-${match[2]}`;
-};
-
-const normalizeWeekValue = (value?: string | null) => {
-  const text = String(value || "").trim();
-  const monthId = normalizeWeekId(text);
-  if (monthId === text) return text;
-  const match = text.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
-  if (!match) return "";
-  const normalizedMonth = normalizeWeekId(match[1]);
-  if (!normalizedMonth) return "";
-  if (!match[2].startsWith(`${normalizedMonth}-`) || !match[3].startsWith(`${normalizedMonth}-`)) {
-    return "";
-  }
-  return `${normalizedMonth}@${match[2]}~${match[3]}`;
-};
-
-const extractWeekMonthId = (value?: string | null) => {
-  const normalizedRange = normalizeWeekValue(value);
-  if (!normalizedRange) return normalizeWeekId(value);
-  const directMonth = normalizeWeekId(normalizedRange);
-  if (directMonth) return directMonth;
-  const match = normalizedRange.match(/^(\d{4}-\d{2})@/);
-  return match ? match[1] : "";
-};
-
-const formatWeekLabel = (value?: string | null, fallbackLabel?: string | null) => {
-  const explicit = String(fallbackLabel || "").trim();
-  if (explicit) return explicit;
-  const normalizedRange = normalizeWeekValue(value);
-  if (normalizedRange) {
-    const match = normalizedRange.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
-    if (match) {
-      return `${match[1]} (${match[2].slice(5).replace("-", "/")}-${match[3].slice(5).replace("-", "/")})`;
-    }
-    return normalizedRange;
-  }
-  return normalizeWeekId(value) || "";
 };
 
 const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
@@ -522,83 +488,6 @@ const describeReparseWarningReason = (code: string) => {
   if (normalized === "sheet_llm_audit_failed") return "LLM監査NG";
   return code;
 };
-
-const normalizeHeaderToken = (value: string) => {
-  const normalized = value
-    .replace(/[　\s]+/g, "")
-    .replace(/[（）()[\]【】]/g, "")
-    .toLowerCase();
-  return normalized
-    .replace(/[０-９]/g, (match) => String.fromCharCode(match.charCodeAt(0) - 0xfee0))
-    .replace("ｆ", "f")
-    .replace("Ｆ", "f");
-};
-
-const isSubheaderRow = (row: string[]) => {
-  if (!row.length) return false;
-  let nonEmpty = 0;
-  let markers = 0;
-  row.forEach((cell) => {
-    const token = normalizeHeaderToken(cell);
-    if (!token) return;
-    nonEmpty += 1;
-    if (token === "2f" || token === "3f" || token === "2階" || token === "3階") {
-      markers += 1;
-    }
-  });
-  return nonEmpty >= 2 && nonEmpty === markers;
-};
-
-const mergeHeaderRows = (primary: string[], secondary: string[]) => {
-  const maxLen = Math.max(primary.length, secondary.length);
-  const merged: string[] = [];
-  let currentGroup = "";
-  for (let idx = 0; idx < maxLen; idx += 1) {
-    const h1 = primary[idx]?.trim() || "";
-    const h2 = secondary[idx]?.trim() || "";
-    if (h1) currentGroup = h1;
-    if (h2) {
-      const group = currentGroup || h1;
-      merged.push(group ? `${group} ${h2}`.trim() : h2);
-    } else {
-      merged.push(h1);
-    }
-  }
-  return merged;
-};
-
-const buildPreviewBlocks = (blocks: MarkdownBlock[], lineLimit: number) => {
-  let remaining = lineLimit;
-  const preview: MarkdownBlock[] = [];
-  blocks.forEach((block) => {
-    if (remaining <= 0) return;
-    if (block.type === "table") {
-      const hasHeader = block.header.length > 0;
-      const headerCost = hasHeader ? 1 : 0;
-      if (remaining <= 0 || (hasHeader && remaining < headerCost)) return;
-      const available = Math.max(remaining - headerCost, 0);
-      const rows = available > 0 ? block.rows.slice(0, available) : [];
-      if (!hasHeader && rows.length === 0) return;
-      preview.push({ type: "table", header: block.header, rows });
-      remaining -= headerCost + rows.length;
-      return;
-    }
-    const lines = block.lines.filter((line) => line.trim().length > 0);
-    const slice = lines.slice(0, remaining);
-    if (!slice.length) return;
-    preview.push({ type: "text", lines: slice });
-    remaining -= slice.length;
-  });
-  return preview;
-};
-
-const countMarkdownLines = (blocks: MarkdownBlock[]) =>
-  blocks.reduce((sum, block) => {
-    if (block.type === "table") {
-      return sum + (block.header.length ? 1 : 0) + block.rows.length;
-    }
-    return sum + block.lines.length;
-  }, 0);
 
 const formatQuantity = (value?: number | null) => {
   if (value == null || Number.isNaN(value)) return "-";
@@ -974,115 +863,6 @@ const groupByDateAndCategory = <
   });
 };
 
-const groupBagsByDate = (rows: BagRow[]) => {
-  const map = new Map<string, BagRow[]>();
-  rows.forEach((row) => {
-    const date = row.date || "-";
-    const group = map.get(date) || [];
-    group.push(row);
-    map.set(date, group);
-  });
-  return Array.from(map.entries())
-    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB, "ja"))
-    .map(([date, group]) => ({ date, rows: group }));
-};
-
-type MarkdownBlock =
-  | { type: "table"; header: string[]; rows: string[][] }
-  | { type: "text"; lines: string[] };
-
-const splitLines = (text: string) => text.split(/\r\n|\n|\r/);
-
-const parseMarkdownBlocks = (markdown: string): MarkdownBlock[] => {
-  const lines = splitLines(markdown);
-  const blocks: MarkdownBlock[] = [];
-  let buffer: string[] = [];
-  let tableBuffer: string[] = [];
-
-  const flushText = () => {
-    if (!buffer.length) return;
-    blocks.push({ type: "text", lines: buffer });
-    buffer = [];
-  };
-
-  const flushTable = () => {
-    if (!tableBuffer.length) return;
-    const rows = tableBuffer.map((line) =>
-      line
-        .trim()
-        .replace(/^\|/, "")
-        .replace(/\|$/, "")
-        .split("|")
-        .map((cell) => cell.trim()),
-    );
-    let header: string[] = [];
-    let dataRows = rows;
-    if (rows.length >= 2 && rows[1].every((cell) => /^:?-+:?$/.test(cell))) {
-      header = rows[0];
-      dataRows = rows.slice(2);
-    }
-    blocks.push({ type: "table", header, rows: dataRows });
-    tableBuffer = [];
-  };
-
-  lines.forEach((line) => {
-    if (line.trim().startsWith("|")) {
-      flushText();
-      tableBuffer.push(line);
-    } else {
-      flushTable();
-      if (line.trim()) {
-        buffer.push(line);
-      }
-    }
-  });
-  flushTable();
-  flushText();
-  return blocks;
-};
-
-const extractTableFromPage = (page?: OcrPage | null) => {
-  if (!page?.markdown_text) return null;
-  const blocks = parseMarkdownBlocks(page.markdown_text);
-  const table = blocks.find(
-    (block) => block.type === "table" && block.rows.length > 0,
-  ) as MarkdownBlock | undefined;
-  if (table && table.type === "table") {
-    let header = table.header;
-    let rows = table.rows;
-    if (header.length && rows.length && isSubheaderRow(rows[0])) {
-      header = mergeHeaderRows(header, rows[0]);
-      rows = rows.slice(1);
-    }
-    return { header, rows };
-  }
-  return null;
-};
-
-const extractFirstTable = (pages: OcrPage[]) => {
-  for (let index = 0; index < pages.length; index += 1) {
-    const page = pages[index];
-    const table = extractTableFromPage(page);
-    if (table) {
-      return {
-        pageArrayIndex: index,
-        pageIndex: page.page_index ?? index + 1,
-        header: table.header,
-        rows: table.rows,
-      };
-    }
-  }
-  return null;
-};
-
-const buildMarkdownTable = (header: string[], rows: string[][]) => {
-  const safeHeader = header.length ? header : rows[0]?.map((_, idx) => `col${idx + 1}`) || [];
-  const headerLine = `| ${safeHeader.join(" | ")} |`;
-  const separatorLine = `| ${safeHeader.map(() => "---").join(" | ")} |`;
-  const bodyLines = rows.map((row) => `| ${row.join(" | ")} |`);
-  return [headerLine, separatorLine, ...bodyLines].join("\n");
-};
-
 const getColumnCount = (header: string[], rows: string[][]) => {
   const rowMax = rows.reduce((max, row) => Math.max(max, row.length), 0);
   const base = Math.max(header.length, rowMax);
@@ -1190,7 +970,8 @@ export default function OrderDetailPage() {
   const [orderHistoryMessage, setOrderHistoryMessage] = useState<string>("");
   const [ocrTableMessage, setOcrTableMessage] = useState<string>("");
   const [ocrTableSaving, setOcrTableSaving] = useState<boolean>(false);
-  const [ocrEditorUiMode, setOcrEditorUiMode] = useState<OcrEditorUiMode>("sheet");
+  const [ocrShiftStartRow, setOcrShiftStartRow] = useState<string>("");
+  const [ocrShiftEndRow, setOcrShiftEndRow] = useState<string>("");
   const [showOcrEdit, setShowOcrEdit] = useState<boolean>(false);
   const [showTableBoxEditor, setShowTableBoxEditor] = useState<boolean>(false);
   const [tableBoxDraft, setTableBoxDraft] = useState<number[] | null>(null);
@@ -1226,7 +1007,6 @@ export default function OrderDetailPage() {
   const [layoutOverlayError, setLayoutOverlayError] = useState<boolean>(false);
   const [ocrOverlayRetry, setOcrOverlayRetry] = useState<boolean>(false);
   const [layoutOverlayRetry, setLayoutOverlayRetry] = useState<boolean>(false);
-  const [overlayActiveCell, setOverlayActiveCell] = useState<{ row: number; col: number } | null>(null);
   const [overlayImageSize, setOverlayImageSize] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
@@ -1234,7 +1014,6 @@ export default function OrderDetailPage() {
   const [activeStep, setActiveStep] = useState<number>(0);
   const [ocrEditMode, setOcrEditMode] = useState<boolean>(false);
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
-  const overlayInputRef = useRef<HTMLInputElement | null>(null);
   const reparseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1304,7 +1083,6 @@ export default function OrderDetailPage() {
     setOrderHistoryMessage("");
     setOcrTableMessage("");
     setActiveOcrPageIndex(0);
-    setOcrEditorUiMode("sheet");
     setShowOcrEdit(false);
     setShowLayoutOverlay(false);
     setShowTableBoxEditor(false);
@@ -1322,7 +1100,6 @@ export default function OrderDetailPage() {
     setGridRowEdges(null);
     setGridRowEdgesDraft(null);
     setRowEdgesText("");
-    setOverlayActiveCell(null);
     setOverlayImageSize({ width: 0, height: 0 });
     setOcrOverlayError(false);
     setLayoutOverlayError(false);
@@ -1773,13 +1550,13 @@ export default function OrderDetailPage() {
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で施設設定を完了してください。");
       return;
     }
-    if (!normalizeWeekValue(order.week_value || order.week || "")) {
+    if (!normalizeWeekValue(order.persisted_week_value || order.week || "")) {
       setOcrSheetAutoRetryBlocked(true);
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で週を設定してください。");
       return;
     }
     loadOcrSheet({ silent: true });
-  }, [order?.id, order?.facility, order?.week, order?.week_value]);
+  }, [order?.id, order?.facility, order?.week, order?.week_value, order?.persisted_week_value]);
 
   const loadOcrHistory = async (options: { silent?: boolean } = {}) => {
     if (!order) return;
@@ -2085,16 +1862,6 @@ export default function OrderDetailPage() {
   }, [order?.id]);
 
   useEffect(() => {
-    setOverlayActiveCell(null);
-  }, [activeOcrPageIndex, ocrTableHeader, ocrTableRows.length]);
-
-  useEffect(() => {
-    if (!showOcrEdit) {
-      setOverlayActiveCell(null);
-    }
-  }, [showOcrEdit]);
-
-  useEffect(() => {
     if (activeStep !== 1 && ocrEditMode) {
       setOcrEditMode(false);
       setShowOcrEdit(false);
@@ -2135,9 +1902,8 @@ export default function OrderDetailPage() {
     rowIndex: number,
     cellIndex: number,
     value: string,
-    targetMode: OcrEditorUiMode = ocrEditorUiMode,
   ) => {
-    const updater = (prev: string[][]) => {
+    setOcrSheetRows((prev) => {
       const next = prev.map((row) => [...row]);
       while (next.length <= rowIndex) {
         next.push([]);
@@ -2147,53 +1913,21 @@ export default function OrderDetailPage() {
       }
       next[rowIndex][cellIndex] = value;
       return next;
-    };
-    if (targetMode === "sheet") {
-      setOcrSheetRows(updater);
-    } else {
-      setOcrTableRows(updater);
-    }
+    });
   };
 
   const updateOcrTableHeaderCell = (
     cellIndex: number,
     value: string,
-    targetMode: OcrEditorUiMode = ocrEditorUiMode,
   ) => {
-    const updater = (prev: string[]) => {
+    setOcrSheetHeader((prev) => {
       const next = [...prev];
       while (next.length <= cellIndex) {
         next.push("");
       }
       next[cellIndex] = value;
       return next;
-    };
-    if (targetMode === "sheet") {
-      setOcrSheetHeader(updater);
-    } else {
-      setOcrTableHeader(updater);
-    }
-  };
-
-  const getOverlayCellValue = (rowIndex: number, cellIndex: number) => {
-    const headerRows = ocrTableHeader.length ? 1 : 0;
-    if (headerRows && rowIndex === 0) {
-      return ocrTableHeader[cellIndex] ?? "";
-    }
-    const dataRowIndex = rowIndex - headerRows;
-    if (dataRowIndex < 0) return "";
-    return ocrTableRows[dataRowIndex]?.[cellIndex] ?? "";
-  };
-
-  const updateOverlayCellValue = (rowIndex: number, cellIndex: number, value: string) => {
-    const headerRows = ocrTableHeader.length ? 1 : 0;
-    if (headerRows && rowIndex === 0) {
-      updateOcrTableHeaderCell(cellIndex, value, "legacy");
-      return;
-    }
-    const dataRowIndex = rowIndex - headerRows;
-    if (dataRowIndex < 0) return;
-    updateOcrTableCell(dataRowIndex, cellIndex, value, "legacy");
+    });
   };
 
   const updateOverlaySize = () => {
@@ -2222,11 +1956,6 @@ export default function OrderDetailPage() {
       window.removeEventListener("resize", updateOverlaySize);
     };
   }, [ocrPages, activeOcrPageIndex, showOcrEdit]);
-
-  useEffect(() => {
-    if (!overlayActiveCell) return;
-    overlayInputRef.current?.focus();
-  }, [overlayActiveCell]);
 
   const tableBoxUnitsLabel = (tableBoxUnitsOverride || ocrTableUnits || "normalized").toLowerCase();
   const tableBoxNormalized = tableBoxUnitsLabel === "normalized" || tableBoxUnitsLabel === "ratio";
@@ -2552,63 +2281,74 @@ export default function OrderDetailPage() {
   };
 
   const addOcrTableRow = () => {
-    if (ocrEditorUiMode === "sheet") {
-      const columnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
-      setOcrSheetRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
-      setOcrSheetRowIds((prev) => [...prev, makeSheetRowId("manual")]);
-      return;
-    }
-    const columnCount = getColumnCount(ocrTableHeader, ocrTableRows);
-    setOcrTableRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
+    const columnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
+    setOcrSheetRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
+    setOcrSheetRowIds((prev) => [...prev, makeSheetRowId("manual")]);
   };
 
   const duplicateOcrTableRow = (rowIndex: number) => {
-    if (ocrEditorUiMode === "sheet") {
-      setOcrSheetRows((prev) => {
-        const next = prev.map((row) => [...row]);
-        const row = next[rowIndex];
-        if (!row) return prev;
-        next.splice(rowIndex + 1, 0, [...row]);
-        return next;
-      });
-      setOcrSheetRowIds((prev) => {
-        const next = [...prev];
-        const sourceId = next[rowIndex] || `sheet-${rowIndex + 1}`;
-        next.splice(rowIndex + 1, 0, `${sourceId}-copy-${Date.now()}`);
-        return next;
-      });
-      return;
-    }
-    setOcrTableRows((prev) => {
+    setOcrSheetRows((prev) => {
       const next = prev.map((row) => [...row]);
       const row = next[rowIndex];
       if (!row) return prev;
       next.splice(rowIndex + 1, 0, [...row]);
       return next;
     });
+    setOcrSheetRowIds((prev) => {
+      const next = [...prev];
+      const sourceId = next[rowIndex] || `sheet-${rowIndex + 1}`;
+      next.splice(rowIndex + 1, 0, `${sourceId}-copy-${Date.now()}`);
+      return next;
+    });
   };
 
   const removeOcrTableRow = (rowIndex: number) => {
-    if (ocrEditorUiMode === "sheet") {
-      setOcrSheetRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
-      setOcrSheetRowIds((prev) => prev.filter((_, idx) => idx !== rowIndex));
+    setOcrSheetRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
+    setOcrSheetRowIds((prev) => prev.filter((_, idx) => idx !== rowIndex));
+  };
+
+  const shiftOcrTableRange = (offset: number) => {
+    if (!offset) return;
+    const totalRows = ocrSheetRows.length;
+    if (!totalRows) {
+      setOcrTableMessage("シフトできる行がありません。");
       return;
     }
-    setOcrTableRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
-  };
-
-  const switchToSheetMode = async () => {
-    setOcrEditorUiMode("sheet");
-    setOverlayActiveCell(null);
-    setShowTableBoxEditor(false);
-    if (!ocrSheetRows.length && !ocrSheetLoading) {
-      await loadOcrSheet();
+    const parsedStart = Number.parseInt(ocrShiftStartRow, 10);
+    const parsedEnd = Number.parseInt(ocrShiftEndRow, 10);
+    const start = Number.isFinite(parsedStart) ? parsedStart - 1 : 0;
+    const end = Number.isFinite(parsedEnd) ? parsedEnd - 1 : totalRows - 1;
+    const normalizedStart = Math.max(0, Math.min(start, end, totalRows - 1));
+    const normalizedEnd = Math.max(normalizedStart, Math.min(Math.max(start, end), totalRows - 1));
+    const quantityColumnIndexes = ocrSheetColumnSpecs
+      .map((spec, idx) => (spec.className === "ocr-sheet-col-qty" ? idx : -1))
+      .filter((idx) => idx >= 0);
+    if (!quantityColumnIndexes.length) {
+      setOcrTableMessage("シフト対象の数量列が見つかりません。");
+      return;
     }
-  };
-
-  const switchToLegacyMode = () => {
-    setOcrEditorUiMode("legacy");
-    setShowTableBoxEditor(true);
+    setOcrSheetRows((prev) => {
+      const next = prev.map((row) => [...row]);
+      quantityColumnIndexes.forEach((colIdx) => {
+        const values = [];
+        for (let rowIdx = normalizedStart; rowIdx <= normalizedEnd; rowIdx += 1) {
+          values.push(prev[rowIdx]?.[colIdx] ?? "");
+        }
+        for (let rowIdx = normalizedStart; rowIdx <= normalizedEnd; rowIdx += 1) {
+          const sourceRow = rowIdx - offset;
+          next[rowIdx][colIdx] =
+            sourceRow >= normalizedStart && sourceRow <= normalizedEnd
+              ? values[sourceRow - normalizedStart] ?? ""
+              : "";
+        }
+      });
+      return next;
+    });
+    if (!ocrShiftStartRow) setOcrShiftStartRow(String(normalizedStart + 1));
+    if (!ocrShiftEndRow) setOcrShiftEndRow(String(normalizedEnd + 1));
+    setOcrTableMessage(
+      `数量列を ${normalizedStart + 1} 行目から ${normalizedEnd + 1} 行目まで ${Math.abs(offset)} 行${offset > 0 ? "下" : "上"}へずらしました。`,
+    );
   };
 
   const applyOcrTable = async (): Promise<{ ok: boolean; message: string }> => {
@@ -2618,7 +2358,7 @@ export default function OrderDetailPage() {
     const trimmedFacility = facility.trim();
     const persistedFacility = (order.facility || "").trim();
     const normalizedWeek = normalizeWeekValue(weekDraft);
-    const persistedWeek = normalizeWeekValue(order.week_value || order.week || "");
+    const persistedWeek = normalizeWeekValue(order.persisted_week_value || order.week || "");
     if (!trimmedFacility && !persistedFacility) {
       const message = "施設が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で施設を設定してください。";
       setOcrTableMessage(message);
@@ -2647,13 +2387,12 @@ export default function OrderDetailPage() {
         return { ok: false, message };
       }
     }
-    const useSheet = ocrEditorUiMode === "sheet";
-    let targetHeader = useSheet ? ocrSheetHeader : ocrTableHeader;
-    let targetRows = useSheet ? ocrSheetRows : ocrTableRows;
-    let targetFields = useSheet ? ocrSheetFields : [];
-    let targetRowIds = useSheet ? ocrSheetRowIds : [];
+    let targetHeader = ocrSheetHeader;
+    let targetRows = ocrSheetRows;
+    let targetFields = ocrSheetFields;
+    let targetRowIds = ocrSheetRowIds;
 
-    if (useSheet && !targetRows.length) {
+    if (!targetRows.length) {
       const loaded = await loadOcrSheet({ silent: true });
       if (loaded) {
         targetHeader = loaded.header;
@@ -2675,18 +2414,16 @@ export default function OrderDetailPage() {
         markdown,
         header: targetHeader,
         rows: targetRows,
-        ui_mode: useSheet ? "sheet" : "legacy",
-        fields: useSheet ? targetFields : undefined,
-        row_ids: useSheet ? targetRowIds : undefined,
+        ui_mode: "sheet",
+        fields: targetFields,
+        row_ids: targetRowIds,
       });
       setOrder(res.data);
       const message = "OCRテーブルを反映しました。";
       setOcrTableMessage(message);
       await refreshOcrOutput(order.id);
       await loadOcrHistory({ silent: true });
-      if (useSheet) {
-        await loadOcrSheet({ silent: true });
-      }
+      await loadOcrSheet({ silent: true });
       await rebuildBags();
       return { ok: true, message };
     } catch (err: any) {
@@ -2757,8 +2494,8 @@ export default function OrderDetailPage() {
   const enterOcrEditMode = () => {
     setOcrEditMode(true);
     setShowOcrEdit(true);
-    setShowTableBoxEditor(ocrEditorUiMode === "legacy");
-    if (ocrEditorUiMode === "sheet" && !ocrSheetRows.length && !ocrSheetLoading) {
+    setShowTableBoxEditor(false);
+    if (!ocrSheetRows.length && !ocrSheetLoading) {
       loadOcrSheet();
     }
   };
@@ -2767,13 +2504,12 @@ export default function OrderDetailPage() {
     setOcrEditMode(false);
     setShowOcrEdit(false);
     setShowTableBoxEditor(false);
-    setOverlayActiveCell(null);
   };
 
   const applyOcrAndMoveToDetails = async () => {
     if (!order) return;
-    let activeRows = ocrEditorUiMode === "sheet" ? ocrSheetRows : ocrTableRows;
-    if (ocrEditorUiMode === "sheet" && !activeRows.length) {
+    let activeRows = ocrSheetRows;
+    if (!activeRows.length) {
       const loaded = await loadOcrSheet({ silent: true });
       if (loaded) {
         activeRows = loaded.rows;
@@ -2889,6 +2625,7 @@ export default function OrderDetailPage() {
               ...current,
               week: extractWeekMonthId(normalizedWeek),
               week_value: normalizedWeek,
+              persisted_week_value: normalizedWeek,
               week_label: formatWeekLabel(normalizedWeek),
             }
           : current,
@@ -2920,7 +2657,9 @@ export default function OrderDetailPage() {
       return;
     }
     const persistedFacility = (order?.facility || "").trim();
-    const persistedWeek = normalizeWeekValue(order?.week_value || order?.week || "");
+    const persistedWeek = normalizeWeekValue(
+      order?.persisted_week_value || order?.week || "",
+    );
     if (facility.trim() !== persistedFacility) {
       const saved = await saveFacility(facility);
       if (!saved) return;
@@ -2933,7 +2672,7 @@ export default function OrderDetailPage() {
       await loadWeekOptions(order.id);
     }
     setOcrSheetAutoRetryBlocked(false);
-    if (activeStep === 1 && ocrEditorUiMode === "sheet") {
+    if (activeStep === 1) {
       await loadOcrSheet();
     }
   };
@@ -2994,12 +2733,14 @@ export default function OrderDetailPage() {
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
       setFacilityTemplateMessage("施設テンプレートに保存しました。シート再読込で反映されます。");
-      if (order?.id && normalizeWeekValue(order.week_value || order.week || "")) {
+      if (order?.id && normalizeWeekValue(order.persisted_week_value || order.week || "")) {
         await loadOcrSheet({ silent: true });
       }
     } catch (err: any) {
       const status = err?.response?.status;
-      setFacilityTemplateMessage(status === 403 ? "権限がありません。" : "施設テンプレートの保存に失敗しました。");
+      setFacilityTemplateMessage(
+        status === 403 ? "管理者権限が必要です。" : "施設テンプレートの保存に失敗しました。"
+      );
     } finally {
       setFacilityTemplateSaving(false);
     }
@@ -3343,7 +3084,7 @@ export default function OrderDetailPage() {
     }),
     categoryOrder,
   );
-  const bagGroups = groupBagsByDate(bagRows);
+  const bagSummaryGroups = groupBagSummaryRowsByDate(buildBagSummaryRows(bagRows));
   const bagAmountStats = buildBagAmountStats(lines);
   const bagTypeLabelMap = buildBagTypeLabelMap(facilityConfig);
   const activeOcrPage = ocrPages[activeOcrPageIndex];
@@ -3476,6 +3217,49 @@ export default function OrderDetailPage() {
   } else if (layoutOverlayError) {
     layoutOverlayPlaceholder = "レイアウトオーバーレイの読み込みに失敗しました。";
   }
+  const usingSyntheticOverlay = Boolean(activeOcrPage?.synthetic);
+  const hasUsableOverlayPreview = showOcrOverlay || usingSyntheticOverlay;
+  const step2CriticalBannerMessages = (() => {
+    const messages: string[] = [];
+    if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
+      messages.push(order?.ocr_error ? `OCRが失敗しました: ${order.ocr_error}` : "OCRが失敗しました。");
+    } else if (rawOcrStatus === "empty") {
+      messages.push(
+        hasUsableOverlayPreview
+          ? "OCR結果の構造化行は空でした。左のPDFプレビューを見ながら右のシートを修正してください。"
+          : "OCR結果が空でした。overlay ではなく原本PDFを見ながら修正してください。",
+      );
+    } else if (rawOcrStatus === "stalled") {
+      messages.push(order?.ocr_error ? `OCRが停止しました: ${order.ocr_error}` : "OCRが停止しました。");
+    }
+    if (!ocrPagesLoading && !ocrPages.length) {
+      messages.push(ocrPagesMessage || "OCRページが取得できていません。");
+    }
+    if (!hasUsableOverlayPreview && !ocrPagesLoading) {
+      if (ocrOverlayUrl && ocrOverlayGs) {
+        messages.push("OCRオーバーレイの署名URL取得に失敗しました。");
+      } else if (ocrOverlayError) {
+        messages.push("OCRオーバーレイの読み込みに失敗しました。");
+      } else if (!ocrOverlayUrl) {
+        messages.push("OCRオーバーレイがありません。");
+      }
+    }
+    return Array.from(new Set(messages.filter(Boolean)));
+  })();
+  const shouldFallbackToRawPdfPreview = Boolean(
+    pdfUrl &&
+      !ocrPagesLoading &&
+      !hasUsableOverlayPreview,
+  );
+  const step2FallbackSummary =
+    shouldFallbackToRawPdfPreview && pdfUrl
+      ? "原本PDFを表示しています。右のシートを直接修正してください。"
+      : "";
+  const overlayPreviewModeLabel = shouldFallbackToRawPdfPreview
+    ? "原本PDF (fallback)"
+    : usingSyntheticOverlay
+      ? `OCRプレビュー (${activeOcrPage?.pdf_variant_used === "corrected" ? "corrected PDF" : "raw PDF"})`
+      : "OCRオーバーレイ";
   const activeTableBox = showTableBoxEditor && tableBoxDraft ? tableBoxDraft : ocrTableBox;
   const overlayBox = (() => {
     if (!activeTableBox || overlayRowCount < 1 || overlayColumnCount < 1) return null;
@@ -3546,17 +3330,15 @@ export default function OrderDetailPage() {
       ? overlayRowEdges.map((edge) => overlayBox.top + overlayBox.height * edge)
       : null;
   const overlayCellHeight = overlayBox ? overlayBox.height / overlayRowCount : 0;
-  const isLegacyEditor = ocrEditorUiMode === "legacy";
-  const overlayEditingEnabled = isLegacyEditor;
-  const activeEditorRows = ocrEditorUiMode === "sheet" ? ocrSheetRows : ocrTableRows;
-  const activeEditorRowIds = ocrEditorUiMode === "sheet" ? ocrSheetRowIds : [];
-  const activeEditorFields = ocrEditorUiMode === "sheet" ? ocrSheetFields : [];
+  const activeEditorRows = ocrSheetRows;
+  const activeEditorRowIds = ocrSheetRowIds;
+  const activeEditorFields = ocrSheetFields;
   const recentOcrHistory = [...ocrHistoryRows].reverse().slice(0, 5);
   const latestOcrRevisionMode =
     ocrHistoryLatest?.ui_mode === "sheet"
       ? "シートUI"
       : ocrHistoryLatest?.ui_mode === "legacy"
-        ? "レガシーUI"
+        ? "旧UI"
         : ocrHistoryLatest?.ui_mode || "-";
   const latestOcrRevisionChanged =
     typeof ocrHistoryLatest?.changed === "boolean"
@@ -3573,6 +3355,9 @@ export default function OrderDetailPage() {
     const name = ocrSheetHeader[idx]?.trim() || "";
     return name || `列${idx + 1}`;
   });
+  const ocrSheetColumnSpecs = ocrSheetHeaders.map((header, idx) =>
+    getOcrSheetColumnSpec(ocrSheetFields[idx] || "", header, normalizeDietTypeToken),
+  );
   const ocrSheetDateColumnIndex = (() => {
     const fieldIdx = ocrSheetFields.findIndex((field) =>
       String(field || "").trim().toLowerCase().startsWith("date"),
@@ -3656,10 +3441,8 @@ export default function OrderDetailPage() {
     });
     return boundaries;
   })();
-  const weeklyMenuMissingWarning =
-    ocrEditorUiMode === "sheet" && ocrSheetSource.startsWith("ocr_table");
+  const weeklyMenuMissingWarning = ocrSheetSource.startsWith("ocr_table");
   const ocrReparseBlockedHint = (() => {
-    if (ocrEditorUiMode !== "sheet") return "";
     const status = String(order?.ocr_status || "").trim().toLowerCase();
     const error = String(order?.ocr_error || "").trim();
     if (!error) return "";
@@ -3683,7 +3466,7 @@ export default function OrderDetailPage() {
   })();
   const persistedFacility = (order?.facility || "").trim();
   const selectedFacility = facility.trim();
-  const persistedWeek = normalizeWeekValue(order?.week_value || order?.week || "");
+  const persistedWeek = normalizeWeekValue(order?.persisted_week_value || order?.week || "");
   const selectedWeek = normalizeWeekValue(weekDraft);
   const facilityMissing = !persistedFacility;
   const weekMissing = !persistedWeek;
@@ -4161,28 +3944,12 @@ export default function OrderDetailPage() {
                   <header className="panel-header">
                     <div>
                       <h2>OCR修正</h2>
-                      <p className="subtle">標準はシートUIです。オーバーレイ編集とレイアウト調整はレガシーUI（バックアップ）で使えます。</p>
+                      <p className="subtle">OCRオーバーレイとシートを左右で比較しながら、そのままシートを修正します。</p>
                     </div>
                     <div className="panel-actions">
                       <button className="btn ghost" type="button" onClick={loadOcrPages} disabled={ocrPagesLoading}>
                         {ocrPagesLoading ? "取得中..." : "OCRページを更新"}
                       </button>
-                      <div className="ocr-editor-mode-switch" role="tablist" aria-label="OCR editor mode">
-                        <button
-                          className={`btn ${ocrEditorUiMode === "sheet" ? "primary" : "ghost"}`}
-                          type="button"
-                          onClick={switchToSheetMode}
-                        >
-                          シートUI
-                        </button>
-                        <button
-                          className={`btn ${ocrEditorUiMode === "legacy" ? "primary" : "ghost"}`}
-                          type="button"
-                          onClick={switchToLegacyMode}
-                        >
-                          レガシーUI（バックアップ）
-                        </button>
-                      </div>
                       <button
                         className="btn primary"
                         type="button"
@@ -4213,6 +3980,22 @@ export default function OrderDetailPage() {
                       </div>
                     </div>
                   ) : null}
+                  {step2CriticalBannerMessages.length ? (
+                    <div className="critical-alert">
+                      <p className="critical-alert-title">
+                        {shouldFallbackToRawPdfPreview
+                          ? "OCR結果を利用できないため、原本PDFへフォールバックしています。"
+                          : usingSyntheticOverlay
+                            ? "OCR overlay artifact が無いため、PDFプレビューを比較表示しています。"
+                            : "OCR結果に注意が必要です。"}
+                      </p>
+                      <ul className="critical-alert-list">
+                        {step2CriticalBannerMessages.map((message, idx) => (
+                          <li key={`step2-critical-${idx}`}>{message}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   {ocrPagesMessage ? <p className="subtle">{ocrPagesMessage}</p> : null}
                   {ocrPages.length > 1 ? (
                     <div className="page-tabs">
@@ -4233,460 +4016,328 @@ export default function OrderDetailPage() {
                       警告: この注文の週次メニューが未設定のため、OCRテーブルを暫定ソースとして表示しています。週次メニュー設定後に再読込してください。
                     </p>
                   ) : null}
-                  <div className="ocr-showcase">
-                    <div className="ocr-preview-card">
-                      <div className="preview-header">
-                        <span className="subtle">OCRオーバーレイ</span>
-                        {activeOcrPageLabel != null ? (
-                          <span className="subtle">Page {activeOcrPageLabel}</span>
-                        ) : null}
-                      </div>
-                      <div className={`edit-hint${overlayEditingEnabled ? " active" : ""}`}>
-                        {isLegacyEditor
-                          ? "レガシー編集: セルをクリックして直接修正できます。"
-                          : "シート編集が標準です。オーバーレイ編集はレガシーUIで利用できます。"}
-                      </div>
-                      {showOcrOverlay ? (
-                        <div
-                          className={`ocr-preview-wrapper${overlayEditingEnabled ? " editable" : ""}`}
-                          onClick={() => setOverlayActiveCell(null)}
-                        >
-                          <img
-                            ref={overlayImageRef}
-                            src={ocrOverlayUrl || ""}
-                            alt="OCR overlay"
-                            className="ocr-preview"
-                            onError={() => {
-                              setOcrOverlayError(true);
-                              if (!ocrOverlayRetry && !ocrPagesLoading) {
-                                setOcrOverlayRetry(true);
-                                loadOcrPages();
-                              }
-                            }}
-                          />
-                          {overlayEditingEnabled && overlayBox ? (
-                            <>
-                              <div
-                                className="ocr-overlay-grid"
-                                style={{
-                                  left: `${overlayBox.left}px`,
-                                  top: `${overlayBox.top}px`,
-                                  width: `${overlayBox.width}px`,
-                                  height: `${overlayBox.height}px`,
-                                  gridTemplateColumns: overlayColumnTemplate,
-                                  gridTemplateRows: overlayRowTemplate,
-                                }}
-                              >
-                                {Array.from({ length: overlayRowCount * overlayColumnCount }).map((_, idx) => {
-                                  const row = Math.floor(idx / overlayColumnCount);
-                                  const col = idx % overlayColumnCount;
-                                  const value = getOverlayCellValue(row, col);
-                                  const isActive =
-                                    overlayActiveCell?.row === row && overlayActiveCell?.col === col;
-                                  return (
-                                    <button
-                                      key={`overlay-${row}-${col}`}
-                                      type="button"
-                                      className={`ocr-overlay-cell${isActive ? " active" : ""}`}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        setOverlayActiveCell({ row, col });
-                                      }}
-                                      title={value}
-                                    >
-                                      <span className="ocr-overlay-text">{value}</span>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                              {overlayActiveCell && overlayCellHeight > 0 ? (
-                                <input
-                                  ref={overlayInputRef}
-                                  className="input ocr-overlay-input"
-                                  value={getOverlayCellValue(
-                                    overlayActiveCell.row,
-                                    overlayActiveCell.col,
-                                  )}
-                                  onChange={(event) =>
-                                    updateOverlayCellValue(
-                                      overlayActiveCell.row,
-                                      overlayActiveCell.col,
-                                      event.target.value,
-                                    )
-                                  }
-                                  onClick={(event) => event.stopPropagation()}
-                                  style={{
-                                    left: `${
-                                      overlayColumnEdgesPx
-                                        ? overlayColumnEdgesPx[overlayActiveCell.col]
-                                        : overlayBox.left + (overlayBox.width / overlayColumnCount) * overlayActiveCell.col
-                                    }px`,
-                                    top: `${
-                                      overlayRowEdgesPx
-                                        ? overlayRowEdgesPx[overlayActiveCell.row]
-                                        : overlayBox.top + overlayCellHeight * overlayActiveCell.row
-                                    }px`,
-                                    width: `${
-                                      overlayColumnEdgesPx
-                                        ? (overlayColumnEdgesPx[overlayActiveCell.col + 1] ??
-                                          overlayBox.left + overlayBox.width) -
-                                          overlayColumnEdgesPx[overlayActiveCell.col]
-                                        : overlayBox.width / overlayColumnCount
-                                    }px`,
-                                    height: `${
-                                      overlayRowEdgesPx
-                                        ? (overlayRowEdgesPx[overlayActiveCell.row + 1] ??
-                                          overlayBox.top + overlayBox.height) -
-                                          overlayRowEdgesPx[overlayActiveCell.row]
-                                        : overlayCellHeight
-                                    }px`,
-                                  }}
-                                />
-                              ) : null}
-                            </>
+                  <div className="ocr-workspace">
+                    <div className="ocr-workspace-preview">
+                      <div className="ocr-preview-card">
+                        <div className="preview-header">
+                          <span className="subtle">{overlayPreviewModeLabel}</span>
+                          {activeOcrPageLabel != null ? (
+                            <span className="subtle">Page {activeOcrPageLabel}</span>
                           ) : null}
                         </div>
-                      ) : (
-                        <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
-                      )}
-                      <div className="layout-toggle">
-                        <button
-                          className="btn ghost"
-                          type="button"
-                          onClick={() => setShowLayoutOverlay((prev) => !prev)}
-                          disabled={!canToggleLayoutOverlay}
-                        >
-                          {showLayoutOverlay ? "レイアウトを閉じる" : "レイアウトを表示"}
-                        </button>
-                        <span className="subtle">
-                          {canToggleLayoutOverlay ? "レイアウトオーバーレイ" : layoutOverlayPlaceholder}
-                        </span>
-                      </div>
-                      {showLayoutOverlay ? (
-                        showLayoutOverlayImage ? (
-                          <img
-                            src={layoutOverlayUrl || ""}
-                            alt="Layout overlay"
-                            className="ocr-preview"
-                            onError={() => {
-                              setLayoutOverlayError(true);
-                              if (!layoutOverlayRetry && !ocrPagesLoading) {
-                                setLayoutOverlayRetry(true);
-                                loadOcrPages();
-                              }
-                            }}
-                          />
+                        <div className="edit-hint active">
+                          {shouldFallbackToRawPdfPreview
+                            ? step2FallbackSummary || "原本PDFを見ながら、右のシートだけを更新します。"
+                            : "左は比較用です。編集は右のシートだけを更新します。"}
+                        </div>
+                        {shouldFallbackToRawPdfPreview ? (
+                          pdfUrl ? (
+                            <iframe
+                              title="order-pdf-fallback"
+                              src={pdfUrl}
+                              className="pdf-frame pdf-frame-compact"
+                            />
+                          ) : (
+                            <div className="preview-placeholder">{pdfError || "PDFを読み込み中..."}</div>
+                          )
+                        ) : showOcrOverlay ? (
+                          <div className="ocr-preview-wrapper">
+                            <img
+                              ref={overlayImageRef}
+                              src={ocrOverlayUrl || ""}
+                              alt="OCR overlay"
+                              className="ocr-preview"
+                              onError={() => {
+                                setOcrOverlayError(true);
+                                if (!ocrOverlayRetry && !ocrPagesLoading) {
+                                  setOcrOverlayRetry(true);
+                                  loadOcrPages();
+                                }
+                              }}
+                            />
+                          </div>
                         ) : (
-                          <div className="preview-placeholder">{layoutOverlayPlaceholder}</div>
-                        )
-                      ) : null}
-                      <div className="table-box-editor">
-                        <div className="table-box-header">
-                          <span className="field-label">レイアウト調整</span>
+                          <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
+                        )}
+                        {!shouldFallbackToRawPdfPreview && usingSyntheticOverlay ? (
+                          <p className="subtle">
+                            OCR overlay artifact が無いため、PDFレンダリング画像を比較表示しています。
+                          </p>
+                        ) : null}
+                        {!shouldFallbackToRawPdfPreview ? (
+                          <div className="layout-toggle">
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => setShowLayoutOverlay((prev) => !prev)}
+                              disabled={!canToggleLayoutOverlay}
+                            >
+                              {showLayoutOverlay ? "レイアウトを閉じる" : "レイアウトを表示"}
+                            </button>
+                            <span className="subtle">
+                              {canToggleLayoutOverlay ? "レイアウトオーバーレイ" : layoutOverlayPlaceholder}
+                            </span>
+                          </div>
+                        ) : null}
+                        {!shouldFallbackToRawPdfPreview && showLayoutOverlay ? (
+                          showLayoutOverlayImage ? (
+                            <img
+                              src={layoutOverlayUrl || ""}
+                              alt="Layout overlay"
+                              className="ocr-preview"
+                              onError={() => {
+                                setLayoutOverlayError(true);
+                                if (!layoutOverlayRetry && !ocrPagesLoading) {
+                                  setLayoutOverlayRetry(true);
+                                  loadOcrPages();
+                                }
+                              }}
+                            />
+                          ) : (
+                            <div className="preview-placeholder">{layoutOverlayPlaceholder}</div>
+                          )
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="ocr-workspace-editor">
+                      <div className="ocr-edit">
+                        <div className="ocr-edit-header">
+                          <div>
+                            <p className="subtle">編集対象: シートテンプレート</p>
+                            <p className="subtle">
+                              ソース: {ocrSheetSource || "-"} / 項目: {activeEditorFields.length} / 行:{" "}
+                              {activeEditorRows.length} / 列: {ocrSheetHeaders.length}
+                            </p>
+                          </div>
+                          <div className="ocr-edit-actions">
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => loadOcrSheet()}
+                              disabled={ocrSheetLoading || step1Incomplete}
+                            >
+                              {ocrSheetLoading ? "再読込中..." : "シート再読込"}
+                            </button>
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => loadOcrHistory()}
+                              disabled={ocrHistoryLoading}
+                            >
+                              {ocrHistoryLoading ? "履歴取得中..." : "履歴更新"}
+                            </button>
+                            <button className="btn ghost" type="button" onClick={addOcrTableRow}>
+                              行を追加
+                            </button>
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={saveOcrSheetExact}
+                              disabled={ocrTableSaving}
+                            >
+                              {ocrTableSaving ? "保存中..." : "シートだけ保存"}
+                            </button>
+                            <button
+                              className="btn primary"
+                              onClick={applyOcrTable}
+                              disabled={ocrTableSaving || step1Incomplete}
+                            >
+                              {ocrTableSaving ? "反映中..." : "OCRテーブルを反映"}
+                            </button>
+                          </div>
+                        </div>
+                        {ocrSheetMessage ? <p className="subtle">{ocrSheetMessage}</p> : null}
+                        {ocrReparseBlockedHint ? <p className="subtle">{ocrReparseBlockedHint}</p> : null}
+                        <div className="ocr-shift-toolbar">
+                          <span className="ocr-shift-label">数量列の範囲シフト</span>
+                          <label className="ocr-shift-field">
+                            <span>開始行</span>
+                            <input
+                              className="input"
+                              inputMode="numeric"
+                              value={ocrShiftStartRow}
+                              onChange={(e) => setOcrShiftStartRow(e.target.value.replace(/[^\d]/g, ""))}
+                              placeholder="1"
+                            />
+                          </label>
+                          <label className="ocr-shift-field">
+                            <span>終了行</span>
+                            <input
+                              className="input"
+                              inputMode="numeric"
+                              value={ocrShiftEndRow}
+                              onChange={(e) => setOcrShiftEndRow(e.target.value.replace(/[^\d]/g, ""))}
+                              placeholder={String(Math.max(ocrSheetRows.length, 1))}
+                            />
+                          </label>
                           <button
                             className="btn ghost"
                             type="button"
-                            onClick={toggleTableBoxEditor}
-                            disabled={!isLegacyEditor || !ocrOverlayUrl}
+                            onClick={() => shiftOcrTableRange(-1)}
+                            disabled={!ocrSheetRows.length || ocrTableSaving}
                           >
-                            {showTableBoxEditor ? "調整を閉じる" : "調整を開く"}
+                            1行上へ
                           </button>
+                          <button
+                            className="btn ghost"
+                            type="button"
+                            onClick={() => shiftOcrTableRange(1)}
+                            disabled={!ocrSheetRows.length || ocrTableSaving}
+                          >
+                            1行下へ
+                          </button>
+                          <span className="subtle">日付・区分・メニューは固定し、数量列だけ動かします。</span>
                         </div>
-                        {!isLegacyEditor ? (
-                          <p className="subtle">レイアウト調整はレガシーUI（バックアップ）で利用できます。</p>
-                        ) : showTableBoxEditor ? (
-                          <>
-                            <div className="table-box-primary">
-                              <button
-                                className="btn primary"
-                                type="button"
-                                onClick={detectGridEdges}
-                                disabled={gridDetecting}
-                              >
-                                {gridDetecting ? "自動検出中..." : "自動で合わせる"}
-                              </button>
-                              <button
-                                className="btn ghost"
-                                type="button"
-                                onClick={resetTableBoxDraft}
-                                disabled={!tableBoxReady}
-                              >
-                                元に戻す
-                              </button>
-                              <button
-                                className="btn ghost"
-                                type="button"
-                                onClick={() => setRowCount(overlayRowCount)}
-                                disabled={!overlayRowCount}
-                              >
-                                行境界を均等割
-                              </button>
-                              <button
-                                className="btn primary"
-                                type="button"
-                                onClick={saveTableBox}
-                                disabled={tableBoxSaving || !tableBoxReady}
-                              >
-                                {tableBoxSaving ? "保存中..." : "施設テンプレに保存"}
-                              </button>
-                            </div>
-                            <details className="table-box-advanced">
-                              <summary>詳細調整</summary>
-                              <p className="subtle">単位: {tableBoxUnitsLabel}</p>
-                              <div className="table-box-grid">
-                                <label className="table-box-field">
-                                  <span>x0</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={tableBoxNormalized ? 0.001 : 1}
-                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[0], tableBoxDecimals) : ""}
-                                    onChange={(event) => updateTableBoxIndex(0, event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>y0</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={tableBoxNormalized ? 0.001 : 1}
-                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[1], tableBoxDecimals) : ""}
-                                    onChange={(event) => updateTableBoxIndex(1, event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>x1</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={tableBoxNormalized ? 0.001 : 1}
-                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[2], tableBoxDecimals) : ""}
-                                    onChange={(event) => updateTableBoxIndex(2, event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>y1</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={tableBoxNormalized ? 0.001 : 1}
-                                    value={tableBoxDraft ? toFixedOrEmpty(tableBoxDraft[3], tableBoxDecimals) : ""}
-                                    onChange={(event) => updateTableBoxIndex(3, event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>微調整幅</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={tableBoxNormalized ? 0.001 : 1}
-                                    value={tableBoxStep}
-                                    onChange={(event) => {
-                                      const parsed = Number(event.target.value);
-                                      if (!Number.isNaN(parsed)) {
-                                        setTableBoxStep(parsed);
-                                      }
-                                    }}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>列数</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    min={2}
-                                    value={
-                                      (activeColumnEdges && activeColumnEdges.length >= 2
-                                        ? activeColumnEdges.length - 1
-                                        : fallbackColumnCount) || ""
-                                    }
-                                    onChange={(event) => {
-                                      const parsed = Number(event.target.value);
-                                      if (!Number.isNaN(parsed)) {
-                                        setColumnCount(parsed);
-                                      }
-                                    }}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>列境界(%)</span>
-                                  <input
-                                    className="input"
-                                    type="text"
-                                    placeholder="例: 12, 28, 45"
-                                    value={columnEdgesText}
-                                    onChange={(event) => {
-                                      const raw = event.target.value;
-                                      setColumnEdgesText(raw);
-                                      updateColumnEdgesText(raw);
-                                    }}
-                                  />
-                                </label>
-                                <div className="table-box-field">
-                                  <span>行数</span>
-                                  <span className="subtle">{overlayRowCount || "-"}</span>
-                                </div>
-                                <label className="table-box-field">
-                                  <span>行境界(%)</span>
-                                  <input
-                                    className="input"
-                                    type="text"
-                                    placeholder="例: 6, 12, 20"
-                                    value={rowEdgesText}
-                                    onChange={(event) => {
-                                      const raw = event.target.value;
-                                      setRowEdgesText(raw);
-                                      updateRowEdgesText(raw);
-                                    }}
-                                  />
-                                </label>
-                              </div>
-                              <p className="subtle">検出パラメータ</p>
-                              <div className="table-box-grid">
-                                <label className="table-box-field">
-                                  <span>DPI</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={1}
-                                    value={gridParamsDraft.grid_dpi}
-                                    onChange={(event) => updateGridParam("grid_dpi", event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>線抽出スケール</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={1}
-                                    value={gridParamsDraft.grid_line_scale}
-                                    onChange={(event) => updateGridParam("grid_line_scale", event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>線抽出閾値</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={0.05}
-                                    value={gridParamsDraft.grid_line_min_ratio}
-                                    onChange={(event) => updateGridParam("grid_line_min_ratio", event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>線結合ギャップ</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={1}
-                                    value={gridParamsDraft.grid_line_merge_gap}
-                                    onChange={(event) => updateGridParam("grid_line_merge_gap", event.target.value)}
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>列結合許容</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={0.005}
-                                    value={gridParamsDraft.grid_line_merge_tolerance}
-                                    onChange={(event) =>
-                                      updateGridParam("grid_line_merge_tolerance", event.target.value)
-                                    }
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>想定列数</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={1}
-                                    value={gridParamsDraft.grid_expected_columns}
-                                    onChange={(event) =>
-                                      updateGridParam("grid_expected_columns", event.target.value)
-                                    }
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>数量列許容</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={0.005}
-                                    value={gridParamsDraft.grid_qty_gap_tolerance}
-                                    onChange={(event) =>
-                                      updateGridParam("grid_qty_gap_tolerance", event.target.value)
-                                    }
-                                  />
-                                </label>
-                                <label className="table-box-field">
-                                  <span>日付列比率</span>
-                                  <input
-                                    className="input"
-                                    type="number"
-                                    step={0.05}
-                                    value={gridParamsDraft.grid_left_date_ratio}
-                                    onChange={(event) =>
-                                      updateGridParam("grid_left_date_ratio", event.target.value)
-                                    }
-                                  />
-                                </label>
-                              </div>
-                              <div className="table-box-nudge">
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => nudgeTableBox(0, -tableBoxNudge)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  上へ
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => nudgeTableBox(0, tableBoxNudge)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  下へ
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => nudgeTableBox(-tableBoxNudge, 0)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  左へ
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => nudgeTableBox(tableBoxNudge, 0)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  右へ
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => expandTableBox(tableBoxNudge)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  広げる
-                                </button>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={() => expandTableBox(-tableBoxNudge)}
-                                  disabled={!tableBoxReady}
-                                >
-                                  縮める
-                                </button>
-                              </div>
-                            </details>
-                            {tableBoxMessage ? <p className="subtle">{tableBoxMessage}</p> : null}
-                            {gridDetectMessage ? <p className="subtle">{gridDetectMessage}</p> : null}
-                          </>
+                        {reparseWarningReasons.length ? (
+                          <div className="warning-banner">
+                            <p>
+                              再解析は警告付きでシートに反映しました。警告:{" "}
+                              {reparseWarningReasons
+                                .map((code) => describeReparseWarningReason(code))
+                                .filter(Boolean)
+                                .join(" / ")}
+                            </p>
+                            {reparseWarningDetailText ? (
+                              <pre className="raw-output">{reparseWarningDetailText}</pre>
+                            ) : null}
+                          </div>
                         ) : null}
+                        {ocrHistoryMessage ? <p className="subtle">{ocrHistoryMessage}</p> : null}
+                        {ocrHistoryLatest ? (
+                          <div className="ocr-history-summary">
+                            <span>
+                              {latestOcrRevisionActionLabel}: {formatTimestamp(ocrHistoryLatest.edited_at)} / UI: {latestOcrRevisionMode}
+                            </span>
+                            <span>
+                              行数:{" "}
+                              {typeof ocrHistoryLatest.row_count === "number"
+                                ? ocrHistoryLatest.row_count
+                                : ocrHistoryLatest.rows?.length || 0}
+                            </span>
+                            <span>差分: {latestOcrRevisionChanged}</span>
+                            <span>Revision: {ocrHistoryLatest.revision_id || "-"}</span>
+                          </div>
+                        ) : null}
+                        {recentOcrHistory.length ? (
+                          <details className="ocr-history-list">
+                            <summary>反映履歴（最新5件）</summary>
+                            <div className="ocr-history-rows">
+                              {recentOcrHistory.map((item, idx) => (
+                                <div className="ocr-history-row" key={`ocr-history-${item.revision_id || idx}`}>
+                                  <span>{formatTimestamp(item.edited_at)}</span>
+                                  <span>
+                                    UI:{" "}
+                                    {item.ui_mode === "sheet"
+                                      ? "シートUI"
+                                      : item.ui_mode === "legacy"
+                                        ? "旧UI"
+                                        : item.ui_mode || "-"}
+                                  </span>
+                                  <span>
+                                    行:{" "}
+                                    {typeof item.row_count === "number"
+                                      ? item.row_count
+                                      : item.rows?.length || 0}
+                                  </span>
+                                  <span>
+                                    差分:{" "}
+                                    {typeof item.changed === "boolean"
+                                      ? item.changed
+                                        ? "あり"
+                                        : "なし"
+                                      : "-"}
+                                  </span>
+                                  <span>{item.revision_id || "-"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        ) : null}
+                        {ocrTableMessage ? <p className="subtle">{ocrTableMessage}</p> : null}
+                        {activeEditorRows.length ? (
+                          <div className="ocr-sheet-wrap">
+                            <table className="ocr-sheet-table">
+                              <colgroup>
+                                <col style={{ width: "56px" }} />
+                                {ocrSheetColumnSpecs.map((spec, idx) => (
+                                  <col
+                                    key={`ocr-sheet-col-${idx}`}
+                                    className={spec.className}
+                                    style={{ width: `${spec.width}px` }}
+                                  />
+                                ))}
+                                <col style={{ width: "132px" }} />
+                              </colgroup>
+                              <thead>
+                                <tr>
+                                  <th className="ocr-sheet-row-index ocr-sheet-sticky-top">#</th>
+                                  {ocrSheetHeaders.map((cell, idx) => (
+                                    <th
+                                      key={`ocr-sheet-header-${idx}`}
+                                      className={`ocr-sheet-sticky-top ${ocrSheetColumnSpecs[idx]?.className || ""}`}
+                                    >
+                                      {cell}
+                                    </th>
+                                  ))}
+                                  <th className="ocr-sheet-sticky-top">操作</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {ocrSheetRows.map((row, rowIdx) => (
+                                  <tr
+                                    key={`ocr-sheet-row-${rowIdx}`}
+                                    className={[
+                                      "ocr-sheet-row",
+                                      ocrSheetRowDateStripeClasses[rowIdx] || "ocr-sheet-row-date-a",
+                                      ocrSheetRowBoundaryClasses[rowIdx] || "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                  >
+                                    <th
+                                      className="ocr-sheet-row-index"
+                                      title={activeEditorRowIds[rowIdx] || ""}
+                                    >
+                                      {rowIdx + 1}
+                                    </th>
+                                    {ocrSheetHeaders.map((_, cellIdx) => (
+                                      <td
+                                        key={`ocr-sheet-cell-${rowIdx}-${cellIdx}`}
+                                        className={ocrSheetColumnSpecs[cellIdx]?.className || ""}
+                                      >
+                                        <input
+                                          className={`input ocr-sheet-input ${ocrSheetColumnSpecs[cellIdx]?.className || ""}`}
+                                          value={row[cellIdx] ?? ""}
+                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
+                                        />
+                                      </td>
+                                    ))}
+                                    <td className="ocr-sheet-action-cell">
+                                      <div className="ocr-row-actions">
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => duplicateOcrTableRow(rowIdx)}
+                                        >
+                                          複製
+                                        </button>
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={() => removeOcrTableRow(rowIdx)}
+                                        >
+                                          削除
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <p className="subtle">編集できる表がありません。</p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -4787,247 +4438,6 @@ export default function OrderDetailPage() {
                     )}
                     {facilityTemplateMessage ? <p className="subtle">{facilityTemplateMessage}</p> : null}
                   </div>
-                  <div className="ocr-edit">
-                      <div className="ocr-edit-header">
-                        <div>
-                          <p className="subtle">
-                            編集対象:{" "}
-                            {ocrEditorUiMode === "sheet"
-                              ? "シートテンプレート"
-                              : ocrTablePageIndex != null
-                                ? `Page ${ocrTablePageIndex}`
-                                : "未選択"}
-                          </p>
-                          <p className="subtle">編集UI: {ocrEditorUiMode === "sheet" ? "シートUI（標準）" : "レガシーUI（バックアップ）"}</p>
-                          {ocrEditorUiMode === "sheet" ? (
-                            <p className="subtle">
-                              ソース: {ocrSheetSource || "-"} / 項目: {activeEditorFields.length} / 行:{" "}
-                              {activeEditorRows.length} / 列: {ocrSheetHeaders.length}
-                            </p>
-                          ) : null}
-                        </div>
-                        <div className="ocr-edit-actions">
-                          {ocrEditorUiMode === "sheet" ? (
-                            <button
-                              className="btn ghost"
-                              type="button"
-                              onClick={() => loadOcrSheet()}
-                              disabled={ocrSheetLoading || step1Incomplete}
-                            >
-                              {ocrSheetLoading ? "再読込中..." : "シート再読込"}
-                            </button>
-                          ) : null}
-                          <button
-                            className="btn ghost"
-                            type="button"
-                            onClick={() => loadOcrHistory()}
-                            disabled={ocrHistoryLoading}
-                          >
-                            {ocrHistoryLoading ? "履歴取得中..." : "履歴更新"}
-                          </button>
-                          <button className="btn ghost" type="button" onClick={addOcrTableRow}>
-                            行を追加
-                          </button>
-                          {ocrEditorUiMode === "sheet" ? (
-                            <button className="btn ghost" type="button" onClick={saveOcrSheetExact} disabled={ocrTableSaving}>
-                              {ocrTableSaving ? "保存中..." : "シートだけ保存"}
-                            </button>
-                          ) : null}
-                          <button className="btn primary" onClick={applyOcrTable} disabled={ocrTableSaving || step1Incomplete}>
-                            {ocrTableSaving ? "反映中..." : "OCRテーブルを反映"}
-                          </button>
-                        </div>
-                      </div>
-                      {ocrEditorUiMode === "sheet" && ocrSheetMessage ? (
-                        <p className="subtle">{ocrSheetMessage}</p>
-                      ) : null}
-                      {ocrEditorUiMode === "sheet" && ocrReparseBlockedHint ? (
-                        <p className="subtle">{ocrReparseBlockedHint}</p>
-                      ) : null}
-                      {ocrEditorUiMode === "sheet" && reparseWarningReasons.length ? (
-                        <div className="warning-banner">
-                          <p>
-                            再解析は警告付きでシートに反映しました。警告:{" "}
-                            {reparseWarningReasons
-                              .map((code) => describeReparseWarningReason(code))
-                              .filter(Boolean)
-                              .join(" / ")}
-                          </p>
-                          {reparseWarningDetailText ? (
-                            <pre className="raw-output">{reparseWarningDetailText}</pre>
-                          ) : null}
-                        </div>
-                      ) : null}
-                      {ocrHistoryMessage ? <p className="subtle">{ocrHistoryMessage}</p> : null}
-                      {ocrHistoryLatest ? (
-                        <div className="ocr-history-summary">
-                          <span>
-                            {latestOcrRevisionActionLabel}: {formatTimestamp(ocrHistoryLatest.edited_at)} / UI: {latestOcrRevisionMode}
-                          </span>
-                          <span>
-                            行数:{" "}
-                            {typeof ocrHistoryLatest.row_count === "number"
-                              ? ocrHistoryLatest.row_count
-                              : ocrHistoryLatest.rows?.length || 0}
-                          </span>
-                          <span>差分: {latestOcrRevisionChanged}</span>
-                          <span>Revision: {ocrHistoryLatest.revision_id || "-"}</span>
-                        </div>
-                      ) : null}
-                      {recentOcrHistory.length ? (
-                        <details className="ocr-history-list">
-                          <summary>反映履歴（最新5件）</summary>
-                          <div className="ocr-history-rows">
-                            {recentOcrHistory.map((item, idx) => (
-                              <div className="ocr-history-row" key={`ocr-history-${item.revision_id || idx}`}>
-                                <span>{formatTimestamp(item.edited_at)}</span>
-                                <span>
-                                  UI:{" "}
-                                  {item.ui_mode === "sheet"
-                                    ? "シートUI"
-                                    : item.ui_mode === "legacy"
-                                      ? "レガシーUI"
-                                      : item.ui_mode || "-"}
-                                </span>
-                                <span>
-                                  行:{" "}
-                                  {typeof item.row_count === "number"
-                                    ? item.row_count
-                                    : item.rows?.length || 0}
-                                </span>
-                                <span>
-                                  差分:{" "}
-                                  {typeof item.changed === "boolean"
-                                    ? item.changed
-                                      ? "あり"
-                                      : "なし"
-                                    : "-"}
-                                </span>
-                                <span>{item.revision_id || "-"}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      ) : null}
-                      {ocrTableMessage ? <p className="subtle">{ocrTableMessage}</p> : null}
-                      {activeEditorRows.length ? (
-                        ocrEditorUiMode === "sheet" ? (
-                          <div className="ocr-sheet-wrap">
-                            <table className="ocr-sheet-table">
-                              <thead>
-                                <tr>
-                                  <th className="ocr-sheet-row-index ocr-sheet-sticky-top">#</th>
-                                  {ocrSheetHeaders.map((cell, idx) => (
-                                    <th key={`ocr-sheet-header-${idx}`} className="ocr-sheet-sticky-top">
-                                      {cell}
-                                    </th>
-                                  ))}
-                                  <th className="ocr-sheet-sticky-top">操作</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {ocrSheetRows.map((row, rowIdx) => (
-                                  <tr
-                                    key={`ocr-sheet-row-${rowIdx}`}
-                                    className={[
-                                      "ocr-sheet-row",
-                                      ocrSheetRowDateStripeClasses[rowIdx] || "ocr-sheet-row-date-a",
-                                      ocrSheetRowBoundaryClasses[rowIdx] || "",
-                                    ]
-                                      .filter(Boolean)
-                                      .join(" ")}
-                                  >
-                                    <th
-                                      className="ocr-sheet-row-index"
-                                      title={activeEditorRowIds[rowIdx] || ""}
-                                    >
-                                      {rowIdx + 1}
-                                    </th>
-                                    {ocrSheetHeaders.map((_, cellIdx) => (
-                                      <td key={`ocr-sheet-cell-${rowIdx}-${cellIdx}`}>
-                                        <input
-                                          className="input ocr-sheet-input"
-                                          value={row[cellIdx] ?? ""}
-                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
-                                        />
-                                      </td>
-                                    ))}
-                                    <td className="ocr-sheet-action-cell">
-                                      <div className="ocr-row-actions">
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => duplicateOcrTableRow(rowIdx)}
-                                        >
-                                          複製
-                                        </button>
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => removeOcrTableRow(rowIdx)}
-                                        >
-                                          削除
-                                        </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        ) : (
-                          <div className="table-wrap">
-                            <table className="ocr-edit-table">
-                              {ocrTableHeader.length ? (
-                                <thead>
-                                  <tr>
-                                    {ocrTableHeader.map((cell, idx) => (
-                                      <th key={`ocr-header-${idx}`}>{cell}</th>
-                                    ))}
-                                    <th>操作</th>
-                                  </tr>
-                                </thead>
-                              ) : null}
-                              <tbody>
-                                {ocrTableRows.map((row, rowIdx) => (
-                                  <tr key={`ocr-row-${rowIdx}`}>
-                                    {row.map((cell, cellIdx) => (
-                                      <td key={`ocr-cell-${rowIdx}-${cellIdx}`}>
-                                        <input
-                                          className="input ocr-edit-input"
-                                          value={cell}
-                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
-                                        />
-                                      </td>
-                                    ))}
-                                    <td>
-                                      <div className="ocr-row-actions">
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => duplicateOcrTableRow(rowIdx)}
-                                        >
-                                          複製
-                                        </button>
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => removeOcrTableRow(rowIdx)}
-                                        >
-                                          削除
-                                        </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )
-                      ) : (
-                        <p className="subtle">編集できる表がありません。</p>
-                      )}
-                    </div>
                 </section>
           ) : null}
 
@@ -5176,22 +4586,26 @@ export default function OrderDetailPage() {
               <p className="subtle">袋分け結果がありません。</p>
             ) : (
               <div className="wrap-grid">
-                {bagGroups.map((group) => (
+                <p className="bag-summary-note subtle">
+                  同じ日付・食区・メニュー・区分・エリア・袋種は1行にまとめて表示します。
+                </p>
+                {bagSummaryGroups.map((group) => (
                   <div key={`bag-${group.date}`} className="date-group">
                     <div className="date-group-header">
                       <span className="date-group-title">{group.date}</span>
-                      <span className="group-count">{group.rows.length}件</span>
+                      <span className="group-count">{group.rows.length}グループ</span>
                     </div>
                     <div className="table-wrap">
-                      <table>
+                      <table className="bag-summary-table">
                         <thead>
                           <tr>
                             <th>食区</th>
                             <th>メニュー</th>
                             <th>区分</th>
                             <th>エリア</th>
-                            <th>袋</th>
-                            <th>数量</th>
+                            <th>袋種</th>
+                            <th>注文数</th>
+                            <th>計算結果</th>
                             <th>総量(計算)</th>
                           </tr>
                         </thead>
@@ -5203,8 +4617,32 @@ export default function OrderDetailPage() {
                               <td>{bag.diet_type ? formatDietType(bag.diet_type) : "-"}</td>
                               <td>{bag.area_id || "-"}</td>
                               <td>{formatBagTypeLabel(bag.bag_type, bagTypeLabelMap)}</td>
-                              <td>{formatQuantity(bag.quantity)}</td>
-                              <td>{formatBagAmountFromTotals(resolveBagAmountTotals(bag, bagAmountStats))}</td>
+                              <td className="bag-total-qty">{formatQuantity(bag.total_quantity)}</td>
+                              <td className="bag-calc-result-cell">
+                                <span className={`bag-count-badge${bag.bag_count > 1 ? " split" : ""}`}>
+                                  {bag.bag_count}袋
+                                </span>
+                                {bag.bag_count > 1 ? (
+                                  <span className="bag-calc-breakdown">{formatBagCalculationResult(bag)}</span>
+                                ) : null}
+                              </td>
+                              <td>
+                                {formatBagAmountFromTotals(
+                                  resolveBagAmountTotals(
+                                    {
+                                      id: bag.id,
+                                      date: bag.date,
+                                      daypart: bag.daypart,
+                                      menu_name: bag.menu_name,
+                                      diet_type: bag.diet_type,
+                                      area_id: bag.area_id,
+                                      bag_type: bag.bag_type,
+                                      quantity: bag.total_quantity,
+                                    },
+                                    bagAmountStats,
+                                  ),
+                                )}
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -5696,6 +5134,31 @@ export default function OrderDetailPage() {
           font-size: 13px;
         }
 
+        .critical-alert {
+          margin-top: 10px;
+          padding: 12px 14px;
+          border-radius: 12px;
+          border: 1px solid rgba(150, 32, 32, 0.28);
+          background: #fff0ee;
+          color: #7a1d1d;
+        }
+
+        .critical-alert-title {
+          margin: 0 0 8px;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .critical-alert-list {
+          margin: 0;
+          padding-left: 18px;
+          font-size: 13px;
+        }
+
+        .critical-alert-list li + li {
+          margin-top: 4px;
+        }
+
         .prompt-panel {
           margin-top: 14px;
           padding: 12px;
@@ -5912,18 +5375,33 @@ export default function OrderDetailPage() {
         .ocr-showcase {
           display: grid;
           gap: 16px;
-          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+          grid-template-columns: 1fr;
+          margin-bottom: 0;
+        }
+
+        .ocr-workspace {
+          display: grid;
+          gap: 16px;
+          grid-template-columns: minmax(520px, 1.2fr) minmax(420px, 0.92fr);
           margin-bottom: 16px;
+          align-items: start;
+        }
+
+        .ocr-workspace-preview,
+        .ocr-workspace-editor {
+          min-width: 0;
         }
 
         .ocr-preview-card {
-          padding: 12px;
+          padding: 14px;
           border-radius: 14px;
           border: 1px solid rgba(25, 32, 30, 0.08);
           background: #fbfbf9;
           display: flex;
           flex-direction: column;
           gap: 10px;
+          position: sticky;
+          top: 12px;
         }
 
         .preview-header {
@@ -5951,11 +5429,7 @@ export default function OrderDetailPage() {
         }
 
         .table-box-editor {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-          padding-top: 8px;
-          border-top: 1px dashed rgba(25, 32, 30, 0.12);
+          display: none;
         }
 
         .table-box-header {
@@ -6101,9 +5575,11 @@ export default function OrderDetailPage() {
         }
 
         .ocr-edit {
-          margin-top: 16px;
-          padding-top: 12px;
-          border-top: 1px dashed rgba(25, 32, 30, 0.12);
+          margin-top: 0;
+          padding: 10px;
+          border-radius: 14px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #fbfbf9;
         }
 
         .ocr-edit-header {
@@ -6125,6 +5601,38 @@ export default function OrderDetailPage() {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
+        }
+
+        .ocr-shift-toolbar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 10px;
+          padding: 8px 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 10px;
+          background: #f9fbfa;
+        }
+
+        .ocr-shift-label {
+          font-size: 12px;
+          font-weight: 700;
+          color: #243431;
+        }
+
+        .ocr-shift-field {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          color: #44524f;
+        }
+
+        .ocr-shift-field input {
+          width: 72px;
+          padding: 6px 8px;
+          font-size: 12px;
         }
 
         .ocr-history-summary {
@@ -6196,13 +5704,15 @@ export default function OrderDetailPage() {
           border: 1px solid rgba(25, 32, 30, 0.12);
           border-radius: 12px;
           background: #ffffff;
-          max-height: 560px;
+          max-height: 70vh;
         }
 
         .ocr-sheet-table {
           border-collapse: separate;
           border-spacing: 0;
-          min-width: 960px;
+          width: max-content;
+          min-width: 100%;
+          table-layout: fixed;
         }
 
         .ocr-sheet-table th,
@@ -6243,10 +5753,29 @@ export default function OrderDetailPage() {
         .ocr-sheet-input {
           border: none;
           border-radius: 0;
-          min-width: 88px;
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
           background: transparent;
           padding: 8px;
           font-size: 12px;
+        }
+
+        .ocr-sheet-col-date,
+        .ocr-sheet-col-daypart,
+        .ocr-sheet-col-qty {
+          text-align: center;
+        }
+
+        .ocr-sheet-col-date .ocr-sheet-input,
+        .ocr-sheet-col-daypart .ocr-sheet-input,
+        .ocr-sheet-col-qty .ocr-sheet-input {
+          text-align: center;
+        }
+
+        .ocr-sheet-col-menu .ocr-sheet-input,
+        .ocr-sheet-col-note .ocr-sheet-input {
+          text-align: left;
         }
 
         .ocr-sheet-input:focus {
@@ -6255,7 +5784,7 @@ export default function OrderDetailPage() {
         }
 
         .ocr-sheet-action-cell {
-          min-width: 140px;
+          min-width: 132px;
         }
 
         .ocr-sheet-row.ocr-sheet-row-date-a td,
@@ -6420,6 +5949,11 @@ export default function OrderDetailPage() {
           align-items: start;
         }
 
+        .bag-summary-note {
+          grid-column: 1 / -1;
+          margin: 0;
+        }
+
         .date-group {
           padding: 12px;
           border-radius: 14px;
@@ -6470,6 +6004,44 @@ export default function OrderDetailPage() {
           white-space: nowrap;
         }
 
+        .bag-summary-table td {
+          vertical-align: middle;
+        }
+
+        .bag-total-qty {
+          font-weight: 700;
+          color: #1f2a2a;
+        }
+
+        .bag-count-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 56px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          background: #edf3ef;
+          color: #355047;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .bag-count-badge.split {
+          background: #efe6d6;
+          color: #7d4a18;
+        }
+
+        .bag-calc-result-cell {
+          min-width: 148px;
+        }
+
+        .bag-calc-breakdown {
+          display: inline-block;
+          margin-left: 8px;
+          color: #566663;
+          font-size: 12px;
+        }
+
         .date-group-title {
           white-space: nowrap;
         }
@@ -6495,6 +6067,12 @@ export default function OrderDetailPage() {
         }
 
         @media (max-width: 720px) {
+          .ocr-workspace {
+            grid-template-columns: 1fr;
+          }
+          .ocr-preview-card {
+            position: static;
+          }
           .summary-actions {
             flex-direction: column;
             align-items: stretch;

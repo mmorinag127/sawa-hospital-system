@@ -314,17 +314,101 @@
             "column_index": 4
           },
           {
-            "name": "禁食",
+            "name": "肉禁",
             "source": "quantity",
-            "diet_type": "禁食",
-            "header": "禁食",
+            "diet_type": "no_meat",
+            "header": "肉禁",
             "column_index": 5
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish",
+            "header": "魚禁",
+            "column_index": 6
+          },
+          {
+            "name": "変更1",
+            "source": "quantity",
+            "diet_type": "change_1",
+            "header": "変更1",
+            "column_index": 7
+          },
+          {
+            "name": "変更2",
+            "source": "quantity",
+            "diet_type": "change_2",
+            "header": "変更2",
+            "column_index": 8
           },
           {
             "name": "備考",
             "source": "note",
-            "header": "備考",
-            "column_index": 7
+            "header": "備考欄",
+            "column_index": 9
+          }
+        ]
+      },
+      "fax_template_override": {
+        "llm_audit_non_blocking_codes": [
+          "row_count_shortfall"
+        ],
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "note",
+            "header": "備考欄"
           }
         ]
       },
@@ -412,7 +496,12 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_ids": [
+        "fax_layout_floor_2f3f_v1",
+        "fax_layout_regular_forbidden_v1"
+      ]
     },
     {
       "facility_name": "介護老人保健施設ふれあいの丘",
@@ -607,57 +696,66 @@
             "column_index": 3
           },
           {
-            "name": "常食2F",
+            "name": "常食通常",
             "source": "quantity",
             "diet_type": "regular",
-            "area_id": "2F",
-            "header": "常食2F",
+            "area_id": "X",
+            "header": "常食通常",
             "column_index": 4
           },
           {
-            "name": "常食3F",
+            "name": "常食袋分け",
             "source": "quantity",
-            "diet_type": "regular",
-            "area_id": "3F",
-            "header": "常食3F",
+            "diet_type": "regular_bag",
+            "area_id": "X",
+            "header": "常食袋分け",
             "column_index": 5
           },
           {
             "name": "軟菜",
             "source": "quantity",
             "diet_type": "soft",
+            "area_id": "X",
             "header": "軟菜",
             "column_index": 6
           },
           {
-            "name": "ミキサー2F",
+            "name": "ミキサー",
             "source": "quantity",
             "diet_type": "mixer",
-            "area_id": "2F",
+            "area_id": "X",
             "header": "ミキサー",
             "column_index": 7
           },
           {
-            "name": "ミキサー3F",
+            "name": "肉禁",
             "source": "quantity",
-            "diet_type": "mixer",
-            "area_id": "3F",
-            "header": "ミキサー",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "header": "肉禁",
             "column_index": 8
           },
           {
-            "name": "備考",
-            "source": "note",
-            "header": "備考",
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "header": "魚禁",
             "column_index": 9
+          },
+          {
+            "name": "備考欄",
+            "source": "note",
+            "header": "備考欄",
+            "column_index": 10
           }
         ]
       },
-      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
       "fax_template_ids": [
+        "fax_layout_regular_soft_mixer_forbidden_v1",
         "fax_layout_floor_2f3f_v1",
-        "fax_layout_regular_staff_daycare_v1",
-        "fax_layout_regular_soft_mixer_forbidden_v1"
+        "fax_layout_regular_staff_daycare_v1"
       ]
     },
     {
@@ -692,49 +790,113 @@
             "column_index": 3
           },
           {
-            "name": "常食2F",
+            "name": "常食",
             "source": "quantity",
             "diet_type": "regular",
-            "area_id": "2F",
-            "header": "常食2F",
+            "header": "常食",
             "column_index": 4
           },
           {
-            "name": "常食3F",
+            "name": "肉禁",
             "source": "quantity",
-            "diet_type": "regular",
-            "area_id": "3F",
-            "header": "常食3F",
+            "diet_type": "no_meat",
+            "header": "肉禁",
             "column_index": 5
           },
           {
-            "name": "軟菜",
+            "name": "魚禁",
             "source": "quantity",
-            "diet_type": "soft",
-            "header": "軟菜",
+            "diet_type": "no_fish",
+            "header": "魚禁",
             "column_index": 6
           },
           {
-            "name": "ミキサー2F",
+            "name": "変更1",
             "source": "quantity",
-            "diet_type": "mixer",
-            "area_id": "2F",
-            "header": "ミキサー",
+            "diet_type": "change_1",
+            "header": "変更1",
             "column_index": 7
           },
           {
-            "name": "ミキサー3F",
+            "name": "変更2",
             "source": "quantity",
-            "diet_type": "mixer",
-            "area_id": "3F",
-            "header": "ミキサー",
+            "diet_type": "change_2",
+            "header": "変更2",
             "column_index": 8
           },
           {
             "name": "備考",
             "source": "note",
-            "header": "備考",
+            "header": "備考欄",
             "column_index": 9
+          }
+        ]
+      },
+      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_forbidden_v1",
+        "fax_layout_floor_2f3f_v1"
+      ],
+      "fax_template_override": {
+        "llm_audit_non_blocking_codes": [
+          "row_count_shortfall"
+        ],
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "note",
+            "header": "備考欄"
           }
         ]
       }
@@ -1097,17 +1259,98 @@
             "column_index": 4
           },
           {
-            "name": "禁食",
+            "name": "肉禁",
             "source": "quantity",
-            "diet_type": "禁食",
-            "header": "禁食",
+            "diet_type": "no_meat",
+            "header": "肉禁",
             "column_index": 5
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish",
+            "header": "魚禁",
+            "column_index": 6
+          },
+          {
+            "name": "変更1",
+            "source": "quantity",
+            "diet_type": "change_1",
+            "header": "変更1",
+            "column_index": 7
+          },
+          {
+            "name": "変更2",
+            "source": "quantity",
+            "diet_type": "change_2",
+            "header": "変更2",
+            "column_index": 8
           },
           {
             "name": "備考",
             "source": "note",
-            "header": "備考",
-            "column_index": 7
+            "header": "備考欄",
+            "column_index": 9
+          }
+        ]
+      },
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "note",
+            "header": "備考欄"
           }
         ]
       },
@@ -1168,6 +1411,243 @@
             "source": "note",
             "header": "備考",
             "column_index": 6
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "湘南さくら病院",
+      "aliases": [
+        "湘南さくら病院"
+      ],
+      "areas": [],
+      "facility_id": "FAC00014",
+      "fax_template_id": "fax_layout_regular_staff_daycare_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_staff_daycare_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "職員",
+            "diet_type": "staff",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "ゴマアレルギー",
+            "diet_type": "sesame_allergy",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
+            "role": "note",
+            "header": "備考欄"
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "ケアハウス四万十ピア",
+      "aliases": [
+        "ケアハウス四万十ピア",
+        "社会福祉法人清流会四万十ピア"
+      ],
+      "areas": [],
+      "facility_id": "FAC00015",
+      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "-",
+            "diet_type": "placeholder",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
+            "role": "note",
+            "header": "備考欄"
+          }
+        ]
+      }
+    },
+    {
+      "facility_name": "いこいの森プラス",
+      "aliases": [
+        "いこいの森プラス"
+      ],
+      "areas": [],
+      "facility_id": "FAC00016",
+      "fax_template_id": "fax_layout_regular_diabetes_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_diabetes_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "format": "MM/DD"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "糖尿",
+            "diet_type": "diabetes",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
+            "role": "note",
+            "header": "備考欄"
           }
         ]
       }

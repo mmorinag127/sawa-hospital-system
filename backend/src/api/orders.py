@@ -174,6 +174,12 @@ def list_orders_by_line_date(date: str, facility: str | None = None, status: str
     return {"date": target_date.isoformat(), "orders": orders}
 
 
+@router.get("/daily-bags", dependencies=[Depends(require_role("operator"))])
+def get_daily_bags(date: str, facility: str | None = None, status: str | None = None):
+    target_date = _parse_iso_date(date)
+    return order_service.get_daily_bag_summary(target_date, facility_id=facility, status=status)
+
+
 @router.get("/{order_id}", dependencies=[Depends(require_role("operator"))])
 def get_order(order_id: str):
     order = order_service.get_order_by_id(order_id)
@@ -545,7 +551,7 @@ def set_week(order_id: str, body: dict):
     return {"updated": True}
 
 
-@router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("operator"))])
+@router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("admin"))])
 def save_facility_template_columns(order_id: str, body: dict):
     columns = body.get("columns") if isinstance(body, dict) else None
     result, error = order_service.save_order_facility_template_columns(order_id, columns)
@@ -601,7 +607,9 @@ def confirm_order(order_id: str):
 def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
     ocr_prompt = None
     ocr_provider = None
-    llm_assist = False
+    # Explicit user-triggered reparse should follow the OCR reparse directive:
+    # keep yomitoku as default baseline, then run evaluator-guided LLM inference.
+    llm_assist = True
     if isinstance(body, dict):
         raw_prompt = body.get("ocr_prompt")
         if isinstance(raw_prompt, str) and raw_prompt.strip():

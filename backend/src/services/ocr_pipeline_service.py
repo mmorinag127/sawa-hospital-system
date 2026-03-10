@@ -104,6 +104,11 @@ def get_pipeline_config() -> dict[str, Any]:
         or get_default_output_bucket()
         or get_default_artifact_bucket()
     )
+    trigger_mode = "gcs_only"
+    if bucket and url:
+        trigger_mode = "gcs_http"
+    elif url:
+        trigger_mode = "http_only"
     return {
         # The OCR pipeline is triggered by writing to GCS in this system, so the bucket
         # is the only hard requirement. OCR_PIPELINE_URL is optional (HTTP trigger mode).
@@ -113,6 +118,16 @@ def get_pipeline_config() -> dict[str, Any]:
         "bucket": bucket,
         "input_prefix": _get_prefix("OCR_PIPELINE_INPUT_PREFIX", "input/"),
         "output_prefix": _get_prefix("OCR_PIPELINE_OUTPUT_PREFIX", "output/"),
+        "trigger_mode": trigger_mode,
+        "http_trigger_enabled": bool(url),
+        "gcs_trigger_enabled": bool(bucket),
+        "wait_strategy": "poll_output_gcs",
+        "sync_wait_supported": bool(bucket),
+        "sync_wait_note": (
+            "HTTP trigger disabled; worker relies on storage-triggered OCR execution and polls for output."
+            if bucket and not url
+            else None
+        ),
     }
 
 

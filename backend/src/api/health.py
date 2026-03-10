@@ -1,5 +1,7 @@
 from fastapi import APIRouter
 
+from src.services.ingest_job_service import summarize_backlog_metrics
+
 router = APIRouter()
 
 
@@ -10,5 +12,4 @@ def health():
 
 @router.get("/health/backlog")
 def backlog():
-    # Placeholder using in-memory queue sizes if available
-    return {"ingest_queue_depth": 0, "exports_queue_depth": 0, "oldest_pending_seconds": 0}
+    return summarize_backlog_metrics()

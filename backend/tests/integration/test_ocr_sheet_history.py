@@ -16,6 +16,8 @@ from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services import config_service  # noqa: E402
 from src.services import facility_service  # noqa: E402
+from src.services import fax_extractor  # noqa: E402
+from src.services.ocr_job_service import create_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -50,6 +52,36 @@ def _seed_monthly_menu_2026_01() -> None:
                     daypart="昼",
                     name="Menu A",
                     slot_index=0,
+                )
+            )
+
+
+def _seed_monthly_menu_custom_entries(
+    *,
+    month_id: str,
+    month_start: date,
+    entries: list[tuple[date, str, str, int]],
+) -> None:
+    with session_scope() as session:
+        menu = session.get(MonthlyMenu, month_id)
+        if not menu:
+            session.add(
+                MonthlyMenu(
+                    id=month_id,
+                    month_start=month_start,
+                    filename=f"seed-{month_id}.xlsx",
+                )
+            )
+        session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == month_id))
+        for idx, (menu_date, daypart, name, slot_index) in enumerate(entries):
+            session.add(
+                MonthlyMenuEntry(
+                    id=f"seed-entry-{month_id}-custom-{idx}",
+                    monthly_menu_id=month_id,
+                    menu_date=menu_date,
+                    daypart=daypart,
+                    name=name,
+                    slot_index=slot_index,
                 )
             )
 
@@ -95,6 +127,17 @@ def _seed_order(*, message_id: str):
     return order_service.create_order_from_ingest(payload, lines=lines)
 
 
+def _seed_custom_order(*, message_id: str, received_at: datetime, lines: list[dict[str, object]]):
+    payload = IngestEmailPayload(
+        message_id=message_id,
+        pdf_uri="file://dummy.pdf",
+        received_at=received_at,
+        facility_hint="FAC00001",
+        week_hint=None,
+    )
+    return order_service.create_order_from_ingest(payload, lines=lines)
+
+
 def _seed_order_without_facility(*, message_id: str):
     payload = IngestEmailPayload(
         message_id=message_id,
@@ -115,6 +158,105 @@ def _seed_order_without_facility(*, message_id: str):
         }
     ]
     return order_service.create_order_from_ingest(payload, lines=lines)
+
+
+def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted():
+    order_service.clear_all()
+    received_at = datetime(2099, 4, 15, 9, 0, 0)
+    _seed_monthly_menu_custom_entries(
+        month_id="2099-04",
+        month_start=date(2099, 4, 1),
+        entries=[
+            (date(2099, 4, 15), "昼", "Menu A", 0),
+            (date(2099, 4, 15), "昼", "Menu B", 1),
+        ],
+    )
+    order = _seed_custom_order(
+        message_id="msg-sheet-source-row-shift-001",
+        received_at=received_at,
+        lines=[
+            {
+                "date": "2099-04-15",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 11,
+                "source_row_index": 1,
+            },
+            {
+                "date": "2099-04-15",
+                "daypart": "昼",
+                "menu_name": "Menu B",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 22,
+                "source_row_index": 0,
+            },
+        ],
+    )
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+
+    assert error is None
+    assert sheet is not None
+    assert (sheet.get("trace") or {}).get("mapped_mode") == "identity"
+    fields = sheet["fields"]
+    qty_idx = fields.index("qty.regular_2f")
+    menu_idx = fields.index("menu")
+    rows_by_menu = {row[menu_idx]: row for row in sheet["rows"]}
+    assert rows_by_menu["Menu A"][qty_idx] == "11"
+    assert rows_by_menu["Menu B"][qty_idx] == "22"
+
+
+def test_should_prefer_source_row_candidate_when_duplicate_rows_are_clean():
+    quantity_index = {("regular", "2F"): 3}
+    duplicate_identity = order_service._sheet_row_identity("2026-01-08", "昼", "Menu A")
+    base_rows = [
+        {"identity": duplicate_identity, "values": ["01/08", "昼", "Menu A", ""]},
+        {"identity": duplicate_identity, "values": ["01/08", "昼", "Menu A", ""]},
+    ]
+    order_lines = [
+        {
+            "date": "2026-01-08",
+            "daypart": "昼",
+            "menu_name": "Menu A",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "quantity_original": 11,
+            "source_row_index": 0,
+        },
+        {
+            "date": "2026-01-08",
+            "daypart": "昼",
+            "menu_name": "Menu A",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "quantity_original": 22,
+            "source_row_index": 1,
+        },
+    ]
+
+    summary = order_service._summarize_order_line_source_row_mapping(
+        base_rows=base_rows,
+        quantity_index=quantity_index,
+        order_lines=order_lines,
+    )
+
+    assert summary == {
+        "eligible_line_count": 2,
+        "matched_source_row_count": 2,
+        "mismatched_source_row_count": 0,
+        "missing_source_row_count": 0,
+        "invalid_identity_line_count": 0,
+    }
+    assert order_service._should_prefer_source_row_candidate(
+        identity_count=1,
+        source_row_count=2,
+        source_row_summary=summary,
+    )
 
 
 def test_get_ocr_sheet_exposes_roi_review_issues():
@@ -184,6 +326,11 @@ def test_export_ocr_sheet_label_writes_current_sheet_json(tmp_path):
 
     assert export_error is None
     assert exported is not None
+    saved_json = json.loads(export_path.read_text(encoding="utf-8"))
+    assert saved_json["rows"] == current_sheet["rows"]
+    assert saved_json["row_ids"] == current_sheet["row_ids"]
+    assert saved_json["fields"] == current_sheet["fields"]
+    assert saved_json["header"] == current_sheet["header"]
     assert export_path.exists()
     saved = json.loads(export_path.read_text(encoding="utf-8"))
     assert saved == current_sheet
@@ -287,11 +434,143 @@ def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(tmp_path):
 
     assert export_error is None
     assert exported is not None
-    saved_json = json.loads(export_path.read_text(encoding="utf-8"))
-    assert saved_json["rows"] == rows
-    assert saved_json["row_ids"] == row_ids
-    assert saved_json["fields"] == fields
-    assert saved_json["header"] == header
+
+
+def test_get_ocr_output_falls_back_to_message_job_first_pass_payload_when_reparse_job_is_unusable(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-first-pass-fallback-001")
+    create_job(f"OCR-{order['id']}", input_reference="gs://order/reparse.json", status="failed")
+    create_job(f"OCR-{order['message_id']}", input_reference="gs://message/first-pass.json", status="done")
+
+    first_pass_payload = {
+        "status": "success",
+        "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|01/08|昼|Menu A|4||",
+        "pages": [
+            {
+                "page_index": 1,
+                "markdown_uri": "gs://bucket/markdown.md",
+                "ocr_overlay_uri": "gs://bucket/ocr.png",
+                "layout_overlay_uri": "gs://bucket/layout.png",
+                "figure_uris": [],
+            }
+        ],
+    }
+
+    def _fake_load_job_output(job, label):
+        if not isinstance(job, dict):
+            return None
+        if job.get("id") == f"OCR-{order['id']}":
+            return {"status": "failed", "error": "lines_empty"}
+        if job.get("id") == f"OCR-{order['message_id']}":
+            return dict(first_pass_payload)
+        return None
+
+    monkeypatch.setattr(order_service, "_load_job_output", _fake_load_job_output)
+
+    output, error = order_service.get_ocr_output(order["id"])
+
+    assert error is None
+    assert output is not None
+    assert output.get("table_raw") == first_pass_payload["table_raw"]
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        assert cache is not None
+        assert isinstance(cache.payload, dict)
+        assert cache.payload.get("table_raw") == first_pass_payload["table_raw"]
+
+
+def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_page_artifacts(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-fallback-001")
+    create_job(f"OCR-{order['id']}", input_reference="gs://order/reparse.json", status="failed")
+    create_job(f"OCR-{order['message_id']}", input_reference="gs://message/first-pass.json", status="done")
+
+    first_pass_payload = {
+        "status": "success",
+        "pages": [
+            {
+                "page_index": 1,
+                "markdown_uri": None,
+                "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                "figure_uris": [],
+            }
+        ],
+    }
+
+    def _fake_load_job_output(job, label):
+        if not isinstance(job, dict):
+            return None
+        if job.get("id") == f"OCR-{order['id']}":
+            return {"status": "success", "table_raw": "|日付|区分|メニュー|常食2F|"}
+        if job.get("id") == f"OCR-{order['message_id']}":
+            return dict(first_pass_payload)
+        return None
+
+    monkeypatch.setattr(order_service, "_load_job_output", _fake_load_job_output)
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert isinstance(pages.get("pages"), list)
+    assert len(pages["pages"]) == 1
+    assert pages["pages"][0]["page_index"] == 1
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        assert cache is not None
+        assert isinstance(cache.payload, dict)
+        assert isinstance(cache.payload.get("pages"), list)
+        assert len(cache.payload["pages"]) == 1
+
+
+def test_get_ocr_pages_builds_synthetic_preview_from_corrected_pdf_when_overlay_missing(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-synthetic-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|01/08|昼|Menu A|2|",
+            "combined": {
+                "corrected_pdf": "gs://bucket/corrected.pdf",
+            },
+        },
+    )
+
+    captured_pdf_bytes: list[bytes] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        if uri == "gs://bucket/corrected.pdf":
+            return b"%PDF-corrected\n%EOF\n"
+        if uri == "file://dummy.pdf":
+            return b"%PDF-raw\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes: bytes, dpi: int = 220, page: int = 1) -> bytes:
+        assert dpi == 220
+        assert page == 1
+        captured_pdf_bytes.append(pdf_bytes)
+        return b"\x89PNG\r\n\x1a\nsynthetic"
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(order_service, "detect_table_grid", lambda pdf_bytes, template: None)
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["combined"]["raw_pdf"] == "signed:file://dummy.pdf"
+    assert pages["combined"]["corrected_pdf"] == "signed:gs://bucket/corrected.pdf"
+    assert captured_pdf_bytes == [b"%PDF-corrected\n%EOF\n"]
+    assert len(pages["pages"]) == 1
+    page = pages["pages"][0]
+    assert page["synthetic"] is True
+    assert page["synthetic_source"] == "pdf_render"
+    assert page["pdf_variant_used"] == "corrected"
+    assert str(page["ocr_overlay_url"]).startswith("data:image/png;base64,")
+    assert page["markdown_text"]
 
 
 def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_header(tmp_path):
@@ -1394,6 +1673,80 @@ def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe():
     assert second[8] == "3"
 
 
+def test_merge_header_rows_keeps_forbidden_split_markers_unprefixed():
+    merged = fax_extractor._merge_header_rows(
+        ["日付", "区分", "献立", "常食", "", "ミキサー", "", "", "", "備考欄"],
+        ["", "", "", "2F", "3F", "2F", "3F", "肉禁", "魚禁", ""],
+    )
+
+    assert merged[7] == "肉禁"
+    assert merged[8] == "魚禁"
+
+
+def test_merge_header_rows_avoids_duplicate_forbidden_parent_and_change_prefix():
+    merged = fax_extractor._merge_header_rows(
+        ["日付", "区分", "メニュー", "常食", "禁食", "", "変更1", "", "備考欄"],
+        ["", "", "", "", "禁食", "", "", "変更2", ""],
+    )
+
+    assert merged[4] == "禁食"
+    assert merged[7] == "変更2"
+
+
+def test_rows_from_markdown_maps_split_forbidden_subheaders_without_parent_group():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_2f",
+            "qty.regular_3f",
+            "qty.mixer_2f",
+            "qty.mixer_3f",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "remarks",
+        ]
+    }
+    markdown = """
+|日付|区分|献立|常食||ミキサー||||備考欄|
+|-|-|-|-|-|-|-|-|-|-|
+||||2F|3F|2F|3F|肉禁|魚禁||
+|2/15|朝|Menu A|8|6|1|2|3|4||
+""".strip()
+
+    rows = rows_from_markdown(markdown, template)
+
+    assert rows == [["2/15", "朝", "Menu A", "8", "6", "1", "2", "3", "4", ""]]
+
+
+def test_rows_from_markdown_maps_three_row_forbidden_split_headers_and_change2():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+            "remarks",
+        ]
+    }
+    markdown = """
+|日付|区分|メニュー|常食|禁食|||変更1||備考欄|
+|-|-|-|-|-|-|-|-|-|-|
+|||||禁食||||変更2||
+|||||肉禁|魚禁||||
+|2/15|朝|Menu A|20||4|5|6|7||
+""".strip()
+
+    rows = rows_from_markdown(markdown, template)
+
+    assert rows == [["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", ""]]
+
+
 def test_rows_from_markdown_infers_columns_from_sparse_header():
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -1468,6 +1821,65 @@ def test_apply_order_line_quantities_by_source_row_index_fallback():
         order_lines=order_lines,
     )
     assert rows[1]["values"][3] == "5"
+
+
+def test_count_source_row_alignment_penalty_cells_counts_shifted_rows():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "remarks",
+    ]
+    quantity_index = order_service._build_sheet_quantity_index(fields)
+    base_rows = [
+        {
+            "row_id": "r0",
+            "values": ["01/08", "朝", "Menu A", "", ""],
+            "identity": order_service._sheet_row_identity(date(2026, 1, 8), "朝", "Menu A"),
+        },
+        {
+            "row_id": "r1",
+            "values": ["01/09", "朝", "Menu B", "", ""],
+            "identity": order_service._sheet_row_identity(date(2026, 1, 9), "朝", "Menu B"),
+        },
+    ]
+    rows_by_source_index = [
+        {"row_id": "r0", "values": ["01/08", "朝", "Menu A", "6", ""]},
+        {"row_id": "r1", "values": ["01/09", "朝", "Menu B", "5", ""]},
+    ]
+    order_lines = [
+        {
+            "date": date(2026, 1, 8),
+            "daypart": "朝",
+            "menu_name": "Menu A",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 5,
+            "quantity_corrected": None,
+            "source_row_index": 1,
+        },
+        {
+            "date": date(2026, 1, 9),
+            "daypart": "朝",
+            "menu_name": "Menu B",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 6,
+            "quantity_corrected": None,
+            "source_row_index": 0,
+        },
+    ]
+
+    penalty = order_service._count_source_row_alignment_penalty_cells(
+        base_rows=base_rows,
+        rows_by_source_index=rows_by_source_index,
+        fields=fields,
+        quantity_index=quantity_index,
+        order_lines=order_lines,
+    )
+
+    assert penalty == 2
 
 
 def test_apply_order_line_quantities_defaults_missing_area_to_x():
@@ -1841,6 +2253,221 @@ def test_get_ocr_sheet_weekly_menu_falls_back_to_payload_numeric_when_order_line
         config_service.get_facility_config = original_get
 
 
+def test_get_ocr_sheet_weekly_menu_prefers_payload_when_order_lines_have_stale_quantity_family():
+    order_service.clear_all()
+    _seed_monthly_menu_daypart_order_2099_11()
+    payload = IngestEmailPayload(
+        message_id="msg-sheet-unmapped-stale-family-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2099, 11, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2099-11",
+    )
+    lines = [
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "regular",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 20,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "staff",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 4,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "business",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 5,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 6,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 7,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "sesame_allergy",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 8,
+        },
+        {
+            "date": "2099-11-15",
+            "daypart": "朝",
+            "menu_name": "朝メニュー",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "bag_type": "standard",
+            "quantity_original": 9,
+        },
+    ]
+    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_rows": [
+                ["11/15", "朝", "朝メニュー", "20", "4", "6", "7", "8", "9", ""],
+            ],
+        },
+    )
+
+    original_get = config_service.get_facility_config
+
+    def _mock_get(facility_id: str):
+        current = original_get(facility_id)
+        if not current or facility_id != "FAC00001":
+            return current
+        payload_cfg = dict(current)
+        template = dict(payload_cfg.get("fax_template") or {})
+        template["main_ocr_row_fields"] = [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.sesame_allergy_x",
+            "qty.change_1_x",
+            "remarks",
+        ]
+        payload_cfg["fax_template"] = template
+        return payload_cfg
+
+    config_service.get_facility_config = _mock_get
+    try:
+        sheet, error = order_service.get_ocr_sheet(order["id"])
+        assert error is None
+        assert sheet is not None
+        assert sheet["source"] == "weekly_menu+ocr_payload"
+        assert "sheet_order_lines_unmapped_fallback_payload" in (sheet.get("warnings") or [])
+        assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
+        fields = sheet["fields"]
+        assert fields == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.sesame_allergy_x",
+            "qty.change_1_x",
+            "remarks",
+        ]
+        breakfast = sheet["rows"][0]
+        assert breakfast[3:9] == ["20", "4", "6", "7", "8", "9"]
+    finally:
+        config_service.get_facility_config = original_get
+
+
+def test_get_ocr_sheet_prefers_identity_over_payload_row_index_tie_without_menu_signal(monkeypatch):
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-sheet-payload-rowindex-tie-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 1, 8, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-01",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_rows": [
+                ["", "", "", "6", ""],
+                ["", "", "", "5", ""],
+            ]
+        },
+    )
+
+    def _fake_build_sheet_menu_entries(**_kwargs):
+        return ([{"row": 0}, {"row": 1}], "ocr_table")
+
+    def _fake_build_rows_from_menu_entries(**kwargs):
+        fields = kwargs["fields"]
+        field_index = kwargs["field_index"]
+        rows = []
+        for row_id, menu_date, mmdd, menu_name in (
+            ("row-1", date(2026, 1, 8), "01/08", "Menu A"),
+            ("row-2", date(2026, 1, 9), "01/09", "Menu B"),
+        ):
+            values = [""] * len(fields)
+            values[field_index["date_mmdd"]] = mmdd
+            values[field_index["daypart"]] = "朝"
+            values[field_index["menu"]] = menu_name
+            rows.append(
+                {
+                    "row_id": row_id,
+                    "values": values,
+                    "identity": order_service._sheet_row_identity(menu_date, "朝", menu_name),
+                }
+            )
+        return rows, "ocr_table"
+
+    def _fake_build_sheet_lines_from_ocr_payload(**_kwargs):
+        return [
+            {
+                "date": date(2026, 1, 8),
+                "daypart": "朝",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity_original": 5,
+            },
+            {
+                "date": date(2026, 1, 9),
+                "daypart": "朝",
+                "menu_name": "Menu B",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity_original": 6,
+            },
+        ]
+
+    monkeypatch.setattr(order_service, "_build_sheet_menu_entries", _fake_build_sheet_menu_entries)
+    monkeypatch.setattr(order_service, "_build_rows_from_menu_entries", _fake_build_rows_from_menu_entries)
+    monkeypatch.setattr(order_service, "_build_sheet_lines_from_ocr_payload", _fake_build_sheet_lines_from_ocr_payload)
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+
+    assert error is None
+    assert sheet is not None
+    assert sheet["trace"]["mapped_mode"] == "identity"
+    menu_idx = sheet["fields"].index("menu")
+    qty_idx = sheet["fields"].index("qty.regular_2f")
+    actual = {row[menu_idx]: row[qty_idx] for row in sheet["rows"]}
+    assert actual["Menu A"] == "5"
+    assert actual["Menu B"] == "6"
+
+
 def test_resolve_sheet_week_prefers_ocr_month_over_stale_hints():
     received_at = datetime(2026, 2, 3, 9, 0, 0)
     payload = {
@@ -2023,6 +2650,64 @@ def test_get_ocr_sheet_without_order_lines_keeps_weekly_menu_dates():
     dates = {row[0] for row in sheet["rows"] if row and row[0]}
     assert "12/26" in dates
     assert "12/27" in dates
+
+
+def test_get_ocr_sheet_respects_explicit_selected_week_range():
+    order_service.clear_all()
+    with session_scope() as session:
+        session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
+        session.execute(delete(MonthlyMenu).where(MonthlyMenu.id == "2099-12"))
+        session.add(
+            MonthlyMenu(
+                id="2099-12",
+                month_start=date(2099, 12, 1),
+                filename="seed-2099-12.xlsx",
+            )
+        )
+        session.add_all(
+            [
+                MonthlyMenuEntry(
+                    id="seed-entry-2099-12-26-breakfast-a-range",
+                    monthly_menu_id="2099-12",
+                    menu_date=date(2099, 12, 26),
+                    daypart="朝食",
+                    name="Menu A",
+                    slot_index=0,
+                ),
+                MonthlyMenuEntry(
+                    id="seed-entry-2099-12-27-breakfast-b-range",
+                    monthly_menu_id="2099-12",
+                    menu_date=date(2099, 12, 27),
+                    daypart="朝食",
+                    name="Menu B",
+                    slot_index=0,
+                ),
+                MonthlyMenuEntry(
+                    id="seed-entry-2099-12-28-breakfast-c-range",
+                    monthly_menu_id="2099-12",
+                    menu_date=date(2099, 12, 28),
+                    daypart="朝食",
+                    name="Menu C",
+                    slot_index=0,
+                ),
+            ]
+        )
+    payload = IngestEmailPayload(
+        message_id="msg-sheet-week-range-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2099, 12, 26, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2099-12",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    assert order_service.set_week(order["id"], "2099-12@2099-12-26~2099-12-27") is True
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+    assert error is None
+    assert sheet is not None
+    assert sheet["week_id"] == "2099-12@2099-12-26~2099-12-27"
+    dates = [row[0] for row in sheet["rows"] if row and row[0]]
+    assert dates == ["12/26", "12/27"]
 
 
 def test_get_ocr_sheet_without_order_lines_filters_weekly_menu_by_payload_dates():
@@ -3629,10 +4314,114 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     assert latest["rows"][0][3] == "2"
     assert latest["llm_review"]["issues"][0]["issue_code"] == "misread_quantity"
 
+
+def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-llm-review-corrected-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "tables": [
+                        {
+                            "table_id": "p1_t1",
+                            "rows": [
+                                [
+                                    "日付",
+                                    "区分",
+                                    "メニュー",
+                                    "常食2F",
+                                    "常食3F",
+                                    "軟菜2F",
+                                    "軟菜3F",
+                                    "ミキサー2F",
+                                    "ミキサー3F",
+                                    "備考",
+                                ],
+                                ["01/08", "昼", "Menu A", "2", "1", "3", "", "", "", "first-pass"],
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "combined": {
+                "corrected_pdf": "gs://bucket/corrected.pdf",
+            },
+            "table_raw": "|日付|区分|メニュー|常食2F|常食3F|軟菜2F|軟菜3F|ミキサー2F|ミキサー3F|備考|\n|---|---|---|---|---|---|---|---|---|---|\n|01/08|昼|Menu A|2|1|3||||first-pass|",
+        },
+    )
+
+    captured_uris: list[str] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        captured_uris.append(uri)
+        if uri == "gs://bucket/corrected.pdf":
+            return b"%PDF-corrected\n%EOF\n"
+        if uri == "file://dummy.pdf":
+            return b"%PDF-raw\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        assert pdf_bytes == b"%PDF-corrected\n%EOF\n"
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["2026-01-08"],
+            table_rows=[],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            raw_text=json.dumps(
+                {
+                    "facility_name": "Test Facility",
+                    "date_strings": ["1/8"],
+                    "rows": [
+                        {
+                            "date_mmdd": "01/08",
+                            "daypart": "昼",
+                            "menu": "Menu A",
+                            "qty.regular_2f": "5",
+                            "qty.regular_3f": "1",
+                            "qty.soft_2f": "3",
+                            "qty.soft_3f": "",
+                            "qty.mixer_2f": "",
+                            "qty.mixer_3f": "",
+                            "remarks": "first-pass",
+                        }
+                    ],
+                    "table_raw": "|...|",
+                    "llm_review": {
+                        "status": "verified",
+                        "needs_more_review": False,
+                        "notes": "used corrected pdf",
+                        "issues": [],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            provider_debug={"provider": "gemini", "model": "review-model-corrected"},
+        )
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+
+    updated, error = order_service.review_ocr_table_with_llm(
+        order["id"],
+        provider="gemini",
+        pdf_variant="corrected",
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["llm_review"]["pdf_variant_requested"] == "corrected"
+    assert updated["llm_review"]["pdf_variant_used"] == "corrected"
+    assert "pdf_variant_fallback_reason" not in updated["llm_review"]
+    assert captured_uris == ["gs://bucket/corrected.pdf"]
+
     sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
     assert sheet_error is None
     assert sheet is not None
-    assert "sheet_ocr_review_required" in (sheet.get("warnings") or [])
+    assert "sheet_ocr_review_required" not in (sheet.get("warnings") or [])
     issues = sheet.get("cell_issues") or []
-    assert any(issue.get("issue_code") == "misread_quantity" for issue in issues)
-    assert any(issue.get("field") == "qty.regular_2f" for issue in issues)
+    assert issues == []

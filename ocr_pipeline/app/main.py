@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -59,6 +61,9 @@ OCR_TEMPLATE_MATCH_ALLOW_DISCOVERY = (
 OCR_TEMPLATE_MATCH_DPI = int(os.environ.get("OCR_TEMPLATE_MATCH_DPI", "300"))
 OCR_ENABLE_TEMPLATE_ROI = os.environ.get("OCR_ENABLE_TEMPLATE_ROI", "true").lower() == "true"
 OCR_ENABLE_PAGE_CORRECTION = os.environ.get("OCR_ENABLE_PAGE_CORRECTION", "true").lower() == "true"
+OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE = (
+    os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", "skip").strip().lower()
+)
 
 db = firestore.Client(project=PROJECT_ID or None)
 gcs = storage.Client(project=PROJECT_ID or None)
@@ -103,6 +108,32 @@ def _encode_png(image_bgr) -> bytes:
 def _upload_bytes(bucket: str, object_name: str, data: bytes, content_type: str) -> str:
     gcs.bucket(bucket).blob(object_name).upload_from_string(data, content_type=content_type)
     return f"gs://{bucket}/{object_name}"
+
+
+def _upload_corrected_pdf_artifact(
+    *,
+    bucket: str,
+    artifact_prefix: str,
+    base: str,
+    original_pdf_bytes: bytes,
+    corrected_pdf_bytes: bytes,
+    page_correction_summary: dict | None,
+) -> str | None:
+    if not isinstance(page_correction_summary, dict):
+        return None
+    if not page_correction_summary.get("applied"):
+        return None
+    if not page_correction_summary.get("corrected_pdf_generated"):
+        return None
+    if not corrected_pdf_bytes or corrected_pdf_bytes == original_pdf_bytes:
+        return None
+    corrected_object_name = f"{artifact_prefix}{base}_corrected.pdf"
+    return _upload_bytes(
+        bucket,
+        corrected_object_name,
+        corrected_pdf_bytes,
+        "application/pdf",
+    )
 
 
 def _upload_text(bucket: str, object_name: str, text: str, content_type: str) -> str:
@@ -449,9 +480,20 @@ def _run_template_roi_extraction(
     )
     post = tpl_cfg.get("postprocess") if isinstance(tpl_cfg.get("postprocess"), dict) else {}
     qty_ocr_engine = str(post.get("qty_ocr_engine") or os.environ.get("OCR_QTY_OCR_ENGINE", "yomitoku")).strip().lower()
+    text_ocr_engine = str(
+        post.get("text_ocr_engine")
+        or os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE)
+        or ""
+    ).strip().lower()
+    if not text_ocr_engine:
+        text_ocr_engine = "skip" if qty_ocr_engine == "tesseract_digits" else "yomitoku"
 
     def _ocr_fn(image_bgr, _prompt: str, _max_tokens: int) -> str:
         if _max_tokens <= 32 and qty_ocr_engine == "tesseract_digits":
+            return _tesseract_digits_text(image_bgr)
+        if _max_tokens > 32 and text_ocr_engine in {"skip", "none", "disabled", "off"}:
+            return ""
+        if _max_tokens > 32 and text_ocr_engine == "tesseract_digits":
             return _tesseract_digits_text(image_bgr)
         return ocr_image_text(image_bgr, device=YOMITOKU_DEVICE)
 
@@ -552,6 +594,12 @@ def handler():
             "template_warp_page_count": 0,
             "deskew_page_count": 0,
             "position_normalized_page_count": 0,
+            "corrected_page_count": 0,
+            "corrected_pdf_generated": False,
+            "corrected_pdf_changed": False,
+            "corrected_pdf_byte_length": 0,
+            "corrected_pdf_uploaded": False,
+            "corrected_pdf_uri": None,
             "pages": [],
         }
         classification_warnings: list[str] = []
@@ -657,6 +705,20 @@ def handler():
         base = os.path.splitext(os.path.basename(name))[0]
         artifact_prefix = f"{output_prefix}{base}/"
         figure_prefix = f"{artifact_prefix}{YOMITOKU_FIGURE_DIR}/"
+        corrected_pdf_uri = _upload_corrected_pdf_artifact(
+            bucket=bucket,
+            artifact_prefix=artifact_prefix,
+            base=base,
+            original_pdf_bytes=pdf_bytes,
+            corrected_pdf_bytes=yomitoku_pdf_bytes,
+            page_correction_summary=page_correction_summary,
+        )
+        page_correction_summary["corrected_pdf_uploaded"] = bool(corrected_pdf_uri)
+        page_correction_summary["corrected_pdf_uri"] = corrected_pdf_uri or None
+        page_correction_artifacts = {
+            "corrected_pdf_uri": corrected_pdf_uri,
+            "corrected_pdf_uploaded": bool(corrected_pdf_uri),
+        }
 
         uploaded_figures: dict[str, str] = {}
         pages: list[dict] = []
@@ -749,6 +811,8 @@ def handler():
         cell_issues = merge_cell_issues(structured_cell_issues, roi_cell_issues)
 
         combined = {}
+        if corrected_pdf_uri:
+            combined["corrected_pdf"] = corrected_pdf_uri
         if YOMITOKU_VIS and YOMITOKU_VIS_PDF:
             if ocr_pdf:
                 combined["ocr_pdf"] = _upload_bytes(
@@ -815,6 +879,13 @@ def handler():
             "page_correction_position_normalized_page_count": int(
                 page_correction_summary.get("position_normalized_page_count") or 0
             ),
+            "page_correction_corrected_page_count": int(page_correction_summary.get("corrected_page_count") or 0),
+            "page_correction_corrected_pdf_generated": bool(
+                page_correction_summary.get("corrected_pdf_generated")
+            ),
+            "page_correction_corrected_pdf_uploaded": bool(
+                page_correction_summary.get("corrected_pdf_uploaded")
+            ),
             "elapsed_sec": elapsed,
         }
         if OCR_PIPELINE_MODE == "structured_v2" and not structured_tables:
@@ -855,6 +926,7 @@ def handler():
             if isinstance(classification, dict)
             else None,
             "page_correction": page_correction_summary,
+            "page_correction_artifacts": page_correction_artifacts,
             "warnings": warnings,
         }
         gcs.bucket(bucket).blob(output_name).upload_from_string(

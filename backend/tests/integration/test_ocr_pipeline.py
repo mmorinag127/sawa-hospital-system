@@ -334,6 +334,9 @@ def test_reparse_order_llm_truncated_uses_pipeline_rows(monkeypatch, tmp_path):
     assert metrics.get("finish_reason") == "MAX_TOKENS"
     assert metrics.get("truncated_output") is True
     assert metrics.get("rows_replaced_with_pipeline") is True
+    assert metrics.get("quality_track") == "llm_reparse"
+    assert metrics.get("reparse_origin") == "llm_assist"
+    assert metrics.get("feedback_retry_depth") == 0
 
 
 def test_reparse_order_quantity_only_rows_merge_without_provider_flag(monkeypatch, tmp_path):
@@ -626,6 +629,130 @@ def test_parse_order_lines_allow_blank_structure_rows_keeps_quantity_only_rows()
     assert [line["source_row_index"] for line in lines] == [0, 1]
     assert all(line.get("date") is None for line in lines)
     assert all(line.get("menu_name") is None for line in lines)
+
+
+def test_parse_order_lines_rows_are_body_only_ignores_template_header_rows():
+    template = {
+        "header_rows": 2,
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+        ],
+    }
+    rows = [
+        ["", "", "", ""],
+        ["", "", "", ""],
+        ["", "", "", "42"],
+        ["", "", "", "42"],
+        ["", "", "", "42"],
+        ["", "", "", "43"],
+    ]
+    lines = parse_order_lines(
+        rows,
+        template,
+        datetime(2026, 2, 15, 9, 0, 0),
+        {
+            "zero_as_empty": False,
+            "strict_numeric_quantity_cell": True,
+            "allow_blank_structure_rows": True,
+            "rows_are_body_only": True,
+        },
+    )
+    assert [int(line["quantity_original"]) for line in lines] == [42, 42, 42, 43]
+    assert [line["source_row_index"] for line in lines] == [2, 3, 4, 5]
+
+
+def test_build_reparse_quantity_rules_marks_llm_rows_as_body_only():
+    rules = order_service._build_reparse_quantity_rules({}, strict_llm_quantity=True)
+    assert rules["allow_blank_structure_rows"] is True
+    assert rules["rows_are_body_only"] is True
+    assert rules["strict_numeric_quantity_cell"] is True
+
+
+def test_validate_reparse_lines_against_weekly_menu_accepts_body_only_blank_anchor_rows():
+    template = {
+        "header_rows": 2,
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+        ],
+    }
+    entries_override = [
+        {"menu_date": "2026-02-15", "daypart_key": "朝", "menu_name": "A0"},
+        {"menu_date": "2026-02-15", "daypart_key": "朝", "menu_name": "A1"},
+        {"menu_date": "2026-02-15", "daypart_key": "昼", "menu_name": "A2"},
+        {"menu_date": "2026-02-15", "daypart_key": "昼", "menu_name": "A3"},
+        {"menu_date": "2026-02-15", "daypart_key": "昼", "menu_name": "A4"},
+        {"menu_date": "2026-02-15", "daypart_key": "夕", "menu_name": "A5"},
+    ]
+    ocr_rows = [
+        ["", "", "", ""],
+        ["", "", "", ""],
+        ["", "", "", "42"],
+        ["", "", "", "42"],
+        ["", "", "", "42"],
+        ["", "", "", "43"],
+    ]
+    lines = [
+        {
+            "source_row_index": 2,
+            "date": "2026-02-15",
+            "daypart": "昼",
+            "menu_name": "A2",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+        {
+            "source_row_index": 3,
+            "date": "2026-02-15",
+            "daypart": "昼",
+            "menu_name": "A3",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+        {
+            "source_row_index": 4,
+            "date": "2026-02-15",
+            "daypart": "昼",
+            "menu_name": "A4",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+        {
+            "source_row_index": 5,
+            "date": "2026-02-15",
+            "daypart": "夕",
+            "menu_name": "A5",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 43,
+        },
+    ]
+
+    error, detail = order_service._validate_reparse_lines_against_weekly_menu(
+        lines=lines,
+        week_id="2026-02@2026-02-15~2026-02-21",
+        ocr_rows=ocr_rows,
+        template=template,
+        entries_override=entries_override,
+        rows_are_body_only=True,
+    )
+
+    assert error is None
+    assert detail is None
 
 
 def test_apply_menu_position_mapping_overrides_daypart_and_date_from_weekly_menu(monkeypatch):
@@ -2167,6 +2294,17 @@ def test_build_quantity_only_repair_prompts_includes_focus_context():
         ["2/15", "昼", "A", "6", ""],
         ["2/15", "夕", "B", "", ""],
     ]
+    baseline_rows = [
+        ["2/15", "朝", "Anchor 1", "", ""],
+        ["2/15", "昼", "A", "6", ""],
+        ["2/15", "夕", "B", "", ""],
+    ]
+    structural_rows = [
+        ["2/15", "朝", "Anchor 1", "", ""],
+        ["2/15", "朝", "Anchor 2", "", ""],
+        ["2/15", "昼", "A", "6", ""],
+        ["2/15", "夕", "B", "", ""],
+    ]
     quality_detail = {
         "expected_row_count": 3,
         "actual_row_count": 2,
@@ -2178,6 +2316,10 @@ def test_build_quantity_only_repair_prompts_includes_focus_context():
         provider="gemini",
         template=template,
         current_rows=current_rows,
+        baseline_rows=baseline_rows,
+        baseline_fields=template["main_ocr_row_fields"],
+        structural_rows=structural_rows,
+        structural_fields=template["main_ocr_row_fields"],
         expected_row_count=3,
         quality_error="sheet_column_anomaly",
         quality_detail=quality_detail,
@@ -2192,6 +2334,13 @@ def test_build_quantity_only_repair_prompts_includes_focus_context():
     assert '"target_model": "gemini-2.5-pro"' in user_prompt
     assert '"focus_row_indexes": [2]' in user_prompt
     assert '"focus_quantity_column_indexes": [4]' in user_prompt
+    assert "Treat the current sheet/baseline rows as the user-visible structural context." in system_prompt
+    assert "keep it blank unless the fax shows direct row-level evidence" in system_prompt
+    assert "Infer unreadable quantities only within the same date/daypart block." in system_prompt
+    assert "Current sheet/baseline rows shown to the user" in user_prompt
+    assert '"Anchor 1"' in user_prompt
+    assert "Blank-anchor structural row indexes" in user_prompt
+    assert "[0, 1]" in user_prompt
 
 
 def test_build_llm_assist_prompt_uses_yomitoku_structured_rows_and_derived_issues():
@@ -2258,6 +2407,1456 @@ def test_build_llm_assist_prompt_uses_yomitoku_structured_rows_and_derived_issue
     assert "99" not in prompt
 
 
+def test_build_llm_assist_prompt_includes_auto_fallback_context():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        failure_context={
+            "trigger": "yomitoku_failed",
+            "from_provider": "pipeline",
+            "reason": "lines_empty",
+            "row_count": 0,
+            "line_count": 0,
+        },
+    )
+
+    assert prompt is not None
+    assert "Automatic fallback context:" in prompt
+    assert "first-pass yomitoku/pipeline OCR did not produce parseable order lines" in prompt
+    assert '"reason": "lines_empty"' in prompt
+    assert '"from_provider": "pipeline"' in prompt
+
+
+def test_build_llm_assist_prompt_includes_baseline_and_evaluator_feedback():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+        "gemini_ocr_prompt": "facility-base",
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [["01/08", "昼", "Menu A", "2", "baseline"]],
+        "row_ids": ["row-1"],
+        "baseline_source": "edited",
+        "baseline_revision_id": "rev-1",
+    }
+    evaluator_feedback = {
+        "status": "fail",
+        "provider": "openai",
+        "model": "audit-model-v1",
+        "issue_count": 1,
+        "blocking_issue_count": 1,
+        "issues": [
+            {
+                "issue_code": "column_swap",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.91,
+                "evidence": "visible 7 in the regular column",
+                "reason": "candidate row mismatched the baseline",
+            }
+        ],
+        "blocking_issues": [
+            {
+                "issue_code": "column_swap",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.91,
+                "evidence": "visible 7 in the regular column",
+                "reason": "candidate row mismatched the baseline",
+            }
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        evaluator_feedback=evaluator_feedback,
+        draft_rows_override=[["01/08", "昼", "Menu A", "5", "draft"]],
+        draft_rows_label="First LLM inference candidate rows",
+    )
+
+    assert prompt is not None
+    assert "Current sheet/baseline rows shown to the user" in prompt
+    assert "Current baseline source: edited" in prompt
+    assert "Current baseline revision_id: rev-1" in prompt
+    assert "Evaluator feedback from previous OCR draft" in prompt
+    assert '"issue_code": "column_swap"' in prompt
+    assert "First LLM inference candidate rows" in prompt
+
+
+def test_build_llm_assist_prompt_warns_against_dense_fill_when_sheet_has_more_rows_than_first_pass():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+        "baseline_source": "sheet",
+    }
+    pipeline_output = {
+        "rows": [
+            {
+                "cells": {
+                    "date_mmdd": "02/15",
+                    "daypart": "昼",
+                    "menu": "Menu C",
+                    "qty.regular_x": "42",
+                }
+            },
+            {
+                "cells": {
+                    "date_mmdd": "02/15",
+                    "daypart": "昼",
+                    "menu": "Menu D",
+                    "qty.regular_x": "42",
+                }
+            },
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=pipeline_output,
+        llm_assist=True,
+        baseline=baseline,
+    )
+
+    assert prompt is not None
+    assert "It is valid for some rows to remain blank across all quantity columns." in prompt
+    assert "Do NOT fill a row unless a quantity is directly visible" in prompt
+    assert "Current sheet rows: 4." in prompt
+    assert "First-pass yomitoku rows: 2." in prompt
+    assert "Keep quantity cells empty on unmatched structural rows" in prompt
+    assert "Row block boundaries from structural sheet/baseline" in prompt
+    assert "same date/daypart block" in prompt
+    assert "Continuity is never clear across a block boundary" in prompt
+    assert '"row_start": 0' in prompt
+    assert '"row_end": 1' in prompt
+    assert '"daypart": "朝"' in prompt
+    assert "Treat each consecutive date/daypart block above as a hard row boundary." in prompt
+
+
+def test_build_llm_assist_prompt_skips_nested_generated_prompt_prefix():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+        "gemini_ocr_prompt": (
+            "Second-pass repair mode:\n"
+            "- Treat the first-pass yomitoku output as the baseline draft.\n"
+            "Current sheet/baseline rows shown to the user:\n[]"
+        ),
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [["02/15", "朝", "Menu A", "", ""]],
+        "row_ids": ["row-1"],
+        "baseline_source": "sheet",
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+    )
+
+    assert prompt is not None
+    assert "Facility-specific instruction" not in prompt
+    assert prompt.count("Second-pass repair mode:") == 1
+
+
+def test_build_llm_assist_prompt_includes_date_block_layout_rules():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+        "columns": [
+            {"field": "date_mmdd", "header": "日付", "type": "date", "index": 0},
+            {"field": "daypart", "header": "区分", "type": "text", "index": 1},
+            {"field": "menu", "header": "メニュー", "type": "text", "index": 2},
+            {
+                "field": "qty.regular_x",
+                "header": "常食",
+                "type": "quantity",
+                "role": "quantity",
+                "index": 3,
+                "diet_type": "regular",
+                "area_id": "X",
+            },
+            {"field": "remarks", "header": "備考", "type": "text", "index": 4},
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+            ["02/16", "朝", "Menu E", "", ""],
+            ["02/16", "昼", "Menu F", "", ""],
+        ],
+        "row_ids": [f"row-{idx + 1}" for idx in range(6)],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+            ["02/16", "朝", "Menu E", "", ""],
+            ["02/16", "昼", "Menu F", "", ""],
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        draft_rows_override=[
+            ["02/15", "朝", "Menu A", "42", ""],
+            ["02/15", "朝", "Menu B", "42", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+            ["02/16", "朝", "Menu E", "43", ""],
+            ["02/16", "昼", "Menu F", "", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "Date block layout summary" in prompt
+    assert '"sub_blocks": [{"daypart": "朝", "row_start": 0, "row_end": 1, "row_count": 2}' in prompt
+    assert "Blank sub-blocks may appear at the start, middle, or end of a date block." in prompt
+    assert "Do NOT rotate a blank sub-block to the end of a date block" in prompt
+    assert "Suspicious blank-edge placement hints from the current OCR draft" in prompt
+    assert "trailing_blank_run_after_filled_rows" in prompt
+
+
+def test_build_llm_assist_prompt_prefers_structural_rows_for_blank_anchor_preservation():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["02/15", "朝", "Menu A", "99", ""],
+            ["02/15", "朝", "Menu B", "99", ""],
+            ["02/15", "昼", "Menu C", "42", ""],
+            ["02/15", "昼", "Menu D", "42", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+        ],
+        "structure_row_ids": ["srow-1", "srow-2", "srow-3", "srow-4"],
+        "structure_source": "weekly_menu_structure",
+    }
+    pipeline_output = {
+        "rows": [
+            {
+                "cells": {
+                    "date_mmdd": "02/15",
+                    "daypart": "昼",
+                    "menu": "Menu C",
+                    "qty.regular_x": "42",
+                }
+            },
+            {
+                "cells": {
+                    "date_mmdd": "02/15",
+                    "daypart": "昼",
+                    "menu": "Menu D",
+                    "qty.regular_x": "42",
+                }
+            },
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=pipeline_output,
+        llm_assist=True,
+        baseline=baseline,
+    )
+
+    assert prompt is not None
+    assert "Structural sheet rows for blank-anchor preservation" in prompt
+    assert '"qty.regular_x": ""' in prompt
+    assert "Structural baseline source: weekly_menu_structure" in prompt
+
+
+def test_build_llm_assist_prompt_uses_first_pass_rows_override_for_blank_anchor_preservation():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["02/15", "朝", "Menu A", "99", ""],
+            ["02/15", "朝", "Menu B", "99", ""],
+            ["02/15", "昼", "Menu C", "42", ""],
+            ["02/15", "昼", "Menu D", "42", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+        ],
+        "structure_row_ids": ["srow-1", "srow-2", "srow-3", "srow-4"],
+        "structure_source": "weekly_menu_structure",
+    }
+    pipeline_output = {"pages": [], "table_raw": ""}
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=pipeline_output,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["02/15", "昼", "Menu C", "42", ""],
+            ["02/15", "昼", "Menu D", "42", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "Blank-anchor structural row indexes" in prompt
+    assert "[0, 1]" in prompt
+    assert "First-pass yomitoku structured rows" in prompt
+    assert '"Menu C"' in prompt
+
+
+def test_build_llm_assist_prompt_omits_noisy_markdown_when_block_drift_feedback_exists():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["02/15", "朝", "Menu A", "", ""],
+            ["02/15", "朝", "Menu B", "", ""],
+            ["02/15", "昼", "Menu C", "", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+        ],
+        "structure_row_ids": ["srow-1", "srow-2", "srow-3", "srow-4"],
+    }
+    pipeline_output = {
+        "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|昼|Menu C|42|",
+        "rows": [
+            {
+                "cells": {
+                    "date_mmdd": "02/15",
+                    "daypart": "昼",
+                    "menu": "Menu C",
+                    "qty.regular_x": "42",
+                }
+            },
+        ],
+        "tables": [
+            {
+                "table_id": "p1_t1",
+                "rows": [["日付", "区分", "メニュー", "常食"], ["02/15", "昼", "Menu C", "42"]],
+                "cells": [{"row_index": 1, "col_index": 3, "text": "42"}],
+            }
+        ],
+    }
+    evaluator_feedback = {
+        "status": "fail",
+        "provider": "gemini",
+        "actual_provider": "gemini",
+        "model": "gemini-2.5-pro",
+        "issue_count": 1,
+        "blocking_issue_count": 1,
+        "issues": [
+            {
+                "issue_code": "unexpected_dense_fill",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.99,
+                "evidence": "No handwritten quantity for breakfast block",
+                "reason": "Keep blank anchors blank",
+            }
+        ],
+        "blocking_issues": [
+            {
+                "issue_code": "unexpected_dense_fill",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.99,
+                "evidence": "No handwritten quantity for breakfast block",
+                "reason": "Keep blank anchors blank",
+            }
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=pipeline_output,
+        llm_assist=True,
+        baseline=baseline,
+        evaluator_feedback=evaluator_feedback,
+    )
+
+    assert prompt is not None
+    assert "Block-anchored repair mode" in prompt
+    assert "First-pass yomitoku markdown" not in prompt
+    assert "First-pass yomitoku structured tables/cells" not in prompt
+    assert "Suspicious first-pass cells" not in prompt
+    assert "First-pass yomitoku structured rows" in prompt
+
+
+def test_build_llm_reparse_audit_prompts_include_current_sheet_rows_and_dense_fill_codes():
+    system_prompt, user_prompt, fields = order_service._build_llm_reparse_audit_prompts(
+        candidate_rows=[["", "", "", "42"], ["", "", "", "42"]],
+        reference_rows=[["02/15", "昼", "Menu C", "42"]],
+        baseline_rows=[["02/15", "朝", "Menu A", ""], ["02/15", "朝", "Menu B", ""]],
+        quantity_columns=[{"field": "qty.regular_x", "index": 3}],
+        expected_row_count=4,
+        block_anchor_hints={
+            "blocks": [
+                {"row_start": 0, "row_end": 1, "row_count": 2, "date_mmdd": "02/15", "daypart": "朝"},
+                {"row_start": 2, "row_end": 3, "row_count": 2, "date_mmdd": "02/15", "daypart": "昼"},
+            ],
+            "unmatched_structural_row_indexes": [0, 1],
+        },
+    )
+
+    assert fields == [
+        "issue_code",
+        "severity",
+        "row_index",
+        "column_index",
+        "confidence",
+        "evidence",
+        "reason",
+    ]
+    assert "unexpected_dense_fill" in system_prompt
+    assert "missing_blank_anchor_rows" in system_prompt
+    assert "overextended_span" in system_prompt
+    assert "current_sheet_block_ranges" in system_prompt
+    assert "current_sheet_date_ranges" in system_prompt
+    assert "blank_anchor_row_indexes_hint" in system_prompt
+    assert "direct visual evidence" in system_prompt
+    assert "lower handwritten quantity is shifted upward" in system_prompt
+    assert '"current_sheet_rows_hint": [["02/15", "朝", "Menu A", ""], ["02/15", "朝", "Menu B", ""]]' in user_prompt
+    assert '"current_sheet_date_ranges": [{"date_mmdd": "02/15", "row_start": 0, "row_end": 1, "row_count": 2' in user_prompt
+    assert '"current_sheet_block_ranges": [{"row_start": 0, "row_end": 1, "row_count": 2, "date_mmdd": "02/15", "daypart": "朝"' in user_prompt
+    assert '"blank_anchor_row_indexes_hint": [0, 1]' in user_prompt
+
+
+def test_build_llm_reparse_audit_prompts_uses_structural_blank_anchor_rows_when_unmatched_empty():
+    system_prompt, user_prompt, fields = order_service._build_llm_reparse_audit_prompts(
+        candidate_rows=[["", "", "", "42"], ["", "", "", ""]],
+        reference_rows=[["02/15", "昼", "Menu B", ""]],
+        baseline_rows=[["02/15", "朝", "Menu A", ""], ["02/15", "朝", "Menu B", ""]],
+        quantity_columns=[{"field": "qty.regular_x", "index": 3}],
+        expected_row_count=2,
+        block_anchor_hints={
+            "blocks": [
+                {
+                    "row_start": 0,
+                    "row_end": 1,
+                    "row_count": 2,
+                    "date_mmdd": "02/15",
+                    "daypart": "朝",
+                }
+            ],
+            "unmatched_structural_row_indexes": [],
+            "structural_blank_anchor_row_indexes": [0],
+        },
+    )
+
+    assert fields == [
+        "issue_code",
+        "severity",
+        "row_index",
+        "column_index",
+        "confidence",
+        "evidence",
+        "reason",
+    ]
+    assert '"blank_anchor_row_indexes_hint": [0]' in user_prompt
+    assert "overextended_span" in system_prompt
+
+
+def test_collect_candidate_blank_edge_hints_detects_trailing_blank_runs():
+    hints = order_service._collect_candidate_blank_edge_hints(
+        candidate_rows=[
+            ["02/15", "朝", "Menu A", "42", ""],
+            ["02/15", "朝", "Menu B", "42", ""],
+            ["02/15", "昼", "Menu C", "43", ""],
+            ["02/15", "昼", "Menu D", "", ""],
+            ["02/15", "昼", "Menu E", "", ""],
+        ],
+        quantity_columns=[{"field": "qty.regular_x", "index": 3}],
+        date_blocks=[
+            {
+                "date_mmdd": "02/15",
+                "row_start": 0,
+                "row_end": 4,
+                "row_count": 5,
+                "sub_blocks": [
+                    {"daypart": "朝", "row_start": 0, "row_end": 1, "row_count": 2},
+                    {"daypart": "昼", "row_start": 2, "row_end": 4, "row_count": 3},
+                ],
+            }
+        ],
+    )
+
+    assert hints == [
+        {
+            "date_mmdd": "02/15",
+            "row_start": 0,
+            "row_end": 4,
+            "filled_row_indexes": [0, 1, 2],
+            "blank_row_indexes": [3, 4],
+            "trailing_blank_row_indexes": [3, 4],
+            "pattern": "trailing_blank_run_after_filled_rows",
+            "note": "Verify that blank rows were not rotated to the end of the date block.",
+            "sub_blocks": [
+                {"daypart": "朝", "row_start": 0, "row_end": 1, "row_count": 2},
+                {"daypart": "昼", "row_start": 2, "row_end": 4, "row_count": 3},
+            ],
+        }
+    ]
+
+
+def test_resolve_reparse_baseline_rows_for_structure_prefers_structure_rows():
+    fields, rows, row_ids, source = order_service._resolve_reparse_baseline_rows_for_structure(
+        {
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "rows": [["02/15", "朝", "Menu A", "99"]],
+            "row_ids": ["row-1"],
+            "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "structure_rows": [["02/15", "朝", "Menu A", ""]],
+            "structure_row_ids": ["srow-1"],
+            "structure_source": "weekly_menu_structure",
+        }
+    )
+
+    assert fields == ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    assert rows == [["02/15", "朝", "Menu A", ""]]
+    assert row_ids == ["srow-1"]
+    assert source == "weekly_menu_structure"
+
+
+def test_validate_reparse_blank_anchor_drift_detects_dense_fill_into_structural_blank_rows():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+        ["02/15", "昼", "Menu D", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "昼", "Menu C", "42", ""],
+        ["02/15", "昼", "Menu D", "42", ""],
+    ]
+    lines = [
+        {
+            "source_row_index": 0,
+            "date": date(2026, 2, 15),
+            "daypart": "朝",
+            "menu_name": "Menu A",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+        {
+            "source_row_index": 2,
+            "date": date(2026, 2, 15),
+            "daypart": "昼",
+            "menu_name": "Menu C",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+    ]
+
+    error, detail = order_service._validate_reparse_blank_anchor_drift(
+        lines=lines,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert error == "sheet_blank_anchor_drift"
+    assert detail is not None
+    assert detail["offending_source_rows"] == [0]
+    assert detail["blank_anchor_row_indexes"] == [0, 1]
+    assert detail["filled_source_rows"] == [0, 2]
+    assert detail["offending_blocks"] == [
+        {
+            "date_mmdd": "02/15",
+            "daypart": "朝",
+            "row_start": 0,
+            "row_end": 1,
+            "offending_source_rows": [0],
+        }
+    ]
+
+
+def test_validate_reparse_blank_anchor_drift_allows_quantities_within_matched_rows():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+        ["02/15", "昼", "Menu D", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "昼", "Menu C", "42", ""],
+        ["02/15", "昼", "Menu D", "42", ""],
+    ]
+    lines = [
+        {
+            "source_row_index": 2,
+            "date": date(2026, 2, 15),
+            "daypart": "昼",
+            "menu_name": "Menu C",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+        {
+            "source_row_index": 3,
+            "date": date(2026, 2, 15),
+            "daypart": "昼",
+            "menu_name": "Menu D",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 42,
+        },
+    ]
+
+    error, detail = order_service._validate_reparse_blank_anchor_drift(
+        lines=lines,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert error is None
+    assert detail is None
+
+
+def test_augment_llm_reparse_audit_with_structural_feedback_adds_all_offending_blank_anchor_rows():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "A1", "", ""],
+        ["02/15", "朝", "A2", "", ""],
+        ["02/15", "昼", "A3", "", ""],
+        ["02/15", "昼", "A4", "", ""],
+        ["02/16", "朝", "B1", "", ""],
+        ["02/16", "朝", "B2", "", ""],
+        ["02/16", "昼", "B3", "", ""],
+        ["02/16", "昼", "B4", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "昼", "A3", "42", ""],
+        ["02/15", "昼", "A4", "42", ""],
+        ["02/16", "昼", "B3", "43", ""],
+        ["02/16", "昼", "B4", "43", ""],
+    ]
+    candidate_rows = [
+        ["", "", "", "42", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "43", ""],
+    ]
+    audit = {
+        "status": "fail",
+        "issue_count": 1,
+        "blocking_issue_count": 1,
+        "issues": [
+            {
+                "issue_code": "overextended_span",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.91,
+                "evidence": "initial example",
+                "reason": "first block drift",
+            }
+        ],
+        "blocking_issues": [
+            {
+                "issue_code": "overextended_span",
+                "severity": "high",
+                "row_index": 0,
+                "column_index": 3,
+                "confidence": 0.91,
+                "evidence": "initial example",
+                "reason": "first block drift",
+            }
+        ],
+    }
+
+    augmented = order_service._augment_llm_reparse_audit_with_structural_feedback(
+        llm_audit=audit,
+        candidate_rows=candidate_rows,
+        template=template,
+        baseline_fields=fields,
+        baseline_structure_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert augmented is not None
+    issue_rows = sorted(
+        int(item["row_index"])
+        for item in (augmented.get("issues") or [])
+        if item.get("issue_code") == "missing_blank_anchor_rows"
+    )
+    dense_fill_rows = sorted(
+        int(item["row_index"])
+        for item in (augmented.get("issues") or [])
+        if item.get("issue_code") == "unexpected_dense_fill"
+    )
+    assert issue_rows == [0, 1, 4, 5]
+    assert dense_fill_rows == [0, 1, 4, 5]
+    assert augmented["status"] == "fail"
+    assert augmented["blocking_issue_count"] >= 4
+
+
+def test_augment_llm_reparse_audit_with_structural_feedback_uses_majority_leading_blank_pattern():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = []
+    for date_mmdd in ["02/15", "02/16", "02/17"]:
+        structural_rows.extend(
+            [
+                [date_mmdd, "朝", f"{date_mmdd}-A1", "", ""],
+                [date_mmdd, "朝", f"{date_mmdd}-A2", "", ""],
+                [date_mmdd, "昼", f"{date_mmdd}-L1", "", ""],
+                [date_mmdd, "昼", f"{date_mmdd}-L2", "", ""],
+                [date_mmdd, "昼", f"{date_mmdd}-L3", "", ""],
+                [date_mmdd, "夕", f"{date_mmdd}-D1", "", ""],
+                [date_mmdd, "夕", f"{date_mmdd}-D2", "", ""],
+                [date_mmdd, "夕", f"{date_mmdd}-D3", "", ""],
+            ]
+        )
+    candidate_rows = [
+        ["", "", "", "", ""],
+        ["", "", "", "", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "43", ""],
+        ["", "", "", "", ""],
+        ["", "", "", "", ""],
+        ["", "", "", "44", ""],
+        ["", "", "", "44", ""],
+        ["", "", "", "44", ""],
+        ["", "", "", "45", ""],
+        ["", "", "", "45", ""],
+        ["", "", "", "45", ""],
+        ["", "", "", "46", ""],
+        ["", "", "", "46", ""],
+        ["", "", "", "46", ""],
+        ["", "", "", "46", ""],
+        ["", "", "", "46", ""],
+        ["", "", "", "47", ""],
+        ["", "", "", "47", ""],
+        ["", "", "", "47", ""],
+    ]
+    audit = {
+        "status": "fail",
+        "issue_count": 1,
+        "blocking_issue_count": 1,
+        "issues": [
+            {
+                "issue_code": "overextended_span",
+                "severity": "high",
+                "row_index": 8,
+                "column_index": 3,
+                "confidence": 0.9,
+                "evidence": "structural drift example",
+                "reason": "use this as a repair hint",
+            }
+        ],
+        "blocking_issues": [],
+    }
+
+    augmented = order_service._augment_llm_reparse_audit_with_structural_feedback(
+        llm_audit=audit,
+        candidate_rows=candidate_rows,
+        template=template,
+        baseline_fields=fields,
+        baseline_structure_rows=structural_rows,
+        reference_rows=[],
+        reference_fields=fields,
+    )
+
+    assert augmented is not None
+    issue_rows = sorted(
+        int(item["row_index"])
+        for item in (augmented.get("issues") or [])
+        if item.get("issue_code") == "missing_blank_anchor_rows"
+    )
+    dense_fill_rows = sorted(
+        int(item["row_index"])
+        for item in (augmented.get("issues") or [])
+        if item.get("issue_code") == "unexpected_dense_fill"
+    )
+    assert 16 in issue_rows
+    assert 17 in issue_rows
+    assert 16 in dense_fill_rows
+    assert 17 in dense_fill_rows
+
+
+def test_realign_quantity_only_rows_to_structural_blank_anchors_rotates_block_fill_into_blank_anchors():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "朝", "Menu C", "42", ""],
+        ["02/15", "朝", "Menu D", "43", ""],
+    ]
+    rotated_rows = [
+        ["02/15", "朝", "Menu A", "42", ""],
+        ["02/15", "朝", "Menu B", "43", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+
+    realigned_rows, stats = order_service._realign_quantity_only_rows_to_structural_blank_anchors(
+        rows=rotated_rows,
+        template=template,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert [row[3] for row in realigned_rows] == ["", "", "42", "43"]
+    assert stats is not None
+    assert stats["blocks_realigned"] == 1
+    assert stats["rows_shifted"] == 2
+
+
+def test_realign_quantity_only_rows_to_structural_blank_anchors_uses_structural_fallback_when_reference_alignment_is_strong():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "42", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+    rotated_rows = [
+        ["02/15", "朝", "Menu A", "11", ""],
+        ["02/15", "朝", "Menu B", "22", ""],
+        ["02/15", "朝", "Menu C", "33", ""],
+        ["02/15", "朝", "Menu D", "44", ""],
+    ]
+
+    realigned_rows, stats = order_service._realign_quantity_only_rows_to_structural_blank_anchors(
+        rows=rotated_rows,
+        template=template,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert [row[3] for row in realigned_rows] == ["11", "", "", ""]
+    assert stats is not None
+    assert stats["blocks_realigned"] == 1
+    assert stats["rows_shifted"] == 3
+    assert stats["quantity_cells_shifted"] == 3
+
+
+def test_project_quantity_only_rows_onto_structural_rows_preserves_structure_and_blank_rows():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+    ]
+    sparse_rows = [
+        ["", "", "", "", ""],
+        ["", "", "", "42", ""],
+        ["", "", "", "43", ""],
+    ]
+
+    projected_rows, stats = order_service._project_quantity_only_rows_onto_structural_rows(
+        rows=sparse_rows,
+        template=template,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+    )
+
+    assert [row[:3] for row in projected_rows] == [row[:3] for row in structural_rows]
+    assert [row[3] for row in projected_rows] == ["", "42", "43"]
+    assert stats is not None
+    assert stats["rows_with_projected_quantity"] == 2
+    assert stats["quantity_cells_copied"] == 2
+
+
+def test_project_quantity_only_rows_onto_structural_rows_skips_candidates_with_structural_cells():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+    }
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+    ]
+    candidate_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "42", ""],
+    ]
+
+    should_project = order_service._should_project_quantity_rows_to_structural_rows(
+        rows=candidate_rows,
+        structural_rows=structural_rows,
+        template=template,
+    )
+    projected_rows, stats = order_service._project_quantity_only_rows_onto_structural_rows(
+        rows=candidate_rows,
+        template=template,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+    )
+
+    assert should_project is False
+    assert projected_rows == candidate_rows
+    assert stats is None
+
+
+def test_build_reparse_block_anchor_hints_ignores_unmatched_rows_when_reference_alignment_is_too_weak():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+        ["02/15", "昼", "Menu D", "", ""],
+    ]
+    noisy_reference_rows = [
+        ["99/99", "?", "Noise 1", "42", ""],
+        ["99/99", "?", "Noise 2", "43", ""],
+    ]
+
+    hints = order_service._build_reparse_block_anchor_hints(
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        first_pass_fields=fields,
+        first_pass_rows=noisy_reference_rows,
+    )
+
+    assert hints["reference_alignment_weak"] is True
+    assert hints["matched_reference_key_count"] == 0
+    assert hints["reference_key_count"] == 2
+    assert hints["unmatched_structural_row_indexes"] == []
+    assert hints["structural_blank_anchor_row_indexes"] == []
+
+
+def test_build_reparse_block_anchor_hints_uses_structural_blank_anchor_rows_when_reference_alignment_is_weak():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "99", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "42", ""],
+    ]
+    noisy_reference_rows = [
+        ["99/99", "?", "Noise 1", "12", ""],
+        ["99/99", "?", "Noise 2", "13", ""],
+    ]
+
+    hints = order_service._build_reparse_block_anchor_hints(
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        first_pass_fields=fields,
+        first_pass_rows=noisy_reference_rows,
+    )
+
+    assert hints["reference_alignment_weak"] is True
+    assert hints["unmatched_structural_row_indexes"] == []
+    assert hints["structural_blank_anchor_row_indexes"] == [0, 2]
+
+
+def test_validate_reparse_blank_anchor_drift_uses_structural_blank_anchor_rows_when_reference_alignment_is_weak():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "99", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "42", ""],
+    ]
+    reference_rows = [
+        ["99/99", "?", "Noise 1", "12", ""],
+    ]
+    lines = [
+        {
+            "source_row_index": 0,
+            "date": date(2026, 2, 15),
+            "daypart": "朝",
+            "menu_name": "Menu A",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_original": 12,
+        },
+    ]
+
+    error, detail = order_service._validate_reparse_blank_anchor_drift(
+        lines=lines,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        reference_rows=reference_rows,
+        reference_fields=fields,
+    )
+
+    assert error == "sheet_blank_anchor_drift"
+    assert detail is not None
+    assert detail["offending_source_rows"] == [0]
+    assert detail["blank_anchor_row_indexes"] == [0, 2]
+
+
+def test_build_reparse_block_anchor_hints_omits_blank_quantity_indexes_when_structure_is_quantity_empty():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "昼", "Menu C", "", ""],
+        ["02/15", "昼", "Menu D", "", ""],
+    ]
+
+    hints = order_service._build_reparse_block_anchor_hints(
+        structural_fields=fields,
+        structural_rows=structural_rows,
+        first_pass_fields=fields,
+        first_pass_rows=[],
+    )
+
+    assert hints["reference_alignment_weak"] is False
+    assert hints["unmatched_structural_row_indexes"] == []
+    assert hints["structural_blank_anchor_row_indexes"] == []
+    blocks = hints["blocks"]
+    assert isinstance(blocks, list)
+    assert blocks
+    assert all("blank_quantity_row_indexes" not in block for block in blocks)
+
+
+def test_reparse_order_realigns_rotated_blank_anchor_rows_before_line_parsing(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-blank-anchor-realign.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-blank-anchor-realign-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    template = {
+        "header_rows": 0,
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+            },
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "fax_template_id": "test-template",
+        "map_menu_by_position": False,
+    }
+    structural_rows = [
+        ["02/15", "朝", "Menu A", "", ""],
+        ["02/15", "朝", "Menu B", "", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+    reference_rows = [
+        ["02/15", "朝", "Menu C", "42", ""],
+        ["02/15", "朝", "Menu D", "43", ""],
+    ]
+    rotated_rows = [
+        ["02/15", "朝", "Menu A", "42", ""],
+        ["02/15", "朝", "Menu B", "43", ""],
+        ["02/15", "朝", "Menu C", "", ""],
+        ["02/15", "朝", "Menu D", "", ""],
+    ]
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://pipeline-output.json"
+
+    def _fake_config(_facility_id: str):
+        return {"facility_id": "FAC00001", "fax_template": dict(template)}
+
+    def _fake_load_pipeline(_ref):
+        return {"table_raw": "", "rows": []}
+
+    def _fake_extract(*_args, **_kwargs):
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["2026-02-15"],
+            table_rows=[list(row) for row in rotated_rows],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash", "quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        assert [row[3] for row in rows] == ["", "", "42", "43"]
+        return [
+            {
+                "date": "2026-02-15",
+                "daypart": "朝",
+                "menu_name": "Menu C",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 42,
+                "source_row_index": 2,
+            },
+            {
+                "date": "2026-02-15",
+                "daypart": "朝",
+                "menu_name": "Menu D",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 43,
+                "source_row_index": 3,
+            },
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", lambda **_kwargs: {"status": "pass", "issues": [], "blocking_issues": [], "issue_count": 0, "blocking_issue_count": 0})
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "_extract_first_pass_rows_from_payload", lambda *_args, **_kwargs: [list(row) for row in reference_rows])
+    monkeypatch.setattr(order_service, "_extract_sheet_rows_from_payload", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_reparse_llm_baseline", lambda **_kwargs: {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [list(row) for row in structural_rows],
+        "row_ids": [f"row-{idx+1}" for idx in range(len(structural_rows))],
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [list(row) for row in structural_rows],
+        "structure_row_ids": [f"srow-{idx+1}" for idx in range(len(structural_rows))],
+        "structure_source": "weekly_menu_structure",
+    })
+    monkeypatch.setattr(config_service, "get_facility_config", _fake_config)
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_apply_menu_matching", lambda lines, *_args, **_kwargs: lines)
+    monkeypatch.setattr(order_service, "_apply_menu_position_mapping_safe", lambda lines, *_args, **_kwargs: (lines, 0))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 4)
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 4)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert [line["quantity_original"] for line in updated["lines"]] == [42, 43]
+    assert updated["reparse"]["provider"] == "gemini"
+
+
+def test_resolve_reparse_llm_baseline_prefers_current_sheet_rows(monkeypatch):
+    monkeypatch.setattr(order_service, "_build_reparse_structural_baseline", lambda **kwargs: None)
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda order_id: (
+            {
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+                "rows": [
+                    ["02/15", "朝", "Menu A", ""],
+                    ["02/15", "昼", "Menu B", "42"],
+                ],
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_load_order_ocr_cache",
+        lambda order_id: {"template_id": "fax_layout_regular_forbidden_v1"},
+    )
+
+    baseline = order_service._resolve_reparse_llm_baseline(
+        order_id="ORDTEST0001",
+        template={"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"]},
+    )
+
+    assert baseline is not None
+    assert baseline["baseline_source"] == "sheet"
+    assert baseline["rows"] == [
+        ["02/15", "朝", "Menu A", ""],
+        ["02/15", "昼", "Menu B", "42"],
+    ]
+    assert baseline["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+
+
+def test_resolve_reparse_llm_baseline_prefers_full_structure_when_current_sheet_truncated(monkeypatch):
+    monkeypatch.setattr(
+        order_service,
+        "_build_reparse_structural_baseline",
+        lambda **kwargs: {
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "rows": [
+                ["02/15", "朝", "Menu A", ""],
+                ["02/15", "朝", "Menu B", ""],
+                ["02/15", "昼", "Menu C", ""],
+                ["02/15", "昼", "Menu D", ""],
+            ],
+            "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+            "baseline_source": "weekly_menu_structure",
+        },
+    )
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda order_id: (
+            {
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+                "rows": [
+                    ["02/15", "朝", "Menu A", ""],
+                    ["02/15", "昼", "Menu C", "42"],
+                ],
+            },
+            None,
+        ),
+    )
+
+    baseline = order_service._resolve_reparse_llm_baseline(
+        order_id="ORDTEST0001",
+        template={"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"]},
+    )
+
+    assert baseline is not None
+    assert baseline["baseline_source"] == "weekly_menu_structure"
+    assert len(baseline["rows"]) == 4
+
+
+def test_evaluate_quantity_only_rows_quality_detects_row_overfill():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    rows = [
+        ["02/15", "朝", "Menu A", "42", ""],
+        ["02/15", "朝", "Menu B", "42", ""],
+        ["02/15", "昼", "Menu C", "42", ""],
+        ["02/15", "昼", "Menu D", "42", ""],
+        ["02/15", "夕", "Menu E", "43", ""],
+    ]
+
+    error, detail = order_service._evaluate_quantity_only_rows_quality(
+        rows=rows,
+        template=template,
+        expected_row_count=4,
+        reference_rows=None,
+    )
+
+    assert error == "sheet_row_overfill"
+    assert isinstance(detail, dict)
+    assert detail.get("extra_rows") == 1
+
+
 def test_validate_reparse_date_anchor_stability_detects_drift():
     previous_lines = [
         {"date": "2026-02-08"},
@@ -2312,6 +3911,914 @@ def test_validate_reparse_date_anchor_stability_allows_overlap():
 
     assert error is None
     assert detail is None
+
+
+def test_reparse_order_auto_falls_back_to_llm_when_pipeline_lines_empty(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-auto-llm-fallback.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-auto-llm-fallback-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    extract_calls: list[str] = []
+
+    def _fake_pipeline(**_kwargs):
+        return None
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        provider = str(
+            template.get("_force_main_ocr_provider")
+            or template.get("main_ocr_provider")
+            or "pipeline"
+        ).strip().lower()
+        extract_calls.append(provider)
+        if provider == "gemini":
+            assert "Automatic fallback context:" in str(template.get("gemini_ocr_prompt") or "")
+            assert '"reason": "lines_empty"' in str(template.get("gemini_ocr_prompt") or "")
+            return FaxExtractedData(
+                facility_name="Test Facility",
+                date_strings=[canonical_date],
+                table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+                tokens=[],
+                grid=None,
+                ocr_provider="gemini",
+                provider_debug={"provider": "gemini", "model": "gemini-2.5-flash"},
+            )
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[],
+            tokens=[],
+            grid=None,
+            ocr_provider="pipeline",
+            provider_debug={"provider": "pipeline"},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        provider = str(
+            template.get("_force_main_ocr_provider")
+            or template.get("main_ocr_provider")
+            or "pipeline"
+        ).strip().lower()
+        if provider == "gemini":
+            return [
+                {
+                    "date": canonical_date,
+                    "daypart": canonical_daypart,
+                    "menu_name": canonical_menu,
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "bag_type": "standard",
+                    "quantity_original": 7,
+                    "source_row_index": 0,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_has_gemini_api_key", lambda: True)
+    monkeypatch.setattr(order_service, "_has_openai_api_key", lambda: False)
+
+    updated, error = order_service.reparse_order(order["id"])
+
+    assert error is None
+    assert updated is not None
+    assert extract_calls[:2] == ["pipeline", "gemini"]
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    metrics = job.get("metrics") or {}
+    assert metrics.get("provider") == "gemini"
+    assert metrics.get("auto_fallback_applied") is True
+    assert metrics.get("auto_fallback_from_provider") == "pipeline"
+    assert metrics.get("auto_fallback_reason") == "lines_empty"
+
+
+def test_reparse_order_llm_assist_ignores_cached_order_rows_when_first_pass_rows_missing(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-assist-no-cached-rescue.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-assist-no-cached-rescue-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    audit_candidates: list[list[list[str]]] = []
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://dummy/output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref):
+        return {"facility_name": "Test Facility", "date_strings": [canonical_mmdd], "rows": []}
+
+    def _fake_load_order_ocr_cache(_order_id):
+        return {
+            "rows": [
+                {
+                    "date_mmdd": canonical_mmdd,
+                    "daypart": canonical_daypart,
+                    "menu": canonical_menu,
+                    "qty.regular_2f": "99",
+                }
+            ]
+        }
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash", "quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 7,
+                "source_row_index": 0,
+            }
+        ]
+
+    def _fake_audit(**kwargs):
+        candidate_rows = [list(row) for row in (kwargs.get("candidate_rows") or []) if isinstance(row, list)]
+        audit_candidates.append(candidate_rows)
+        return {
+            "status": "pass",
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "issues": [],
+            "blocking_issues": [],
+        }
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", _fake_load_order_ocr_cache)
+    monkeypatch.setattr(order_service, "get_ocr_output", lambda order_id, *, persist_cache=False: (None, "ocr_output_invalid"))
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert audit_candidates
+    assert audit_candidates[0] == [[canonical_mmdd, canonical_daypart, canonical_menu, "7"]]
+
+
+def test_reparse_order_llm_second_pass_uses_evaluator_feedback(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-audit-feedback-retry.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-audit-feedback-retry-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    extract_prompts: list[str] = []
+    audit_calls = 0
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://dummy/output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref):
+        return {"facility_name": "Test Facility", "date_strings": [canonical_mmdd], "rows": []}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        extract_prompts.append(
+            "\n\n".join(
+                [
+                    str(template.get("gemini_ocr_prompt") or ""),
+                    str(template.get("gemini_ocr_user_prompt") or ""),
+                ]
+            )
+        )
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash", "quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 7,
+                "source_row_index": 0,
+            }
+        ]
+
+    def _fake_audit(**kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 1:
+            issue = {
+                "issue_code": "overextended_span",
+                "severity": "high",
+                "confidence": 0.99,
+                "reason": "quantity spilled into blank rows",
+                "row_index": 0,
+                "column_index": 3,
+                "evidence": "blank rows should remain blank",
+            }
+            return {
+                "status": "fail",
+                "issue_count": 1,
+                "blocking_issue_count": 1,
+                "issues": [issue],
+                "blocking_issues": [issue],
+            }
+        return {
+            "status": "pass",
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "issues": [],
+            "blocking_issues": [],
+        }
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert audit_calls >= 1
+    assert len(extract_prompts) >= 2
+    repair_prompts = [prompt for prompt in extract_prompts if "Second-pass OCR repair mode" in prompt]
+    assert repair_prompts
+    assert any("Evaluator feedback from previous OCR draft" in prompt for prompt in repair_prompts)
+    assert any("overextended_span" in prompt for prompt in repair_prompts)
+    assert any("Determine each date/daypart block's quantity pattern first" in prompt for prompt in repair_prompts)
+
+
+def test_build_quantity_only_repair_prompts_include_evaluator_feedback_and_structural_row_rules():
+    system_prompt, user_prompt = order_service._build_quantity_only_repair_prompts(
+        provider="gemini",
+        template={
+            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        },
+        current_rows=[["", "", "", "42"]],
+        expected_row_count=3,
+        quality_error="sheet_structural_drift",
+        quality_detail={"quality_issue": "blank_anchor"},
+        baseline_rows=[
+            ["02/15", "朝", "Menu A", ""],
+            ["02/15", "昼", "Menu B", ""],
+            ["02/15", "昼", "Menu C", ""],
+        ],
+        baseline_fields=["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        structural_rows=[
+            ["02/15", "朝", "Menu A", ""],
+            ["02/15", "昼", "Menu B", ""],
+            ["02/15", "昼", "Menu C", ""],
+        ],
+        structural_fields=["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        evaluator_feedback={
+            "status": "fail",
+            "issues": [
+                {
+                    "issue_code": "missing_blank_anchor_rows",
+                    "severity": "high",
+                    "confidence": 0.98,
+                    "row_index": 0,
+                    "column_index": 3,
+                    "evidence": "blank breakfast row should remain blank",
+                    "reason": "later quantity shifted upward",
+                }
+            ],
+        },
+    )
+
+    assert "Determine each date/daypart block's quantity pattern first" in system_prompt
+    assert "row_index is the structural row position" in system_prompt
+    assert "Do not compress blank rows out of the output" in system_prompt
+    assert "re-check every date/daypart block for the same pattern" in system_prompt
+    assert "Existing quantities in the current sheet may be stale" in system_prompt
+    assert "Return the full structural rows from the current sheet" in system_prompt
+    assert "Copy date/daypart/menu cells from the current sheet exactly" in system_prompt
+    assert "Evaluator feedback from previous OCR draft" in user_prompt
+    assert "missing_blank_anchor_rows" in user_prompt
+
+
+def test_reparse_order_llm_final_audit_failure_retries_with_evaluator_feedback(monkeypatch, tmp_path):
+    order_service.clear_all()
+    monkeypatch.setenv("OCR_REPARSE_ENABLE_REPAIR_PASS", "0")
+    pdf_path = tmp_path / "sample-llm-final-audit-feedback-retry.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-final-audit-feedback-retry-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    extract_prompts: list[str] = []
+    audit_calls = 0
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://dummy/output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref):
+        return {"facility_name": "Test Facility", "date_strings": [canonical_mmdd], "rows": []}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        extract_prompts.append(str(template.get("gemini_ocr_prompt") or ""))
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "quantity_only_mode": True,
+            },
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 7,
+                "source_row_index": 0,
+            }
+        ]
+
+    def _fake_audit(**kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 2:
+            issue = {
+                "issue_code": "overextended_span",
+                "severity": "high",
+                "confidence": 0.99,
+                "reason": "quantity spilled into blank rows",
+                "row_index": 0,
+                "column_index": 3,
+                "evidence": "blank rows should remain blank",
+            }
+            return {
+                "status": "fail",
+                "issue_count": 1,
+                "blocking_issue_count": 1,
+                "issues": [issue],
+                "blocking_issues": [issue],
+            }
+        return {
+            "status": "pass",
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "issues": [],
+            "blocking_issues": [],
+        }
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+    monkeypatch.setattr(order_service, "_llm_reparse_audit_requires_second_pass", lambda *_args, **_kwargs: False)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert audit_calls == 4
+    assert len(extract_prompts) == 2
+    assert "Evaluator feedback from previous OCR draft" in extract_prompts[1]
+    assert "Previous failed LLM inference candidate rows" in extract_prompts[1]
+    assert "overextended_span" in extract_prompts[1]
+
+
+def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecified(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-explicit-reparse-defaults-to-gemini.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-explicit-reparse-defaults-to-gemini-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    provider_calls: list[str] = []
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://pipeline-output.json"
+
+    def _fake_load_pipeline(_ref):
+        return {
+            "table_raw": (
+                "|日付|区分|メニュー|常食|\n"
+                "|---|---|---|---|\n"
+                "|02/15|昼|Menu A|7|"
+            )
+        }
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        provider = str(
+            template.get("_force_main_ocr_provider")
+            or template.get("main_ocr_provider")
+            or "pipeline"
+        ).strip().lower()
+        provider_calls.append(provider)
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=["2026/02/15"],
+            table_rows=[["02/15", canonical_daypart, canonical_menu, "7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider=provider,
+            provider_debug={"provider": provider, "quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 7,
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "_has_gemini_api_key", lambda: True)
+    monkeypatch.setattr(order_service, "_has_openai_api_key", lambda: False)
+
+    updated, error = order_service.reparse_order(order["id"], llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert provider_calls
+    assert provider_calls[0] == "gemini"
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    metrics = job.get("metrics") or {}
+    assert metrics.get("provider") == "gemini"
+
+
+def test_reparse_order_with_yomitoku_rows_runs_evaluator_before_llm_inference(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-yomitoku-evaluator-first.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-yomitoku-evaluator-first-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    yomitoku_rows = [[canonical_mmdd, canonical_daypart, canonical_menu, "2"]]
+    call_trace: list[str] = []
+    audit_count = {"value": 0}
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://pipeline-output.json"
+
+    def _fake_load_pipeline(_ref):
+        return {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "tables": [
+                        {
+                            "table_id": "p1_t1",
+                            "rows": [
+                                ["日付", "区分", "メニュー", "常食"],
+                                [canonical_mmdd, canonical_daypart, canonical_menu, "2"],
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "table_raw": f"|日付|区分|メニュー|常食|\n|---|---|---|---|\n|{canonical_mmdd}|{canonical_daypart}|{canonical_menu}|2|",
+        }
+
+    def _fake_audit(**kwargs):
+        audit_count["value"] += 1
+        call_trace.append("audit-pre")
+        assert kwargs["candidate_rows"]
+        if audit_count["value"] == 1:
+            assert kwargs["candidate_rows"][0][:4] == yomitoku_rows[0]
+        return {
+            "status": "fail",
+            "provider": "openai",
+            "actual_provider": "openai",
+            "model": "audit-model-v1",
+            "issue_count": 1,
+            "blocking_issue_count": 1,
+            "issues": [
+                {
+                    "issue_code": "column_swap",
+                    "severity": "high",
+                    "row_index": 0,
+                    "column_index": 3,
+                    "confidence": 0.91,
+                    "evidence": "visible 5 in the regular column",
+                    "reason": "repair the yomitoku draft before line parsing",
+                }
+            ],
+            "blocking_issues": [
+                {
+                    "issue_code": "column_swap",
+                    "severity": "high",
+                    "row_index": 0,
+                    "column_index": 3,
+                    "confidence": 0.91,
+                    "evidence": "visible 5 in the regular column",
+                    "reason": "repair the yomitoku draft before line parsing",
+                }
+            ],
+        }
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        call_trace.append("extract-1")
+        assert pdf_bytes.startswith(b"%PDF-1.4")
+        assert facility_id == "FAC00001"
+        prompt = str(template.get("gemini_ocr_prompt") or "")
+        assert "Evaluator feedback from previous OCR draft" in prompt
+        assert '"issue_code": "column_swap"' in prompt
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "5"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash"},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": int(rows[0][3]),
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert call_trace[:2] == ["audit-pre", "extract-1"]
+    assert updated["lines"][0]["quantity_original"] == 5
+
+
+def test_reparse_order_with_yomitoku_rows_runs_second_pass_after_llm_candidate_audit(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-yomitoku-evaluator-second-pass.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-yomitoku-evaluator-second-pass-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    first_rows = [[canonical_mmdd, canonical_daypart, canonical_menu, "4"]]
+    second_rows = [[canonical_mmdd, canonical_daypart, canonical_menu, "7"]]
+    call_trace: list[str] = []
+    extract_count = {"value": 0}
+    audit_count = {"value": 0}
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://pipeline-output.json"
+
+    def _fake_load_pipeline(_ref):
+        return {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "tables": [
+                        {
+                            "table_id": "p1_t1",
+                            "rows": [
+                                ["日付", "区分", "メニュー", "常食"],
+                                [canonical_mmdd, canonical_daypart, canonical_menu, "2"],
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "table_raw": f"|日付|区分|メニュー|常食|\n|---|---|---|---|\n|{canonical_mmdd}|{canonical_daypart}|{canonical_menu}|2|",
+        }
+
+    def _fake_audit(**kwargs):
+        audit_count["value"] += 1
+        call_trace.append(f"audit-{audit_count['value']}")
+        if audit_count["value"] == 1:
+            assert kwargs["candidate_rows"][0][:4] == [canonical_mmdd, canonical_daypart, canonical_menu, "2"]
+            return {
+                "status": "fail",
+                "provider": "openai",
+                "actual_provider": "openai",
+                "model": "audit-model-v1",
+                "issue_count": 1,
+                "blocking_issue_count": 1,
+                "issues": [
+                    {
+                        "issue_code": "column_swap",
+                        "severity": "high",
+                        "row_index": 0,
+                        "column_index": 3,
+                        "confidence": 0.91,
+                        "evidence": "visible 4 in the regular column",
+                        "reason": "repair the yomitoku draft before line parsing",
+                    }
+                ],
+                "blocking_issues": [
+                    {
+                        "issue_code": "column_swap",
+                        "severity": "high",
+                        "row_index": 0,
+                        "column_index": 3,
+                        "confidence": 0.91,
+                        "evidence": "visible 4 in the regular column",
+                        "reason": "repair the yomitoku draft before line parsing",
+                    }
+                ],
+            }
+        assert kwargs["candidate_rows"][0][:4] == first_rows[0]
+        return {
+            "status": "fail",
+            "provider": "openai",
+            "actual_provider": "openai",
+            "model": "audit-model-v1",
+            "issue_count": 1,
+            "blocking_issue_count": 1,
+            "issues": [
+                {
+                    "issue_code": "date_anchor_drift",
+                    "severity": "critical",
+                    "row_index": 0,
+                    "column_index": 3,
+                    "confidence": 0.99,
+                    "evidence": "quantity belongs to the next block",
+                    "reason": "shift the candidate rows using the visible date/daypart block anchors",
+                }
+            ],
+            "blocking_issues": [
+                {
+                    "issue_code": "date_anchor_drift",
+                    "severity": "critical",
+                    "row_index": 0,
+                    "column_index": 3,
+                    "confidence": 0.99,
+                    "evidence": "quantity belongs to the next block",
+                    "reason": "shift the candidate rows using the visible date/daypart block anchors",
+                }
+            ],
+        }
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        extract_count["value"] += 1
+        call_trace.append(f"extract-{extract_count['value']}")
+        prompt = str(template.get("gemini_ocr_prompt") or "")
+        if extract_count["value"] == 1:
+            assert "Evaluator feedback from previous OCR draft" in prompt
+            assert '"issue_code": "column_swap"' in prompt
+            rows = first_rows
+        else:
+            assert "Evaluator feedback from previous OCR draft" in prompt
+            assert '"issue_code": "date_anchor_drift"' in prompt
+            assert "First LLM inference candidate rows" in prompt
+            rows = second_rows
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[list(row) for row in rows],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash"},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": int(rows[0][3]),
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert call_trace == ["audit-1", "extract-1", "audit-2", "extract-2"]
+    assert updated["lines"][0]["quantity_original"] == 7
+
+
+def test_reparse_order_without_yomitoku_rows_runs_infer_then_evaluator_then_second_inference(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-evaluator-second-pass.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-evaluator-second-pass-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    first_rows = [[canonical_mmdd, canonical_daypart, canonical_menu, "4"]]
+    second_rows = [[canonical_mmdd, canonical_daypart, canonical_menu, "7"]]
+    call_trace: list[str] = []
+    extract_count = {"value": 0}
+    audit_count = {"value": 0}
+
+    def _fake_pipeline(**_kwargs):
+        return "gs://pipeline-output-empty.json"
+
+    def _fake_load_pipeline(_ref):
+        return {"pages": [], "table_raw": ""}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):
+        extract_count["value"] += 1
+        call_trace.append(f"extract-{extract_count['value']}")
+        prompt = str(template.get("gemini_ocr_prompt") or "")
+        if extract_count["value"] == 1:
+            assert "Evaluator feedback from previous OCR draft" not in prompt
+            rows = first_rows
+        else:
+            assert "Evaluator feedback from previous OCR draft" in prompt
+            assert "First LLM inference candidate rows" in prompt
+            rows = second_rows
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[list(row) for row in rows],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-flash"},
+        )
+
+    def _fake_audit(**kwargs):
+        audit_count["value"] += 1
+        call_trace.append(f"audit-{audit_count['value']}")
+        if audit_count["value"] == 1:
+            assert kwargs["candidate_rows"] == first_rows
+            return {
+                "status": "fail",
+                "provider": "openai",
+                "actual_provider": "openai",
+                "model": "audit-model-v1",
+                "issue_count": 1,
+                "blocking_issue_count": 1,
+                "issues": [
+                    {
+                        "issue_code": "row_count_shortfall",
+                        "severity": "high",
+                        "row_index": 0,
+                        "column_index": 3,
+                        "confidence": 0.88,
+                        "evidence": "visible 7 in the regular column",
+                        "reason": "run a second pass with evaluator feedback",
+                    }
+                ],
+                "blocking_issues": [
+                    {
+                        "issue_code": "row_count_shortfall",
+                        "severity": "high",
+                        "row_index": 0,
+                        "column_index": 3,
+                        "confidence": 0.88,
+                        "evidence": "visible 7 in the regular column",
+                        "reason": "run a second pass with evaluator feedback",
+                    }
+                ],
+            }
+        assert kwargs["candidate_rows"] == second_rows
+        return {
+            "status": "pass",
+            "provider": "openai",
+            "actual_provider": "openai",
+            "model": "audit-model-v1",
+            "issue_count": 0,
+            "blocking_issue_count": 0,
+            "issues": [],
+            "blocking_issues": [],
+        }
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": int(rows[0][3]),
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert call_trace[:3] == ["extract-1", "audit-1", "extract-2"]
+    assert updated["lines"][0]["quantity_original"] == 7
 
 
 def test_reparse_order_row_coverage_uses_payload_scoped_expected_rows(monkeypatch, tmp_path):
@@ -3039,6 +5546,7 @@ def test_reparse_order_rejects_mirrored_quantity_columns_without_reference_rows(
     monkeypatch.setenv("OCR_REPARSE_COLUMN_MIRROR_MIN_NONZERO_OVERLAP", "6")
     monkeypatch.setenv("OCR_REPARSE_COLUMN_MIRROR_MIN_EQUAL_RATIO", "0.98")
     monkeypatch.setenv("OCR_REPARSE_COLUMN_MIRROR_MIN_DISTINCT_PAIRS", "3")
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 6)
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
 
@@ -3548,9 +6056,9 @@ def test_reparse_order_merges_quantity_only_rows_with_pipeline(monkeypatch, tmp_
     assert error is None
     assert updated is not None
     assert captured_rows
-    assert captured_rows[0] == [
-        ["2/15", "昼", "Menu A", "20"],
-        ["2/15", "夕", "Menu B", "11"],
+    assert [row[1:] for row in captured_rows[0]] == [
+        ["昼", "Menu A", "20"],
+        ["夕", "Menu B", "11"],
     ]
     quantities = sorted(int(line["quantity_original"]) for line in updated["lines"])
     assert quantities == [11, 20]
@@ -3835,6 +6343,62 @@ def test_resolve_llm_audit_provider_forces_cross_model_when_same_requested(monke
     )
 
 
+def test_run_llm_reparse_audit_allows_template_non_blocking_codes(monkeypatch):
+    monkeypatch.setenv("OCR_REPARSE_ENABLE_LLM_AUDIT_GATE", "1")
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def _fake_extract(_pdf_bytes, _template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test",
+            date_strings=[],
+            table_rows=[],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-pro"},
+        )
+
+    def _fake_parse_issues(*, rows, fields):  # noqa: ARG001
+        return [
+            {
+                "issue_code": "date_anchor_drift",
+                "severity": "critical",
+                "confidence": 1.0,
+                "evidence": "Quantity '42' drifted to the previous daypart block.",
+                "reason": "Bracketed handwritten counts can anchor to the prior row on FAC00007 forms.",
+            },
+            {
+                "issue_code": "row_count_shortfall",
+                "severity": "critical",
+                "confidence": 1.0,
+                "evidence": "Image has 52 menu item rows but candidate OCR has 56 rows.",
+                "reason": "Two-row bracket layout over-segmented by audit.",
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "_parse_llm_reparse_audit_issues", _fake_parse_issues)
+
+    result = order_service._run_llm_reparse_audit(
+        pdf_bytes=b"%PDF-1.4\n%EOF\n",
+        provider="gemini",
+        template={"llm_audit_non_blocking_codes": ["row_count_shortfall"]},
+        facility_id="FAC00007",
+        preferred_template_id=None,
+        candidate_rows=[["02/15", "朝", "Menu A", "42"]],
+        reference_rows=None,
+        expected_row_count=56,
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("status") == "fail"
+    assert int(result.get("blocking_issue_count") or 0) == 1
+    issues = result.get("issues") or []
+    issue_codes = {str(item.get("issue_code")) for item in issues}
+    assert issue_codes == {"row_count_shortfall", "date_anchor_drift"}
+
+
 def test_run_llm_reparse_audit_switches_to_gemini_when_openai_key_missing(monkeypatch):
     monkeypatch.setenv("OCR_REPARSE_ENABLE_LLM_AUDIT_GATE", "1")
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key")
@@ -3914,8 +6478,8 @@ def test_run_llm_reparse_audit_never_passes_when_provider_falls_back_to_pipeline
     assert str(result.get("actual_provider") or "").endswith("_fallback_pipeline")
 
 
-def test_build_reparse_debug_payload_sets_cluster_fill_decision_from_llm_audit():
-    allow_payload = order_service._build_reparse_debug_payload(
+def test_build_reparse_debug_payload_requires_explicit_cluster_fill_allow():
+    neutral_payload = order_service._build_reparse_debug_payload(
         provider="gemini",
         requested_provider="gemini",
         llm_assist=True,
@@ -3925,6 +6489,19 @@ def test_build_reparse_debug_payload_sets_cluster_fill_decision_from_llm_audit()
         after_count=0,
         changed=False,
         llm_audit={"status": "pass", "issues": []},
+        quality_metadata={"quality_track": "llm_reparse", "reparse_origin": "llm_assist", "feedback_retry_depth": 0},
+    )
+    allow_payload = order_service._build_reparse_debug_payload(
+        provider="gemini",
+        requested_provider="gemini",
+        llm_assist=True,
+        rows=[],
+        lines_count=0,
+        before_count=0,
+        after_count=0,
+        changed=False,
+        llm_audit={"status": "pass", "issues": [], "order_line_cluster_fill_decision": "allow"},
+        quality_metadata={"quality_track": "llm_reparse", "reparse_origin": "llm_assist", "feedback_retry_depth": 1},
     )
     deny_payload = order_service._build_reparse_debug_payload(
         provider="gemini",
@@ -3936,10 +6513,16 @@ def test_build_reparse_debug_payload_sets_cluster_fill_decision_from_llm_audit()
         after_count=0,
         changed=False,
         llm_audit={"status": "fail", "issues": [{"issue_code": "coverage_low"}]},
+        quality_metadata={"quality_track": "llm_reparse", "reparse_origin": "auto_fallback", "feedback_retry_depth": 0},
     )
 
+    assert "order_line_cluster_fill_decision" not in neutral_payload
+    assert neutral_payload.get("quality_track") == "llm_reparse"
+    assert neutral_payload.get("reparse_origin") == "llm_assist"
     assert allow_payload.get("order_line_cluster_fill_decision") == "allow"
+    assert allow_payload.get("feedback_retry_depth") == 1
     assert deny_payload.get("order_line_cluster_fill_decision") == "deny"
+    assert deny_payload.get("reparse_origin") == "auto_fallback"
 
 
 def test_build_llm_assist_prompt_uses_yomitoku_rows_and_generic_cell_issues_without_roi_overlay():
@@ -4224,6 +6807,277 @@ def test_build_llm_review_prompt_includes_baseline_tables_and_cell_issues():
     assert "Existing suspicious cells from yomitoku/LLM" in user_prompt
     assert "merged_numeric_cell" in user_prompt
     assert "88" not in user_prompt
+
+
+def test_resolve_llm_review_pdf_bytes_uses_corrected_artifact_when_available(monkeypatch):
+    captured_uris: list[str] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        captured_uris.append(uri)
+        if uri == "gs://bucket/corrected.pdf":
+            return b"%PDF-corrected\n%EOF\n"
+        if uri == "gs://bucket/raw.pdf":
+            return b"%PDF-raw\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+
+    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
+        document_uri="gs://bucket/raw.pdf",
+        payload={
+            "combined": {
+                "corrected_pdf": "gs://bucket/corrected.pdf",
+            }
+        },
+        requested_variant="corrected",
+    )
+
+    assert pdf_bytes == b"%PDF-corrected\n%EOF\n"
+    assert meta["requested"] == "corrected"
+    assert meta["used"] == "corrected"
+    assert meta["fallback_reason"] is None
+    assert captured_uris == ["gs://bucket/corrected.pdf"]
+
+
+def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_missing(monkeypatch):
+    captured_uris: list[str] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        captured_uris.append(uri)
+        if uri == "gs://bucket/raw.pdf":
+            return b"%PDF-raw\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+
+    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
+        document_uri="gs://bucket/raw.pdf",
+        payload={},
+        requested_variant="corrected",
+    )
+
+    assert pdf_bytes == b"%PDF-raw\n%EOF\n"
+    assert meta["requested"] == "corrected"
+    assert meta["used"] == "raw"
+    assert meta["fallback_reason"] == "corrected_pdf_unavailable_in_backend_cache"
+    assert captured_uris == ["gs://bucket/raw.pdf"]
+
+
+def test_extract_corrected_pdf_uri_from_nested_review_payload():
+    corrected_uri = order_service._extract_corrected_pdf_uri_from_payload(
+        {
+            "_edited_ocr": {
+                "latest": {
+                    "llm_review": {
+                        "output_payload": {
+                            "page_correction": {
+                                "corrected_pdf_uri": "gs://bucket/review-corrected.pdf",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    assert corrected_uri == "gs://bucket/review-corrected.pdf"
+
+
+def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_load_fails(monkeypatch):
+    captured_uris: list[str] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        captured_uris.append(uri)
+        if uri == "gs://bucket/corrected.pdf":
+            raise RuntimeError("missing corrected artifact")
+        if uri == "gs://bucket/raw.pdf":
+            return b"%PDF-raw\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+
+    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
+        document_uri="gs://bucket/raw.pdf",
+        payload={
+            "_edited_ocr": {
+                "raw_output": {
+                    "combined": {
+                        "corrected_pdf": "gs://bucket/corrected.pdf",
+                    }
+                }
+            }
+        },
+        requested_variant="corrected",
+    )
+
+    assert pdf_bytes == b"%PDF-raw\n%EOF\n"
+    assert meta["requested"] == "corrected"
+    assert meta["used"] == "raw"
+    assert meta["fallback_reason"] == "corrected_pdf_load_failed"
+    assert captured_uris == ["gs://bucket/corrected.pdf", "gs://bucket/raw.pdf"]
+
+
+def test_reparse_order_llm_path_uses_rescued_first_pass_payload_and_corrected_pdf(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-corrected.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-corrected-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+
+    extract_pdf_inputs: list[bytes] = []
+    parse_pdf_inputs: list[bytes | None] = []
+    get_ocr_output_calls: list[bool] = []
+
+    rescued_payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            [
+                                "日付",
+                                "区分",
+                                "メニュー",
+                                "常食2F",
+                                "常食3F",
+                                "軟菜2F",
+                                "軟菜3F",
+                                "ミキサー2F",
+                                "ミキサー3F",
+                                "備考",
+                            ],
+                            [canonical_mmdd, canonical_daypart, canonical_menu, "9", "", "", "", "", "", "first-pass"],
+                        ],
+                    }
+                ],
+            }
+        ],
+        "combined": {
+            "corrected_pdf": "gs://bucket/corrected.pdf",
+        },
+        "table_raw": (
+            "|日付|区分|メニュー|常食2F|常食3F|軟菜2F|軟菜3F|ミキサー2F|ミキサー3F|備考|\n"
+            "|---|---|---|---|---|---|---|---|---|---|\n"
+            f"|{canonical_mmdd}|{canonical_daypart}|{canonical_menu}|9||||||first-pass|"
+        ),
+    }
+
+    def _fake_pipeline(**_kwargs):
+        return "file://pipeline-output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref, retries=0, delay=0.0):  # noqa: ARG001
+        return {"status": "success"}
+
+    def _fake_get_ocr_output(order_id: str, *, persist_cache: bool = True):
+        assert order_id == order["id"]
+        get_ocr_output_calls.append(persist_cache)
+        return dict(rescued_payload), None
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        if uri == "gs://bucket/corrected.pdf":
+            return b"%PDF-corrected\n%EOF\n"
+        return b"%PDF-raw\n%EOF\n"
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        extract_pdf_inputs.append(pdf_bytes)
+        assert pdf_bytes == b"%PDF-corrected\n%EOF\n"
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "2"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"quantity_only_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        parse_pdf_inputs.append(pdf_bytes)
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 2,
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "get_ocr_output", _fake_get_ocr_output)
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **kwargs: {"status": "pass", "issues": [], "issue_count": 0, "blocking_issues": [], "blocking_issue_count": 0},
+    )
+    monkeypatch.setattr(order_service, "detect_table_grid", lambda pdf_bytes, template: None)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert get_ocr_output_calls
+    assert all(flag is False for flag in get_ocr_output_calls)
+    assert extract_pdf_inputs == [b"%PDF-corrected\n%EOF\n"]
+    assert parse_pdf_inputs
+    assert all(item == b"%PDF-corrected\n%EOF\n" for item in parse_pdf_inputs if item is not None)
+    assert updated["lines"][0]["quantity_original"] == 2
+
+
+def test_reparse_order_projects_quantity_only_rows_onto_structural_baseline(monkeypatch, tmp_path):
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "role": "remarks"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        "rows": [
+            ["02/15", "昼", "Menu A", "", ""],
+            ["02/15", "夕", "Menu B", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    fields, structural_rows, _row_ids, source = order_service._resolve_reparse_baseline_rows_for_structure(baseline)
+    projected_rows, stats = order_service._project_quantity_only_rows_onto_structural_rows(
+        rows=[["", "", "", "20", ""], ["", "", "", "11", ""]],
+        template=template,
+        structural_fields=fields,
+        structural_rows=structural_rows,
+    )
+
+    assert source == "sheet"
+    assert [row[:3] for row in projected_rows] == [
+        ["02/15", "昼", "Menu A"],
+        ["02/15", "夕", "Menu B"],
+    ]
+    assert [row[3] for row in projected_rows] == ["20", "11"]
+    assert stats is not None
+    assert stats["projected_row_count"] == 2
+    assert stats["rows_with_projected_quantity"] == 2
 
 
 def test_parse_llm_review_response_returns_yomitoku_compatible_output_payload():

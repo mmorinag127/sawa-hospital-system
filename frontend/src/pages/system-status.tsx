@@ -32,6 +32,12 @@ type SystemStatus = {
     bucket?: string | null;
     input_prefix?: string | null;
     output_prefix?: string | null;
+    trigger_mode?: string | null;
+    http_trigger_enabled?: boolean;
+    gcs_trigger_enabled?: boolean;
+    wait_strategy?: string | null;
+    sync_wait_supported?: boolean;
+    sync_wait_note?: string | null;
   };
   db_quota?: {
     resource?: string;
@@ -299,6 +305,17 @@ export default function SystemStatusPage() {
             設定: Bucket={status?.ocr_pipeline?.bucket_set ? "OK" : "NG"} / URL=
             {status?.ocr_pipeline?.url_set ? "OK" : "未設定（バケット経由で動作）"}
           </p>
+          <p className="meta">
+            trigger_mode={status?.ocr_pipeline?.trigger_mode || "未取得"} / wait=
+            {status?.ocr_pipeline?.wait_strategy || "未取得"}
+          </p>
+          <p className="meta">
+            sync_wait={status?.ocr_pipeline?.sync_wait_supported ? "OK" : "利用条件あり"} / http_trigger=
+            {status?.ocr_pipeline?.http_trigger_enabled ? "ON" : "OFF"}
+          </p>
+          {status?.ocr_pipeline?.sync_wait_note ? (
+            <p className="meta warn">{status.ocr_pipeline.sync_wait_note}</p>
+          ) : null}
           <p className="meta">
             Bucket: {status?.ocr_pipeline?.bucket || "未取得"} / input=
             {status?.ocr_pipeline?.input_prefix || "-"} / output=

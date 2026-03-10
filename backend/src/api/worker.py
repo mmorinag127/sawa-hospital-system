@@ -1,10 +1,11 @@
 import base64
 import json
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from google.auth.exceptions import RefreshError
 from loguru import logger
 
+from src.api.auth import require_role
 from src.workers.ingest_worker import enqueue_ingest_async
 from src.services.gmail_watch_service import GmailWatchConfigError, refresh_gmail_watch
 from src.services.gmail_ingest_service import GmailIngestConfigError, ingest_from_notification
@@ -25,7 +26,7 @@ def _decode_pubsub_data(message: dict) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-@router.post("/pubsub/push")
+@router.post("/pubsub/push", dependencies=[Depends(require_role("operator"))])
 async def pubsub_push(request: Request):
     payload = await request.json()
     message = payload.get("message") if isinstance(payload, dict) else None
@@ -58,7 +59,7 @@ async def pubsub_push(request: Request):
     return {"ok": True}
 
 
-@router.post("/watch-refresh")
+@router.post("/watch-refresh", dependencies=[Depends(require_role("operator"))])
 async def watch_refresh():
     try:
         result = refresh_gmail_watch()

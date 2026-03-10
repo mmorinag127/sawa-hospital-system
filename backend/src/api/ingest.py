@@ -13,7 +13,7 @@ from src.services.ingest_policy import ingest_chunk_delay_seconds
 router = APIRouter()
 
 
-@router.post("/email", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/email", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
 def ingest_email(payload: dict, force: bool = False):
     required = {"message_id", "pdf_uri", "received_at"}
     if not required.issubset(payload):

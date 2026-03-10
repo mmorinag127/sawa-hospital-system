@@ -12,6 +12,7 @@ sys.path.append(str(ROOT))
 
 from src.db import session_scope
 from src.models.menu import MonthlyMenu, MonthlyMenuItem
+from src.models.output import Bag
 from src.services import config_service, facility_service, menu_service, order_service
 from src.services.output_builder import build_outputs, rebuild_bags
 from src.workers.ingest_mail_adapter import IngestEmailPayload
@@ -67,6 +68,114 @@ def test_condiment_bags_are_merged_across_diet_and_area():
     assert condiments[0]["quantity"] == 7.0
     assert condiments[0]["diet_type"] is None
     assert condiments[0]["area_id"] is None
+
+
+def test_get_bag_summary_rebuilds_stale_materialized_bags():
+    _reset_orders_and_menus()
+
+    payload = IngestEmailPayload(
+        message_id="bag-stale-001",
+        pdf_uri="file:///tmp/bag-stale.pdf",
+        received_at=datetime(2025, 2, 18, 12, 0, 0),
+        facility_hint="FAC00003",
+        week_hint="2025-02",
+    )
+    lines = [
+        {
+            "line_id": "1",
+            "date": "2025-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "bag_type": "standard",
+            "quantity_original": 9,
+        },
+        {
+            "line_id": "2",
+            "date": "2025-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "bag_type": "standard",
+            "quantity_original": 8,
+        },
+        {
+            "line_id": "3",
+            "date": "2025-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "bag_type": "standard",
+            "quantity_original": 2,
+        },
+        {
+            "line_id": "4",
+            "date": "2025-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "bag_type": "standard",
+            "quantity_original": 3,
+        },
+    ]
+    order = order_service.create_order_from_ingest(payload, lines=lines)
+
+    with session_scope() as session:
+        session.add(
+            Bag(
+                id=f"BAG{uuid4().hex[:8]}",
+                order_id=order["id"],
+                date=datetime(2025, 2, 18).date(),
+                daypart="昼",
+                menu_name="筑前煮",
+                diet_type="regular",
+                area_id=None,
+                bag_type="large",
+                quantity=15,
+            )
+        )
+        session.add(
+            Bag(
+                id=f"BAG{uuid4().hex[:8]}",
+                order_id=order["id"],
+                date=datetime(2025, 2, 18).date(),
+                daypart="昼",
+                menu_name="筑前煮",
+                diet_type="regular",
+                area_id=None,
+                bag_type="large",
+                quantity=15,
+            )
+        )
+        session.add(
+            Bag(
+                id=f"BAG{uuid4().hex[:8]}",
+                order_id=order["id"],
+                date=datetime(2025, 2, 18).date(),
+                daypart="昼",
+                menu_name="筑前煮",
+                diet_type="regular",
+                area_id=None,
+                bag_type="large",
+                quantity=9,
+            )
+        )
+
+    summary, error = order_service.get_bag_summary(order["id"])
+
+    assert error is None
+    assert summary is not None
+    chikuzen = [row for row in summary["bags"] if row.get("menu_name") == "筑前煮"]
+    assert {(row.get("diet_type"), row.get("area_id"), row.get("quantity")) for row in chikuzen} == {
+        ("mixer", "2F", 2.0),
+        ("mixer", "3F", 3.0),
+        ("regular", "2F", 9.0),
+        ("regular", "3F", 8.0),
+    }
 
 
 def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_path):

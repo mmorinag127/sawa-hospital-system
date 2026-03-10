@@ -1,8 +1,10 @@
 from typing import Any, Optional
 from pathlib import Path
+import base64
 import json
 import os
 import hashlib
+import math
 import re
 import time
 import threading
@@ -27,6 +29,7 @@ from src.models.facility import FacilityConfig
 from src.services.notification_service import record_event
 from src.services import config_service, menu_service, facility_service
 from src.services.config_validator import validate_facility_config
+from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services.fax_extractor import (
     extract_fax_data,
     filter_tokens_by_box,
@@ -40,6 +43,7 @@ from src.services.ingest_policy import parse_date_string, month_id_from_dates
 from src.services.storage_service import load_bytes_from_uri
 from src.services.storage_service import generate_signed_url
 from src.services.grid_detector import detect_table_grid, detect_table_grid_image
+from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.ocr_job_service import create_job, update_job, get_job as get_ocr_job
 from src.services.ocr_pipeline_service import run_ocr_pipeline
 
@@ -106,6 +110,13 @@ def _normalize_sheet_week_value(value: object) -> str | None:
     if not month_id:
         return None
     return _format_sheet_week_value(month_id, start_date, end_date)
+
+
+def _normalize_sheet_week_candidate(value: object) -> str | None:
+    normalized_week = _normalize_sheet_week_value(value)
+    if normalized_week and "@" in normalized_week:
+        return normalized_week
+    return _to_sheet_month_id(value)
 
 
 def _format_sheet_week_label(value: object) -> str:
@@ -1340,6 +1351,7 @@ def _collect_numeric_source_rows_for_reparse(
     *,
     rows: list[list[str]],
     template: dict[str, Any],
+    rows_are_body_only: bool = False,
 ) -> set[int]:
     if not rows:
         return set()
@@ -1362,8 +1374,9 @@ def _collect_numeric_source_rows_for_reparse(
         header_rows = max(0, int(header_rows_raw))
     except Exception:
         header_rows = 0
+    effective_header_rows = 0 if rows_are_body_only else header_rows
     numeric_rows: set[int] = set()
-    for source_row_index, row in enumerate(rows[header_rows:]):
+    for source_row_index, row in enumerate(rows[effective_header_rows:]):
         if not isinstance(row, list):
             continue
         for col_idx in quantity_indexes:
@@ -1402,6 +1415,71 @@ def _template_quantity_columns(template: dict[str, Any]) -> list[dict[str, str |
         }
         unique_by_index[int(index_raw)] = item
     return [unique_by_index[idx] for idx in sorted(unique_by_index.keys())]
+
+
+def _template_structural_column_indexes(template: dict[str, Any]) -> list[int]:
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return []
+    roles = {"date", "daypart", "menu", "menu_name"}
+    structural_indexes: set[int] = set()
+    for col in columns:
+        if not isinstance(col, dict):
+            continue
+        if str(col.get("role") or "").strip() not in roles:
+            continue
+        index_raw = col.get("index")
+        if not isinstance(index_raw, int):
+            continue
+        structural_indexes.add(int(index_raw))
+    return sorted(structural_indexes)
+
+
+def _row_has_structural_data(
+    row: list[str],
+    structural_indexes: list[int],
+) -> bool:
+    for col_index in structural_indexes:
+        if col_index < 0 or col_index >= len(row):
+            continue
+        if str(row[col_index]).strip():
+            return True
+    return False
+
+
+def _should_project_quantity_rows_to_structural_rows(
+    *,
+    rows: list[list[str]],
+    structural_rows: list[list[str]],
+    template: dict[str, Any],
+) -> bool:
+    normalized_rows = [list(row) for row in rows if isinstance(row, list)]
+    normalized_structural_rows = [list(row) for row in structural_rows if isinstance(row, list)]
+    if not normalized_rows or not normalized_structural_rows:
+        return False
+    max_row_overflow = max(2, int(len(normalized_structural_rows) * 0.1))
+    if len(normalized_rows) > len(normalized_structural_rows) + max_row_overflow:
+        return False
+    if _rows_look_like_quantity_only(
+        rows=normalized_rows,
+        template=template,
+        rows_are_body_only=True,
+    ):
+        return True
+    structural_indexes = _template_structural_column_indexes(template)
+    if not structural_indexes:
+        return False
+    rows_with_structural_data = sum(
+        1
+        for row in normalized_rows
+        if _row_has_structural_data(row=row, structural_indexes=structural_indexes)
+    )
+    if rows_with_structural_data <= 0:
+        return len(normalized_rows) <= len(normalized_structural_rows)
+    structural_ratio = float(rows_with_structural_data) / float(len(normalized_rows))
+    if len(normalized_rows) < len(normalized_structural_rows):
+        return structural_ratio <= 0.2
+    return structural_ratio < 0.1
 
 
 def _analyze_quantity_pair_similarity(
@@ -1614,6 +1692,7 @@ def _rows_look_like_quantity_only(
     *,
     rows: list[list[str]],
     template: dict[str, Any],
+    rows_are_body_only: bool = False,
 ) -> bool:
     if not rows:
         return False
@@ -1647,7 +1726,8 @@ def _rows_look_like_quantity_only(
         header_rows = max(0, int(header_rows_raw))
     except Exception:
         header_rows = 0
-    data_rows = [row for row in rows[header_rows:] if isinstance(row, list)]
+    effective_header_rows = 0 if rows_are_body_only else header_rows
+    data_rows = [row for row in rows[effective_header_rows:] if isinstance(row, list)]
     if not data_rows:
         return False
 
@@ -2026,6 +2106,18 @@ def _evaluate_quantity_only_rows_quality(
         detail["quality_issue"] = "row_coverage"
         return "sheet_row_coverage_low", detail
 
+    extra_rows = max(row_count - effective_expected, 0)
+    max_extra_rows = _read_reparse_int_env(
+        "OCR_REPARSE_MAX_EXTRA_ROWS",
+        0,
+        min_value=0,
+    )
+    detail["extra_rows"] = int(extra_rows)
+    detail["max_extra_rows"] = int(max_extra_rows)
+    if extra_rows > max_extra_rows:
+        detail["quality_issue"] = "row_overfill"
+        return "sheet_row_overfill", detail
+
     if str(os.getenv("OCR_REPARSE_ENABLE_COLUMN_ANOMALY_GATE", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return None, detail
 
@@ -2167,12 +2259,16 @@ def _is_reparse_quality_improved(
     after_coverage = float(after_detail.get("row_coverage_ratio") or 0.0)
     before_missing_tail = int(before_detail.get("missing_tail_rows") or 0)
     after_missing_tail = int(after_detail.get("missing_tail_rows") or 0)
+    before_extra_rows = int(before_detail.get("extra_rows") or 0)
+    after_extra_rows = int(after_detail.get("extra_rows") or 0)
     before_col_anomaly = int(before_detail.get("column_anomaly_count") or 0)
     after_col_anomaly = int(after_detail.get("column_anomaly_count") or 0)
 
     if after_coverage > before_coverage:
         return True
     if after_missing_tail < before_missing_tail:
+        return True
+    if after_extra_rows < before_extra_rows:
         return True
     if after_col_anomaly < before_col_anomaly:
         return True
@@ -2218,6 +2314,7 @@ def _validate_reparse_lines_against_weekly_menu(
     ocr_rows: list[list[str]] | None,
     template: dict[str, Any],
     entries_override: list[dict[str, Any]] | None = None,
+    rows_are_body_only: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
     if not lines:
         return None, None
@@ -2274,6 +2371,7 @@ def _validate_reparse_lines_against_weekly_menu(
     numeric_source_rows = _collect_numeric_source_rows_for_reparse(
         rows=[list(item) for item in (ocr_rows or []) if isinstance(item, list)],
         template=template,
+        rows_are_body_only=rows_are_body_only,
     )
     for source_row_index in sorted(numeric_source_rows):
         expected_key = weekly_key_by_source_row.get(source_row_index)
@@ -2302,6 +2400,387 @@ def _validate_reparse_lines_against_weekly_menu(
     if invalid_lines or mismatch_source_rows:
         return "sheet_canonical_mismatch", detail
     return "sheet_suspicious_blank_row", detail
+
+
+def _collect_filled_source_rows_from_lines(
+    lines: list[dict[str, Any]] | None,
+) -> list[int]:
+    indexes: set[int] = set()
+    for line in lines or []:
+        if not isinstance(line, dict):
+            continue
+        quantity_value = line.get("quantity_corrected")
+        if quantity_value is None or quantity_value == "":
+            quantity_value = line.get("quantity_original")
+        if _parse_strict_numeric_cell(quantity_value) is None:
+            continue
+        source_row_raw = line.get("source_row_index")
+        try:
+            source_row_index = int(source_row_raw) if source_row_raw is not None else -1
+        except Exception:
+            source_row_index = -1
+        if source_row_index >= 0:
+            indexes.add(source_row_index)
+    return sorted(indexes)
+
+
+def _validate_reparse_blank_anchor_drift(
+    *,
+    lines: list[dict[str, Any]],
+    structural_fields: list[str] | None,
+    structural_rows: list[list[str]] | None,
+    reference_rows: list[list[str]] | None,
+    reference_fields: list[str] | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    normalized_structural_rows = [list(row) for row in (structural_rows or []) if isinstance(row, list)]
+    normalized_reference_rows = [list(row) for row in (reference_rows or []) if isinstance(row, list)]
+    if not lines or not normalized_structural_rows or not normalized_reference_rows:
+        return None, None
+
+    resolved_structural_fields = [
+        str(field or "").strip()
+        for field in (structural_fields or [])
+        if str(field or "").strip()
+    ]
+    resolved_reference_fields = [
+        str(field or "").strip()
+        for field in ((reference_fields or structural_fields) or [])
+        if str(field or "").strip()
+    ]
+    if not resolved_structural_fields:
+        return None, None
+
+    block_anchor_hints = _build_reparse_block_anchor_hints(
+        structural_fields=resolved_structural_fields,
+        structural_rows=normalized_structural_rows,
+        first_pass_fields=resolved_reference_fields or resolved_structural_fields,
+        first_pass_rows=normalized_reference_rows,
+    )
+    blank_anchor_row_indexes = sorted(
+        {
+            int(item)
+            for item in (block_anchor_hints.get("unmatched_structural_row_indexes") or [])
+            if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+        }
+    )
+    if not blank_anchor_row_indexes:
+        blank_anchor_row_indexes = sorted(
+            {
+                int(item)
+                for item in (block_anchor_hints.get("structural_blank_anchor_row_indexes") or [])
+                if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+            }
+        )
+    if not blank_anchor_row_indexes:
+        return None, None
+
+    filled_source_rows = _collect_filled_source_rows_from_lines(lines)
+    offending_rows = sorted(set(filled_source_rows) & set(blank_anchor_row_indexes))
+    if not offending_rows:
+        return None, None
+
+    offending_blocks: list[dict[str, Any]] = []
+    for block in (block_anchor_hints.get("blocks") or []):
+        if not isinstance(block, dict):
+            continue
+        try:
+            row_start = int(block.get("row_start"))
+            row_end = int(block.get("row_end"))
+        except Exception:
+            continue
+        block_offending = [idx for idx in offending_rows if row_start <= idx <= row_end]
+        if not block_offending:
+            continue
+        offending_blocks.append(
+            {
+                "date_mmdd": block.get("date_mmdd"),
+                "daypart": block.get("daypart"),
+                "row_start": row_start,
+                "row_end": row_end,
+                "offending_source_rows": block_offending,
+            }
+        )
+
+    return "sheet_blank_anchor_drift", {
+        "quality_issue": "blank_anchor_drift",
+        "offending_source_rows": offending_rows[:80],
+        "offending_rows": offending_rows[:80],
+        "blank_anchor_row_indexes": blank_anchor_row_indexes[:160],
+        "filled_source_rows": filled_source_rows[:160],
+        "offending_blocks": offending_blocks[:40],
+    }
+
+
+def _realign_quantity_only_rows_to_structural_blank_anchors(
+    *,
+    rows: list[list[str]],
+    template: dict[str, Any],
+    structural_fields: list[str] | None,
+    structural_rows: list[list[str]] | None,
+    reference_rows: list[list[str]] | None,
+    reference_fields: list[str] | None = None,
+) -> tuple[list[list[str]], dict[str, Any] | None]:
+    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
+    normalized_structural_rows = [list(row) for row in (structural_rows or []) if isinstance(row, list)]
+    normalized_reference_rows = [list(row) for row in (reference_rows or []) if isinstance(row, list)]
+    if not normalized_rows or not normalized_structural_rows or not normalized_reference_rows:
+        return normalized_rows, None
+
+    quantity_indexes = _template_quantity_column_indexes(template)
+    if not quantity_indexes:
+        return normalized_rows, None
+
+    resolved_structural_fields = [
+        str(field or "").strip()
+        for field in (structural_fields or [])
+        if str(field or "").strip()
+    ]
+    resolved_reference_fields = [
+        str(field or "").strip()
+        for field in ((reference_fields or structural_fields) or [])
+        if str(field or "").strip()
+    ]
+    if not resolved_structural_fields:
+        return normalized_rows, None
+
+    block_anchor_hints = _build_reparse_block_anchor_hints(
+        structural_fields=resolved_structural_fields,
+        structural_rows=normalized_structural_rows,
+        first_pass_fields=resolved_reference_fields or resolved_structural_fields,
+        first_pass_rows=normalized_reference_rows,
+    )
+    unmatched_structural_row_indexes = {
+        int(item)
+        for item in (block_anchor_hints.get("unmatched_structural_row_indexes") or [])
+        if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+    }
+    used_structural_blank_fallback = not bool(unmatched_structural_row_indexes)
+    if not unmatched_structural_row_indexes:
+        unmatched_structural_row_indexes = {
+            int(item)
+            for item in (block_anchor_hints.get("structural_blank_anchor_row_indexes") or [])
+            if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+        }
+    blocks = block_anchor_hints.get("blocks") or []
+    if not unmatched_structural_row_indexes or not isinstance(blocks, list):
+        return normalized_rows, None
+
+    realigned_rows = [list(row) for row in normalized_rows]
+    stats: dict[str, Any] = {
+        "blocks_evaluated": 0,
+        "blocks_realigned": 0,
+        "rows_shifted": 0,
+        "quantity_cells_shifted": 0,
+        "skipped_blocks": [],
+    }
+
+    def _row_quantity_vector(row: list[str]) -> dict[int, str]:
+        vector: dict[int, str] = {}
+        for col_index in quantity_indexes:
+            if col_index < 0 or col_index >= len(row):
+                continue
+            qty = _parse_strict_numeric_cell(row[col_index])
+            if qty is None:
+                continue
+            vector[col_index] = _format_merged_quantity_cell(qty)
+        return vector
+
+    def _clear_row_quantities(row: list[str]) -> int:
+        cleared_cells = 0
+        for col_index in quantity_indexes:
+            if col_index < 0 or col_index >= len(row):
+                continue
+            if row[col_index]:
+                row[col_index] = ""
+                cleared_cells += 1
+        return cleared_cells
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        try:
+            row_start = int(block.get("row_start"))
+            row_end = int(block.get("row_end"))
+        except Exception:
+            continue
+        if row_start < 0 or row_end < row_start:
+            continue
+        if row_end >= len(realigned_rows):
+            continue
+        block_indexes = list(range(row_start, row_end + 1))
+        blank_anchor_rows = [
+            idx for idx in block_indexes if idx in unmatched_structural_row_indexes
+        ]
+        if not blank_anchor_rows:
+            continue
+        target_indexes = [idx for idx in block_indexes if idx not in unmatched_structural_row_indexes]
+        if not target_indexes:
+            continue
+
+        clear_made = False
+        for row_index in blank_anchor_rows:
+            if row_index < 0 or row_index >= len(realigned_rows):
+                continue
+            row = realigned_rows[row_index]
+            clear_made = bool(clear_made or any(row[col_index] for col_index in quantity_indexes if 0 <= col_index < len(row)))
+
+        candidate_vectors: list[tuple[int, dict[int, str]]] = []
+        candidate_pattern: list[bool] = []
+        for row_index in block_indexes:
+            vector = _row_quantity_vector(realigned_rows[row_index])
+            if 0 <= row_index < len(realigned_rows):
+                candidate_pattern.append(bool(vector))
+            if vector:
+                candidate_vectors.append((row_index, vector))
+        structural_pattern = [row_index in target_indexes for row_index in block_indexes]
+        stats["blocks_evaluated"] = int(stats.get("blocks_evaluated") or 0) + 1
+        if candidate_pattern == structural_pattern:
+            if not clear_made:
+                continue
+            cleared_cells = 0
+            for row_index in blank_anchor_rows:
+                if 0 <= row_index < len(realigned_rows):
+                    cleared_cells += _clear_row_quantities(realigned_rows[row_index])
+            stats["blocks_realigned"] = int(stats.get("blocks_realigned") or 0) + 1
+            stats["rows_shifted"] = int(stats.get("rows_shifted") or 0) + len(blank_anchor_rows)
+            stats["quantity_cells_shifted"] = int(stats.get("quantity_cells_shifted") or 0) + cleared_cells
+            continue
+        if len(candidate_vectors) != len(target_indexes):
+            if (
+                used_structural_blank_fallback
+                and clear_made
+                and len(candidate_vectors) > 1
+                and len(candidate_vectors) >= len(target_indexes)
+            ):
+                cleared_cells = 0
+                for row_index in blank_anchor_rows:
+                    if 0 <= row_index < len(realigned_rows):
+                        cleared_cells += _clear_row_quantities(realigned_rows[row_index])
+                stats["blocks_realigned"] = int(stats.get("blocks_realigned") or 0) + 1
+                stats["rows_shifted"] = int(stats.get("rows_shifted") or 0) + len(blank_anchor_rows)
+                stats["quantity_cells_shifted"] = int(stats.get("quantity_cells_shifted") or 0) + cleared_cells
+                continue
+            skipped = stats.setdefault("skipped_blocks", [])
+            if isinstance(skipped, list):
+                skipped.append(
+                    {
+                        "date_mmdd": block.get("date_mmdd"),
+                        "daypart": block.get("daypart"),
+                        "row_start": row_start,
+                        "row_end": row_end,
+                        "reason": "filled_count_mismatch",
+                        "filled_rows": len(candidate_vectors),
+                        "target_rows": len(target_indexes),
+                    }
+                )
+            continue
+
+        for row_index in block_indexes:
+            target_row = realigned_rows[row_index]
+            for col_index in quantity_indexes:
+                if 0 <= col_index < len(target_row):
+                    target_row[col_index] = ""
+
+        block_shifted_rows = 0
+        block_shifted_cells = 0
+        for (source_row_index, quantity_vector), target_row_index in zip(candidate_vectors, target_indexes):
+            target_row = realigned_rows[target_row_index]
+            for col_index, value in quantity_vector.items():
+                while len(target_row) <= col_index:
+                    target_row.append("")
+                target_row[col_index] = value
+                block_shifted_cells += 1
+            if source_row_index != target_row_index:
+                block_shifted_rows += 1
+        if block_shifted_cells <= 0:
+            continue
+        stats["blocks_realigned"] = int(stats.get("blocks_realigned") or 0) + 1
+        stats["rows_shifted"] = int(stats.get("rows_shifted") or 0) + block_shifted_rows
+        stats["quantity_cells_shifted"] = int(stats.get("quantity_cells_shifted") or 0) + block_shifted_cells
+
+    if int(stats.get("blocks_realigned") or 0) <= 0:
+        return normalized_rows, None
+    skipped_blocks = stats.get("skipped_blocks")
+    if isinstance(skipped_blocks, list):
+        stats["skipped_blocks"] = skipped_blocks[:20]
+    return realigned_rows, stats
+
+
+def _project_quantity_only_rows_onto_structural_rows(
+    *,
+    rows: list[list[str]],
+    template: dict[str, Any],
+    structural_fields: list[str] | None,
+    structural_rows: list[list[str]] | None,
+) -> tuple[list[list[str]], dict[str, Any] | None]:
+    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
+    normalized_structural_rows = [list(row) for row in (structural_rows or []) if isinstance(row, list)]
+    resolved_fields = [str(field or "").strip() for field in (structural_fields or []) if str(field or "").strip()]
+    if not normalized_rows or not normalized_structural_rows or not resolved_fields:
+        return normalized_rows, None
+    if not _should_project_quantity_rows_to_structural_rows(
+        rows=normalized_rows,
+        structural_rows=normalized_structural_rows,
+        template=template,
+    ):
+        return normalized_rows, None
+
+    quantity_indexes = _template_quantity_column_indexes(template)
+    if not quantity_indexes:
+        return normalized_rows, None
+
+    target_width = max(
+        len(resolved_fields),
+        max((len(row) for row in normalized_structural_rows), default=0),
+        max((len(row) for row in normalized_rows), default=0),
+    )
+    projected_rows: list[list[str]] = []
+    rows_with_projected_quantity = 0
+    quantity_cells_copied = 0
+    padded_blank_rows = 0
+
+    for row_index, structural_row in enumerate(normalized_structural_rows):
+        target_row = list(structural_row)
+        if len(target_row) < target_width:
+            target_row.extend([""] * (target_width - len(target_row)))
+        source_row = normalized_rows[row_index] if row_index < len(normalized_rows) else []
+        if len(source_row) < target_width:
+            source_row = list(source_row) + [""] * (target_width - len(source_row))
+        copied_in_row = False
+        for col_index in quantity_indexes:
+            if col_index < 0 or col_index >= target_width:
+                continue
+            value = str(source_row[col_index] or "").strip()
+            if target_row[col_index] != value:
+                target_row[col_index] = value
+            if value:
+                copied_in_row = True
+                quantity_cells_copied += 1
+        if copied_in_row:
+            rows_with_projected_quantity += 1
+        elif row_index >= len(normalized_rows):
+            padded_blank_rows += 1
+        projected_rows.append(target_row)
+
+    return projected_rows, {
+        "projected_row_count": len(projected_rows),
+        "source_row_count": len(normalized_rows),
+        "structural_row_count": len(normalized_structural_rows),
+        "rows_with_projected_quantity": rows_with_projected_quantity,
+        "quantity_cells_copied": quantity_cells_copied,
+        "padded_blank_rows": padded_blank_rows,
+    }
+
+
+def _rows_for_reparse_quality_gate(
+    *,
+    original_rows: list[list[str]] | None,
+    projected_rows: list[list[str]] | None,
+    llm_quantity_only_active: bool,
+) -> list[list[str]]:
+    if llm_quantity_only_active:
+        return [list(row) for row in (original_rows or []) if isinstance(row, list)]
+    return [list(row) for row in (projected_rows or original_rows or []) if isinstance(row, list)]
 
 
 def _validate_reparse_date_anchor_stability(
@@ -2732,6 +3211,7 @@ def get_order_by_id(order_id: str):
         payload = serialize_order(order)
     raw_week_value = payload.get("week_value")
     raw_week_month = payload.get("week")
+    payload["persisted_week_value"] = raw_week_value
     if (
         isinstance(raw_week_value, str)
         and isinstance(raw_week_month, str)
@@ -2871,6 +3351,466 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
     return options, None
 
 
+def _normalize_bag_summary_date(value: object) -> str:
+    normalized = _normalize_entry_date(value)
+    if isinstance(normalized, date):
+        return normalized.isoformat()
+    return str(value or "").strip()
+
+
+def _bag_summary_group_key(
+    *,
+    date_value: object,
+    daypart: object,
+    menu_name: object,
+    diet_type: object = None,
+    area_id: object = None,
+    bag_type: object = None,
+) -> tuple[str, ...]:
+    date_key = _normalize_bag_summary_date(date_value)
+    daypart_key = _normalize_daypart_key(daypart)
+    menu_key = _normalize_sheet_text(menu_name)
+    bag_type_key = _normalize_sheet_text(bag_type).lower()
+    if bag_type_key == "condiment":
+        return ("condiment", date_key, daypart_key, menu_key)
+    diet_key = _normalize_sheet_diet(diet_type) or _normalize_sheet_text(diet_type).lower()
+    area_key = _normalize_sheet_area(area_id) or "X"
+    return ("meal", date_key, daypart_key, menu_key, diet_key, area_key)
+
+
+def _bag_summary_expected_totals(order_payload: dict[str, Any]) -> dict[tuple[str, ...], float]:
+    from src.services.output_builder import build_order_lines_for_outputs
+
+    totals: dict[tuple[str, ...], float] = {}
+    order_lines = build_order_lines_for_outputs(order_payload)
+    for line in order_lines:
+        quantity_raw = (
+            line.get("quantity_corrected")
+            if line.get("quantity_corrected") is not None
+            else line.get("quantity_original")
+        )
+        try:
+            quantity = float(quantity_raw)
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        key = _bag_summary_group_key(
+            date_value=line.get("date"),
+            daypart=line.get("daypart"),
+            menu_name=line.get("menu_name"),
+            diet_type=line.get("diet_type"),
+            area_id=line.get("area_id"),
+            bag_type=line.get("bag_type"),
+        )
+        totals[key] = round(totals.get(key, 0.0) + quantity, 4)
+    return totals
+
+
+def _bag_summary_materialized_totals(rows: list[dict[str, Any]]) -> dict[tuple[str, ...], float]:
+    totals: dict[tuple[str, ...], float] = {}
+    for row in rows:
+        try:
+            quantity = float(row.get("quantity"))
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        key = _bag_summary_group_key(
+            date_value=row.get("date"),
+            daypart=row.get("daypart"),
+            menu_name=row.get("menu_name"),
+            diet_type=row.get("diet_type"),
+            area_id=row.get("area_id"),
+            bag_type=row.get("bag_type"),
+        )
+        totals[key] = round(totals.get(key, 0.0) + quantity, 4)
+    return totals
+
+
+def _bag_summary_requires_rebuild(
+    order_payload: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> tuple[bool, str | None]:
+    if not rows:
+        return True, "missing_bags"
+    expected_totals = _bag_summary_expected_totals(order_payload)
+    materialized_totals = _bag_summary_materialized_totals(rows)
+    if expected_totals != materialized_totals:
+        return True, "bag_totals_mismatch"
+    return False, None
+
+
+def _normalize_output_unit(value: object) -> str:
+    token = _normalize_sheet_text(value).lower()
+    if not token:
+        return ""
+    if token in {"g", "gram", "grams"}:
+        return "g"
+    if token in {"ml"}:
+        return "ml"
+    if token in {"個"}:
+        return "個"
+    if token in {"切"}:
+        return "切"
+    return str(value or "").strip()
+
+
+def _format_amount_number(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_amount_label(totals: dict[str, float] | None) -> str | None:
+    if not isinstance(totals, dict):
+        return None
+    entries: list[tuple[str, float]] = []
+    for unit, raw_value in totals.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value < 0:
+            continue
+        entries.append((str(unit or ""), value))
+    if not entries:
+        return None
+    entries.sort(key=lambda item: item[0])
+    return " + ".join(f"{_format_amount_number(value)}{unit}" for unit, value in entries)
+
+
+def _merge_amount_totals(base: dict[str, float], incoming: dict[str, float] | None) -> dict[str, float]:
+    if not isinstance(incoming, dict):
+        return base
+    for unit, raw_value in incoming.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value < 0:
+            continue
+        base[str(unit or "")] = round(base.get(str(unit or ""), 0.0) + value, 4)
+    return base
+
+
+def _build_condiment_amount_key(date_value: object, daypart: object) -> str:
+    return f"condiment__{_normalize_bag_summary_date(date_value)}__{_normalize_daypart_key(daypart)}"
+
+
+def _build_non_condiment_amount_key(
+    date_value: object,
+    daypart: object,
+    menu_name: object,
+    diet_type: object,
+    area_id: object,
+) -> str:
+    return "__".join(
+        [
+            "normal",
+            _normalize_bag_summary_date(date_value),
+            _normalize_daypart_key(daypart),
+            _normalize_sheet_text(menu_name),
+            _normalize_sheet_diet(diet_type) or _normalize_sheet_text(diet_type).lower() or "unknown",
+            _normalize_sheet_area(area_id) or "X",
+        ]
+    )
+
+
+def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]:
+    condiment_totals: dict[str, dict[str, float]] = {}
+    non_condiment_stats: dict[str, dict[str, dict[str, float]]] = {}
+    for line in lines:
+        quantity_raw = (
+            line.get("quantity_corrected")
+            if line.get("quantity_corrected") is not None
+            else line.get("quantity_original")
+        )
+        try:
+            quantity = float(quantity_raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(quantity) or quantity <= 0:
+            continue
+        unit = _normalize_output_unit(line.get("actual_unit_type") or line.get("menu_unit_type"))
+        if not unit:
+            continue
+        amount_raw = line.get("actual_amount")
+        if amount_raw is None:
+            per_serving = line.get("menu_qty_per_serving")
+            try:
+                amount_raw = float(per_serving) * quantity
+            except (TypeError, ValueError):
+                continue
+        try:
+            amount = float(amount_raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(amount) or amount < 0:
+            continue
+        if _normalize_sheet_text(line.get("bag_type")).lower() == "condiment":
+            key = _build_condiment_amount_key(line.get("date"), line.get("daypart"))
+            totals = condiment_totals.get(key, {})
+            totals[unit] = round(totals.get(unit, 0.0) + amount, 4)
+            condiment_totals[key] = totals
+            continue
+        key = _build_non_condiment_amount_key(
+            line.get("date"),
+            line.get("daypart"),
+            line.get("menu_name"),
+            line.get("diet_type"),
+            line.get("area_id"),
+        )
+        unit_stats = non_condiment_stats.get(key, {})
+        current = unit_stats.get(unit, {"amount": 0.0, "quantity": 0.0})
+        current["amount"] = round(current.get("amount", 0.0) + amount, 4)
+        current["quantity"] = round(current.get("quantity", 0.0) + quantity, 4)
+        unit_stats[unit] = current
+        non_condiment_stats[key] = unit_stats
+    per_serving_by_group: dict[str, dict[str, float]] = {}
+    for key, unit_stats in non_condiment_stats.items():
+        per_serving: dict[str, float] = {}
+        for unit, stat in unit_stats.items():
+            try:
+                amount = float(stat.get("amount", 0.0))
+                quantity = float(stat.get("quantity", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(amount) or not math.isfinite(quantity) or quantity <= 0:
+                continue
+            per_serving[unit] = round(amount / quantity, 6)
+        if per_serving:
+            per_serving_by_group[key] = per_serving
+    return {"condiment_totals": condiment_totals, "per_serving_by_group": per_serving_by_group}
+
+
+def _resolve_daily_bag_amount_totals(bag: dict[str, Any], stats: dict[str, Any]) -> dict[str, float] | None:
+    bag_type = _normalize_sheet_text(bag.get("bag_type")).lower()
+    if bag_type == "condiment":
+        return stats.get("condiment_totals", {}).get(
+            _build_condiment_amount_key(bag.get("date"), bag.get("daypart"))
+        )
+    try:
+        quantity = float(bag.get("quantity"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(quantity) or quantity < 0:
+        return None
+    per_serving = stats.get("per_serving_by_group", {}).get(
+        _build_non_condiment_amount_key(
+            bag.get("date"),
+            bag.get("daypart"),
+            bag.get("menu_name"),
+            bag.get("diet_type"),
+            bag.get("area_id"),
+        )
+    )
+    if not isinstance(per_serving, dict):
+        return None
+    totals: dict[str, float] = {}
+    for unit, raw_value in per_serving.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value < 0:
+            continue
+        totals[unit] = round(value * quantity, 4)
+    return totals or None
+
+
+def get_daily_bag_summary(
+    target_date: date,
+    facility_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> dict[str, Any]:
+    orders = list_orders_by_line_date(target_date, facility_id=facility_id, status=status)
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    facility_labels: dict[str, str] = {}
+    from src.services.output_builder import build_order_lines_for_outputs
+
+    for order_summary in orders:
+        order_id = str(order_summary.get("id") or "").strip()
+        if not order_id:
+            continue
+        order_payload = get_order_by_id(order_id)
+        if not isinstance(order_payload, dict):
+            continue
+        order_lines = build_order_lines_for_outputs(order_payload)
+        amount_stats = _build_daily_bag_amount_stats(order_lines)
+        bag_summary, error = get_bag_summary(order_id)
+        if error or not isinstance(bag_summary, dict):
+            continue
+        facility_code = str(order_payload.get("facility") or "").strip()
+        facility_label = facility_labels.get(facility_code)
+        if facility_label is None:
+            facility_name = ""
+            if facility_code:
+                try:
+                    facility_config = config_service.get_facility_config(facility_code) or {}
+                    facility_name = str(facility_config.get("facility_name") or "").strip()
+                except Exception:
+                    facility_name = ""
+            facility_label = f"{facility_name} ({facility_code})" if facility_name and facility_code else facility_code or "未確定"
+            facility_labels[facility_code] = facility_label
+
+        for bag in bag_summary.get("bags") or []:
+            if _normalize_bag_summary_date(bag.get("date")) != target_date.isoformat():
+                continue
+            group_daypart = str(bag.get("daypart") or _normalize_daypart_key(bag.get("daypart")) or "-").strip() or "-"
+            menu_name = str(bag.get("menu_name") or "-").strip() or "-"
+            menu_key = (group_daypart, menu_name)
+            menu_group = groups.get(menu_key)
+            if menu_group is None:
+                menu_group = {
+                    "daypart": group_daypart,
+                    "daypart_key": _normalize_daypart_key(group_daypart),
+                    "menu_name": menu_name,
+                    "diet_groups": {},
+                }
+                groups[menu_key] = menu_group
+
+            diet_key = _normalize_sheet_diet(bag.get("diet_type")) or _normalize_sheet_text(bag.get("diet_type")).lower() or "unknown"
+            diet_group = menu_group["diet_groups"].get(diet_key)
+            if diet_group is None:
+                diet_group = {
+                    "diet_type": diet_key,
+                    "total_quantity": 0.0,
+                    "total_amounts": {},
+                    "bag_type_groups": {},
+                }
+                menu_group["diet_groups"][diet_key] = diet_group
+
+            try:
+                quantity = float(bag.get("quantity"))
+            except (TypeError, ValueError):
+                quantity = 0.0
+            if math.isfinite(quantity):
+                diet_group["total_quantity"] = round(diet_group["total_quantity"] + quantity, 4)
+
+            amount_totals = _resolve_daily_bag_amount_totals(bag, amount_stats)
+            _merge_amount_totals(diet_group["total_amounts"], amount_totals)
+
+            bag_type_key = _normalize_sheet_text(bag.get("bag_type")).lower() or "standard"
+            bag_type_group = diet_group["bag_type_groups"].get(bag_type_key)
+            if bag_type_group is None:
+                bag_type_group = {
+                    "bag_type": bag_type_key,
+                    "bag_count": 0,
+                    "total_quantity": 0.0,
+                    "total_amounts": {},
+                    "breakdowns": {},
+                }
+                diet_group["bag_type_groups"][bag_type_key] = bag_type_group
+            bag_type_group["bag_count"] += 1
+            if math.isfinite(quantity):
+                bag_type_group["total_quantity"] = round(bag_type_group["total_quantity"] + quantity, 4)
+            _merge_amount_totals(bag_type_group["total_amounts"], amount_totals)
+
+            amount_label = _format_amount_label(amount_totals) or "計算不可"
+            breakdown = bag_type_group["breakdowns"].get(amount_label)
+            if breakdown is None:
+                breakdown = {
+                    "amount_label": amount_label,
+                    "count": 0,
+                    "order_refs": [],
+                }
+                bag_type_group["breakdowns"][amount_label] = breakdown
+            breakdown["count"] += 1
+            breakdown["order_refs"].append(
+                {
+                    "order_id": order_id,
+                    "facility_label": facility_label,
+                    "area_id": bag.get("area_id"),
+                    "quantity": quantity if math.isfinite(quantity) else None,
+                }
+            )
+
+    preferred_diet_order = [
+        "regular",
+        "regular_bag",
+        "soft",
+        "mixer",
+        "daycare",
+        "staff",
+        "tea",
+        "business",
+        "diabetes",
+        "pregnancy",
+        "sesame_allergy",
+        "no_meat",
+        "no_fish",
+        "change_1",
+        "change_2",
+        "placeholder",
+        "unknown",
+    ]
+    diet_sort_index = {value: idx for idx, value in enumerate(preferred_diet_order)}
+    bag_sort_order = {"large": 0, "medium": 1, "small": 2, "standard": 3, "condiment": 4}
+
+    normalized_groups: list[dict[str, Any]] = []
+    for menu_group in groups.values():
+        diet_groups: list[dict[str, Any]] = []
+        for diet_group in menu_group["diet_groups"].values():
+            bag_type_groups: list[dict[str, Any]] = []
+            for bag_type_group in diet_group["bag_type_groups"].values():
+                breakdowns = list(bag_type_group["breakdowns"].values())
+                breakdowns.sort(key=lambda item: (item.get("amount_label") == "計算不可", item.get("amount_label") or ""))
+                bag_type_groups.append(
+                    {
+                        "bag_type": bag_type_group["bag_type"],
+                        "bag_count": bag_type_group["bag_count"],
+                        "total_quantity": bag_type_group["total_quantity"],
+                        "total_amounts": bag_type_group["total_amounts"],
+                        "total_amount_label": _format_amount_label(bag_type_group["total_amounts"]),
+                        "breakdowns": breakdowns,
+                    }
+                )
+            bag_type_groups.sort(
+                key=lambda item: (
+                    bag_sort_order.get(str(item.get("bag_type") or ""), 50),
+                    str(item.get("bag_type") or ""),
+                )
+            )
+            diet_groups.append(
+                {
+                    "diet_type": diet_group["diet_type"],
+                    "total_quantity": diet_group["total_quantity"],
+                    "total_amounts": diet_group["total_amounts"],
+                    "total_amount_label": _format_amount_label(diet_group["total_amounts"]),
+                    "bag_type_groups": bag_type_groups,
+                }
+            )
+        diet_groups.sort(
+            key=lambda item: (
+                diet_sort_index.get(str(item.get("diet_type") or ""), 99),
+                str(item.get("diet_type") or ""),
+            )
+        )
+        normalized_groups.append(
+            {
+                "daypart": menu_group["daypart"],
+                "daypart_key": menu_group["daypart_key"],
+                "menu_name": menu_group["menu_name"],
+                "diet_groups": diet_groups,
+            }
+        )
+    normalized_groups.sort(
+        key=lambda item: (
+            _daypart_sort_components(item.get("daypart"))[0],
+            _daypart_sort_components(item.get("daypart"))[1],
+            str(item.get("menu_name") or ""),
+        )
+    )
+    return {
+        "date": target_date.isoformat(),
+        "status": status,
+        "facility_id": facility_id,
+        "order_count": len(orders),
+        "groups": normalized_groups,
+    }
+
+
 def get_bag_summary(order_id: str):
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -2894,16 +3834,35 @@ def get_bag_summary(order_id: str):
             }
             for bag in bags
         ]
-    if not payload:
+    should_rebuild = False
+    rebuild_reason: str | None = None
+    order_payload = get_order_by_id(order_id)
+    if isinstance(order_payload, dict):
+        should_rebuild, rebuild_reason = _bag_summary_requires_rebuild(order_payload, payload)
+    elif not payload:
+        should_rebuild = True
+        rebuild_reason = "missing_bags"
+    if should_rebuild:
         # Bag rows are materialized during output generation/rebuild.
-        # Auto-rebuild once so operators can open the bag tab without manual pre-step.
+        # Auto-rebuild so operators always see bag rows that match current order lines.
         try:
             from src.services.output_builder import rebuild_bags
 
             rebuilt = rebuild_bags(order_id)
             payload = rebuilt.get("bags") if isinstance(rebuilt, dict) else payload
+            logger.info(
+                "Bag summary auto rebuilt",
+                order_id=order_id,
+                reason=rebuild_reason,
+                bag_count=len(payload),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Bag auto rebuild failed", order_id=order_id, error=str(exc))
+            logger.warning(
+                "Bag auto rebuild failed",
+                order_id=order_id,
+                reason=rebuild_reason,
+                error=str(exc),
+            )
     payload.sort(
         key=lambda row: (
             row.get("date") or "",
@@ -3130,6 +4089,22 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
             ],
             fields,
         )
+    if "職員" in token or "staff" in token:
+        return _select_field(["qty.staff_x", "staff_x"], fields)
+    if "お茶" in token or "tea" in token:
+        return _select_field(["qty.tea_x", "tea_x"], fields)
+    if "事業" in token or "business" in token:
+        return _select_field(["qty.business_x", "business_x"], fields)
+    if "通所" in token or "daycare" in token:
+        return _select_field(["qty.daycare_x", "daycare_x"], fields)
+    if "糖尿" in token or "diabetes" in token:
+        return _select_field(["qty.diabetes_x", "diabetes_x", "qty.糖尿_x", "糖尿_x"], fields)
+    if "妊娠" in token or "pregnancy" in token:
+        return _select_field(["qty.pregnancy_x", "pregnancy_x"], fields)
+    if ("ごま" in token or "ゴマ" in header or "sesame" in token) and (
+        "アレル" in header or "allergy" in token
+    ):
+        return _select_field(["qty.sesame_allergy_x", "sesame_allergy_x"], fields)
     if ("禁" in token and "肉" in token) or "nomeat" in token:
         return _select_field(
             ["qty.no_meat_x", "no_meat_x", "qty.no_meat_2f", "no_meat_2f", "qty.no_meat_3f", "no_meat_3f"],
@@ -3140,6 +4115,12 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
             ["qty.no_fish_x", "no_fish_x", "qty.no_fish_2f", "no_fish_2f", "qty.no_fish_3f", "no_fish_3f"],
             fields,
         )
+    if "変更1" in header or "change1" in token:
+        return _select_field(["qty.change_1_x", "change_1_x"], fields)
+    if "変更2" in header or "change2" in token:
+        return _select_field(["qty.change_2_x", "change_2_x"], fields)
+    if token in {"-", "placeholder"}:
+        return _select_field(["qty.placeholder_x", "placeholder_x"], fields)
     return None
 
 
@@ -3215,10 +4196,28 @@ def _normalize_sheet_diet(value: object) -> str | None:
         return "daycare"
     if "staff" in token or "職員" in token:
         return "staff"
+    if "tea" in token or "お茶" in token:
+        return "tea"
+    if "business" in token or "事業" in token:
+        return "business"
+    if "diabetes" in token or "糖尿" in token:
+        return "diabetes"
+    if "pregnancy" in token or "妊娠" in token:
+        return "pregnancy"
+    if ("ごま" in token or "ゴマ" in str(value or "") or "sesame" in token) and (
+        "アレル" in str(value or "") or "allergy" in token
+    ):
+        return "sesame_allergy"
     if "nomeat" in token or ("禁" in token and "肉" in token):
         return "no_meat"
     if "nofish" in token or ("禁" in token and "魚" in token):
         return "no_fish"
+    if "change1" in token or "変更1" in str(value or ""):
+        return "change_1"
+    if "change2" in token or "変更2" in str(value or ""):
+        return "change_2"
+    if token in {"-", "placeholder"}:
+        return "placeholder"
     return token
 
 
@@ -3422,19 +4421,11 @@ def _sanitize_revision_rows(
     rows_payload: object,
     fields: list[str],
 ) -> list[list[str]]:
-    sanitized: list[list[str]] = []
-    if not isinstance(rows_payload, list):
-        return sanitized
-    for row in rows_payload:
-        if isinstance(row, dict):
-            sanitized.append([_field_value_to_str(row.get(field)) for field in fields])
-            continue
-        if isinstance(row, list):
-            current = [_field_value_to_str(cell) for cell in row[: len(fields)]]
-            if len(current) < len(fields):
-                current.extend([""] * (len(fields) - len(current)))
-            sanitized.append(current)
-    return sanitized
+    return ocr_sheet_revision_service.sanitize_revision_rows(
+        rows_payload=rows_payload,
+        fields=fields,
+        field_value_to_str=_field_value_to_str,
+    )
 
 
 def _normalize_sheet_revision_snapshot(
@@ -3444,48 +4435,14 @@ def _normalize_sheet_revision_snapshot(
     rows_payload: object,
     row_ids: object,
 ) -> dict[str, Any]:
-    normalized_fields = [str(field).strip() for field in fields] if isinstance(fields, list) else []
-    input_rows = rows_payload if isinstance(rows_payload, list) else []
-    max_width = max(
-        (len(row) for row in input_rows if isinstance(row, list)),
-        default=0,
+    return ocr_sheet_revision_service.normalize_sheet_revision_snapshot(
+        fields=fields,
+        header=header,
+        rows_payload=rows_payload,
+        row_ids=row_ids,
+        field_label=_field_label,
+        field_value_to_str=_field_value_to_str,
     )
-    if isinstance(header, list):
-        max_width = max(max_width, len(header))
-    if not normalized_fields:
-        normalized_fields = [f"col{idx + 1}" for idx in range(max(max_width, 1))]
-    elif len(normalized_fields) < max_width:
-        normalized_fields.extend(
-            [f"col{idx + 1}" for idx in range(len(normalized_fields), max_width)]
-        )
-
-    normalized_rows = _sanitize_revision_rows(rows_payload=rows_payload, fields=normalized_fields)
-    normalized_header = (
-        [str(cell or "").strip() for cell in header]
-        if isinstance(header, list)
-        else [_field_label(field) for field in normalized_fields]
-    )
-    if len(normalized_header) < len(normalized_fields):
-        normalized_header.extend(
-            [_field_label(field) for field in normalized_fields[len(normalized_header) :]]
-        )
-
-    normalized_row_ids = (
-        [str(item).strip() for item in row_ids if str(item).strip()]
-        if isinstance(row_ids, list)
-        else []
-    )
-    if len(normalized_row_ids) < len(normalized_rows):
-        normalized_row_ids.extend(
-            [f"row-{idx + 1}" for idx in range(len(normalized_row_ids), len(normalized_rows))]
-        )
-
-    return {
-        "fields": normalized_fields,
-        "header": normalized_header,
-        "rows": normalized_rows,
-        "row_ids": normalized_row_ids[: len(normalized_rows)],
-    }
 
 
 def _sheet_digest(
@@ -3495,14 +4452,14 @@ def _sheet_digest(
     rows_payload: object,
     row_ids: object,
 ) -> str:
-    snapshot = _normalize_sheet_revision_snapshot(
+    return ocr_sheet_revision_service.sheet_digest(
         fields=fields,
         header=header,
         rows_payload=rows_payload,
         row_ids=row_ids,
+        field_label=_field_label,
+        field_value_to_str=_field_value_to_str,
     )
-    payload = json.dumps(snapshot, ensure_ascii=True, sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _select_edited_sheet_revision(
@@ -3510,31 +4467,10 @@ def _select_edited_sheet_revision(
     *,
     exact_only: bool = False,
 ) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-    edited = payload.get("_edited_ocr")
-    if not isinstance(edited, dict):
-        return None
-    candidates: list[dict[str, Any]] = []
-    revisions = edited.get("revisions")
-    if isinstance(revisions, list):
-        candidates.extend(item for item in revisions if isinstance(item, dict))
-    latest = edited.get("latest")
-    if isinstance(latest, dict):
-        candidates.append(latest)
-    for revision in reversed(candidates):
-        if str(revision.get("ui_mode") or "").strip().lower() != "sheet":
-            continue
-        if not isinstance(revision.get("rows"), list):
-            continue
-        if exact_only:
-            is_exact = bool(revision.get("sheet_save_only")) or (
-                str(revision.get("sheet_save_mode") or "").strip().lower() == "exact"
-            )
-            if not is_exact:
-                continue
-        return revision
-    return None
+    return ocr_sheet_revision_service.select_edited_sheet_revision(
+        payload,
+        exact_only=exact_only,
+    )
 
 
 def _build_sheet_payload_from_revision(
@@ -3543,61 +4479,13 @@ def _build_sheet_payload_from_revision(
     revision: dict[str, Any],
     fallback_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    snapshot = _normalize_sheet_revision_snapshot(
-        fields=revision.get("fields"),
-        header=revision.get("header"),
-        rows_payload=revision.get("rows"),
-        row_ids=revision.get("row_ids"),
+    return ocr_sheet_revision_service.build_sheet_payload_from_revision(
+        order_id=order_id,
+        revision=revision,
+        fallback_sheet=fallback_sheet,
+        field_label=_field_label,
+        field_value_to_str=_field_value_to_str,
     )
-    if not snapshot["rows"]:
-        return None
-    payload = dict(fallback_sheet) if isinstance(fallback_sheet, dict) else {"order_id": order_id}
-    payload["order_id"] = order_id
-    if isinstance(fallback_sheet, dict):
-        base_snapshot = _normalize_sheet_revision_snapshot(
-            fields=fallback_sheet.get("fields"),
-            header=fallback_sheet.get("header"),
-            rows_payload=fallback_sheet.get("rows"),
-            row_ids=fallback_sheet.get("row_ids"),
-        )
-        if base_snapshot["rows"]:
-            revision_rows_by_id = {
-                row_id: snapshot["rows"][idx]
-                for idx, row_id in enumerate(snapshot["row_ids"])
-                if row_id and idx < len(snapshot["rows"])
-            }
-            rebased_rows: list[list[str]] = []
-            for row_idx, base_row in enumerate(base_snapshot["rows"]):
-                base_row_id = (
-                    base_snapshot["row_ids"][row_idx]
-                    if row_idx < len(base_snapshot["row_ids"])
-                    else ""
-                )
-                revision_row = revision_rows_by_id.get(base_row_id)
-                if revision_row is None and row_idx < len(snapshot["rows"]):
-                    revision_row = snapshot["rows"][row_idx]
-                merged_row = list(base_row)
-                if revision_row is not None:
-                    for col_idx in range(min(len(merged_row), len(revision_row))):
-                        merged_row[col_idx] = revision_row[col_idx]
-                rebased_rows.append(merged_row)
-            payload["fields"] = base_snapshot["fields"]
-            payload["header"] = base_snapshot["header"]
-            payload["rows"] = rebased_rows
-            payload["row_ids"] = base_snapshot["row_ids"][: len(rebased_rows)]
-        else:
-            payload["fields"] = snapshot["fields"]
-            payload["header"] = snapshot["header"]
-            payload["rows"] = snapshot["rows"]
-            payload["row_ids"] = snapshot["row_ids"]
-    else:
-        payload["fields"] = snapshot["fields"]
-        payload["header"] = snapshot["header"]
-        payload["rows"] = snapshot["rows"]
-        payload["row_ids"] = snapshot["row_ids"]
-    if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
-        payload["source"] = "edited_sheet"
-    return payload
 
 
 def _append_edited_ocr_revision(
@@ -4257,14 +5145,11 @@ def _build_llm_review_prompt_rows(
     rows: list[list[str]],
     row_ids: list[str],
 ) -> list[dict[str, Any]]:
-    prompt_rows: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows):
-        row_id = row_ids[idx] if idx < len(row_ids) and row_ids[idx] else f"row-{idx + 1}"
-        entry: dict[str, Any] = {"row_id": row_id}
-        for col_idx, field in enumerate(fields):
-            entry[field] = row[col_idx] if col_idx < len(row) else ""
-        prompt_rows.append(entry)
-    return prompt_rows
+    return ocr_llm_review_service.build_llm_review_prompt_rows(
+        fields=fields,
+        rows=rows,
+        row_ids=row_ids,
+    )
 
 
 def _build_llm_review_payload_rows(
@@ -4272,15 +5157,10 @@ def _build_llm_review_payload_rows(
     fields: list[str],
     rows: list[list[str]],
 ) -> list[dict[str, str]]:
-    payload_rows: list[dict[str, str]] = []
-    for row in rows:
-        entry = {
-            field: row[idx] if idx < len(row) else ""
-            for idx, field in enumerate(fields)
-        }
-        if any(str(value or "").strip() for value in entry.values()):
-            payload_rows.append(entry)
-    return payload_rows
+    return ocr_llm_review_service.build_llm_review_payload_rows(
+        fields=fields,
+        rows=rows,
+    )
 
 
 def _resolve_llm_review_row_ids(
@@ -4288,92 +5168,14 @@ def _resolve_llm_review_row_ids(
     baseline_row_ids: list[str],
     row_count: int,
 ) -> list[str]:
-    resolved: list[str] = []
-    for idx in range(max(row_count, 0)):
-        candidate = str(baseline_row_ids[idx] if idx < len(baseline_row_ids) else "").strip()
-        resolved.append(candidate or f"row-{idx + 1}")
-    return resolved
+    return ocr_llm_review_service.resolve_llm_review_row_ids(
+        baseline_row_ids=baseline_row_ids,
+        row_count=row_count,
+    )
 
 
 def _build_llm_review_response_schema(fields: list[str]) -> dict[str, Any]:
-    row_properties: dict[str, Any] = {}
-    for field in fields:
-        row_properties[field] = {"type": "string"}
-    issue_schema = {
-        "type": "object",
-        "properties": {
-            "issue_id": {"type": "string"},
-            "row_id": {"type": "string"},
-            "row_index": {"type": "integer"},
-            "field": {"type": "string"},
-            "issue_code": {"type": "string"},
-            "status": {"type": "string"},
-            "page_index": {"type": "integer"},
-            "table_id": {"type": "string"},
-            "current_text": {"type": "string"},
-            "confidence": {"type": "number"},
-            "evidence": {"type": "string"},
-            "reason": {"type": "string"},
-            "severity": {"type": "string"},
-        },
-        "required": ["field"],
-    }
-    table_schema = {
-        "type": "object",
-        "properties": {
-            "table_id": {"type": "string"},
-            "page_index": {"type": "integer"},
-            "rows": {
-                "type": "array",
-                "items": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-        },
-        "required": ["rows"],
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "facility_name": {"type": "string"},
-            "date_strings": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "rows": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": row_properties,
-                    "required": list(fields),
-                },
-            },
-            "table_raw": {"type": "string"},
-            "tables": {
-                "type": "array",
-                "items": table_schema,
-            },
-            "cell_issues": {
-                "type": "array",
-                "items": issue_schema,
-            },
-            "llm_review": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "needs_more_review": {"type": "boolean"},
-                    "notes": {"type": "string"},
-                    "issues": {
-                        "type": "array",
-                        "items": issue_schema,
-                    },
-                },
-                "required": ["status", "needs_more_review", "notes"],
-            },
-        },
-        "required": ["facility_name", "date_strings", "rows", "llm_review"],
-    }
+    return ocr_llm_review_service.build_llm_review_response_schema(fields)
 
 
 def _build_llm_review_prompts(
@@ -4386,88 +5188,18 @@ def _build_llm_review_prompts(
     pdf_variant_fallback_reason: str | None = None,
     prompt_override: str | None = None,
 ) -> tuple[str, str]:
-    prompt_key = "openai_ocr_prompt" if provider == "openai" else "gemini_ocr_prompt"
-    user_key = "openai_ocr_user_prompt" if provider == "openai" else "gemini_ocr_user_prompt"
-    base_system_prompt = str(template.get(prompt_key) or "").strip()
-    base_user_prompt = str(prompt_override or template.get(user_key) or "").strip()
-    baseline_fields = [str(field).strip() for field in (baseline.get("fields") or []) if str(field).strip()]
-    baseline_rows = _build_llm_review_prompt_rows(
-        fields=baseline_fields,
-        rows=baseline.get("rows") or [],
-        row_ids=baseline.get("row_ids") or [],
+    return ocr_llm_review_service.build_llm_review_prompts(
+        provider=provider,
+        template=template,
+        baseline=baseline,
+        pdf_variant_requested=pdf_variant_requested,
+        pdf_variant_used=pdf_variant_used,
+        pdf_variant_fallback_reason=pdf_variant_fallback_reason,
+        prompt_override=prompt_override,
+        truncate_assist_text=_truncate_assist_text,
+        compact_prompt_tables=_compact_prompt_tables,
+        compact_prompt_cell_issues=_compact_prompt_cell_issues,
     )
-    raw_output = baseline.get("raw_output") if isinstance(baseline.get("raw_output"), dict) else {}
-
-    system_sections: list[str] = []
-    if base_system_prompt:
-        system_sections.append(base_system_prompt)
-    system_sections.append(
-        "You are validating yomitoku OCR against the attached fax PDF/image.\n"
-        "You will receive the fax PDF/image, the current baseline rows shown to the user, and the previous yomitoku/LLM OCR payload.\n"
-        "Review the baseline against the fax and return a revised OCR payload in yomitoku-compatible JSON.\n"
-        "Return strict JSON only with shape:\n"
-        '{"facility_name":"","date_strings":[],"rows":[{}],"table_raw":"","tables":[{"table_id":"","page_index":1,"rows":[[]]}],"cell_issues":[{"issue_id":"","row_id":"","row_index":0,"field":"","issue_code":"","status":"","page_index":1,"table_id":"","current_text":"","confidence":0.0,"evidence":"","reason":"","severity":"warning"}],"llm_review":{"status":"","needs_more_review":false,"notes":"","issues":[{"issue_id":"","row_id":"","row_index":0,"field":"","issue_code":"","status":"","page_index":1,"table_id":"","current_text":"","confidence":0.0,"evidence":"","reason":"","severity":"warning"}]}}\n'
-        "Rules:\n"
-        "- Keep the row order aligned with the baseline rows.\n"
-        "- Use only field names from the baseline schema in rows and issues.\n"
-        "- rows, table_raw, and tables must describe the same reviewed table content.\n"
-        "- Correct cells only when the fax image clearly supports the change.\n"
-        "- If a cell remains unreadable or ambiguous, keep the safest value in rows and add an issue in cell_issues and llm_review.issues.\n"
-        "- Use row_id values from the baseline rows when you report issues. If you cannot infer row_id, include row_index.\n"
-        "- Confidence must be 0.00-1.00.\n"
-        "- Return JSON only."
-    )
-
-    user_sections: list[str] = []
-    if base_user_prompt:
-        user_sections.append(base_user_prompt)
-    user_sections.append(
-        f"Attached fax variant requested: {pdf_variant_requested}\n"
-        f"Attached fax variant used: {pdf_variant_used}"
-    )
-    if pdf_variant_fallback_reason:
-        user_sections.append(f"Attached fax fallback reason: {pdf_variant_fallback_reason}")
-    baseline_revision_id = str(baseline.get("baseline_revision_id") or "").strip()
-    if baseline_revision_id:
-        user_sections.append(f"Current baseline revision_id: {baseline_revision_id}")
-    user_sections.append(
-        f"Current baseline source: {str(baseline.get('baseline_source') or 'yomitoku').strip()}"
-    )
-    if baseline_fields:
-        user_sections.append(
-            "Valid baseline fields:\n"
-            f"{json.dumps(baseline_fields, ensure_ascii=False)}"
-        )
-    user_sections.append(
-        "Current baseline rows:\n"
-        f"{_truncate_assist_text(json.dumps(baseline_rows[:200], ensure_ascii=False), max_chars=12000)}"
-    )
-    user_sections.append(
-        "Return rows using this exact baseline field schema:\n"
-        f"{json.dumps(baseline_fields, ensure_ascii=False)}"
-    )
-    table_raw = raw_output.get("table_raw")
-    if isinstance(table_raw, str) and table_raw.strip():
-        user_sections.append(
-            "Previous yomitoku/LLM markdown:\n"
-            f"{_truncate_assist_text(table_raw.strip(), max_chars=7000)}"
-        )
-    tables = _compact_prompt_tables(raw_output)
-    if tables:
-        user_sections.append(
-            "Previous yomitoku/LLM structured tables/cells:\n"
-            f"{_truncate_assist_text(json.dumps(tables, ensure_ascii=False), max_chars=10000)}"
-        )
-    issues = _compact_prompt_cell_issues(raw_output, template)
-    if issues:
-        user_sections.append(
-            "Existing suspicious cells from yomitoku/LLM:\n"
-            f"{_truncate_assist_text(json.dumps(issues, ensure_ascii=False), max_chars=6000)}"
-        )
-    user_sections.append(
-        "Review the baseline against the fax image and return a revised yomitoku-compatible payload only."
-    )
-    return "\n\n".join(system_sections), "\n\n".join(user_sections)
 
 
 def _extract_llm_review_json_object(raw_text: object) -> dict[str, Any] | None:
@@ -5033,9 +5765,43 @@ def _apply_llm_review_overwrites(
     }
 
 
+def _extract_corrected_pdf_uri_from_payload(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[dict[str, Any]] = [payload]
+    edited = payload.get("_edited_ocr")
+    if isinstance(edited, dict):
+        raw_output = edited.get("raw_output")
+        if isinstance(raw_output, dict):
+            candidates.append(raw_output)
+        latest = edited.get("latest")
+        if isinstance(latest, dict):
+            llm_review = latest.get("llm_review")
+            if isinstance(llm_review, dict):
+                output_payload = llm_review.get("output_payload")
+                if isinstance(output_payload, dict):
+                    candidates.append(output_payload)
+    for candidate in candidates:
+        direct_uri = candidate.get("corrected_pdf_uri")
+        if isinstance(direct_uri, str) and direct_uri.strip():
+            return direct_uri.strip()
+        combined = candidate.get("combined")
+        if isinstance(combined, dict):
+            combined_uri = combined.get("corrected_pdf")
+            if isinstance(combined_uri, str) and combined_uri.strip():
+                return combined_uri.strip()
+        page_correction = candidate.get("page_correction")
+        if isinstance(page_correction, dict):
+            correction_uri = page_correction.get("corrected_pdf_uri")
+            if isinstance(correction_uri, str) and correction_uri.strip():
+                return correction_uri.strip()
+    return None
+
+
 def _resolve_llm_review_pdf_bytes(
     *,
     document_uri: str,
+    payload: dict[str, Any] | None = None,
     requested_variant: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     requested = str(requested_variant or "raw").strip().lower() or "raw"
@@ -5044,13 +5810,43 @@ def _resolve_llm_review_pdf_bytes(
     if requested not in {"raw", "corrected"}:
         requested = "raw"
     if requested == "corrected":
-        fallback_reason = "corrected_pdf_unavailable_in_backend_cache"
+        corrected_pdf_uri = _extract_corrected_pdf_uri_from_payload(payload)
+        if corrected_pdf_uri:
+            try:
+                corrected_pdf_bytes = load_bytes_from_uri(corrected_pdf_uri)
+                return corrected_pdf_bytes, {
+                    "requested": requested,
+                    "used": "corrected",
+                    "fallback_reason": None,
+                    "corrected_pdf_uri": corrected_pdf_uri,
+                }
+            except Exception:
+                fallback_reason = "corrected_pdf_load_failed"
+        else:
+            fallback_reason = "corrected_pdf_unavailable_in_backend_cache"
     pdf_bytes = load_bytes_from_uri(document_uri)
     return pdf_bytes, {
         "requested": requested,
         "used": used,
         "fallback_reason": fallback_reason,
     }
+
+
+def _resolve_reparse_llm_pdf_bytes(
+    *,
+    document_uri: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    return _resolve_llm_review_pdf_bytes(
+        document_uri=document_uri,
+        payload=payload,
+        requested_variant="corrected",
+    )
+
+
+def _png_data_uri(png_bytes: bytes) -> str:
+    encoded = base64.b64encode(png_bytes).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def review_ocr_table_with_llm(
@@ -5119,6 +5915,7 @@ def review_ocr_table_with_llm(
 
     pdf_bytes, pdf_variant_meta = _resolve_llm_review_pdf_bytes(
         document_uri=document_uri,
+        payload=payload,
         requested_variant=pdf_variant,
     )
     system_prompt, user_prompt = _build_llm_review_prompts(
@@ -5301,6 +6098,26 @@ def _output_is_pending(parsed: dict | None) -> bool:
     return False
 
 
+def _payload_has_first_pass_ocr_content(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    table_raw = payload.get("table_raw")
+    if isinstance(table_raw, str) and table_raw.strip():
+        return True
+    for key in ("pages", "rows", "table_rows", "tables"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _payload_has_page_artifacts(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    pages = payload.get("pages")
+    return isinstance(pages, list) and bool(pages)
+
+
 def _attach_facility_candidates(parsed: dict) -> dict:
     if not isinstance(parsed, dict):
         return parsed
@@ -5377,6 +6194,11 @@ def _sync_reparse_debug_from_job_metrics(
         _set_value("llm_assist", bool(metrics.get("llm_assist")))
     if isinstance(metrics.get("changed"), bool):
         _set_value("changed", bool(metrics.get("changed")))
+    if isinstance(metrics.get("pdf_variant_used"), str) and metrics.get("pdf_variant_used").strip():
+        _set_value("pdf_variant_used", metrics.get("pdf_variant_used").strip())
+    if isinstance(metrics.get("pdf_variant_fallback_reason"), str):
+        normalized_pdf_variant_reason = metrics.get("pdf_variant_fallback_reason").strip() or None
+        _set_value("pdf_variant_fallback_reason", normalized_pdf_variant_reason)
     if isinstance(metrics.get("finish_reason"), str) and metrics.get("finish_reason").strip():
         _set_value("finish_reason", metrics.get("finish_reason").strip())
     if isinstance(metrics.get("truncated_output"), bool):
@@ -5438,17 +6260,24 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
     job = get_ocr_job(f"OCR-{order_id}")
     parsed = _load_job_output(job, "order")
     parsed_source = "job"
-    order_job_exists = job is not None
     order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
     if _output_is_pending(parsed):
         parsed = None
+    elif not _payload_has_first_pass_ocr_content(parsed):
+        parsed = None
     fallback_job = None
-    if parsed is None and message_id and not order_job_exists:
+    if (
+        message_id
+        and not order_job_pending
+        and parsed is None
+    ):
         fallback_job = get_ocr_job(f"OCR-{message_id}")
-        parsed = _load_job_output(fallback_job, "message")
-        parsed_source = "message"
-        if _output_is_pending(parsed):
-            parsed = None
+        fallback_parsed = _load_job_output(fallback_job, "message")
+        if _output_is_pending(fallback_parsed):
+            fallback_parsed = None
+        if _payload_has_first_pass_ocr_content(fallback_parsed):
+            parsed = fallback_parsed
+            parsed_source = "message"
     if parsed is None:
         parsed = _load_order_ocr_cache(order_id)
         parsed_source = "cache"
@@ -5490,6 +6319,43 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
     return _attach_facility_candidates(parsed), None
 
 
+def _build_synthetic_ocr_pages(
+    *,
+    document_uri: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, object]], dict[str, Any]] | tuple[None, None]:
+    try:
+        pdf_bytes, pdf_variant_meta = _resolve_reparse_llm_pdf_bytes(
+            document_uri=document_uri,
+            payload=payload,
+        )
+        png_bytes = render_pdf_to_png_bytes(pdf_bytes=pdf_bytes, dpi=220, page=1)
+    except Exception:
+        return None, None
+    markdown_text = None
+    if isinstance(payload, dict):
+        table_raw = payload.get("table_raw")
+        if isinstance(table_raw, str) and table_raw.strip():
+            markdown_text = table_raw.strip()
+    pages = [
+        {
+            "page_index": 1,
+            "markdown_uri": None,
+            "markdown_text": markdown_text,
+            "ocr_overlay_uri": None,
+            "ocr_overlay_url": _png_data_uri(png_bytes),
+            "layout_overlay_uri": None,
+            "layout_overlay_url": None,
+            "figure_uris": [],
+            "figure_urls": [],
+            "synthetic": True,
+            "synthetic_source": "pdf_render",
+            "pdf_variant_used": str(pdf_variant_meta.get("used") or "raw"),
+        }
+    ]
+    return pages, pdf_variant_meta
+
+
 def get_ocr_pages(order_id: str):
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -5497,20 +6363,28 @@ def get_ocr_pages(order_id: str):
             return None, "order_not_found"
         message_id = order.message_id
         facility_id = order.facility_code
+        document_uri = order.document_uri
     job = get_ocr_job(f"OCR-{order_id}")
     parsed = _load_job_output(job, "order")
     parsed_source = "job"
-    order_job_exists = job is not None
     order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
     if _output_is_pending(parsed):
         parsed = None
+    elif not _payload_has_page_artifacts(parsed):
+        parsed = None
     fallback_job = None
-    if parsed is None and message_id and not order_job_exists:
+    if (
+        message_id
+        and not order_job_pending
+        and parsed is None
+    ):
         fallback_job = get_ocr_job(f"OCR-{message_id}")
-        parsed = _load_job_output(fallback_job, "message")
-        parsed_source = "message"
-        if _output_is_pending(parsed):
-            parsed = None
+        fallback_parsed = _load_job_output(fallback_job, "message")
+        if _output_is_pending(fallback_parsed):
+            fallback_parsed = None
+        if _payload_has_page_artifacts(fallback_parsed):
+            parsed = fallback_parsed
+            parsed_source = "message"
     if parsed is None:
         parsed = _load_order_ocr_cache(order_id)
         parsed_source = "cache"
@@ -5523,56 +6397,78 @@ def get_ocr_pages(order_id: str):
                 parsed_source = "cache"
     if parsed is None:
         active_job = job or fallback_job
-        if not active_job:
-            return None, "ocr_job_not_found"
         if order_job_pending:
             return None, "ocr_output_pending"
-        if _job_is_pending(active_job):
+        if active_job and _job_is_pending(active_job):
             return None, "ocr_output_pending"
-        if active_job.get("output_reference"):
-            return None, "ocr_output_invalid"
-        return None, "ocr_output_not_found"
-    if not _output_is_pending(parsed):
+        if not document_uri:
+            if not active_job:
+                return None, "ocr_job_not_found"
+            if active_job.get("output_reference"):
+                return None, "ocr_output_invalid"
+            return None, "ocr_output_not_found"
+    if isinstance(parsed, dict) and not _output_is_pending(parsed):
         _save_order_ocr_cache(order_id, parsed)
     pages_payload = parsed.get("pages")
-    if not isinstance(pages_payload, list):
-        return None, "ocr_pages_not_found"
     pages: list[dict[str, object]] = []
-    for page in pages_payload:
-        if not isinstance(page, dict):
-            continue
-        markdown_text = None
-        markdown_uri = page.get("markdown_uri")
-        if isinstance(markdown_uri, str):
-            try:
-                markdown_text = load_bytes_from_uri(markdown_uri).decode("utf-8")
-            except Exception:  # noqa: BLE001
-                markdown_text = None
-        ocr_overlay_uri = page.get("ocr_overlay_uri")
-        layout_overlay_uri = page.get("layout_overlay_uri")
-        figure_uris = page.get("figure_uris") if isinstance(page.get("figure_uris"), list) else []
-        figure_urls = [_signed_url_from_uri(uri) for uri in figure_uris]
-        if markdown_text and figure_uris:
-            for uri, signed in zip(figure_uris, figure_urls):
-                if uri and signed:
-                    markdown_text = markdown_text.replace(uri, signed)
-        pages.append(
-            {
-                "page_index": page.get("page_index"),
-                "markdown_uri": markdown_uri,
-                "markdown_text": markdown_text,
-                "ocr_overlay_uri": ocr_overlay_uri,
-                "ocr_overlay_url": _signed_url_from_uri(ocr_overlay_uri),
-                "layout_overlay_uri": layout_overlay_uri,
-                "layout_overlay_url": _signed_url_from_uri(layout_overlay_uri),
-                "figure_uris": figure_uris,
-                "figure_urls": figure_urls,
-            }
+    synthetic_pdf_variant_meta: dict[str, Any] | None = None
+    if isinstance(pages_payload, list):
+        for page in pages_payload:
+            if not isinstance(page, dict):
+                continue
+            markdown_text = None
+            markdown_uri = page.get("markdown_uri")
+            if isinstance(markdown_uri, str):
+                try:
+                    markdown_text = load_bytes_from_uri(markdown_uri).decode("utf-8")
+                except Exception:  # noqa: BLE001
+                    markdown_text = None
+            ocr_overlay_uri = page.get("ocr_overlay_uri")
+            layout_overlay_uri = page.get("layout_overlay_uri")
+            figure_uris = page.get("figure_uris") if isinstance(page.get("figure_uris"), list) else []
+            figure_urls = [_signed_url_from_uri(uri) for uri in figure_uris]
+            if markdown_text and figure_uris:
+                for uri, signed in zip(figure_uris, figure_urls):
+                    if uri and signed:
+                        markdown_text = markdown_text.replace(uri, signed)
+            pages.append(
+                {
+                    "page_index": page.get("page_index"),
+                    "markdown_uri": markdown_uri,
+                    "markdown_text": markdown_text,
+                    "ocr_overlay_uri": ocr_overlay_uri,
+                    "ocr_overlay_url": _signed_url_from_uri(ocr_overlay_uri),
+                    "layout_overlay_uri": layout_overlay_uri,
+                    "layout_overlay_url": _signed_url_from_uri(layout_overlay_uri),
+                    "figure_uris": figure_uris,
+                    "figure_urls": figure_urls,
+                    "synthetic": bool(page.get("synthetic")) if "synthetic" in page else None,
+                    "synthetic_source": page.get("synthetic_source"),
+                    "pdf_variant_used": page.get("pdf_variant_used"),
+                }
+            )
+    if not pages and document_uri:
+        synthetic_pages, synthetic_pdf_variant_meta = _build_synthetic_ocr_pages(
+            document_uri=document_uri,
+            payload=parsed if isinstance(parsed, dict) else None,
         )
+        if synthetic_pages:
+            pages = synthetic_pages
+    if not pages:
+        return None, "ocr_pages_not_found"
     combined = parsed.get("combined") if isinstance(parsed.get("combined"), dict) else {}
     combined_urls = {
         key: _signed_url_from_uri(value) for key, value in combined.items() if isinstance(value, str)
     }
+    if document_uri and "raw_pdf" not in combined_urls:
+        signed_raw_pdf = _signed_url_from_uri(document_uri)
+        if signed_raw_pdf:
+            combined_urls["raw_pdf"] = signed_raw_pdf
+    if synthetic_pdf_variant_meta and synthetic_pdf_variant_meta.get("used") == "corrected":
+        corrected_uri = _extract_corrected_pdf_uri_from_payload(parsed if isinstance(parsed, dict) else None)
+        signed_corrected_pdf = _signed_url_from_uri(corrected_uri) if corrected_uri else None
+        if signed_corrected_pdf:
+            combined_urls["corrected_pdf"] = signed_corrected_pdf
     table_box = None
     table_units = None
     grid_column_edges = None
@@ -5627,6 +6523,23 @@ def get_ocr_pages(order_id: str):
         for key in grid_params.keys():
             if key in template:
                 grid_params[key] = template.get(key)
+    should_detect_grid = bool(not grid_column_edges or not grid_row_edges or not table_box)
+    if should_detect_grid and document_uri and isinstance(template, dict) and template:
+        try:
+            preview_pdf_bytes, _ = _resolve_reparse_llm_pdf_bytes(
+                document_uri=document_uri,
+                payload=parsed if isinstance(parsed, dict) else None,
+            )
+            detected_grid = detect_table_grid(preview_pdf_bytes, template)
+        except Exception:
+            detected_grid = None
+        if detected_grid:
+            if not table_box:
+                table_box = list(detected_grid.table_box)
+            if not grid_column_edges:
+                grid_column_edges = list(detected_grid.column_edges)
+            if not grid_row_edges:
+                grid_row_edges = list(detected_grid.row_edges)
     return (
         {
             "order_id": order_id,
@@ -6504,15 +7417,18 @@ def _resolve_sheet_week_id(
     week_hints: list[str] | None = None,
 ) -> str | None:
     policy = config_service.load_ingest_policy()
-    normalized_current_week = _normalize_sheet_week_value(current_week_id)
     primary_candidates: list[str] = []
     fallback_candidates: list[str] = []
     stale_hint_candidates: list[str] = []
 
     def _append(target: list[str], value: object) -> None:
-        month_id = _to_sheet_month_id(value)
-        if month_id and month_id not in target:
-            target.append(month_id)
+        candidate = _normalize_sheet_week_candidate(value)
+        if candidate and candidate not in target:
+            target.append(candidate)
+
+    explicit_current_week = _normalize_sheet_week_value(current_week_id)
+    if explicit_current_week and "@" in explicit_current_week:
+        return explicit_current_week
 
     base_month = received_at.strftime("%Y-%m")
 
@@ -6548,9 +7464,6 @@ def _resolve_sheet_week_id(
 
     def _has_menu_entries(month_id: str) -> bool:
         return bool(_build_position_menu_entries(month_id))
-
-    if normalized_current_week and _build_position_menu_entries(normalized_current_week):
-        return normalized_current_week
 
     for month_id in primary_candidates:
         if _has_menu_entries(month_id):
@@ -6734,6 +7647,151 @@ def _count_non_empty_quantity_rows(
     return count
 
 
+def _count_non_empty_quantity_columns(
+    *,
+    rows: list[dict[str, Any]],
+    quantity_index: dict[tuple[str, str], int],
+) -> int:
+    if not rows or not quantity_index:
+        return 0
+    quantity_columns = sorted(set(quantity_index.values()))
+    active: set[int] = set()
+    for row in rows:
+        values = row.get("values")
+        if not isinstance(values, list):
+            continue
+        for col_idx in quantity_columns:
+            if col_idx < len(values) and str(values[col_idx] or "").strip():
+                active.add(col_idx)
+    return len(active)
+
+
+def _count_non_empty_quantity_cells_for_row_indexes(
+    *,
+    rows: list[dict[str, Any]],
+    quantity_index: dict[tuple[str, str], int],
+    row_indexes: set[int],
+) -> int:
+    if not rows or not quantity_index or not row_indexes:
+        return 0
+    quantity_columns = sorted(set(quantity_index.values()))
+    count = 0
+    for row_idx in sorted(row_indexes):
+        if row_idx < 0 or row_idx >= len(rows):
+            continue
+        values = rows[row_idx].get("values")
+        if not isinstance(values, list):
+            continue
+        for col_idx in quantity_columns:
+            if col_idx < len(values) and str(values[col_idx] or "").strip():
+                count += 1
+    return count
+
+
+def _count_source_row_alignment_penalty_cells(
+    *,
+    base_rows: list[dict[str, Any]],
+    rows_by_source_index: list[dict[str, Any]],
+    fields: list[str],
+    quantity_index: dict[tuple[str, str], int],
+    order_lines: list[Any],
+) -> int:
+    if not base_rows or not rows_by_source_index or not fields or not quantity_index or not order_lines:
+        return 0
+
+    def _line_value(line: Any, key: str):
+        if isinstance(line, dict):
+            return line.get(key)
+        return getattr(line, key, None)
+
+    has_daypart_field = "daypart" in fields
+    mismatched_row_indexes: set[int] = set()
+    invalid_source_row_penalty = 0
+    for line in order_lines:
+        qty_corrected = _line_value(line, "quantity_corrected")
+        qty_original = _line_value(line, "quantity_original")
+        qty = qty_corrected if qty_corrected is not None else qty_original
+        if qty is None:
+            continue
+        try:
+            float(qty)
+        except Exception:
+            continue
+        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
+        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
+        if not diet_key or not area_key:
+            continue
+        col_idx = _resolve_quantity_column_index(
+            quantity_index=quantity_index,
+            diet_key=diet_key,
+            area_key=area_key,
+        )
+        if col_idx is None:
+            continue
+        source_idx_raw = _line_value(line, "source_row_index")
+        try:
+            source_row_index = int(source_idx_raw) if source_idx_raw is not None else None
+        except Exception:
+            source_row_index = None
+        if source_row_index is None:
+            continue
+        if source_row_index < 0 or source_row_index >= len(base_rows):
+            invalid_source_row_penalty += 1
+            continue
+        target_identity = base_rows[source_row_index].get("identity")
+        if not isinstance(target_identity, tuple) or len(target_identity) != 3:
+            continue
+        line_identity = _sheet_row_identity(
+            _line_value(line, "date"),
+            _line_value(line, "daypart"),
+            _line_value(line, "menu_name"),
+        )
+        if not line_identity[0] or not line_identity[2]:
+            continue
+        if has_daypart_field and not line_identity[1]:
+            continue
+        same_identity = target_identity == line_identity
+        if not same_identity and not has_daypart_field:
+            same_identity = target_identity[0] == line_identity[0] and target_identity[2] == line_identity[2]
+        if same_identity:
+            continue
+        mismatched_row_indexes.add(source_row_index)
+    return invalid_source_row_penalty + _count_non_empty_quantity_cells_for_row_indexes(
+        rows=rows_by_source_index,
+        quantity_index=quantity_index,
+        row_indexes=mismatched_row_indexes,
+    )
+
+
+def _sheet_candidate_sort_key(
+    *,
+    mapped_count: int,
+    mapped_row_count: int,
+    mapped_column_count: int,
+    priority: int,
+    mismatch_penalty_cells: int = 0,
+    payload_match_stats: dict[str, Any] | None = None,
+) -> tuple[int, int, int, int, int, int]:
+    effective_count = int(mapped_count) - max(int(mismatch_penalty_cells), 0)
+    payload_trusted_match_score = 0
+    payload_row_index_penalty = 0
+    if isinstance(payload_match_stats, dict):
+        payload_trusted_match_score = (
+            int(payload_match_stats.get("exact", 0)) * 4
+            + int(payload_match_stats.get("partial", 0)) * 3
+            + int(payload_match_stats.get("neighbor", 0)) * 2
+        )
+        payload_row_index_penalty = int(payload_match_stats.get("row_index", 0))
+    return (
+        effective_count,
+        int(mapped_count),
+        payload_trusted_match_score,
+        -payload_row_index_penalty,
+        int(mapped_row_count) + int(mapped_column_count),
+        int(priority),
+    )
+
+
 def _select_dominant_quantity_columns_from_rows(
     *,
     rows: list[dict[str, Any]],
@@ -6785,21 +7843,22 @@ def _apply_weekly_menu_order_line_cluster_consensus_fill(
     )
 
 
+def _parse_sheet_fill_decision(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "allow", "allowed", "approve", "approved", "ok"}:
+        return True
+    if text in {"0", "false", "no", "deny", "denied", "reject", "rejected"}:
+        return False
+    return None
+
+
 def _llm_allows_order_line_cluster_consensus_fill(ocr_payload: dict[str, Any] | None) -> bool:
     if not isinstance(ocr_payload, dict):
         return False
-
-    def _parse_decision(value: object) -> bool | None:
-        if isinstance(value, bool):
-            return bool(value)
-        text = str(value or "").strip().lower()
-        if not text:
-            return None
-        if text in {"1", "true", "yes", "allow", "allowed", "approve", "approved", "ok"}:
-            return True
-        if text in {"0", "false", "no", "deny", "denied", "reject", "rejected"}:
-            return False
-        return None
 
     candidates: list[object] = [
         ocr_payload.get("_sheet_fill_decision"),
@@ -6814,7 +7873,7 @@ def _llm_allows_order_line_cluster_consensus_fill(ocr_payload: dict[str, Any] | 
         candidates.append(ocr_debug.get("order_line_cluster_fill_decision"))
 
     for candidate in candidates:
-        parsed = _parse_decision(candidate)
+        parsed = _parse_sheet_fill_decision(candidate)
         if parsed is None:
             continue
         return parsed
@@ -8850,6 +9909,98 @@ def _apply_order_line_quantities_by_source_row_index(
                 )
 
 
+def _summarize_order_line_source_row_mapping(
+    *,
+    base_rows: list[dict[str, Any]],
+    quantity_index: dict[tuple[str, str], int],
+    order_lines: list[Any],
+) -> dict[str, int]:
+    def _line_value(line: Any, key: str):
+        if isinstance(line, dict):
+            return line.get(key)
+        return getattr(line, key, None)
+
+    summary = {
+        "eligible_line_count": 0,
+        "matched_source_row_count": 0,
+        "mismatched_source_row_count": 0,
+        "missing_source_row_count": 0,
+        "invalid_identity_line_count": 0,
+    }
+    if not base_rows or not quantity_index or not order_lines:
+        return summary
+
+    for line in order_lines:
+        qty_corrected = _line_value(line, "quantity_corrected")
+        qty_original = _line_value(line, "quantity_original")
+        qty = qty_corrected if qty_corrected is not None else qty_original
+        if qty is None:
+            continue
+        try:
+            float(qty)
+        except Exception:
+            continue
+        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
+        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
+        if not diet_key or not area_key:
+            continue
+        col_idx = _resolve_quantity_column_index(
+            quantity_index=quantity_index,
+            diet_key=diet_key,
+            area_key=area_key,
+        )
+        if col_idx is None:
+            continue
+        summary["eligible_line_count"] += 1
+
+        line_identity = _build_canonical_menu_key(
+            menu_date=_line_value(line, "date"),
+            daypart=_line_value(line, "daypart"),
+            menu_name=_line_value(line, "menu_name"),
+        )
+        if line_identity is None:
+            summary["invalid_identity_line_count"] += 1
+            continue
+
+        source_idx_raw = _line_value(line, "source_row_index")
+        try:
+            source_idx = int(source_idx_raw) if source_idx_raw is not None else None
+        except Exception:
+            source_idx = None
+        if source_idx is None or source_idx < 0 or source_idx >= len(base_rows):
+            summary["missing_source_row_count"] += 1
+            continue
+
+        target_identity = base_rows[source_idx].get("identity")
+        if isinstance(target_identity, tuple) and len(target_identity) == 3 and target_identity == line_identity:
+            summary["matched_source_row_count"] += 1
+        else:
+            summary["mismatched_source_row_count"] += 1
+
+    return summary
+
+
+def _should_prefer_source_row_candidate(
+    *,
+    identity_count: int,
+    source_row_count: int,
+    source_row_summary: dict[str, int] | None,
+) -> bool:
+    if source_row_count <= identity_count:
+        return False
+    if not isinstance(source_row_summary, dict):
+        return False
+    if int(source_row_summary.get("eligible_line_count") or 0) <= 0:
+        return False
+    if int(source_row_summary.get("mismatched_source_row_count") or 0) > 0:
+        return False
+    if int(source_row_summary.get("missing_source_row_count") or 0) > 0:
+        return False
+    if int(source_row_summary.get("invalid_identity_line_count") or 0) > 0:
+        return False
+    return True
+
+
 def get_ocr_sheet(order_id: str):
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -9044,7 +10195,10 @@ def get_ocr_sheet(order_id: str):
     # OCR payload numeric rescue is used only when persisted order lines are absent.
     if source == "weekly_menu":
         if order_lines:
-            candidate_rows: list[tuple[int, int, str, list[dict[str, Any]]]] = []
+            unmapped_quantity_lines = _collect_unmapped_quantity_lines(
+                order_lines=sheet_lines,
+                quantity_index=quantity_index,
+            )
 
             rows_by_identity = _clone_sheet_rows(base_rows)
             _apply_order_line_quantities_to_sheet_rows(
@@ -9057,7 +10211,6 @@ def get_ocr_sheet(order_id: str):
                 rows=rows_by_identity,
                 quantity_index=quantity_index,
             )
-            candidate_rows.append((identity_count, 0, "identity", rows_by_identity))
 
             rows_by_source_index = _clone_sheet_rows(base_rows)
             _apply_order_line_quantities_by_source_row_index(
@@ -9070,14 +10223,45 @@ def get_ocr_sheet(order_id: str):
                 rows=rows_by_source_index,
                 quantity_index=quantity_index,
             )
-            candidate_rows.append((source_index_count, 1, "source_row", rows_by_source_index))
-
-            mapped_count, _mapped_priority, mapped_mode, mapped_rows = max(
-                candidate_rows,
-                key=lambda item: (item[0], item[1]),
+            source_row_summary = _summarize_order_line_source_row_mapping(
+                base_rows=base_rows,
+                quantity_index=quantity_index,
+                order_lines=sheet_lines,
             )
-            rows = mapped_rows
+            mapped_count = identity_count
+            mapped_mode = "identity"
+            rows = rows_by_identity
+            if _should_prefer_source_row_candidate(
+                identity_count=identity_count,
+                source_row_count=source_index_count,
+                source_row_summary=source_row_summary,
+            ):
+                mapped_count = source_index_count
+                mapped_mode = "source_row"
+                rows = rows_by_source_index
+            elif (
+                source_index_count >= identity_count
+                and (
+                    int(source_row_summary.get("mismatched_source_row_count") or 0) > 0
+                    or int(source_row_summary.get("missing_source_row_count") or 0) > 0
+                    or int(source_row_summary.get("invalid_identity_line_count") or 0) > 0
+                )
+            ):
+                logger.info(
+                    "Rejected source-row sheet mapping due to row identity conflicts",
+                    order_id=order_id,
+                    facility_id=facility_id,
+                    week_id=resolved_week_id,
+                    source=source,
+                    identity_count=identity_count,
+                    source_row_count=source_index_count,
+                    **source_row_summary,
+                )
             mapped_row_count = _count_non_empty_quantity_rows(
+                rows=rows,
+                quantity_index=quantity_index,
+            )
+            mapped_column_count = _count_non_empty_quantity_columns(
                 rows=rows,
                 quantity_index=quantity_index,
             )
@@ -9103,6 +10287,10 @@ def get_ocr_sheet(order_id: str):
                     rows=rows_by_payload_index,
                     quantity_index=quantity_index,
                 )
+                payload_mapped_column_count = _count_non_empty_quantity_columns(
+                    rows=rows_by_payload_index,
+                    quantity_index=quantity_index,
+                )
                 try:
                     min_row_gain_abs = max(
                         1,
@@ -9123,7 +10311,17 @@ def get_ocr_sheet(order_id: str):
                     row_gain = payload_mapped_row_count - mapped_row_count
                     row_gain_ratio = payload_mapped_row_count / max(mapped_row_count, 1)
                     allow_payload_override = row_gain >= min_row_gain_abs and row_gain_ratio >= min_row_gain_ratio
-                if allow_payload_override and payload_mapped_count > mapped_count:
+                payload_preferred_for_unmapped_lines = bool(unmapped_quantity_lines) and (
+                    payload_mapped_count >= mapped_count and payload_mapped_row_count >= mapped_row_count
+                )
+                payload_preferred_for_stale_family = bool(unmapped_quantity_lines) and (
+                    payload_mapped_row_count >= max(
+                        1,
+                        int((mapped_row_count * 0.95) + 0.9999),
+                    )
+                    and payload_mapped_column_count > mapped_column_count
+                )
+                if (allow_payload_override and payload_mapped_count > mapped_count) or payload_preferred_for_unmapped_lines:
                     logger.warning(
                         "Selected OCR payload numeric-only mapping over order-line mapping",
                         order_id=order_id,
@@ -9142,6 +10340,28 @@ def get_ocr_sheet(order_id: str):
                         match_loose_cell=payload_match_stats.get("loose_cell", 0),
                         match_gap_fill=payload_match_stats.get("gap_fill", 0),
                         match_unstructured=payload_match_stats.get("unstructured", 0),
+                        unmapped_quantity_lines=len(unmapped_quantity_lines),
+                        mapped_column_count=mapped_column_count,
+                        payload_mapped_column_count=payload_mapped_column_count,
+                    )
+                    _append_sheet_warning("sheet_order_lines_unmapped_fallback_payload")
+                    mapped_count = payload_mapped_count
+                    mapped_mode = "payload_row"
+                    rows = rows_by_payload_index
+                elif payload_preferred_for_stale_family:
+                    logger.warning(
+                        "Selected OCR payload mapping due to broader quantity column coverage",
+                        order_id=order_id,
+                        facility_id=facility_id,
+                        week_id=resolved_week_id,
+                        source=source,
+                        mapped_count=mapped_count,
+                        mapped_row_count=mapped_row_count,
+                        mapped_column_count=mapped_column_count,
+                        payload_mapped_count=payload_mapped_count,
+                        payload_mapped_row_count=payload_mapped_row_count,
+                        payload_mapped_column_count=payload_mapped_column_count,
+                        unmapped_quantity_lines=len(unmapped_quantity_lines),
                     )
                     _append_sheet_warning("sheet_order_lines_unmapped_fallback_payload")
                     mapped_count = payload_mapped_count
@@ -9195,8 +10415,6 @@ def get_ocr_sheet(order_id: str):
             mapped_mode = "identity"
             rows = rows_by_identity
     else:
-        candidate_rows: list[tuple[int, int, str, list[dict[str, Any]]]] = []
-
         rows_by_identity = _clone_sheet_rows(base_rows)
         _apply_order_line_quantities_to_sheet_rows(
             rows=rows_by_identity,
@@ -9208,7 +10426,6 @@ def get_ocr_sheet(order_id: str):
             rows=rows_by_identity,
             quantity_index=quantity_index,
         )
-        candidate_rows.append((identity_count, 0, "identity", rows_by_identity))
 
         rows_by_source_index = _clone_sheet_rows(base_rows)
         _apply_order_line_quantities_by_source_row_index(
@@ -9221,11 +10438,26 @@ def get_ocr_sheet(order_id: str):
             rows=rows_by_source_index,
             quantity_index=quantity_index,
         )
-        candidate_rows.append((source_index_count, 1, "source_row", rows_by_source_index))
+        source_row_summary = _summarize_order_line_source_row_mapping(
+            base_rows=base_rows,
+            quantity_index=quantity_index,
+            order_lines=sheet_lines,
+        )
+        mapped_count = identity_count
+        mapped_mode = "identity"
+        rows = rows_by_identity
+        if _should_prefer_source_row_candidate(
+            identity_count=identity_count,
+            source_row_count=source_index_count,
+            source_row_summary=source_row_summary,
+        ):
+            mapped_count = source_index_count
+            mapped_mode = "source_row"
+            rows = rows_by_source_index
 
         if payload_rows:
             rows_by_payload_index = _clone_sheet_rows(base_rows)
-            _apply_payload_cells_by_menu_priority(
+            payload_match_stats = _apply_payload_cells_by_menu_priority(
                 rows=rows_by_payload_index,
                 fields=fields,
                 quantity_index=quantity_index,
@@ -9237,13 +10469,50 @@ def get_ocr_sheet(order_id: str):
                 rows=rows_by_payload_index,
                 quantity_index=quantity_index,
             )
-            candidate_rows.append((payload_index_count, 2, "payload_row", rows_by_payload_index))
-
-        mapped_count, _mapped_priority, mapped_mode, mapped_rows = max(
-            candidate_rows,
-            key=lambda item: (item[0], item[1]),
-        )
-        rows = mapped_rows
+            mapped_row_count = _count_non_empty_quantity_rows(
+                rows=rows,
+                quantity_index=quantity_index,
+            )
+            mapped_column_count = _count_non_empty_quantity_columns(
+                rows=rows,
+                quantity_index=quantity_index,
+            )
+            mapped_priority = 1 if mapped_mode == "source_row" else 0
+            mapped_penalty_cells = 0
+            if mapped_mode == "source_row":
+                mapped_penalty_cells = _count_source_row_alignment_penalty_cells(
+                    base_rows=base_rows,
+                    rows_by_source_index=rows,
+                    fields=fields,
+                    quantity_index=quantity_index,
+                    order_lines=sheet_lines,
+                )
+            payload_row_count = _count_non_empty_quantity_rows(
+                rows=rows_by_payload_index,
+                quantity_index=quantity_index,
+            )
+            payload_column_count = _count_non_empty_quantity_columns(
+                rows=rows_by_payload_index,
+                quantity_index=quantity_index,
+            )
+            mapped_sort_key = _sheet_candidate_sort_key(
+                mapped_count=mapped_count,
+                mapped_row_count=mapped_row_count,
+                mapped_column_count=mapped_column_count,
+                priority=mapped_priority,
+                mismatch_penalty_cells=mapped_penalty_cells,
+            )
+            payload_sort_key = _sheet_candidate_sort_key(
+                mapped_count=payload_index_count,
+                mapped_row_count=payload_row_count,
+                mapped_column_count=payload_column_count,
+                priority=2,
+                payload_match_stats=payload_match_stats,
+            )
+            if payload_sort_key > mapped_sort_key:
+                mapped_count = payload_index_count
+                mapped_mode = "payload_row"
+                rows = rows_by_payload_index
 
     if mapped_count == 0 and (sheet_lines or payload_rows):
         logger.warning(
@@ -9772,6 +11041,88 @@ def _normalize_reparse_provider(value: str | None) -> str | None:
     return None
 
 
+def _build_reparse_quality_metadata(
+    *,
+    requested_provider: str | None,
+    effective_provider: str | None,
+    llm_assist: bool,
+    auto_fallback_applied: bool,
+    feedback_retry_depth: int,
+) -> dict[str, Any]:
+    normalized_requested = _normalize_reparse_provider(requested_provider)
+    normalized_effective = _normalize_reparse_provider(effective_provider)
+    is_llm_reparse = bool(
+        llm_assist
+        or normalized_requested in {"openai", "gemini"}
+        or normalized_effective in {"openai", "gemini"}
+    )
+    if auto_fallback_applied:
+        reparse_origin = "auto_fallback"
+    elif llm_assist:
+        reparse_origin = "llm_assist"
+    elif normalized_requested in {"openai", "gemini"}:
+        reparse_origin = "provider_override"
+    else:
+        reparse_origin = "standard"
+    return {
+        "quality_track": "llm_reparse" if is_llm_reparse else "non_llm_reparse",
+        "reparse_origin": reparse_origin,
+        "feedback_retry_depth": max(0, int(feedback_retry_depth)),
+    }
+
+
+def _resolve_explicit_reparse_inference_provider(
+    *,
+    requested_provider: str | None,
+    llm_assist: bool,
+    template: dict[str, Any],
+) -> str | None:
+    normalized_requested = _normalize_reparse_provider(requested_provider)
+    if normalized_requested in {"openai", "gemini"}:
+        return normalized_requested
+    if not llm_assist:
+        return normalized_requested
+
+    configured = str(
+        template.get("main_ocr_provider")
+        or os.getenv("OCR_MAIN_PROVIDER")
+        or ""
+    ).strip().lower()
+    if configured in {"openai", "gemini"}:
+        return configured
+
+    return _resolve_auto_llm_fallback_provider(template=template) or normalized_requested
+
+
+def _resolve_auto_llm_fallback_provider(*, template: dict[str, Any]) -> str | None:
+    configured = str(
+        template.get("auto_llm_fallback_provider")
+        or os.getenv("OCR_REPARSE_AUTO_LLM_FALLBACK_PROVIDER", "")
+    ).strip().lower()
+    if configured in {"disabled", "none", "off", "false", "0"}:
+        return None
+
+    if configured in {"gemini", "openai"}:
+        preferred = configured
+    else:
+        if _has_gemini_api_key():
+            preferred = "gemini"
+        elif _has_openai_api_key():
+            preferred = "openai"
+        else:
+            return None
+
+    if preferred == "gemini" and _has_gemini_api_key():
+        return "gemini"
+    if preferred == "openai" and _has_openai_api_key():
+        return "openai"
+    if preferred == "gemini" and _has_openai_api_key():
+        return "openai"
+    if preferred == "openai" and _has_gemini_api_key():
+        return "gemini"
+    return None
+
+
 def _is_llm_finish_reason_truncated(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -9810,6 +11161,23 @@ def _truncate_assist_text(value: str, max_chars: int = 6000) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}\n...(truncated)"
+
+
+def _looks_like_generated_reparse_prompt(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    markers = (
+        "Second-pass repair mode:",
+        "Second-pass OCR repair mode:",
+        "Current sheet/baseline rows shown to the user:",
+        "Structural block anchor summary:",
+        "Evaluator feedback from previous OCR draft:",
+        "Automatic fallback context:",
+        "Date block layout summary:",
+        "Suspicious blank-edge placement hints from the current OCR draft:",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _compact_prompt_tables(pipeline_output: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -9902,44 +11270,1090 @@ def _compact_prompt_cell_issues(
     return compact
 
 
+def _build_llm_assist_baseline_rows(
+    baseline: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(baseline, dict):
+        return []
+    fields = [str(field).strip() for field in (baseline.get("fields") or []) if str(field).strip()]
+    rows = [list(row) for row in (baseline.get("rows") or []) if isinstance(row, list)]
+    row_ids = [str(item).strip() for item in (baseline.get("row_ids") or []) if str(item).strip()]
+    if not fields or not rows:
+        return []
+    return _build_llm_review_prompt_rows(
+        fields=fields,
+        rows=rows,
+        row_ids=row_ids,
+    )
+
+
+def _resolve_reparse_baseline_rows_for_structure(
+    baseline: dict[str, Any] | None,
+) -> tuple[list[str], list[list[str]], list[str], str]:
+    if not isinstance(baseline, dict):
+        return [], [], [], ""
+    structure_fields = baseline.get("structure_fields")
+    fields = [
+        str(field or "").strip()
+        for field in ((structure_fields if isinstance(structure_fields, list) and structure_fields else baseline.get("fields")) or [])
+        if str(field or "").strip()
+    ]
+    if not fields:
+        return [], [], [], ""
+    structural_rows = [
+        list(row)
+        for row in ((baseline.get("structural_rows") or baseline.get("structure_rows")) or [])
+        if isinstance(row, list)
+    ]
+    structural_row_ids = [
+        str(item).strip()
+        for item in ((baseline.get("structural_row_ids") or baseline.get("structure_row_ids")) or [])
+        if str(item).strip()
+    ]
+    structural_source = str(
+        baseline.get("structural_baseline_source") or baseline.get("structure_source") or ""
+    ).strip()
+    if structural_rows:
+        if len(structural_row_ids) < len(structural_rows):
+            structural_row_ids.extend(
+                [f"structural-row-{idx + 1}" for idx in range(len(structural_row_ids), len(structural_rows))]
+            )
+        return fields, structural_rows, structural_row_ids[: len(structural_rows)], structural_source or "structure"
+
+    rows = [list(row) for row in (baseline.get("rows") or []) if isinstance(row, list)]
+    row_ids = [str(item).strip() for item in (baseline.get("row_ids") or []) if str(item).strip()]
+    if len(row_ids) < len(rows):
+        row_ids.extend([f"sheet-row-{idx + 1}" for idx in range(len(row_ids), len(rows))])
+    return fields, rows, row_ids[: len(rows)], str(baseline.get("baseline_source") or "").strip() or "sheet"
+
+
+def _build_llm_assist_structural_rows(
+    baseline: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    fields, rows, row_ids, _source = _resolve_reparse_baseline_rows_for_structure(baseline)
+    if not fields or not rows:
+        return []
+    return _build_llm_review_prompt_rows(
+        fields=fields,
+        rows=rows,
+        row_ids=row_ids,
+    )
+
+
+def _resolve_structural_row_field_indexes(
+    fields: list[str] | None,
+) -> tuple[int | None, int | None, int | None, list[int]]:
+    normalized_fields = [str(field or "").strip() for field in (fields or [])]
+    if not normalized_fields:
+        return None, None, None, []
+    date_idx = next(
+        (
+            idx
+            for idx, field in enumerate(normalized_fields)
+            if _normalize_sheet_text(field).lower().startswith("date")
+        ),
+        None,
+    )
+    daypart_idx = next(
+        (
+            idx
+            for idx, field in enumerate(normalized_fields)
+            if _normalize_sheet_text(field).lower() in {"daypart", "meal", "time"}
+        ),
+        None,
+    )
+    menu_idx = next(
+        (
+            idx
+            for idx, field in enumerate(normalized_fields)
+            if _normalize_sheet_text(field).lower() in {"menu", "menuname"}
+        ),
+        None,
+    )
+    quantity_indexes = [
+        idx
+        for idx, field in enumerate(normalized_fields)
+        if str(field or "").strip().startswith("qty.")
+    ]
+    return date_idx, daypart_idx, menu_idx, quantity_indexes
+
+
+def _build_structural_row_key(
+    *,
+    row: list[str],
+    fields: list[str] | None,
+) -> tuple[str, str, str] | None:
+    date_idx, daypart_idx, menu_idx, _ = _resolve_structural_row_field_indexes(fields)
+    if menu_idx is None or menu_idx >= len(row):
+        return None
+    menu_key = _normalize_sheet_text(row[menu_idx])
+    if not menu_key:
+        return None
+    raw_date = row[date_idx] if date_idx is not None and date_idx < len(row) else ""
+    raw_daypart = row[daypart_idx] if daypart_idx is not None and daypart_idx < len(row) else ""
+    return (
+        _normalize_sheet_date_key(raw_date),
+        _normalize_daypart_key(raw_daypart),
+        menu_key,
+    )
+
+
+def _build_reparse_block_anchor_hints(
+    *,
+    structural_fields: list[str] | None,
+    structural_rows: list[list[str]],
+    first_pass_fields: list[str] | None = None,
+    first_pass_rows: list[list[str]] | None = None,
+) -> dict[str, Any]:
+    normalized_rows = [list(row) for row in structural_rows if isinstance(row, list)]
+    if not normalized_rows:
+        return {}
+
+    date_idx, daypart_idx, _menu_idx, quantity_indexes = _resolve_structural_row_field_indexes(structural_fields)
+    structural_blank_hint_enabled = False
+    if quantity_indexes:
+        for row in normalized_rows:
+            has_structural_quantity = False
+            for col_idx in quantity_indexes:
+                if col_idx < 0 or col_idx >= len(row):
+                    continue
+                if _parse_strict_numeric_cell(row[col_idx]) is not None:
+                    has_structural_quantity = True
+                    break
+            if has_structural_quantity:
+                structural_blank_hint_enabled = True
+                break
+    blocks: list[dict[str, Any]] = []
+    current_block: dict[str, Any] | None = None
+    for row_idx, row in enumerate(normalized_rows):
+        raw_date = row[date_idx] if date_idx is not None and date_idx < len(row) else ""
+        raw_daypart = row[daypart_idx] if daypart_idx is not None and daypart_idx < len(row) else ""
+        block_date = _normalize_sheet_date_key(raw_date) or str(raw_date or "").strip()
+        block_daypart = _normalize_daypart_key(raw_daypart) or str(raw_daypart or "").strip()
+        block_key = (block_date, block_daypart)
+        has_quantity = False
+        for col_idx in quantity_indexes:
+            if col_idx < 0 or col_idx >= len(row):
+                continue
+            if _parse_strict_numeric_cell(row[col_idx]) is not None:
+                has_quantity = True
+                break
+        if current_block is None or current_block.get("key") != block_key:
+            current_block = {
+                "key": block_key,
+                "date_mmdd": block_date,
+                "daypart": block_daypart,
+                "row_start": row_idx,
+                "row_end": row_idx,
+                "row_count": 1,
+            }
+            if structural_blank_hint_enabled:
+                current_block["blank_quantity_row_indexes"] = ([] if has_quantity else [row_idx])
+            blocks.append(current_block)
+            continue
+        current_block["row_end"] = row_idx
+        current_block["row_count"] = int(current_block.get("row_count") or 0) + 1
+        if structural_blank_hint_enabled and not has_quantity:
+            blank_indexes = current_block.get("blank_quantity_row_indexes")
+            if isinstance(blank_indexes, list):
+                blank_indexes.append(row_idx)
+
+    unmatched_structural_row_indexes: list[int] = []
+    matched_reference_key_count = 0
+    reference_key_count = 0
+    reference_alignment_weak = False
+    normalized_first_rows = [list(row) for row in (first_pass_rows or []) if isinstance(row, list)]
+    if normalized_first_rows:
+        resolved_first_fields = list(first_pass_fields or structural_fields or [])
+        first_keys = [
+            key
+            for key in (
+                _build_structural_row_key(row=row, fields=resolved_first_fields)
+                for row in normalized_first_rows
+            )
+            if key is not None
+        ]
+        reference_key_count = len(first_keys)
+        if first_keys:
+            first_idx = 0
+            for row_idx, row in enumerate(normalized_rows):
+                structure_key = _build_structural_row_key(row=row, fields=structural_fields)
+                if structure_key is None:
+                    continue
+                if first_idx < len(first_keys) and structure_key == first_keys[first_idx]:
+                    first_idx += 1
+                    matched_reference_key_count += 1
+                    continue
+                unmatched_structural_row_indexes.append(row_idx)
+            match_ratio = (
+                float(matched_reference_key_count) / float(reference_key_count)
+                if reference_key_count > 0
+                else 0.0
+            )
+            if matched_reference_key_count <= 0 or match_ratio < 0.5:
+                reference_alignment_weak = True
+                unmatched_structural_row_indexes = []
+
+    structural_blank_anchor_row_indexes: list[int] = []
+    if structural_blank_hint_enabled:
+        for block in blocks:
+            blank_indexes = block.get("blank_quantity_row_indexes")
+            if isinstance(blank_indexes, list):
+                structural_blank_anchor_row_indexes.extend(
+                    int(item)
+                    for item in blank_indexes
+                    if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+                )
+        structural_blank_anchor_row_indexes = sorted(set(structural_blank_anchor_row_indexes))
+
+    compact_blocks: list[dict[str, Any]] = []
+    for block in blocks[:48]:
+        compact_block = {
+            "date_mmdd": block.get("date_mmdd"),
+            "daypart": block.get("daypart"),
+            "row_start": block.get("row_start"),
+            "row_end": block.get("row_end"),
+            "row_count": block.get("row_count"),
+        }
+        blank_indexes = block.get("blank_quantity_row_indexes")
+        if isinstance(blank_indexes, list) and blank_indexes:
+            compact_block["blank_quantity_row_indexes"] = [int(idx) for idx in blank_indexes[:24]]
+        compact_blocks.append(compact_block)
+    return {
+        "blocks": compact_blocks,
+        "unmatched_structural_row_indexes": unmatched_structural_row_indexes[:160],
+        "structural_blank_anchor_row_indexes": structural_blank_anchor_row_indexes[:160],
+        "reference_alignment_weak": bool(reference_alignment_weak),
+        "matched_reference_key_count": int(matched_reference_key_count),
+        "reference_key_count": int(reference_key_count),
+        "reference_key_match_ratio": (
+            round(float(matched_reference_key_count) / float(reference_key_count), 4)
+            if reference_key_count > 0
+            else None
+        ),
+    }
+
+
+def _normalize_prompt_block_date(value: object) -> str:
+    normalized = _normalize_entry_date(value)
+    if isinstance(normalized, date):
+        return normalized.strftime("%m/%d")
+    return str(value or "").strip()
+
+
+def _prompt_row_value(row: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _summarize_prompt_row_blocks(
+    prompt_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    rows = [dict(row) for row in (prompt_rows or []) if isinstance(row, dict)]
+    if not rows:
+        return []
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for idx, row in enumerate(rows):
+        date_label = _normalize_prompt_block_date(
+            _prompt_row_value(row, "date_mmdd", "date", "menu_date")
+        )
+        daypart_raw = _prompt_row_value(row, "daypart")
+        daypart = _normalize_daypart_key(daypart_raw) or daypart_raw
+        menu_name = _prompt_row_value(row, "menu_name", "menu")
+        key = (date_label, daypart)
+        if current and current.get("_key") == key:
+            current["row_end"] = idx
+            current["row_count"] = int(current.get("row_count") or 0) + 1
+            if menu_name:
+                current_menus = current.setdefault("_menus", [])
+                if menu_name not in current_menus and len(current_menus) < 4:
+                    current_menus.append(menu_name)
+            continue
+        current = {
+            "_key": key,
+            "_menus": [menu_name] if menu_name else [],
+            "row_start": idx,
+            "row_end": idx,
+            "row_count": 1,
+            "date_mmdd": date_label,
+            "daypart": daypart,
+        }
+        blocks.append(current)
+    summarized: list[dict[str, Any]] = []
+    for block in blocks:
+        entry = {
+            "row_start": int(block.get("row_start") or 0),
+            "row_end": int(block.get("row_end") or 0),
+            "row_count": int(block.get("row_count") or 0),
+            "date_mmdd": str(block.get("date_mmdd") or ""),
+            "daypart": str(block.get("daypart") or ""),
+        }
+        menus = [str(item).strip() for item in block.get("_menus", []) if str(item).strip()]
+        if menus:
+            entry["menu_examples"] = menus[:4]
+        summarized.append(entry)
+    return summarized
+
+
+def _summarize_prompt_date_blocks(
+    prompt_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    blocks = _summarize_prompt_row_blocks(prompt_rows)
+    if not blocks:
+        return []
+    summarized: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        date_mmdd = str(block.get("date_mmdd") or "").strip()
+        row_start = block.get("row_start")
+        row_end = block.get("row_end")
+        row_count = block.get("row_count")
+        daypart = str(block.get("daypart") or "").strip()
+        if not isinstance(row_start, int) or not isinstance(row_end, int):
+            continue
+        if current is None or current.get("date_mmdd") != date_mmdd:
+            current = {
+                "date_mmdd": date_mmdd,
+                "row_start": row_start,
+                "row_end": row_end,
+                "row_count": int(row_count or 0),
+                "sub_blocks": [
+                    {
+                        "daypart": daypart,
+                        "row_start": row_start,
+                        "row_end": row_end,
+                        "row_count": int(row_count or 0),
+                    }
+                ],
+            }
+            summarized.append(current)
+            continue
+        current["row_end"] = row_end
+        current["row_count"] = int(current.get("row_count") or 0) + int(row_count or 0)
+        sub_blocks = current.setdefault("sub_blocks", [])
+        if isinstance(sub_blocks, list):
+            sub_blocks.append(
+                {
+                    "daypart": daypart,
+                    "row_start": row_start,
+                    "row_end": row_end,
+                    "row_count": int(row_count or 0),
+                }
+            )
+    return summarized
+
+
+def _summarize_tabular_row_blocks(
+    rows: list[list[str]] | None,
+    *,
+    date_index: int = 0,
+    daypart_index: int = 1,
+    menu_index: int = 2,
+) -> list[dict[str, Any]]:
+    prompt_rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows or []):
+        if not isinstance(row, list):
+            continue
+        prompt_rows.append(
+            {
+                "row_id": f"row-{idx + 1}",
+                "date_mmdd": row[date_index] if date_index < len(row) else "",
+                "daypart": row[daypart_index] if daypart_index < len(row) else "",
+                "menu_name": row[menu_index] if menu_index < len(row) else "",
+            }
+        )
+    return _summarize_prompt_row_blocks(prompt_rows)
+
+
+def _summarize_tabular_date_blocks(
+    rows: list[list[str]] | None,
+    *,
+    date_index: int = 0,
+    daypart_index: int = 1,
+    menu_index: int = 2,
+) -> list[dict[str, Any]]:
+    prompt_rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows or []):
+        if not isinstance(row, list):
+            continue
+        prompt_rows.append(
+            {
+                "row_id": f"row-{idx + 1}",
+                "date_mmdd": row[date_index] if date_index < len(row) else "",
+                "daypart": row[daypart_index] if daypart_index < len(row) else "",
+                "menu_name": row[menu_index] if menu_index < len(row) else "",
+            }
+        )
+    return _summarize_prompt_date_blocks(prompt_rows)
+
+
+def _build_prompt_rows_from_table_rows(
+    *,
+    fields: list[str],
+    rows: list[list[str]] | None,
+    row_id_prefix: str,
+) -> list[dict[str, Any]]:
+    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
+    if not fields or not normalized_rows:
+        return []
+    row_ids = [f"{row_id_prefix}-{idx + 1}" for idx in range(len(normalized_rows))]
+    return _build_llm_review_prompt_rows(fields=fields, rows=normalized_rows, row_ids=row_ids)
+
+
+def _summarize_prompt_block_coverage_gaps(
+    *,
+    baseline_prompt_rows: list[dict[str, Any]] | None,
+    first_pass_prompt_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    baseline_blocks = _summarize_prompt_row_blocks(baseline_prompt_rows)
+    if not baseline_blocks or not first_pass_prompt_rows:
+        return []
+    first_pass_counts: dict[tuple[str, str], int] = {}
+    for row in first_pass_prompt_rows:
+        if not isinstance(row, dict):
+            continue
+        date_label = _normalize_prompt_block_date(
+            _prompt_row_value(row, "date_mmdd", "date", "menu_date")
+        )
+        daypart_raw = _prompt_row_value(row, "daypart")
+        daypart = _normalize_daypart_key(daypart_raw) or daypart_raw
+        key = (date_label, daypart)
+        if not any(key):
+            continue
+        first_pass_counts[key] = first_pass_counts.get(key, 0) + 1
+    coverage_gaps: list[dict[str, Any]] = []
+    for block in baseline_blocks:
+        key = (str(block.get("date_mmdd") or ""), str(block.get("daypart") or ""))
+        baseline_count = int(block.get("row_count") or 0)
+        first_pass_count = int(first_pass_counts.get(key, 0))
+        if first_pass_count >= baseline_count:
+            continue
+        entry = dict(block)
+        entry["first_pass_row_count"] = first_pass_count
+        entry["missing_structural_rows"] = max(baseline_count - first_pass_count, 0)
+        coverage_gaps.append(entry)
+    return coverage_gaps
+
+
+def _format_block_order_hint(blocks: list[dict[str, Any]] | None) -> str:
+    lines: list[str] = []
+    for block in (blocks or [])[:80]:
+        if not isinstance(block, dict):
+            continue
+        date_mmdd = str(block.get("date_mmdd") or "").strip() or "?"
+        daypart = str(block.get("daypart") or "").strip() or "?"
+        row_start = block.get("row_start")
+        row_end = block.get("row_end")
+        if isinstance(row_start, int) and isinstance(row_end, int):
+            if row_start == row_end:
+                range_text = f"row_index {row_start}"
+            else:
+                range_text = f"row_index {row_start}-{row_end}"
+        else:
+            range_text = "row_index ?"
+        lines.append(f"{date_mmdd} {daypart} -> {range_text}")
+    return "\n".join(lines)
+
+
+def _collect_candidate_blank_edge_hints(
+    *,
+    candidate_rows: list[list[str]] | None,
+    quantity_columns: list[dict[str, str | int]] | None,
+    date_blocks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    normalized_rows = [list(row) for row in (candidate_rows or []) if isinstance(row, list)]
+    if not normalized_rows:
+        return []
+    quantity_indexes: list[int] = []
+    for column in quantity_columns or []:
+        try:
+            col_idx = int(column.get("index"))  # type: ignore[arg-type]
+        except Exception:
+            continue
+        if col_idx >= 0:
+            quantity_indexes.append(col_idx)
+    if not quantity_indexes:
+        return []
+
+    hints: list[dict[str, Any]] = []
+    for block in date_blocks or []:
+        if not isinstance(block, dict):
+            continue
+        row_start = block.get("row_start")
+        row_end = block.get("row_end")
+        if not isinstance(row_start, int) or not isinstance(row_end, int):
+            continue
+        if row_start < 0 or row_end < row_start:
+            continue
+        row_indexes = list(range(row_start, min(row_end, len(normalized_rows) - 1) + 1))
+        if not row_indexes:
+            continue
+        filled_row_indexes: list[int] = []
+        blank_row_indexes: list[int] = []
+        for row_idx in row_indexes:
+            row = normalized_rows[row_idx]
+            has_numeric = False
+            for col_idx in quantity_indexes:
+                if col_idx < len(row) and _parse_strict_numeric_cell(row[col_idx]) is not None:
+                    has_numeric = True
+                    break
+            if has_numeric:
+                filled_row_indexes.append(row_idx)
+            else:
+                blank_row_indexes.append(row_idx)
+        if not filled_row_indexes or not blank_row_indexes:
+            continue
+        leading_blank_count = 0
+        for row_idx in row_indexes:
+            if row_idx in blank_row_indexes:
+                leading_blank_count += 1
+                continue
+            break
+        trailing_blank_count = 0
+        for row_idx in reversed(row_indexes):
+            if row_idx in blank_row_indexes:
+                trailing_blank_count += 1
+                continue
+            break
+        if trailing_blank_count <= 0 or leading_blank_count > 0:
+            continue
+        hint = {
+            "date_mmdd": block.get("date_mmdd"),
+            "row_start": row_start,
+            "row_end": row_end,
+            "filled_row_indexes": filled_row_indexes[:40],
+            "blank_row_indexes": blank_row_indexes[:40],
+            "trailing_blank_row_indexes": row_indexes[-trailing_blank_count:][:20],
+            "pattern": "trailing_blank_run_after_filled_rows",
+            "note": "Verify that blank rows were not rotated to the end of the date block.",
+        }
+        sub_blocks = block.get("sub_blocks")
+        if isinstance(sub_blocks, list) and sub_blocks:
+            hint["sub_blocks"] = sub_blocks[:8]
+        hints.append(hint)
+    return hints
+
+
+def _compact_llm_reparse_audit_feedback(audit_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(audit_result, dict) or not audit_result:
+        return None
+    compact = {
+        "status": str(audit_result.get("status") or "").strip().lower() or None,
+        "provider": str(audit_result.get("actual_provider") or audit_result.get("provider") or "").strip() or None,
+        "model": str(audit_result.get("model") or "").strip() or None,
+        "issue_count": int(audit_result.get("issue_count") or 0),
+        "blocking_issue_count": int(audit_result.get("blocking_issue_count") or 0),
+        "issues": [dict(item) for item in (audit_result.get("issues") or [])[:12] if isinstance(item, dict)],
+        "blocking_issues": [
+            dict(item) for item in (audit_result.get("blocking_issues") or [])[:8] if isinstance(item, dict)
+        ],
+    }
+    error = str(audit_result.get("error") or "").strip()
+    if error:
+        compact["error"] = error
+    threshold = audit_result.get("threshold")
+    if isinstance(threshold, dict) and threshold:
+        compact["threshold"] = dict(threshold)
+    return compact
+
+
+def _resolve_reparse_llm_baseline(
+    *,
+    order_id: str,
+    template: dict[str, Any],
+    fallback_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    structural_baseline = _build_reparse_structural_baseline(
+        order_id=order_id,
+        template=template,
+        fallback_payload=fallback_payload,
+    )
+    current_sheet, current_sheet_error = get_ocr_sheet(order_id)
+    if isinstance(current_sheet, dict) and not current_sheet_error:
+        raw_fields = current_sheet.get("fields") if isinstance(current_sheet.get("fields"), list) else []
+        fields: list[str] = []
+        header: list[str] = []
+        for idx, item in enumerate(raw_fields):
+            if isinstance(item, dict):
+                field_name = str(item.get("field") or "").strip()
+                header_name = str(item.get("header") or "").strip()
+            else:
+                field_name = str(item or "").strip()
+                header_name = ""
+            if not field_name:
+                continue
+            fields.append(field_name)
+            header.append(header_name or _field_label(field_name))
+        rows_payload = current_sheet.get("rows") if isinstance(current_sheet.get("rows"), list) else []
+        rows: list[list[str]] = []
+        for row in rows_payload:
+            if not isinstance(row, list):
+                continue
+            normalized_row = [str(cell or "").strip() for cell in row]
+            if fields:
+                while len(normalized_row) < len(fields):
+                    normalized_row.append("")
+                normalized_row = normalized_row[: len(fields)]
+            rows.append(normalized_row)
+        row_ids = [
+            str(item).strip()
+            for item in (
+                current_sheet.get("row_ids")
+                if isinstance(current_sheet.get("row_ids"), list)
+                else []
+            )
+            if str(item).strip()
+        ]
+        if len(row_ids) < len(rows):
+            row_ids.extend([f"sheet-row-{idx + 1}" for idx in range(len(row_ids), len(rows))])
+        payload = _load_order_ocr_cache(order_id)
+        raw_output = _snapshot_raw_ocr_payload(payload) if isinstance(payload, dict) else {}
+        if not isinstance(raw_output, dict):
+            raw_output = {}
+        if not raw_output and isinstance(fallback_payload, dict):
+            raw_output = _snapshot_raw_ocr_payload(fallback_payload)
+        if fields and rows:
+            current_sheet_baseline = {
+                "fields": fields,
+                "header": header[: len(fields)],
+                "rows": rows,
+                "row_ids": row_ids[: len(rows)],
+                "baseline_revision_id": None,
+                "raw_output": raw_output,
+                "baseline_source": "sheet",
+            }
+            structural_rows = (
+                [list(row) for row in (structural_baseline.get("rows") or []) if isinstance(row, list)]
+                if isinstance(structural_baseline, dict)
+                else []
+            )
+            if structural_rows:
+                current_sheet_baseline["structure_rows"] = structural_rows
+                current_sheet_baseline["structure_fields"] = [
+                    str(field).strip()
+                    for field in (structural_baseline.get("fields") or [])
+                    if str(field).strip()
+                ] or fields
+                current_sheet_baseline["structure_row_ids"] = [
+                    str(item).strip()
+                    for item in (structural_baseline.get("row_ids") or [])
+                    if str(item).strip()
+                ][: len(structural_rows)]
+                current_sheet_baseline["structure_source"] = str(
+                    structural_baseline.get("baseline_source") or ""
+                ).strip() or None
+            if len(structural_rows) > len(rows):
+                return structural_baseline
+            return current_sheet_baseline
+    if isinstance(structural_baseline, dict) and structural_baseline:
+        return structural_baseline
+    payload = _load_order_ocr_cache(order_id)
+    if isinstance(payload, dict):
+        try:
+            return _resolve_llm_review_baseline(payload=payload, template=template)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reparse baseline resolution from cache failed", order_id=order_id, error=str(exc))
+    if isinstance(fallback_payload, dict):
+        try:
+            return _resolve_llm_review_baseline(payload=fallback_payload, template=template)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reparse baseline resolution from fallback payload failed", order_id=order_id, error=str(exc))
+    return None
+
+
+def _build_reparse_structural_baseline(
+    *,
+    order_id: str,
+    template: dict[str, Any],
+    fallback_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    try:
+        with session_scope() as session:
+            order = session.get(Order, order_id)
+            if not order:
+                return None
+            facility_id = str(order.facility_code or "").strip()
+            if not facility_id:
+                return None
+            week_id = str(order.week_code or "").strip() or None
+            received_at = order.received_at or datetime.utcnow()
+            facility_week_hint = (
+                session.execute(
+                    select(Order.week_code)
+                    .where(Order.facility_code == facility_id, Order.week_code.is_not(None))
+                    .order_by(Order.received_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            global_week_hint = (
+                session.execute(
+                    select(Order.week_code)
+                    .where(Order.week_code.is_not(None))
+                    .order_by(Order.received_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            raw_order_lines = (
+                session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
+                .scalars()
+                .all()
+            )
+            order_lines = [
+                {
+                    "date": line.date,
+                    "daypart": line.daypart,
+                    "menu_name": line.menu_name,
+                    "diet_type": line.diet_type,
+                    "area_id": line.area_id,
+                    "quantity_original": line.quantity_original,
+                    "quantity_corrected": line.quantity_corrected,
+                }
+                for line in raw_order_lines
+            ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Reparse structural baseline order lookup failed", order_id=order_id, error=str(exc))
+        return None
+
+    fields, field_index = _build_sheet_fields_and_indexes(template)
+    if not fields or _validate_sheet_template_fields(fields):
+        return None
+
+    ocr_payload = None
+    if isinstance(fallback_payload, dict):
+        ocr_payload = dict(fallback_payload)
+    else:
+        payload, _ = get_ocr_output(order_id, persist_cache=False)
+        if isinstance(payload, dict):
+            ocr_payload = payload
+
+    resolved_week_id = _resolve_sheet_week_id(
+        current_week_id=week_id,
+        received_at=received_at,
+        order_lines=order_lines,
+        ocr_payload=ocr_payload,
+        facility_id=facility_id,
+        week_hints=[hint for hint in [facility_week_hint, global_week_hint] if hint],
+    )
+    if not resolved_week_id:
+        return None
+
+    entries, entry_source = _build_sheet_menu_entries(
+        week_id=resolved_week_id,
+        ocr_payload=ocr_payload,
+        template=template,
+        received_at=received_at,
+    )
+    if not entries:
+        return None
+
+    rows, resolved_source = _build_rows_from_menu_entries(
+        entries=entries,
+        fields=fields,
+        field_index=field_index,
+        line_dates=set(),
+        source=entry_source,
+        payload_dates=set(),
+        payload_row_count=0,
+        scope_anchor_date=None,
+    )
+    if not rows:
+        return None
+
+    header = _sheet_header_from_template(fields, template)
+    raw_output = _snapshot_raw_ocr_payload(ocr_payload) if isinstance(ocr_payload, dict) else {}
+    if not raw_output and isinstance(fallback_payload, dict):
+        raw_output = _snapshot_raw_ocr_payload(fallback_payload)
+    return {
+        "fields": fields,
+        "header": header[: len(fields)],
+        "rows": [list(row.get("values") or []) for row in rows],
+        "row_ids": [str(row.get("row_id") or "").strip() or f"sheet-row-{idx + 1}" for idx, row in enumerate(rows)],
+        "baseline_revision_id": None,
+        "raw_output": raw_output,
+        "baseline_source": f"{resolved_source}_structure",
+        "week_id": resolved_week_id,
+    }
+
+
 def _build_llm_assist_prompt(
     *,
     provider: str,
     template: dict,
     pipeline_output: dict | None,
     llm_assist: bool,
+    failure_context: dict[str, Any] | None = None,
+    baseline: dict[str, Any] | None = None,
+    evaluator_feedback: dict[str, Any] | None = None,
+    draft_rows_override: list[list[str]] | None = None,
+    draft_rows_label: str | None = None,
+    first_pass_rows_override: list[list[str]] | None = None,
 ) -> str | None:
     prompt_key = "openai_ocr_prompt" if provider == "openai" else "gemini_ocr_prompt"
     base_custom = str(template.get(prompt_key) or "").strip()
     sections: list[str] = []
-    if base_custom:
+    if base_custom and not _looks_like_generated_reparse_prompt(base_custom):
         sections.append(f"Facility-specific instruction:\n{base_custom}")
     if llm_assist:
+        first_pass_rows = [list(row) for row in (first_pass_rows_override or []) if isinstance(row, list)]
+        if not first_pass_rows and isinstance(pipeline_output, dict):
+            first_pass_rows = _extract_first_pass_rows_from_payload(pipeline_output, template)
+            if not first_pass_rows:
+                first_pass_rows = _extract_sheet_rows_from_payload(pipeline_output, template)
+        structural_fields = (
+            [str(field).strip() for field in (baseline.get("structure_fields") or []) if str(field).strip()]
+            if isinstance(baseline, dict)
+            else []
+        )
+        if not structural_fields and isinstance(baseline, dict):
+            structural_fields = [
+                str(field).strip() for field in (baseline.get("fields") or []) if str(field).strip()
+            ]
+        structural_rows = (
+            [list(row) for row in (baseline.get("structure_rows") or []) if isinstance(row, list)]
+            if isinstance(baseline, dict)
+            else []
+        )
+        if not structural_rows and isinstance(baseline, dict):
+            structural_rows = [list(row) for row in (baseline.get("rows") or []) if isinstance(row, list)]
+        block_anchor_hints = _build_reparse_block_anchor_hints(
+            structural_fields=structural_fields,
+            structural_rows=structural_rows,
+            first_pass_fields=_row_fields_from_template(template) or structural_fields,
+            first_pass_rows=first_pass_rows,
+        )
         sections.append(
             "Second-pass repair mode:\n"
             "- Treat the first-pass yomitoku output as the baseline draft.\n"
+            "- Treat the current sheet/baseline rows as the row structure shown to the user; existing quantities may be stale and must be re-verified against the fax.\n"
             "- Use the fax image to repair or confirm that draft, not to replace the whole table unnecessarily.\n"
+            "- Determine each date/daypart block's quantity pattern first, then expand it to row-level JSON.\n"
             "- Keep row order stable.\n"
+            "- row_index is the structural row position from the current sheet; blank rows still consume row indexes.\n"
+            "- Return the full structural rows for the current sheet, not a quantity-only sparse draft.\n"
+            "- Copy date/daypart/menu cells from the current sheet structure exactly unless the fax clearly contradicts them.\n"
             "- Fill missing cells when readable; keep empty string when unreadable.\n"
-            "- If a handwritten quantity is unreadable, infer only from nearby recognized quantities when continuity is clear; otherwise keep empty string.\n"
+            "- It is valid for some rows to remain blank across all quantity columns.\n"
+            "- Do not compress blank rows out of the output, even when the first visible quantity appears later in the block.\n"
+            "- If evaluator feedback identifies one structural drift example, re-check every date/daypart block for the same pattern before returning JSON.\n"
+            "- Do NOT fill a row unless a quantity is directly visible for that row or an explicit visual span clearly covers that row.\n"
+            "- When the sheet contains more structural rows than first-pass OCR, preserve the structural rows and insert blank quantity rows where evidence is missing.\n"
+            "- If a handwritten quantity is unreadable, infer only from nearby recognized quantities within the same date/daypart block when continuity is clear; otherwise keep empty string.\n"
+            "- Continuity is never clear across a block boundary or across blank-anchor structural rows.\n"
+            "- Keep blank-anchor structural rows at their exact row indexes; never rotate them to the end of a block.\n"
+            "- Leading blank rows inside a date/daypart block may be intentional; keep them at the start of that block unless direct row-level evidence says otherwise.\n"
+            "- Do not trade missing blank rows for extra repeated quantities later in the block.\n"
             "- If a parenthesis/bracket mark spans multiple quantity cells with one number, copy that number to every covered cell.\n"
             "- If arrows/vertical range lines indicate a number applies to a span, copy that number to all cells in that span.\n"
+            "- Never extend a quantity into visually separate rows above or below the marked block.\n"
             "- Apply copying/inference only within the clearly indicated range.\n"
             "- Quantity cells must contain digits only.\n"
             "- Structured table cells and suspicious-cell diagnostics are provided below; use them when deciding what to repair.\n"
             "- Return strict JSON only."
         )
+        if isinstance(failure_context, dict) and failure_context:
+            try:
+                failure_text = json.dumps(failure_context, ensure_ascii=False)
+            except TypeError:
+                failure_text = str(failure_context)
+            sections.append(
+                "Automatic fallback context:\n"
+                "The first-pass yomitoku/pipeline OCR did not produce parseable order lines.\n"
+                f"{_truncate_assist_text(failure_text, max_chars=4000)}"
+            )
+        baseline_rows = _build_llm_assist_baseline_rows(baseline)
+        structural_prompt_rows = _build_llm_assist_structural_rows(baseline)
+        baseline_date_ranges = _summarize_prompt_date_blocks(structural_prompt_rows or baseline_rows)
+        if baseline_rows:
+            baseline_source = (
+                str(baseline.get("baseline_source") or "").strip()
+                if isinstance(baseline, dict)
+                else ""
+            )
+            baseline_revision_id = (
+                str(baseline.get("baseline_revision_id") or "").strip()
+                if isinstance(baseline, dict)
+                else ""
+            )
+            baseline_sections = [
+                "Current sheet/baseline rows shown to the user:\n"
+                f"{_truncate_assist_text(json.dumps(baseline_rows[:80], ensure_ascii=False), max_chars=5000)}"
+            ]
+            if baseline_source:
+                baseline_sections.append(f"Current baseline source: {baseline_source}")
+            if baseline_revision_id:
+                baseline_sections.append(f"Current baseline revision_id: {baseline_revision_id}")
+            sections.append("\n".join(baseline_sections))
+            baseline_block_ranges = _summarize_prompt_row_blocks(structural_prompt_rows or baseline_rows)
+            if baseline_block_ranges:
+                sections.append(
+                    "Row block boundaries from structural sheet/baseline:\n"
+                    f"{_truncate_assist_text(json.dumps(baseline_block_ranges[:80], ensure_ascii=False), max_chars=5000)}"
+                )
+                sections.append(
+                    "Block boundary rules:\n"
+                    "- Treat each consecutive date/daypart block above as a hard row boundary.\n"
+                    "- Keep every quantity inside its own block.\n"
+                    "- If a block has no direct visual quantity evidence, keep the whole block blank.\n"
+                    "- Never start the next block's quantity before that block begins.\n"
+                    "- Never let one handwritten number continue past the end row of its marked block."
+                )
+        if baseline_date_ranges:
+            sections.append(
+                "Date block layout summary:\n"
+                f"{_truncate_assist_text(json.dumps(baseline_date_ranges[:80], ensure_ascii=False), max_chars=5000)}"
+            )
+            sections.append(
+                "Date block rules:\n"
+                "- Inside each date block, preserve the exact order of its sub-blocks.\n"
+                "- Blank sub-blocks may appear at the start, middle, or end of a date block.\n"
+                "- Do NOT rotate a blank sub-block to the end of a date block just because later rows have quantities.\n"
+                "- If the first visible quantity for a date block appears below the top rows, keep all earlier structural rows blank.\n"
+                "- Never shift a lower handwritten quantity upward into earlier rows of the same date block.\n"
+                "- If a sequence of blank-anchor rows exists before a visible handwritten quantity, keep that full sequence blank.\n"
+                "- If one or more blank rows appear before the next visible handwritten number, those earlier rows must stay blank.\n"
+                "- Never pull the next meal block's number upward just to remove blank rows.\n"
+                "- A later meal block's quantity must never overwrite an earlier meal block's filled rows."
+            )
+        if structural_prompt_rows:
+            structure_source = ""
+            if isinstance(baseline, dict):
+                structure_source = str(
+                    baseline.get("structural_baseline_source")
+                    or baseline.get("structure_source")
+                    or ""
+                ).strip()
+            structure_sections = [
+                "Structural sheet rows for blank-anchor preservation:\n"
+                f"{_truncate_assist_text(json.dumps(structural_prompt_rows[:80], ensure_ascii=False), max_chars=5000)}"
+            ]
+            if structure_source:
+                structure_sections.append(f"Structural baseline source: {structure_source}")
+            sections.append("\n".join(structure_sections))
+        block_ranges = block_anchor_hints.get("blocks")
+        if isinstance(block_ranges, list) and block_ranges:
+            sections.append(
+                "Structural block anchor summary:\n"
+                f"{_truncate_assist_text(json.dumps(block_ranges[:80], ensure_ascii=False), max_chars=5000)}"
+            )
+        if bool(block_anchor_hints.get("reference_alignment_weak")):
+            sections.append(
+                "Reference row alignment warning:\n"
+                "- First-pass row keys are too noisy to use as row-index anchors.\n"
+                "- Use only the structural date/daypart block boundaries from the current sheet.\n"
+                "- Do not infer blank-anchor row indexes from the noisy first-pass rows."
+            )
+        unmatched_structural_row_indexes = block_anchor_hints.get("unmatched_structural_row_indexes")
+        if not unmatched_structural_row_indexes:
+            unmatched_structural_row_indexes = block_anchor_hints.get("structural_blank_anchor_row_indexes")
+        if isinstance(unmatched_structural_row_indexes, list) and unmatched_structural_row_indexes:
+            sections.append(
+                "Blank-anchor structural row indexes:\n"
+                f"{_truncate_assist_text(json.dumps(unmatched_structural_row_indexes[:120], ensure_ascii=False), max_chars=2000)}\n"
+                "- These structural rows were not matched by first-pass OCR.\n"
+                "- Keep them blank unless the fax shows direct row-level evidence.\n"
+                "- Never backfill them from the next block."
+            )
+        if baseline_rows and first_pass_rows and len(baseline_rows) > len(first_pass_rows):
+            sections.append(
+                "Structural row preservation hint:\n"
+                f"- Current sheet rows: {len(baseline_rows)}.\n"
+                f"- First-pass yomitoku rows: {len(first_pass_rows)}.\n"
+                "- Missing structural rows are not a license to copy neighboring quantities.\n"
+                "- Keep quantity cells empty on unmatched structural rows unless the fax shows a direct mark or explicit span for them."
+            )
+        if baseline_rows:
+            baseline_quantity_columns = [
+                column
+                for column in _template_quantity_columns(template)
+                if isinstance(column, dict)
+            ]
+            candidate_blank_hint_rows = (
+                [list(row) for row in (draft_rows_override or []) if isinstance(row, list)]
+                or first_pass_rows
+            )
+            trailing_blank_hints = _collect_candidate_blank_edge_hints(
+                candidate_rows=candidate_blank_hint_rows,
+                quantity_columns=baseline_quantity_columns,
+                date_blocks=baseline_date_ranges,
+            )
+            if trailing_blank_hints:
+                sections.append(
+                    "Suspicious blank-edge placement hints from the current OCR draft:\n"
+                    f"{_truncate_assist_text(json.dumps(trailing_blank_hints[:40], ensure_ascii=False), max_chars=4000)}\n"
+                    "- These are suspicious only; verify against the fax image before changing rows.\n"
+                    "- If a blank run belongs earlier in the date block, move it back to the correct structural rows."
+                )
+        compact_feedback = _compact_llm_reparse_audit_feedback(evaluator_feedback)
+        feedback_issue_codes: set[str] = set()
+        if compact_feedback:
+            feedback_issue_codes = {
+                _normalize_audit_issue_code(item.get("issue_code"))
+                for item in (compact_feedback.get("issues") or [])
+                if isinstance(item, dict)
+            }
+            sections.append(
+                "Evaluator feedback from previous OCR draft:\n"
+                f"{_truncate_assist_text(json.dumps(compact_feedback, ensure_ascii=False), max_chars=6000)}"
+            )
+            feedback_row_indexes = sorted(
+                {
+                    int(item.get("row_index"))
+                    for item in (compact_feedback.get("issues") or [])
+                    if isinstance(item, dict)
+                    and item.get("row_index") is not None
+                    and str(item.get("row_index")).strip().lstrip("-").isdigit()
+                    and int(item.get("row_index")) >= 0
+                }
+            )
+            if feedback_row_indexes:
+                sections.append(
+                    "Evaluator row-index repair hints:\n"
+                    f"{_truncate_assist_text(json.dumps(feedback_row_indexes[:120], ensure_ascii=False), max_chars=2000)}\n"
+                    "- Re-check these rows first against the fax image.\n"
+                    "- If evaluator feedback marks overextended_span or missing_blank_anchor_rows on a row, keep that row blank unless the fax shows direct row-level evidence.\n"
+                    "- Do not fix an earlier flagged row by pulling the next block's quantity upward."
+                )
+        structure_sensitive_mode = bool(
+            feedback_issue_codes
+            & {
+                "unexpected_dense_fill",
+                "missing_blank_anchor_rows",
+                "overextended_span",
+                "date_anchor_drift",
+                "invalid_numeric_spike",
+            }
+        ) or bool(isinstance(unmatched_structural_row_indexes, list) and unmatched_structural_row_indexes)
+        if draft_rows_override:
+            draft_label = str(draft_rows_label or "").strip() or "Previous OCR draft rows"
+            try:
+                draft_rows_text = json.dumps(draft_rows_override[:120], ensure_ascii=False)
+            except TypeError:
+                draft_rows_text = ""
+            if draft_rows_text:
+                sections.append(
+                    f"{draft_label}:\n"
+                    f"{_truncate_assist_text(draft_rows_text, max_chars=6000)}"
+                )
         if isinstance(pipeline_output, dict):
             table_raw = pipeline_output.get("table_raw")
-            if isinstance(table_raw, str) and table_raw.strip():
+            if isinstance(table_raw, str) and table_raw.strip() and not structure_sensitive_mode:
                 sections.append(
                     "First-pass yomitoku markdown:\n"
                     f"{_truncate_assist_text(table_raw.strip(), max_chars=7000)}"
                 )
-            rows = _extract_first_pass_rows_from_payload(pipeline_output, template)
-            if rows:
+            if first_pass_rows:
                 try:
-                    rows_text = json.dumps(rows[:80], ensure_ascii=False)
+                    rows_text = json.dumps(first_pass_rows[:80], ensure_ascii=False)
                 except TypeError:
                     rows_text = ""
                 if rows_text:
@@ -9947,18 +12361,25 @@ def _build_llm_assist_prompt(
                         "First-pass yomitoku structured rows:\n"
                         f"{_truncate_assist_text(rows_text, max_chars=4000)}"
                     )
-            tables = _compact_prompt_tables(pipeline_output)
-            if tables:
+            if structure_sensitive_mode:
                 sections.append(
-                    "First-pass yomitoku structured tables/cells:\n"
-                    f"{_truncate_assist_text(json.dumps(tables, ensure_ascii=False), max_chars=10000)}"
+                    "Block-anchored repair mode:\n"
+                    "- First-pass markdown/cell dumps are omitted here because structural drift was detected.\n"
+                    "- Rely on structural sheet rows, block boundaries, and evaluator feedback before copying any quantity."
                 )
-            issues = _compact_prompt_cell_issues(pipeline_output, template)
-            if issues:
-                sections.append(
-                    "Suspicious first-pass cells (review before changing):\n"
-                    f"{_truncate_assist_text(json.dumps(issues, ensure_ascii=False), max_chars=6000)}"
-                )
+            else:
+                tables = _compact_prompt_tables(pipeline_output)
+                if tables:
+                    sections.append(
+                        "First-pass yomitoku structured tables/cells:\n"
+                        f"{_truncate_assist_text(json.dumps(tables, ensure_ascii=False), max_chars=10000)}"
+                    )
+                issues = _compact_prompt_cell_issues(pipeline_output, template)
+                if issues:
+                    sections.append(
+                        "Suspicious first-pass cells (review before changing):\n"
+                        f"{_truncate_assist_text(json.dumps(issues, ensure_ascii=False), max_chars=6000)}"
+                    )
     if not sections:
         return None
     return "\n\n".join(sections)
@@ -10096,7 +12517,7 @@ def _should_use_gemini_pro_repair_pass(
 ) -> tuple[bool, str]:
     if provider != "gemini":
         return False, ""
-    if quality_error not in {"sheet_row_coverage_low", "sheet_column_anomaly"}:
+    if quality_error not in {"sheet_row_coverage_low", "sheet_row_overfill", "sheet_column_anomaly"}:
         return False, ""
     enabled = str(
         os.getenv("OCR_REPARSE_ENABLE_GEMINI_PRO_ON_QUALITY_FAIL", "1")
@@ -10128,6 +12549,11 @@ def _build_quantity_only_repair_prompts(
     quality_detail: dict[str, Any] | None,
     first_pass_model: str | None = None,
     target_model: str | None = None,
+    baseline_rows: list[list[str]] | None = None,
+    baseline_fields: list[str] | None = None,
+    structural_rows: list[list[str]] | None = None,
+    structural_fields: list[str] | None = None,
+    evaluator_feedback: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     prompt_key = "openai_ocr_prompt" if provider == "openai" else "gemini_ocr_prompt"
     user_key = "openai_ocr_user_prompt" if provider == "openai" else "gemini_ocr_user_prompt"
@@ -10157,6 +12583,29 @@ def _build_quantity_only_repair_prompts(
         json.dumps(current_rows[:200], ensure_ascii=False),
         max_chars=12000,
     )
+    normalized_baseline_rows = [list(row) for row in (baseline_rows or []) if isinstance(row, list)]
+    normalized_structural_rows = [list(row) for row in (structural_rows or []) if isinstance(row, list)]
+    resolved_structural_rows = normalized_structural_rows or normalized_baseline_rows
+    resolved_structural_fields = list(structural_fields or baseline_fields or row_fields)
+    block_anchor_hints = _build_reparse_block_anchor_hints(
+        structural_fields=resolved_structural_fields,
+        structural_rows=resolved_structural_rows,
+        first_pass_fields=row_fields or baseline_fields or resolved_structural_fields,
+        first_pass_rows=current_rows,
+    )
+    baseline_rows_hint = ""
+    if normalized_baseline_rows:
+        baseline_rows_hint = _truncate_assist_text(
+            json.dumps(normalized_baseline_rows[:200], ensure_ascii=False),
+            max_chars=12000,
+        ) or ""
+    baseline_block_ranges = _summarize_tabular_row_blocks(normalized_baseline_rows)
+    baseline_block_ranges_hint = ""
+    if baseline_block_ranges:
+        baseline_block_ranges_hint = _truncate_assist_text(
+            json.dumps(baseline_block_ranges[:120], ensure_ascii=False),
+            max_chars=6000,
+        ) or ""
     flash_summary = _build_flash_repair_summary(
         current_rows=current_rows,
         template=template,
@@ -10181,9 +12630,30 @@ def _build_quantity_only_repair_prompts(
         "Second-pass OCR repair mode:\n"
         "- Use fax image as the primary source of truth.\n"
         "- Start from first-pass (Flash) output as a draft and correct only with visible evidence.\n"
+        "- Treat the current sheet/baseline rows as the user-visible structural context.\n"
+        "- Determine each date/daypart block's quantity pattern first, then expand it to row-level JSON.\n"
+        "- row_index is the structural row position from the current sheet; blank rows still consume row indexes.\n"
+        "- Return the full structural rows from the current sheet; do not return quantity-only sparse rows.\n"
+        "- Copy date/daypart/menu cells from the current sheet exactly unless the fax clearly contradicts them.\n"
         "- Keep quantity columns independent and never swap values across columns.\n"
         "- Quantity fields must be digits only; unreadable cells must be empty string.\n"
+        "- It is valid for some rows to remain blank across all quantity columns.\n"
+        "- Do not compress blank rows out of the output, even when the first visible quantity appears later in the block.\n"
+        "- If evaluator feedback identifies one structural drift example, re-check every date/daypart block for the same pattern before returning JSON.\n"
+        "- Do NOT fill a row unless a quantity is directly visible for that row or an explicit visual span clearly covers that row.\n"
+        "- Existing quantities in the current sheet may be stale; use them only as structural context unless the fax confirms them.\n"
+        "- If the current sheet/baseline leaves a row blank, keep it blank unless the fax shows direct row-level evidence for that row.\n"
+        "- If structural rows are missing from first-pass OCR, insert blank rows where evidence is missing instead of copying neighboring quantities.\n"
+        "- Infer unreadable quantities only within the same date/daypart block.\n"
+        "- Continuity is never clear across a block boundary or across unmatched structural row indexes.\n"
+        "- Keep blank-anchor structural rows at their exact row indexes; never rotate them to the end of a block.\n"
         "- Copy numbers across cells only when explicit span marks exist.\n"
+        "- Treat each consecutive date/daypart block from the current sheet as a hard boundary.\n"
+        "- If a block has no direct visual quantity evidence, leave the whole block blank.\n"
+        "- Treat unmatched structural row indexes as blank anchors unless the fax shows direct row-level evidence.\n"
+        "- Never extend one handwritten number into visually separate rows above or below the marked block.\n"
+        "- If a visible number starts below blank rows, keep those blank rows empty instead of pulling that number upward.\n"
+        "- If consecutive meal blocks each have their own handwritten number, stop the earlier number before the next block begins.\n"
         "- Return strict JSON only."
     )
     if expected_row_count > 0:
@@ -10191,6 +12661,8 @@ def _build_quantity_only_repair_prompts(
             f"\n- Output EXACTLY {expected_row_count} table body rows."
             f"\n- row_index must be continuous 0..{max(expected_row_count - 1, 0)} with no gaps."
             f"\n- Missing row indexes from first pass: {missing_hint}."
+            "\n- Missing row indexes are rows to re-check carefully; if the fax does not show a number for them, leave their quantity cells empty."
+            "\n- Do not invent extra rows or duplicate row indexes to make the output denser."
         )
     if quantity_fields:
         hard_rules += (
@@ -10214,10 +12686,34 @@ def _build_quantity_only_repair_prompts(
         "First-pass OCR candidate rows (for repair hint only):\n"
         f"{rows_hint}"
     )
+    if baseline_rows_hint:
+        user_sections.append(
+            "Current sheet/baseline rows shown to the user:\n"
+            f"{baseline_rows_hint}"
+        )
+    if baseline_block_ranges_hint:
+        user_sections.append(
+            "Current sheet block boundaries:\n"
+            f"{baseline_block_ranges_hint}"
+        )
+    unmatched_structural_row_indexes = block_anchor_hints.get("unmatched_structural_row_indexes")
+    if not unmatched_structural_row_indexes:
+        unmatched_structural_row_indexes = block_anchor_hints.get("structural_blank_anchor_row_indexes")
+    if isinstance(unmatched_structural_row_indexes, list) and unmatched_structural_row_indexes:
+        user_sections.append(
+            "Blank-anchor structural row indexes:\n"
+            f"{_truncate_assist_text(json.dumps(unmatched_structural_row_indexes[:120], ensure_ascii=False), max_chars=2000)}"
+        )
     if summary_text:
         user_sections.append(
             "Failure focus locations and first-pass inference summary:\n"
             f"{summary_text}"
+        )
+    compact_feedback = _compact_llm_reparse_audit_feedback(evaluator_feedback)
+    if compact_feedback:
+        user_sections.append(
+            "Evaluator feedback from previous OCR draft:\n"
+            f"{_truncate_assist_text(json.dumps(compact_feedback, ensure_ascii=False), max_chars=6000)}"
         )
     if detail_text:
         user_sections.append(
@@ -10410,6 +12906,8 @@ def _build_llm_reparse_audit_prompts(
     reference_rows: list[list[str]] | None,
     quantity_columns: list[dict[str, str | int]],
     expected_row_count: int,
+    baseline_rows: list[list[str]] | None = None,
+    block_anchor_hints: dict[str, Any] | None = None,
 ) -> tuple[str, str, list[str]]:
     fields = [
         "issue_code",
@@ -10420,6 +12918,16 @@ def _build_llm_reparse_audit_prompts(
         "evidence",
         "reason",
     ]
+    current_sheet_date_ranges = (
+        _summarize_tabular_date_blocks(baseline_rows)
+        if isinstance(baseline_rows, list)
+        else []
+    )
+    candidate_blank_edge_hints = _collect_candidate_blank_edge_hints(
+        candidate_rows=candidate_rows,
+        quantity_columns=quantity_columns,
+        date_blocks=current_sheet_date_ranges,
+    )
     system_prompt = (
         "You are an OCR quality auditor for Japanese fax order sheets.\n"
         "Your task is defect finding only. Do NOT correct OCR rows.\n"
@@ -10428,17 +12936,44 @@ def _build_llm_reparse_audit_prompts(
         '{"facility_name":"", "date_strings":[], "rows":[{"issue_code":"","severity":"","row_index":"","column_index":"","confidence":"","evidence":"","reason":""}]}\n'
         "If no clear defect is found, return rows as [].\n"
         "Rules:\n"
-        "- issue_code should be one of: row_count_shortfall, week_scope_mismatch, date_anchor_drift, mirrored_sibling_columns, column_swap, invalid_numeric_spike, all_quantity_blank.\n"
+        "- issue_code should be one of: row_count_shortfall, week_scope_mismatch, date_anchor_drift, mirrored_sibling_columns, column_swap, invalid_numeric_spike, all_quantity_blank, unexpected_dense_fill, overextended_span, missing_blank_anchor_rows.\n"
         "- severity should be one of: critical, high, medium, low.\n"
         "- confidence must be 0.00-1.00.\n"
         "- evidence must quote concrete visual evidence from the image (short text).\n"
         "- row_index/column_index should be digits when identifiable, otherwise empty string.\n"
+        "- Treat current_sheet_block_ranges as hard structural boundaries between date/daypart blocks.\n"
+        "- Treat current_sheet_date_ranges as ordered parent blocks that contain those date/daypart sub-blocks.\n"
+        "- Treat blank_anchor_row_indexes_hint as rows that should stay blank unless direct row-level evidence exists.\n"
+        "- Flag unexpected_dense_fill when quantities are copied into rows without direct visual evidence.\n"
+        "- Flag missing_blank_anchor_rows when rows that should remain blank are filled.\n"
+        "- Flag missing_blank_anchor_rows when blank-anchor rows are rotated to the tail of a block instead of staying at their hinted row indexes.\n"
+        "- Flag overextended_span when one handwritten number is copied beyond the visually covered block or across a current_sheet_block_ranges boundary.\n"
+        "- When checking overextended_span, reject upward propagation from lower rows into earlier blank-anchor rows.\n"
+        "- Flag overextended_span when a lower handwritten quantity is shifted upward into earlier rows of the same date block.\n"
         "- Never output markdown or explanations."
     )
+    blank_anchor_row_indexes_hint = []
+    if isinstance(block_anchor_hints, dict):
+        raw_blank_anchor_hint = block_anchor_hints.get("unmatched_structural_row_indexes") or []
+        if isinstance(raw_blank_anchor_hint, list):
+            blank_anchor_row_indexes_hint = raw_blank_anchor_hint[:160]
+        if not blank_anchor_row_indexes_hint:
+            fallback_blank_anchor_hint = block_anchor_hints.get("structural_blank_anchor_row_indexes") or []
+            if isinstance(fallback_blank_anchor_hint, list):
+                blank_anchor_row_indexes_hint = fallback_blank_anchor_hint[:160]
     user_payload = {
         "expected_row_count": int(expected_row_count) if expected_row_count > 0 else None,
         "candidate_rows": candidate_rows[:260],
         "reference_rows_hint": (reference_rows or [])[:120],
+        "current_sheet_rows_hint": (baseline_rows or [])[:120],
+        "current_sheet_date_ranges": current_sheet_date_ranges[:80],
+        "current_sheet_block_ranges": (
+            (block_anchor_hints or {}).get("blocks")
+                if isinstance(block_anchor_hints, dict)
+                else _summarize_tabular_row_blocks(baseline_rows)
+            ),
+        "blank_anchor_row_indexes_hint": blank_anchor_row_indexes_hint,
+        "candidate_blank_edge_hints": candidate_blank_edge_hints[:40],
         "quantity_columns": quantity_columns,
     }
     user_prompt = (
@@ -10458,6 +12993,7 @@ def _run_llm_reparse_audit(
     candidate_rows: list[list[str]],
     reference_rows: list[list[str]] | None,
     expected_row_count: int,
+    baseline_rows: list[list[str]] | None = None,
 ) -> dict[str, Any] | None:
     if provider not in {"gemini", "openai"}:
         return None
@@ -10470,6 +13006,13 @@ def _run_llm_reparse_audit(
         template=template,
     )
     quantity_columns = _template_quantity_columns(template)
+    template_fields = _row_fields_from_template(template)
+    block_anchor_hints = _build_reparse_block_anchor_hints(
+        structural_fields=template_fields,
+        structural_rows=[list(row) for row in (baseline_rows or []) if isinstance(row, list)],
+        first_pass_fields=template_fields,
+        first_pass_rows=candidate_rows,
+    )
     requested_audit_provider = _resolve_llm_audit_provider(
         primary_provider=provider,
         template=template,
@@ -10517,8 +13060,10 @@ def _run_llm_reparse_audit(
     system_prompt, user_prompt, row_fields = _build_llm_reparse_audit_prompts(
         candidate_rows=candidate_rows,
         reference_rows=reference_rows,
+        baseline_rows=baseline_rows,
         quantity_columns=quantity_columns,
         expected_row_count=expected_row_count,
+        block_anchor_hints=block_anchor_hints,
     )
 
     audit_template = dict(template)
@@ -10562,12 +13107,29 @@ def _run_llm_reparse_audit(
                 "OCR_REPARSE_LLM_AUDIT_BLOCKING_CODES",
                 (
                     "row_count_shortfall,week_scope_mismatch,date_anchor_drift,"
-                    "mirrored_sibling_columns,column_swap,invalid_numeric_spike,all_quantity_blank"
+                    "mirrored_sibling_columns,column_swap,invalid_numeric_spike,all_quantity_blank,"
+                    "unexpected_dense_fill,overextended_span,missing_blank_anchor_rows"
                 ),
             )
         ).split(",")
         if str(token).strip()
     }
+    template_blocking_codes = template.get("llm_audit_blocking_codes")
+    if isinstance(template_blocking_codes, (list, tuple, set)):
+        blocking_codes |= {
+            _normalize_audit_issue_code(token)
+            for token in template_blocking_codes
+            if str(token).strip()
+        }
+    ignored_blocking_codes: set[str] = set()
+    template_non_blocking_codes = template.get("llm_audit_non_blocking_codes")
+    if isinstance(template_non_blocking_codes, (list, tuple, set)):
+        ignored_blocking_codes = {
+            _normalize_audit_issue_code(token)
+            for token in template_non_blocking_codes
+            if str(token).strip()
+        }
+        blocking_codes -= ignored_blocking_codes
     blocking_severity = {
         str(token).strip().lower()
         for token in str(
@@ -10623,6 +13185,8 @@ def _run_llm_reparse_audit(
                 continue
             issue_code = _normalize_audit_issue_code(issue.get("issue_code"))
             severity = str(issue.get("severity") or "").strip().lower()
+            if issue_code in ignored_blocking_codes:
+                continue
             if issue_code in blocking_codes or severity in blocking_severity:
                 blocking_issues.append(issue)
         status = "pass"
@@ -10733,6 +13297,9 @@ def _build_reparse_quantity_rules(
     # Keep these rows so source_row_index-based position mapping can restore
     # date/daypart/menu from weekly menu entries.
     rules["allow_blank_structure_rows"] = True
+    # LLM quantity-only rows already represent table-body row indexes.
+    # Do not skip template header rows again when parsing them.
+    rules["rows_are_body_only"] = True
     if rules.get("max_quantity_abs") is None:
         try:
             rules["max_quantity_abs"] = float(os.getenv("OCR_SHEET_MAX_QTY", "150"))
@@ -10816,6 +13383,280 @@ def _compact_debug_lines(lines: object, *, max_lines: int = 20) -> list[dict[str
     return compact
 
 
+def _resolve_llm_audit_cluster_fill_decision(llm_audit: dict[str, Any] | None) -> str | None:
+    if not isinstance(llm_audit, dict) or not llm_audit:
+        return None
+    for candidate in (
+        llm_audit.get("sheet_cluster_fill_decision"),
+        llm_audit.get("order_line_cluster_fill_decision"),
+        llm_audit.get("sheet_fill_decision"),
+    ):
+        parsed = _parse_sheet_fill_decision(candidate)
+        if parsed is None:
+            continue
+        return "allow" if parsed else "deny"
+    audit_status = str(llm_audit.get("status") or "").strip().lower()
+    if audit_status == "fail":
+        return "deny"
+    return None
+
+
+def _llm_reparse_audit_requires_second_pass(llm_audit: dict[str, Any] | None) -> bool:
+    if not isinstance(llm_audit, dict) or not llm_audit:
+        return False
+    status = str(llm_audit.get("status") or "").strip().lower()
+    if status == "fail":
+        return True
+    try:
+        if int(llm_audit.get("blocking_issue_count") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        if int(llm_audit.get("issue_count") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _llm_reparse_audit_issue_codes(llm_audit: dict[str, Any] | None) -> set[str]:
+    if not isinstance(llm_audit, dict) or not llm_audit:
+        return set()
+    issue_codes: set[str] = set()
+    for item in (llm_audit.get("issues") or []):
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_audit_issue_code(item.get("issue_code"))
+        if code:
+            issue_codes.add(code)
+    return issue_codes
+
+
+def _llm_reparse_audit_requires_structural_repair_prompt(
+    llm_audit: dict[str, Any] | None,
+) -> bool:
+    issue_codes = _llm_reparse_audit_issue_codes(llm_audit)
+    if not issue_codes:
+        return False
+    return bool(
+        issue_codes
+        & {
+            "unexpected_dense_fill",
+            "missing_blank_anchor_rows",
+            "overextended_span",
+            "date_anchor_drift",
+        }
+    )
+
+
+def _augment_llm_reparse_audit_with_structural_feedback(
+    *,
+    llm_audit: dict[str, Any] | None,
+    candidate_rows: list[list[str]] | None,
+    template: dict[str, Any],
+    baseline_fields: list[str] | None,
+    baseline_structure_rows: list[list[str]] | None,
+    reference_rows: list[list[str]] | None,
+    reference_fields: list[str] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(llm_audit, dict) or not llm_audit:
+        return llm_audit
+    normalized_rows = [list(row) for row in (candidate_rows or []) if isinstance(row, list)]
+    if not normalized_rows:
+        return llm_audit
+    structural_rows = [list(row) for row in (baseline_structure_rows or []) if isinstance(row, list)]
+    if not structural_rows:
+        return llm_audit
+    structural_fields = [str(field).strip() for field in (baseline_fields or []) if str(field).strip()]
+    if not structural_fields:
+        return llm_audit
+    reference_row_values = [list(row) for row in (reference_rows or []) if isinstance(row, list)]
+    normalized_reference_fields = [str(field).strip() for field in (reference_fields or []) if str(field).strip()]
+    quantity_columns = [col for col in _template_quantity_columns(template) if isinstance(col, dict)]
+    if not quantity_columns:
+        return llm_audit
+    try:
+        default_column_index = int(quantity_columns[0].get("index"))
+    except Exception:
+        default_column_index = 3
+    existing_issues = [dict(item) for item in (llm_audit.get("issues") or []) if isinstance(item, dict)]
+    existing_keys = {
+        (
+            _normalize_audit_issue_code(item.get("issue_code")),
+            _parse_audit_int(item.get("row_index")),
+            _parse_audit_int(item.get("column_index")),
+        )
+        for item in existing_issues
+    }
+    block_anchor_hints = _build_reparse_block_anchor_hints(
+        structural_fields=structural_fields,
+        structural_rows=structural_rows,
+        first_pass_fields=normalized_reference_fields or structural_fields,
+        first_pass_rows=reference_row_values,
+    )
+    blank_anchor_row_indexes = block_anchor_hints.get("unmatched_structural_row_indexes")
+    if not blank_anchor_row_indexes:
+        blank_anchor_row_indexes = block_anchor_hints.get("structural_blank_anchor_row_indexes")
+    normalized_blank_anchor_rows = [
+        int(item)
+        for item in (blank_anchor_row_indexes or [])
+        if str(item).strip().lstrip("-").isdigit()
+    ]
+    quantity_indexes: list[int] = []
+    for column in quantity_columns:
+        try:
+            col_idx = int(column.get("index"))
+        except Exception:
+            continue
+        if col_idx >= 0:
+            quantity_indexes.append(col_idx)
+    offending_rows: list[int] = []
+    for row_index in normalized_blank_anchor_rows:
+        if row_index < 0 or row_index >= len(normalized_rows):
+            continue
+        row = normalized_rows[row_index]
+        has_numeric = False
+        for col_idx in quantity_indexes:
+            if col_idx < len(row) and _parse_strict_numeric_cell(row[col_idx]) is not None:
+                has_numeric = True
+                break
+        if has_numeric:
+            offending_rows.append(row_index)
+    structural_date_blocks = _summarize_tabular_date_blocks(structural_rows)
+    signature_groups: dict[tuple[tuple[str, int], ...], list[dict[str, Any]]] = {}
+    for block in structural_date_blocks:
+        if not isinstance(block, dict):
+            continue
+        sub_blocks = block.get("sub_blocks")
+        if not isinstance(sub_blocks, list) or not sub_blocks:
+            continue
+        signature: tuple[tuple[str, int], ...] = tuple(
+            (
+                str(item.get("daypart") or "").strip(),
+                int(item.get("row_count") or 0),
+            )
+            for item in sub_blocks
+            if isinstance(item, dict)
+        )
+        if not signature:
+            continue
+        row_start = block.get("row_start")
+        row_end = block.get("row_end")
+        if not isinstance(row_start, int) or not isinstance(row_end, int) or row_end < row_start:
+            continue
+        block_rows = normalized_rows[row_start : row_end + 1]
+        if not block_rows:
+            continue
+        leading_blank_count = 0
+        any_filled = False
+        for row in block_rows:
+            has_numeric = False
+            for col_idx in quantity_indexes:
+                if col_idx < len(row) and _parse_strict_numeric_cell(row[col_idx]) is not None:
+                    has_numeric = True
+                    any_filled = True
+                    break
+            if has_numeric:
+                break
+            leading_blank_count += 1
+        if not any_filled:
+            continue
+        signature_groups.setdefault(signature, []).append(
+            {
+                "row_start": row_start,
+                "row_end": row_end,
+                "leading_blank_count": leading_blank_count,
+            }
+        )
+    for group in signature_groups.values():
+        if len(group) < 3:
+            continue
+        counts: dict[int, int] = {}
+        for item in group:
+            count = int(item.get("leading_blank_count") or 0)
+            counts[count] = counts.get(count, 0) + 1
+        majority_count = None
+        majority_frequency = 0
+        for count, frequency in counts.items():
+            if frequency > majority_frequency:
+                majority_count = count
+                majority_frequency = frequency
+        if majority_count is None or majority_count <= 0 or majority_frequency < 2:
+            continue
+        if majority_frequency * 2 <= len(group):
+            continue
+        for item in group:
+            row_start = int(item.get("row_start") or 0)
+            leading_blank_count = int(item.get("leading_blank_count") or 0)
+            if leading_blank_count >= majority_count:
+                continue
+            for row_index in range(row_start + leading_blank_count, row_start + majority_count):
+                if 0 <= row_index < len(normalized_rows):
+                    offending_rows.append(row_index)
+    offending_rows = sorted(set(offending_rows))
+    if not offending_rows:
+        return llm_audit
+    augmented_issues = list(existing_issues)
+    for row_index in offending_rows[:80]:
+        for issue_code, reason in (
+            (
+                "missing_blank_anchor_rows",
+                "Keep this structural row blank unless the fax shows direct row-level evidence.",
+            ),
+            (
+                "unexpected_dense_fill",
+                "Do not fill structurally blank rows unless the fax shows explicit row-local evidence.",
+            ),
+        ):
+            key = (issue_code, row_index, default_column_index)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            augmented_issues.append(
+                {
+                    "issue_code": issue_code,
+                    "severity": "high",
+                    "row_index": row_index,
+                    "column_index": default_column_index,
+                    "confidence": 0.99,
+                    "evidence": "Structural blank-anchor row was filled by the current OCR candidate.",
+                    "reason": reason,
+                }
+            )
+    if len(augmented_issues) == len(existing_issues):
+        return llm_audit
+    augmented = dict(llm_audit)
+    augmented["issues"] = augmented_issues
+    augmented["issue_count"] = len(augmented_issues)
+    blocking_issues = [dict(item) for item in (augmented.get("blocking_issues") or []) if isinstance(item, dict)]
+    blocking_keys = {
+        (
+            _normalize_audit_issue_code(item.get("issue_code")),
+            _parse_audit_int(item.get("row_index")),
+            _parse_audit_int(item.get("column_index")),
+        )
+        for item in blocking_issues
+    }
+    for item in augmented_issues:
+        severity = str(item.get("severity") or "").strip().lower()
+        if severity not in {"high", "critical"}:
+            continue
+        key = (
+            _normalize_audit_issue_code(item.get("issue_code")),
+            _parse_audit_int(item.get("row_index")),
+            _parse_audit_int(item.get("column_index")),
+        )
+        if key in blocking_keys:
+            continue
+        blocking_keys.add(key)
+        blocking_issues.append(dict(item))
+    augmented["blocking_issues"] = blocking_issues
+    augmented["blocking_issue_count"] = len(blocking_issues)
+    augmented["status"] = "fail"
+    return augmented
+
+
 def _build_reparse_debug_payload(
     *,
     provider: str | None,
@@ -10837,8 +13678,12 @@ def _build_reparse_debug_payload(
     warning_reasons: list[str] | None = None,
     warning_detail: dict[str, Any] | None = None,
     llm_quantity_only_merge: dict[str, Any] | None = None,
+    structural_row_projection: dict[str, Any] | None = None,
     llm_cost: dict[str, Any] | None = None,
     llm_audit: dict[str, Any] | None = None,
+    pdf_variant_used: str | None = None,
+    pdf_variant_fallback_reason: str | None = None,
+    quality_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_limit = _debug_text_max_chars()
     payload: dict[str, Any] = {
@@ -10873,15 +13718,24 @@ def _build_reparse_debug_payload(
         payload["warning_detail"] = warning_detail
     if isinstance(llm_quantity_only_merge, dict) and llm_quantity_only_merge:
         payload["llm_quantity_only_merge"] = llm_quantity_only_merge
+    if isinstance(structural_row_projection, dict) and structural_row_projection:
+        payload["structural_row_projection"] = structural_row_projection
     if isinstance(llm_cost, dict) and llm_cost:
         payload["llm_cost"] = llm_cost
     if isinstance(llm_audit, dict) and llm_audit:
         payload["llm_audit"] = llm_audit
-        audit_status = str(llm_audit.get("status") or "").strip().lower()
-        if audit_status == "pass":
-            payload["order_line_cluster_fill_decision"] = "allow"
-        elif audit_status == "fail":
-            payload["order_line_cluster_fill_decision"] = "deny"
+        cluster_fill_decision = _resolve_llm_audit_cluster_fill_decision(llm_audit)
+        if cluster_fill_decision:
+            payload["order_line_cluster_fill_decision"] = cluster_fill_decision
+    if isinstance(pdf_variant_used, str) and pdf_variant_used.strip():
+        payload["pdf_variant_used"] = pdf_variant_used.strip()
+    if isinstance(pdf_variant_fallback_reason, str) and pdf_variant_fallback_reason.strip():
+        payload["pdf_variant_fallback_reason"] = pdf_variant_fallback_reason.strip()
+    if isinstance(quality_metadata, dict) and quality_metadata:
+        for key, value in quality_metadata.items():
+            if value is None:
+                continue
+            payload[key] = value
     provider_debug = getattr(extracted, "provider_debug", None) if extracted is not None else None
     if isinstance(provider_debug, dict) and provider_debug:
         payload["provider_debug"] = provider_debug
@@ -10901,6 +13755,11 @@ def reparse_order(
     ocr_prompt: str | None = None,
     ocr_provider: str | None = None,
     llm_assist: bool = False,
+    auto_fallback_context: dict[str, Any] | None = None,
+    evaluator_feedback: dict[str, Any] | None = None,
+    feedback_retry_depth: int = 0,
+    draft_rows_override: list[list[str]] | None = None,
+    draft_rows_label: str | None = None,
 ):
     config_service.reload_configs()
     before_count = 0
@@ -10998,33 +13857,44 @@ def reparse_order(
     )
     template_to_use = dict(template)
     requested_provider = _normalize_reparse_provider(ocr_provider)
-    if llm_assist or requested_provider in {"openai", "gemini"}:
+    inference_provider = _resolve_explicit_reparse_inference_provider(
+        requested_provider=requested_provider,
+        llm_assist=bool(llm_assist),
+        template=template_to_use,
+    )
+    if llm_assist or inference_provider in {"openai", "gemini"}:
         # LLM OCR frequently returns merged rows where date/daypart/menu are omitted
         # in quantity-only rows. Enable fill-forward parsing in reparse path.
         template_to_use.setdefault("large_cell_mode", True)
         template_to_use.setdefault("fill_missing_date_with_hint", True)
-    if requested_provider:
-        template_to_use["main_ocr_provider"] = requested_provider
-        template_to_use["_force_main_ocr_provider"] = requested_provider
-        if requested_provider == "openai":
+    if inference_provider:
+        template_to_use["main_ocr_provider"] = inference_provider
+        template_to_use["_force_main_ocr_provider"] = inference_provider
+        if inference_provider == "openai":
             template_to_use["openai_ocr_enabled"] = True
-        elif requested_provider == "gemini":
+        elif inference_provider == "gemini":
             template_to_use["gemini_ocr_enabled"] = True
     main_provider = str(
-        requested_provider
+        inference_provider
         or os.getenv("OCR_MAIN_PROVIDER")
         or template_to_use.get("main_ocr_provider")
         or "pipeline"
     ).lower()
     llm_quantity_only_requested = bool(
         llm_assist
-        or requested_provider in {"openai", "gemini"}
+        or inference_provider in {"openai", "gemini"}
         or main_provider in {"openai", "gemini"}
     )
     if llm_quantity_only_requested:
         template_to_use["llm_quantity_only_mode"] = True
 
     pdf_bytes = load_bytes_from_uri(document_uri)
+    llm_input_pdf_bytes = pdf_bytes
+    llm_input_pdf_meta: dict[str, Any] = {
+        "requested": "raw",
+        "used": "raw",
+        "fallback_reason": None,
+    }
     ocr_job_id = f"OCR-{order_id}"
     _, created = create_job(ocr_job_id, input_reference=document_uri)
     if not created:
@@ -11051,6 +13921,8 @@ def reparse_order(
     pipeline_anchor_dates: set[date] = set()
     position_entries_for_existing_week: list[dict] = []
     expected_weekly_row_count = 0
+    llm_reparse_baseline: dict[str, Any] | None = None
+    llm_pre_inference_audit: dict[str, Any] | None = None
     if existing_week_code:
         if stable_existing_anchor_scope:
             position_entries_for_existing_week = _build_position_entries_for_lines(
@@ -11060,8 +13932,16 @@ def reparse_order(
         if not position_entries_for_existing_week:
             position_entries_for_existing_week = _build_position_menu_entries(existing_week_code)
         expected_weekly_row_count = len(position_entries_for_existing_week)
-    if llm_assist or requested_provider in {"openai", "gemini"} or (ocr_prompt and main_provider in {"openai", "gemini"}):
+    if llm_assist or inference_provider in {"openai", "gemini"} or (ocr_prompt and main_provider in {"openai", "gemini"}):
         pipeline_output_payload = _load_pipeline_output_with_retry(pipeline_output_ref)
+        if not _payload_has_first_pass_ocr_content(pipeline_output_payload):
+            rescue_payload, rescue_error = get_ocr_output(order_id, persist_cache=False)
+            if rescue_error is None and isinstance(rescue_payload, dict) and _payload_has_first_pass_ocr_content(rescue_payload):
+                pipeline_output_payload = rescue_payload
+                logger.info(
+                    "Reparse using rescued first-pass OCR payload order_id={} source=get_ocr_output",
+                    order_id,
+                )
         if isinstance(pipeline_output_payload, dict):
             pipeline_rows_for_rescue = _extract_first_pass_rows_from_payload(
                 pipeline_output_payload,
@@ -11096,7 +13976,12 @@ def reparse_order(
                 pipeline_rows=pipeline_rows_for_rescue,
                 anchor_date_count=len(pipeline_anchor_dates),
             )
-        if not pipeline_rows_for_rescue:
+        allow_cached_rescue_rows = not (
+            llm_assist
+            or inference_provider in {"openai", "gemini"}
+            or main_provider in {"openai", "gemini"}
+        )
+        if allow_cached_rescue_rows and not pipeline_rows_for_rescue:
             cached_reference_payload = _load_order_ocr_cache(order_id)
             if isinstance(cached_reference_payload, dict):
                 cached_rows = _extract_first_pass_rows_from_payload(
@@ -11126,8 +14011,44 @@ def reparse_order(
                         order_id,
                         len(pipeline_rows_for_rescue),
                     )
-        effective_provider = requested_provider or main_provider
+        llm_reparse_baseline = _resolve_reparse_llm_baseline(
+            order_id=order_id,
+            template=template_to_use,
+            fallback_payload=pipeline_output_payload,
+        )
+        llm_pdf_payload = (
+            pipeline_output_payload
+            if isinstance(pipeline_output_payload, dict)
+            else _load_order_ocr_cache(order_id)
+        )
+        llm_input_pdf_bytes, llm_input_pdf_meta = _resolve_reparse_llm_pdf_bytes(
+            document_uri=document_uri,
+            payload=llm_pdf_payload if isinstance(llm_pdf_payload, dict) else None,
+        )
+        effective_provider = inference_provider or main_provider
         if effective_provider in {"openai", "gemini"}:
+            _, baseline_reference_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)
+            audit_reference_rows = baseline_reference_rows or [
+                list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)
+            ]
+            audit_expected_row_count = _resolve_llm_expected_row_count(
+                menu_expected_row_count=expected_weekly_row_count,
+                pipeline_rows=pipeline_rows_for_rescue,
+                observed_rows=baseline_reference_rows,
+                anchor_date_count=len(pipeline_anchor_dates),
+            )
+            if pipeline_rows_for_rescue:
+                llm_pre_inference_audit = _run_llm_reparse_audit(
+                    pdf_bytes=llm_input_pdf_bytes,
+                    provider=effective_provider,
+                    template=template_to_use,
+                    facility_id=facility_id,
+                    preferred_template_id=preferred_template_id,
+                    candidate_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                    reference_rows=audit_reference_rows,
+                    baseline_rows=baseline_reference_rows,
+                    expected_row_count=audit_expected_row_count,
+                )
             if ocr_prompt and ocr_prompt.strip():
                 if effective_provider == "openai":
                     template_to_use["openai_ocr_user_prompt"] = ocr_prompt.strip()
@@ -11138,6 +14059,16 @@ def reparse_order(
                 template=template_to_use,
                 pipeline_output=pipeline_output_payload,
                 llm_assist=llm_assist,
+                failure_context=auto_fallback_context,
+                baseline=llm_reparse_baseline,
+                evaluator_feedback=(
+                    evaluator_feedback
+                    if isinstance(evaluator_feedback, dict) and evaluator_feedback
+                    else llm_pre_inference_audit
+                ),
+                draft_rows_override=[list(row) for row in (draft_rows_override or []) if isinstance(row, list)],
+                draft_rows_label=draft_rows_label,
+                first_pass_rows_override=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
             )
             if assist_prompt:
                 if effective_provider == "openai":
@@ -11169,12 +14100,38 @@ def reparse_order(
     llm_repair_pass_error: str | None = None
     llm_primary_model: str | None = None
     llm_repair_pass_model: str | None = None
+    llm_feedback_second_pass_applied = False
+    llm_feedback_second_pass_error: str | None = None
     reparse_cost_info: dict[str, Any] | None = None
     llm_audit_result: dict[str, Any] | None = None
+    llm_second_pass_audit: dict[str, Any] | None = None
+    blank_anchor_realign: dict[str, Any] | None = None
+    structural_row_projection: dict[str, Any] | None = None
     quantity_sanitize_stats: dict[str, int] | None = None
+    auto_fallback_applied = isinstance(auto_fallback_context, dict) and bool(auto_fallback_context)
+    auto_fallback_from_provider = (
+        str(auto_fallback_context.get("from_provider") or "").strip().lower()
+        if auto_fallback_applied
+        else None
+    )
+    auto_fallback_reason = (
+        str(auto_fallback_context.get("reason") or "").strip() or None
+        if auto_fallback_applied
+        else None
+    )
+
+    def _current_reparse_quality_metadata() -> dict[str, Any]:
+        return _build_reparse_quality_metadata(
+            requested_provider=requested_provider,
+            effective_provider=main_provider,
+            llm_assist=bool(llm_assist),
+            auto_fallback_applied=bool(auto_fallback_applied),
+            feedback_retry_depth=feedback_retry_depth,
+        )
+
     try:
         extracted = extract_fax_data(
-            pdf_bytes,
+            llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
             template_to_use,
             facility_id=facility_id,
             preferred_template_id=preferred_template_id,
@@ -11193,6 +14150,7 @@ def reparse_order(
         grid = extracted.grid
         provider_debug = extracted.provider_debug if isinstance(extracted.provider_debug, dict) else {}
         llm_primary_model = str(provider_debug.get("model") or "").strip() or None
+        rows_for_quantity_quality = [list(row) for row in rows if isinstance(row, list)]
         if not llm_primary_model and main_provider in {"openai", "gemini"}:
             resolved_model = _resolve_provider_model_name(
                 provider=main_provider,
@@ -11204,6 +14162,7 @@ def reparse_order(
             llm_quantity_only_active = _rows_look_like_quantity_only(
                 rows=[list(row) for row in rows if isinstance(row, list)],
                 template=template_to_use,
+                rows_are_body_only=bool(provider_debug.get("quantity_only_mode")),
             )
         if llm_quantity_only_active:
             provider_debug["quantity_only_mode"] = True
@@ -11226,6 +14185,40 @@ def reparse_order(
         elif llm_quantity_only_active and pipeline_rows_for_rescue and not merge_with_pipeline_enabled:
             provider_debug["quantity_only_merge_disabled"] = True
             extracted.provider_debug = provider_debug
+        if llm_quantity_only_active and pipeline_rows_for_rescue and isinstance(llm_reparse_baseline, dict):
+            rows_for_quantity_quality = [list(row) for row in rows if isinstance(row, list)]
+            baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
+                llm_reparse_baseline
+            )
+            realigned_rows, blank_anchor_realign = _realign_quantity_only_rows_to_structural_blank_anchors(
+                rows=[list(row) for row in rows if isinstance(row, list)],
+                template=template_to_use,
+                structural_fields=baseline_fields,
+                structural_rows=baseline_structure_rows,
+                reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                reference_fields=_row_fields_from_template(template_to_use) or baseline_fields,
+            )
+            if isinstance(blank_anchor_realign, dict) and blank_anchor_realign:
+                rows = realigned_rows
+                provider_debug["blank_anchor_realign"] = blank_anchor_realign
+                extracted.provider_debug = provider_debug
+            should_project_rows = _should_project_quantity_rows_to_structural_rows(
+                rows=[list(row) for row in rows if isinstance(row, list)],
+                structural_rows=baseline_structure_rows,
+                template=template_to_use,
+            )
+            if should_project_rows:
+                projected_rows, projected_stats = _project_quantity_only_rows_onto_structural_rows(
+                    rows=[list(row) for row in rows if isinstance(row, list)],
+                    template=template_to_use,
+                    structural_fields=baseline_fields,
+                    structural_rows=baseline_structure_rows,
+                )
+                if isinstance(projected_stats, dict) and projected_stats:
+                    rows = projected_rows
+                    structural_row_projection = projected_stats
+                    provider_debug["structural_row_projection"] = projected_stats
+                    extracted.provider_debug = provider_debug
         llm_finish_reason = _extract_llm_finish_reason(extracted)
         llm_truncated_output = (
             main_provider in {"openai", "gemini"} and _is_truncated_llm_output(extracted)
@@ -11279,7 +14272,7 @@ def reparse_order(
                 anchor_date_count=len(pipeline_anchor_dates),
             )
             quality_error, quality_detail = _evaluate_quantity_only_rows_quality(
-                rows=[list(row) for row in rows if isinstance(row, list)],
+                rows=rows_for_quantity_quality,
                 template=template_to_use,
                 expected_row_count=expected_weekly_row_count,
                 reference_rows=pipeline_rows_for_rescue,
@@ -11290,7 +14283,7 @@ def reparse_order(
             repair_enabled = str(
                 os.getenv("OCR_REPARSE_ENABLE_REPAIR_PASS", "1")
             ).strip().lower() not in {"0", "false", "no", "off"}
-            if repair_enabled and reparse_quality_error in {"sheet_row_coverage_low", "sheet_column_anomaly"}:
+            if repair_enabled and reparse_quality_error in {"sheet_row_coverage_low", "sheet_row_overfill", "sheet_column_anomaly"}:
                 repair_template = dict(template_to_use)
                 target_repair_model = _resolve_provider_model_name(
                     provider=main_provider,
@@ -11305,10 +14298,17 @@ def reparse_order(
                     repair_template["gemini_ocr_model"] = pro_repair_model
                     target_repair_model = pro_repair_model
                 llm_repair_pass_model = str(target_repair_model or "").strip() or None
+                baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
+                    llm_reparse_baseline
+                )
                 repair_system_prompt, repair_user_prompt = _build_quantity_only_repair_prompts(
                     provider=main_provider,
                     template=repair_template,
                     current_rows=[list(row) for row in rows if isinstance(row, list)],
+                    baseline_rows=baseline_structure_rows,
+                    baseline_fields=baseline_fields,
+                    structural_rows=baseline_structure_rows,
+                    structural_fields=baseline_fields,
                     expected_row_count=expected_weekly_row_count,
                     quality_error=reparse_quality_error,
                     quality_detail=reparse_quality_detail,
@@ -11325,7 +14325,7 @@ def reparse_order(
                     repair_template["gemini_ocr_enabled"] = True
                 try:
                     repaired_extracted = extract_fax_data(
-                        pdf_bytes,
+                        llm_input_pdf_bytes,
                         repair_template,
                         facility_id=facility_id,
                         preferred_template_id=preferred_template_id,
@@ -11334,8 +14334,11 @@ def reparse_order(
                     repaired_tokens = repaired_extracted.tokens or []
                     repaired_date_strings = repaired_extracted.date_strings or date_strings
                     repaired_grid = repaired_extracted.grid or grid
+                    repaired_rows_for_quality = [
+                        list(row) for row in repaired_rows if isinstance(row, list)
+                    ]
                     repaired_quality_error, repaired_quality_detail = _evaluate_quantity_only_rows_quality(
-                        rows=[list(row) for row in repaired_rows if isinstance(row, list)],
+                        rows=repaired_rows_for_quality,
                         template=repair_template,
                         expected_row_count=expected_weekly_row_count,
                         reference_rows=pipeline_rows_for_rescue,
@@ -11348,6 +14351,7 @@ def reparse_order(
                     )
                     if use_repaired:
                         rows = [list(row) for row in repaired_rows if isinstance(row, list)]
+                        rows_for_quantity_quality = repaired_rows_for_quality
                         tokens = repaired_tokens
                         date_strings = repaired_date_strings
                         grid = repaired_grid
@@ -11378,6 +14382,140 @@ def reparse_order(
                         "Reparse repair pass failed provider={} error={}",
                         main_provider,
                         llm_repair_pass_error,
+                    )
+        if (
+            main_provider in {"openai", "gemini"}
+            and rows
+            and not llm_rows_replaced_with_pipeline
+        ):
+            _, baseline_reference_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)
+            audit_reference_rows = baseline_reference_rows or [
+                list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)
+            ]
+            audit_expected_row_count = _resolve_llm_expected_row_count(
+                menu_expected_row_count=expected_weekly_row_count,
+                pipeline_rows=pipeline_rows_for_rescue,
+                observed_rows=[list(row) for row in rows if isinstance(row, list)],
+                anchor_date_count=len(pipeline_anchor_dates),
+            )
+            llm_second_pass_audit = _run_llm_reparse_audit(
+                pdf_bytes=llm_input_pdf_bytes,
+                provider=main_provider,
+                template=template_to_use,
+                facility_id=facility_id,
+                preferred_template_id=preferred_template_id,
+                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                reference_rows=audit_reference_rows,
+                baseline_rows=baseline_reference_rows,
+                expected_row_count=audit_expected_row_count,
+            )
+            llm_second_pass_audit = _augment_llm_reparse_audit_with_structural_feedback(
+                llm_audit=llm_second_pass_audit,
+                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                template=template_to_use,
+                baseline_fields=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[0],
+                baseline_structure_rows=baseline_reference_rows,
+                reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                reference_fields=_row_fields_from_template(template_to_use) or _resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[0],
+            )
+            if _llm_reparse_audit_requires_second_pass(llm_second_pass_audit):
+                second_pass_template = dict(template_to_use)
+                baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
+                    llm_reparse_baseline
+                )
+                use_structural_repair_prompt = (
+                    llm_quantity_only_active
+                    and _llm_reparse_audit_requires_structural_repair_prompt(llm_second_pass_audit)
+                )
+                if use_structural_repair_prompt:
+                    second_pass_model = _resolve_provider_model_name(
+                        provider=main_provider,
+                        template=second_pass_template,
+                    )
+                    repair_system_prompt, repair_user_prompt = _build_quantity_only_repair_prompts(
+                        provider=main_provider,
+                        template=second_pass_template,
+                        current_rows=[list(row) for row in rows if isinstance(row, list)],
+                        baseline_rows=baseline_structure_rows,
+                        baseline_fields=baseline_fields,
+                        structural_rows=baseline_structure_rows,
+                        structural_fields=baseline_fields,
+                        expected_row_count=expected_weekly_row_count,
+                        quality_error="sheet_structural_drift",
+                        quality_detail={"evaluator_feedback": llm_second_pass_audit or {}},
+                        first_pass_model=llm_primary_model,
+                        target_model=second_pass_model,
+                        evaluator_feedback=llm_second_pass_audit,
+                    )
+                    if main_provider == "openai":
+                        second_pass_template["openai_ocr_prompt"] = repair_system_prompt
+                        second_pass_template["openai_ocr_user_prompt"] = repair_user_prompt
+                        second_pass_template["openai_ocr_enabled"] = True
+                    else:
+                        second_pass_template["gemini_ocr_prompt"] = repair_system_prompt
+                        second_pass_template["gemini_ocr_user_prompt"] = repair_user_prompt
+                        second_pass_template["gemini_ocr_enabled"] = True
+                else:
+                    second_pass_prompt = _build_llm_assist_prompt(
+                        provider=main_provider,
+                        template=second_pass_template,
+                        pipeline_output=pipeline_output_payload,
+                        llm_assist=True,
+                        failure_context=auto_fallback_context,
+                        baseline=llm_reparse_baseline,
+                        evaluator_feedback=llm_second_pass_audit,
+                        draft_rows_override=[list(row) for row in rows if isinstance(row, list)],
+                        draft_rows_label="First LLM inference candidate rows",
+                        first_pass_rows_override=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                    )
+                    if second_pass_prompt:
+                        if main_provider == "openai":
+                            second_pass_template["openai_ocr_prompt"] = second_pass_prompt
+                            second_pass_template["openai_ocr_enabled"] = True
+                            if ocr_prompt and ocr_prompt.strip():
+                                second_pass_template["openai_ocr_user_prompt"] = ocr_prompt.strip()
+                        else:
+                            second_pass_template["gemini_ocr_prompt"] = second_pass_prompt
+                            second_pass_template["gemini_ocr_enabled"] = True
+                            if ocr_prompt and ocr_prompt.strip():
+                                second_pass_template["gemini_ocr_user_prompt"] = ocr_prompt.strip()
+                try:
+                    second_extracted = extract_fax_data(
+                        llm_input_pdf_bytes,
+                        second_pass_template,
+                        facility_id=facility_id,
+                        preferred_template_id=preferred_template_id,
+                    )
+                    second_rows = [list(row) for row in (second_extracted.table_rows or []) if isinstance(row, list)]
+                    if second_rows:
+                        rows = second_rows
+                        tokens = second_extracted.tokens or []
+                        date_strings = second_extracted.date_strings or date_strings
+                        grid = second_extracted.grid or grid
+                        extracted_data = second_extracted
+                        llm_finish_reason = _extract_llm_finish_reason(second_extracted)
+                        llm_truncated_output = _is_truncated_llm_output(second_extracted)
+                        llm_feedback_second_pass_applied = True
+                        second_debug = (
+                            second_extracted.provider_debug
+                            if isinstance(second_extracted.provider_debug, dict)
+                            else {}
+                        )
+                        second_model = str(second_debug.get("model") or "").strip()
+                        if second_model:
+                            llm_repair_pass_model = second_model
+                        template_to_use = second_pass_template
+                        effective_prompt = _resolve_reparse_prompt_text(
+                            provider=main_provider,
+                            template=second_pass_template,
+                            user_prompt=ocr_prompt,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    llm_feedback_second_pass_error = str(exc)
+                    logger.warning(
+                        "Reparse evaluator-guided second pass failed provider={} error={}",
+                        main_provider,
+                        llm_feedback_second_pass_error,
                     )
         if main_provider in {"openai", "gemini"}:
             final_debug = (
@@ -11428,13 +14566,21 @@ def reparse_order(
         logger.warning("Main OCR reparse failed (provider={}): {}", main_provider, str(exc))
         cached = _load_cached_ocr(message_id)
         if not cached:
-            update_job(ocr_job_id, status="failed", error_message=f"main_ocr_failed:{main_provider}")
+            update_job(
+                ocr_job_id,
+                status="failed",
+                error_message=f"main_ocr_failed:{main_provider}",
+                metrics=_current_reparse_quality_metadata(),
+            )
             return None, f"main_ocr_failed:{main_provider}"
         date_strings = cached.get("date_strings") or []
         rows = cached.get("table_rows") or []
         tokens = cached.get("tokens") or []
         tokens = filter_tokens_by_box(tokens, template_to_use.get("table_box"))
-        grid = detect_table_grid(pdf_bytes, template_to_use)
+        grid = detect_table_grid(
+            llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
+            template_to_use,
+        )
         _maybe_dump_reparse_debug(order_id, message_id, None, tokens, grid, error=str(exc))
 
     default_date = None
@@ -11449,13 +14595,65 @@ def reparse_order(
     policy = config_service.load_ingest_policy()
     strict_llm_quantity = bool(
         llm_assist
-        or requested_provider in {"openai", "gemini"}
+        or inference_provider in {"openai", "gemini"}
         or main_provider in {"openai", "gemini"}
     )
     reparse_quantity_rules = _build_reparse_quantity_rules(
         policy.get("quantity_rules", {}),
         strict_llm_quantity=strict_llm_quantity,
     )
+    if (
+        main_provider in {"openai", "gemini"}
+        and llm_quantity_only_active
+        and rows
+        and pipeline_rows_for_rescue
+        and isinstance(llm_reparse_baseline, dict)
+    ):
+        baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
+            llm_reparse_baseline
+        )
+        final_realigned_rows, final_blank_anchor_realign = _realign_quantity_only_rows_to_structural_blank_anchors(
+            rows=[list(row) for row in rows if isinstance(row, list)],
+            template=template_to_use,
+            structural_fields=baseline_fields,
+            structural_rows=baseline_structure_rows,
+            reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+            reference_fields=_row_fields_from_template(template_to_use) or baseline_fields,
+        )
+        if isinstance(final_blank_anchor_realign, dict) and final_blank_anchor_realign:
+            rows = final_realigned_rows
+            blank_anchor_realign = final_blank_anchor_realign
+            if extracted_data is not None:
+                extracted_data.table_rows = [list(row) for row in final_realigned_rows]
+                provider_debug = (
+                    extracted_data.provider_debug if isinstance(extracted_data.provider_debug, dict) else {}
+                )
+                provider_debug = dict(provider_debug)
+                provider_debug["blank_anchor_realign"] = final_blank_anchor_realign
+                extracted_data.provider_debug = provider_debug
+        should_project_rows = _should_project_quantity_rows_to_structural_rows(
+            rows=[list(row) for row in rows if isinstance(row, list)],
+            structural_rows=baseline_structure_rows,
+            template=template_to_use,
+        )
+        if should_project_rows:
+            projected_rows, projected_stats = _project_quantity_only_rows_onto_structural_rows(
+                rows=[list(row) for row in rows if isinstance(row, list)],
+                template=template_to_use,
+                structural_fields=baseline_fields,
+                structural_rows=baseline_structure_rows,
+            )
+            if isinstance(projected_stats, dict) and projected_stats:
+                rows = projected_rows
+                structural_row_projection = projected_stats
+                if extracted_data is not None:
+                    extracted_data.table_rows = [list(row) for row in projected_rows]
+                    provider_debug = (
+                        extracted_data.provider_debug if isinstance(extracted_data.provider_debug, dict) else {}
+                    )
+                    provider_debug = dict(provider_debug)
+                    provider_debug["structural_row_projection"] = projected_stats
+                    extracted_data.provider_debug = provider_debug
     lines = parse_order_lines(
         rows,
         template_to_use,
@@ -11464,7 +14662,7 @@ def reparse_order(
         default_date=default_date,
         tokens=tokens,
         grid=grid.__dict__ if grid else None,
-        pdf_bytes=pdf_bytes,
+        pdf_bytes=llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
     )
     parsed_output_for_debug = pipeline_output_payload if isinstance(pipeline_output_payload, dict) else None
     if not lines:
@@ -11499,7 +14697,7 @@ def reparse_order(
                             default_date=fallback_default_date,
                             tokens=[],
                             grid=None,
-                            pdf_bytes=None,
+                            pdf_bytes=llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
                         )
                     logger.info(
                         "Reparse fallback markdown rows={} parsed_lines={}",
@@ -11518,6 +14716,45 @@ def reparse_order(
                     logger.info("Reparse fallback sheet lines={}", len(lines))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Fallback OCR markdown parse failed", error=str(exc))
+    if (
+        not lines
+        and not llm_assist
+        and main_provider not in {"openai", "gemini"}
+        and not auto_fallback_applied
+    ):
+        auto_provider = _resolve_auto_llm_fallback_provider(template=template_to_use)
+        if auto_provider:
+            failure_reason = "lines_empty"
+            if isinstance(main_ocr_error, str) and main_ocr_error.strip():
+                failure_reason = main_ocr_error.strip()
+            fallback_context = {
+                "trigger": "yomitoku_failed",
+                "from_provider": main_provider,
+                "reason": failure_reason,
+                "row_count": len(rows or []),
+                "line_count": 0,
+                "date_strings": [str(item).strip() for item in (date_strings or []) if str(item).strip()][:20],
+            }
+            sample_row = rows[0] if rows else None
+            if sample_row is not None:
+                try:
+                    fallback_context["sample_row"] = str(sample_row)[:320]
+                except Exception:
+                    pass
+            logger.info(
+                "Auto triggering LLM fallback after yomitoku failure order_id={} from_provider={} to_provider={} reason={}",
+                order_id,
+                main_provider,
+                auto_provider,
+                failure_reason,
+            )
+            return reparse_order(
+                order_id,
+                ocr_prompt=ocr_prompt,
+                ocr_provider=auto_provider,
+                llm_assist=True,
+                auto_fallback_context=fallback_context,
+            )
     if not lines:
         sample_row = rows[0] if rows else None
         effective_provider = main_provider or "unknown"
@@ -11557,9 +14794,27 @@ def reparse_order(
             normalized_lines=lines,
             reject_reasons=[lines_empty_error],
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
+            structural_row_projection=structural_row_projection,
             llm_cost=reparse_cost_info,
             llm_audit=llm_audit_result,
+            pdf_variant_used=str(llm_input_pdf_meta.get("used") or "raw"),
+            pdf_variant_fallback_reason=(
+                str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+            ),
+            quality_metadata=_current_reparse_quality_metadata(),
         )
+        if auto_fallback_applied:
+            debug_payload["auto_fallback"] = dict(auto_fallback_context or {})
+        if isinstance(llm_pre_inference_audit, dict) and llm_pre_inference_audit:
+            debug_payload["llm_pre_inference_audit"] = llm_pre_inference_audit
+        if isinstance(llm_second_pass_audit, dict) and llm_second_pass_audit:
+            debug_payload["llm_second_pass_audit"] = llm_second_pass_audit
+        if llm_feedback_second_pass_applied:
+            debug_payload["llm_feedback_second_pass_applied"] = True
+        if llm_feedback_second_pass_error:
+            debug_payload["llm_feedback_second_pass_error"] = llm_feedback_second_pass_error
+        if isinstance(blank_anchor_realign, dict) and blank_anchor_realign:
+            debug_payload["blank_anchor_realign"] = blank_anchor_realign
         try:
             cache_payload: dict[str, Any] = {}
             if isinstance(parsed_output_for_debug, dict):
@@ -11586,6 +14841,7 @@ def reparse_order(
                 "truncated_output": bool(llm_truncated_output),
                 "rows_replaced_with_pipeline": bool(llm_rows_replaced_with_pipeline),
                 "llm_quantity_only_merge": llm_quantity_only_merge_stats or None,
+                "structural_row_projection": structural_row_projection or None,
                 "primary_model": llm_primary_model,
                 "repair_pass_applied": bool(llm_repair_pass_applied),
                 "repair_pass_reason": llm_repair_pass_reason,
@@ -11595,6 +14851,19 @@ def reparse_order(
                 "quality_detail": reparse_quality_detail or {},
                 "llm_cost": reparse_cost_info or None,
                 "llm_audit": llm_audit_result or None,
+                "llm_pre_inference_audit": llm_pre_inference_audit or None,
+                "llm_second_pass_audit": llm_second_pass_audit or None,
+                "llm_feedback_second_pass_applied": bool(llm_feedback_second_pass_applied),
+                "llm_feedback_second_pass_error": llm_feedback_second_pass_error,
+                "blank_anchor_realign": blank_anchor_realign or None,
+                "auto_fallback_applied": bool(auto_fallback_applied),
+                "auto_fallback_from_provider": auto_fallback_from_provider,
+                "auto_fallback_reason": auto_fallback_reason,
+                "pdf_variant_used": str(llm_input_pdf_meta.get("used") or "raw"),
+                "pdf_variant_fallback_reason": (
+                    str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+                ),
+                **_current_reparse_quality_metadata(),
             },
         )
         return None, "lines_empty"
@@ -11646,6 +14915,8 @@ def reparse_order(
         extra_payload_dates=pipeline_payload_dates,
         received_at=received_at,
     )
+    if "rows_for_quantity_quality" not in locals():
+        rows_for_quantity_quality = [list(row) for row in rows if isinstance(row, list)]
     if (
         main_provider in {"openai", "gemini"}
         and llm_quantity_only_active
@@ -11661,25 +14932,35 @@ def reparse_order(
             menu_expected_row_count=len(reparse_position_entries),
             fallback_expected_row_count=expected_weekly_row_count or week_menu_row_count,
             pipeline_rows=pipeline_rows_for_rescue,
-            observed_rows=[list(row) for row in rows if isinstance(row, list)],
+            observed_rows=rows_for_quantity_quality,
             anchor_date_count=len(quality_anchor_dates),
         )
         if quality_expected_row_count > 0:
             reparse_quality_error, reparse_quality_detail = _evaluate_quantity_only_rows_quality(
-                rows=[list(row) for row in rows if isinstance(row, list)],
+                rows=rows_for_quantity_quality,
                 template=template_to_use,
                 expected_row_count=quality_expected_row_count,
                 reference_rows=pipeline_rows_for_rescue,
             )
             llm_audit_result = _run_llm_reparse_audit(
-                pdf_bytes=pdf_bytes,
+                pdf_bytes=llm_input_pdf_bytes,
                 provider=main_provider,
                 template=template_to_use,
                 facility_id=facility_id,
                 preferred_template_id=preferred_template_id,
                 candidate_rows=[list(row) for row in rows if isinstance(row, list)],
                 reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                baseline_rows=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[1],
                 expected_row_count=quality_expected_row_count,
+            )
+            llm_audit_result = _augment_llm_reparse_audit_with_structural_feedback(
+                llm_audit=llm_audit_result,
+                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                template=template_to_use,
+                baseline_fields=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[0],
+                baseline_structure_rows=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[1],
+                reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                reference_fields=_row_fields_from_template(template_to_use) or _resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[0],
             )
     enable_position_mapping = bool(template_to_use.get("map_menu_by_position", True))
     mapped_rows = 0
@@ -11711,9 +14992,27 @@ def reparse_order(
         ocr_rows=rows,
         template=template_to_use,
         entries_override=reparse_position_entries if reparse_position_entries else None,
+        rows_are_body_only=bool(reparse_quantity_rules.get("rows_are_body_only")),
     )
     date_anchor_error: str | None = None
     date_anchor_detail: dict[str, Any] | None = None
+    blank_anchor_error: str | None = None
+    blank_anchor_detail: dict[str, Any] | None = None
+    if (
+        main_provider in {"openai", "gemini"}
+        and llm_quantity_only_active
+        and pipeline_rows_for_rescue
+    ):
+        baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
+            llm_reparse_baseline
+        )
+        blank_anchor_error, blank_anchor_detail = _validate_reparse_blank_anchor_drift(
+            lines=lines,
+            structural_fields=baseline_fields,
+            structural_rows=baseline_structure_rows,
+            reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+            reference_fields=_row_fields_from_template(template_to_use) or baseline_fields,
+        )
     if (
         main_provider in {"openai", "gemini"}
         and llm_quantity_only_active
@@ -11726,6 +15025,9 @@ def reparse_order(
     if not validation_error and date_anchor_error:
         validation_error = date_anchor_error
         validation_detail = date_anchor_detail or {}
+    if not validation_error and blank_anchor_error:
+        validation_error = blank_anchor_error
+        validation_detail = blank_anchor_detail or {}
     if not validation_error and reparse_quality_error:
         validation_error = reparse_quality_error
         validation_detail = reparse_quality_detail or {}
@@ -11743,6 +15045,27 @@ def reparse_order(
         and isinstance(llm_audit_result, dict)
         and str(llm_audit_result.get("status") or "").lower() == "fail"
     ):
+        if (
+            main_provider in {"openai", "gemini"}
+            and feedback_retry_depth < 1
+        ):
+            logger.info(
+                "Retrying reparse with evaluator feedback order_id={} provider={} depth={}",
+                order_id,
+                main_provider,
+                feedback_retry_depth + 1,
+            )
+            return reparse_order(
+                order_id,
+                ocr_prompt=ocr_prompt,
+                ocr_provider=main_provider,
+                llm_assist=True,
+                auto_fallback_context=auto_fallback_context,
+                evaluator_feedback=llm_audit_result,
+                feedback_retry_depth=feedback_retry_depth + 1,
+                draft_rows_override=[list(row) for row in rows if isinstance(row, list)],
+                draft_rows_label="Previous failed LLM inference candidate rows",
+            )
         validation_error = "sheet_llm_audit_failed"
         validation_detail = {
             "quality_issue": "llm_audit",
@@ -11809,7 +15132,24 @@ def reparse_order(
             llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
             llm_cost=reparse_cost_info,
             llm_audit=llm_audit_result,
+            pdf_variant_used=str(llm_input_pdf_meta.get("used") or "raw"),
+            pdf_variant_fallback_reason=(
+                str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+            ),
+            quality_metadata=_current_reparse_quality_metadata(),
         )
+        if auto_fallback_applied:
+            debug_payload["auto_fallback"] = dict(auto_fallback_context or {})
+        if isinstance(llm_pre_inference_audit, dict) and llm_pre_inference_audit:
+            debug_payload["llm_pre_inference_audit"] = llm_pre_inference_audit
+        if isinstance(llm_second_pass_audit, dict) and llm_second_pass_audit:
+            debug_payload["llm_second_pass_audit"] = llm_second_pass_audit
+        if llm_feedback_second_pass_applied:
+            debug_payload["llm_feedback_second_pass_applied"] = True
+        if llm_feedback_second_pass_error:
+            debug_payload["llm_feedback_second_pass_error"] = llm_feedback_second_pass_error
+        if isinstance(blank_anchor_realign, dict) and blank_anchor_realign:
+            debug_payload["blank_anchor_realign"] = blank_anchor_realign
         try:
             cache_payload: dict[str, Any] = {}
             if isinstance(parsed_output_for_debug, dict):
@@ -11836,6 +15176,7 @@ def reparse_order(
                 "truncated_output": bool(llm_truncated_output),
                 "rows_replaced_with_pipeline": bool(llm_rows_replaced_with_pipeline),
                 "llm_quantity_only_merge": llm_quantity_only_merge_stats or None,
+                "structural_row_projection": structural_row_projection or None,
                 "before_count": before_count,
                 "after_count": len(lines),
                 "changed": False,
@@ -11851,6 +15192,19 @@ def reparse_order(
                 "quality_detail": reparse_quality_detail or {},
                 "llm_cost": reparse_cost_info or None,
                 "llm_audit": llm_audit_result or None,
+                "llm_pre_inference_audit": llm_pre_inference_audit or None,
+                "llm_second_pass_audit": llm_second_pass_audit or None,
+                "llm_feedback_second_pass_applied": bool(llm_feedback_second_pass_applied),
+                "llm_feedback_second_pass_error": llm_feedback_second_pass_error,
+                "blank_anchor_realign": blank_anchor_realign or None,
+                "auto_fallback_applied": bool(auto_fallback_applied),
+                "auto_fallback_from_provider": auto_fallback_from_provider,
+                "auto_fallback_reason": auto_fallback_reason,
+                "pdf_variant_used": str(llm_input_pdf_meta.get("used") or "raw"),
+                "pdf_variant_fallback_reason": (
+                    str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+                ),
+                **_current_reparse_quality_metadata(),
             },
         )
         return None, validation_error
@@ -11940,11 +15294,25 @@ def reparse_order(
             "warning_detail": validation_warning_detail or {},
             "llm_cost": reparse_cost_info or None,
             "llm_audit": llm_audit_result or None,
+            "llm_pre_inference_audit": llm_pre_inference_audit or None,
+            "llm_second_pass_audit": llm_second_pass_audit or None,
+            "llm_feedback_second_pass_applied": bool(llm_feedback_second_pass_applied),
+            "llm_feedback_second_pass_error": llm_feedback_second_pass_error,
+            "blank_anchor_realign": blank_anchor_realign or None,
+            "structural_row_projection": structural_row_projection or None,
             "before_count": before_count,
             "after_count": after_count,
             "before_digest": before_digest,
             "after_digest": after_digest,
             "changed": reparse_changed,
+            "auto_fallback_applied": bool(auto_fallback_applied),
+            "auto_fallback_from_provider": auto_fallback_from_provider,
+            "auto_fallback_reason": auto_fallback_reason,
+            "pdf_variant_used": str(llm_input_pdf_meta.get("used") or "raw"),
+            "pdf_variant_fallback_reason": (
+                str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+            ),
+            **_current_reparse_quality_metadata(),
         },
     )
     reparse_debug = _build_reparse_debug_payload(
@@ -11966,9 +15334,27 @@ def reparse_order(
         warning_reasons=validation_warning_reasons or None,
         warning_detail=validation_warning_detail or None,
         llm_quantity_only_merge=llm_quantity_only_merge_stats or None,
+        structural_row_projection=structural_row_projection,
         llm_cost=reparse_cost_info,
         llm_audit=llm_audit_result,
+        pdf_variant_used=str(llm_input_pdf_meta.get("used") or "raw"),
+        pdf_variant_fallback_reason=(
+            str(llm_input_pdf_meta.get("fallback_reason") or "").strip() or None
+        ),
+        quality_metadata=_current_reparse_quality_metadata(),
     )
+    if auto_fallback_applied:
+        reparse_debug["auto_fallback"] = dict(auto_fallback_context or {})
+    if isinstance(llm_pre_inference_audit, dict) and llm_pre_inference_audit:
+        reparse_debug["llm_pre_inference_audit"] = llm_pre_inference_audit
+    if isinstance(llm_second_pass_audit, dict) and llm_second_pass_audit:
+        reparse_debug["llm_second_pass_audit"] = llm_second_pass_audit
+    if llm_feedback_second_pass_applied:
+        reparse_debug["llm_feedback_second_pass_applied"] = True
+    if llm_feedback_second_pass_error:
+        reparse_debug["llm_feedback_second_pass_error"] = llm_feedback_second_pass_error
+    if isinstance(blank_anchor_realign, dict) and blank_anchor_realign:
+        reparse_debug["blank_anchor_realign"] = blank_anchor_realign
     try:
         cache_ref = pipeline_output_ref
         if not cache_ref:

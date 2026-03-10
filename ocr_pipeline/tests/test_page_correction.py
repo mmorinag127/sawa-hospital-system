@@ -131,6 +131,29 @@ class PageCorrectionTest(unittest.TestCase):
         self.assertFalse(diagnostics["position_normalized"])
         np.testing.assert_array_equal(corrected, clean)
 
+    def test_correct_pdf_for_yomitoku_noop_summary_marks_no_corrected_pdf(self):
+        original_render = page_correction.render_pdf_to_page_images
+        try:
+            page_correction.render_pdf_to_page_images = lambda _pdf_bytes, _dpi: [(1, _make_form_image())]
+
+            corrected_pdf, summary, corrected_pages = page_correction.correct_pdf_for_yomitoku(
+                pdf_bytes=b"%PDF-1.4\n%EOF\n",
+                dpi=200,
+                db=None,
+            )
+        finally:
+            page_correction.render_pdf_to_page_images = original_render
+
+        self.assertFalse(summary["applied"])
+        self.assertEqual(summary["corrected_page_count"], 1)
+        self.assertFalse(summary["corrected_pdf_generated"])
+        self.assertFalse(summary["corrected_pdf_changed"])
+        self.assertEqual(summary["corrected_pdf_byte_length"], 0)
+        self.assertFalse(summary["corrected_pdf_uploaded"])
+        self.assertIsNone(summary["corrected_pdf_uri"])
+        self.assertEqual(corrected_pdf, b"%PDF-1.4\n%EOF\n")
+        self.assertIsNone(corrected_pages)
+
     def test_correct_pdf_for_yomitoku_applies_template_warp_to_first_page(self):
         first_page = _make_form_image()
         second_page = _make_form_image(shift_x=20)
@@ -166,6 +189,12 @@ class PageCorrectionTest(unittest.TestCase):
 
         self.assertTrue(summary["applied"])
         self.assertEqual(summary["template_warp_page_count"], 1)
+        self.assertEqual(summary["corrected_page_count"], 2)
+        self.assertTrue(summary["corrected_pdf_generated"])
+        self.assertTrue(summary["corrected_pdf_changed"])
+        self.assertGreater(summary["corrected_pdf_byte_length"], 0)
+        self.assertFalse(summary["corrected_pdf_uploaded"])
+        self.assertIsNone(summary["corrected_pdf_uri"])
         self.assertEqual(corrected_pages[0][1].shape, warped_first_page.shape)
         self.assertTrue(len(corrected_pdf) > 0)
 

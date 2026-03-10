@@ -9,6 +9,13 @@ type NavItem = {
   isActive: (path: string) => boolean;
 };
 
+type NavGroup = {
+  id: string;
+  label: string;
+  description: string;
+  items: NavItem[];
+};
+
 const buildMonthId = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -65,101 +72,122 @@ export default function TopNav() {
       isMounted = false;
     };
   }, []);
-  const navItems: NavItem[] = [
+  const navGroups: NavGroup[] = [
     {
-      href: "/",
-      label: "ダッシュボード",
-      isActive: (path) => path === "/",
+      id: "operator-daily",
+      label: "ユーザー1",
+      description: "日々の処理と注文確認",
+      items: [
+        {
+          href: "/",
+          label: "ダッシュボード",
+          isActive: (path) => path === "/",
+        },
+        {
+          href: "/orders",
+          label: "注文一覧",
+          isActive: (path) => path.startsWith("/orders"),
+        },
+        {
+          href: "/facility-orders",
+          label: "施設別注文",
+          isActive: (path) => path.startsWith("/facility-orders"),
+        },
+        {
+          href: "/daily-delivery-notes",
+          label: "日別出力",
+          isActive: (path) => path.startsWith("/daily-delivery-notes"),
+        },
+        {
+          href: "/ocr-results",
+          label: "OCR結果",
+          isActive: (path) => path.startsWith("/ocr-results"),
+        },
+        {
+          href: "/totals",
+          label: "総量",
+          isActive: (path) => path.startsWith("/totals"),
+        },
+        {
+          href: "/shipping",
+          label: "送り状",
+          isActive: (path) => path === "/shipping",
+        },
+        {
+          href: "/shipping-history",
+          label: "送り状履歴",
+          isActive: (path) => path.startsWith("/shipping-history"),
+        },
+      ],
     },
     {
-      href: `/menus/${buildMonthId()}`,
-      label: "月次メニュー",
-      isActive: (path) => path.startsWith("/menus"),
+      id: "operator-setup",
+      label: "ユーザー2",
+      description: "注文作成と施設登録",
+      items: [
+        {
+          href: `/menus/${buildMonthId()}`,
+          label: "月次メニュー",
+          isActive: (path) => path.startsWith("/menus"),
+        },
+        {
+          href: "/base-menus",
+          label: "基準メニュー",
+          isActive: (path) => path.startsWith("/base-menus"),
+        },
+        {
+          href: "/menu-masters",
+          label: "メニューマスター",
+          isActive: (path) => path.startsWith("/menu-masters"),
+        },
+        {
+          href: "/menu-rules",
+          label: "メニュールール",
+          isActive: (path) => path.startsWith("/menu-rules"),
+        },
+        {
+          href: "/order-forms",
+          label: "注文書生成",
+          isActive: (path) => path.startsWith("/order-forms"),
+        },
+        {
+          href: "/weekly-orders",
+          label: "週次注文",
+          isActive: (path) => path.startsWith("/weekly-orders"),
+        },
+        {
+          href: "/facility-master",
+          label: "施設一覧",
+          isActive: (path) => path === "/facility-master",
+        },
+      ],
     },
     {
-      href: "/base-menus",
-      label: "基準メニュー",
-      isActive: (path) => path.startsWith("/base-menus"),
-    },
-    {
-      href: "/menu-masters",
-      label: "メニューマスター",
-      isActive: (path) => path.startsWith("/menu-masters"),
-    },
-    {
-      href: "/menu-rules",
-      label: "メニュールール",
-      isActive: (path) => path.startsWith("/menu-rules"),
-    },
-    {
-      href: "/system-status",
-      label: "システム管理",
-      isActive: (path) => path.startsWith("/system-status"),
-    },
-    {
-      href: "/users",
-      label: "ユーザー管理",
-      isActive: (path) => path.startsWith("/users"),
-    },
-    {
-      href: "/orders",
-      label: "注文一覧",
-      isActive: (path) => path.startsWith("/orders"),
-    },
-    {
-      href: "/order-forms",
-      label: "注文書生成",
-      isActive: (path) => path.startsWith("/order-forms"),
-    },
-    {
-      href: "/weekly-orders",
-      label: "週次注文",
-      isActive: (path) => path.startsWith("/weekly-orders"),
-    },
-    {
-      href: "/facility-orders",
-      label: "施設別注文",
-      isActive: (path) => path.startsWith("/facility-orders"),
-    },
-    {
-      href: "/daily-delivery-notes",
-      label: "日別納品書",
-      isActive: (path) => path.startsWith("/daily-delivery-notes"),
-    },
-    {
-      href: "/ocr-results",
-      label: "OCR結果",
-      isActive: (path) => path.startsWith("/ocr-results"),
-    },
-    {
-      href: "/ocr-training-data",
-      label: "OCR学習データ",
-      isActive: (path) => path.startsWith("/ocr-training-data"),
-    },
-    {
-      href: "/totals",
-      label: "総量",
-      isActive: (path) => path.startsWith("/totals"),
-    },
-    {
-      href: "/shipping",
-      label: "送り状",
-      isActive: (path) => path === "/shipping",
-    },
-    {
-      href: "/shipping-history",
-      label: "送り状履歴",
-      isActive: (path) => path.startsWith("/shipping-history"),
-    },
-    {
-      href: "/facility-master",
-      label: "施設一覧",
-      isActive: (path) => path === "/facility-master",
-    },
-    {
-      href: "/ocr-queue",
-      label: "OCRキュー",
-      isActive: (path) => path.startsWith("/ocr-queue"),
+      id: "admin",
+      label: "管理者",
+      description: "システムと保守",
+      items: [
+        {
+          href: "/system-status",
+          label: "システム管理",
+          isActive: (path) => path.startsWith("/system-status"),
+        },
+        {
+          href: "/users",
+          label: "ユーザー管理",
+          isActive: (path) => path.startsWith("/users"),
+        },
+        {
+          href: "/ocr-queue",
+          label: "OCRキュー",
+          isActive: (path) => path.startsWith("/ocr-queue"),
+        },
+        {
+          href: "/ocr-training-data",
+          label: "OCR学習データ",
+          isActive: (path) => path.startsWith("/ocr-training-data"),
+        },
+      ],
     },
   ];
 
@@ -238,27 +266,38 @@ export default function TopNav() {
           </div>
         </div>
       ) : null}
-      <nav className="top-nav">
-        {navItems.map((item) => {
-          const active = item.isActive(currentPath);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`top-link${active ? " active" : ""}`}
-              aria-current={active ? "page" : undefined}
-            >
-              {item.label}
-            </Link>
-          );
-        })}
-      </nav>
+      <div className="top-nav-groups">
+        {navGroups.map((group) => (
+          <div key={group.id} className="top-nav-group">
+            <div className="top-nav-group__meta">
+              <div className="top-nav-group__label">{group.label}</div>
+              <div className="top-nav-group__description">{group.description}</div>
+            </div>
+            <nav className="top-nav">
+              {group.items.map((item) => {
+                const active = item.isActive(currentPath);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`top-link${active ? " active" : ""}`}
+                    aria-current={active ? "page" : undefined}
+                  >
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
+        ))}
+      </div>
       <style jsx>{`
         .top-nav-wrap {
           display: flex;
           flex-direction: column;
           gap: 12px;
-          align-items: flex-end;
+          align-items: stretch;
+          width: 100%;
         }
 
         .system-warning {
@@ -328,12 +367,61 @@ export default function TopNav() {
           font-weight: 600;
         }
 
+        .top-nav-groups {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          width: 100%;
+        }
+
+        .top-nav-group {
+          display: grid;
+          grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+          gap: 12px;
+          align-items: start;
+        }
+
+        .top-nav-group__meta {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          padding-top: 6px;
+          color: #51615c;
+        }
+
+        .top-nav-group__label {
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: #1f2a2a;
+        }
+
+        .top-nav-group__description {
+          font-size: 12px;
+        }
+
         .top-nav {
           display: flex;
           flex-wrap: wrap;
           gap: 10px;
           justify-content: flex-end;
           align-items: center;
+        }
+
+        @media (max-width: 900px) {
+          .top-nav-group {
+            grid-template-columns: 1fr;
+            gap: 6px;
+          }
+
+          .top-nav-group__meta {
+            padding-top: 0;
+          }
+
+          .top-nav {
+            justify-content: flex-start;
+          }
         }
 
         :global(.top-link) {

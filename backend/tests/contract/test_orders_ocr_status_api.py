@@ -12,7 +12,8 @@ import src.api.orders as orders_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.main import app  # noqa: E402
 from src.models.order import Order  # noqa: E402
-from src.services import order_service  # noqa: E402
+from src.models.output import Bag  # noqa: E402
+from src.services import menu_service, order_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -162,6 +163,137 @@ def test_list_orders_is_stably_sorted_by_received_at_and_id():
     assert ids == expected
 
 
+def test_get_bags_rebuilds_stale_materialized_payload():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-status-api-bags-001",
+        pdf_uri="file://dummy-bags.pdf",
+        received_at=datetime(2026, 2, 18, 9, 0, 0),
+        facility_hint="FAC00003",
+        week_hint="2026-02",
+    )
+    lines = [
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "bag_type": "standard",
+            "quantity_original": 9,
+        },
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "bag_type": "standard",
+            "quantity_original": 8,
+        },
+    ]
+    order = order_service.create_order_from_ingest(payload, lines=lines)
+    with session_scope() as session:
+        session.add(
+            Bag(
+                id="BAGstale001",
+                order_id=order["id"],
+                date=datetime(2026, 2, 18).date(),
+                daypart="昼",
+                menu_name="筑前煮",
+                diet_type="regular",
+                area_id=None,
+                bag_type="large",
+                quantity=99,
+            )
+        )
+
+    client = TestClient(app)
+    res = client.get(f"/orders/{order['id']}/bags")
+
+    assert res.status_code == 200
+    rows = res.json().get("bags") or []
+    chikuzen = [row for row in rows if row.get("menu_name") == "筑前煮"]
+    assert {(row.get("diet_type"), row.get("area_id"), row.get("quantity")) for row in chikuzen} == {
+        ("regular", "2F", 9.0),
+        ("regular", "3F", 8.0),
+    }
+
+
+def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type():
+    order_service.clear_all()
+    month_id = "2026-02"
+    menu_csv = "menu\n筑前煮\n".encode("utf-8")
+    menu_service.create_menu(month_id, menu_csv, "menu.csv")
+    menu_item = menu_service.create_item_stub(month_id, "筑前煮")
+    menu_service.update_item(
+        month_id,
+        menu_item["id"],
+        {"qty_per_serving": 50, "unit_type": "g", "daypart": "昼", "category": "主A"},
+    )
+    payload = IngestEmailPayload(
+        message_id="msg-status-api-daily-bags-001",
+        pdf_uri="file://dummy-daily-bags.pdf",
+        received_at=datetime(2026, 2, 18, 9, 0, 0),
+        facility_hint="FAC00003",
+        week_hint="2026-02",
+    )
+    lines = [
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "bag_type": "standard",
+            "quantity_original": 9,
+        },
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "regular",
+            "area_id": "3F",
+            "bag_type": "standard",
+            "quantity_original": 8,
+        },
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "mixer",
+            "area_id": "2F",
+            "bag_type": "standard",
+            "quantity_original": 2,
+        },
+        {
+            "date": "2026-02-18",
+            "daypart": "昼",
+            "menu_name": "筑前煮",
+            "diet_type": "mixer",
+            "area_id": "3F",
+            "bag_type": "standard",
+            "quantity_original": 3,
+        },
+    ]
+    order_service.create_order_from_ingest(payload, lines=lines)
+
+    client = TestClient(app)
+    res = client.get("/orders/daily-bags?date=2026-02-18")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["date"] == "2026-02-18"
+    group = next(item for item in payload["groups"] if item.get("menu_name") == "筑前煮")
+    regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
+    assert regular["total_quantity"] == 17.0
+    assert regular["total_amount_label"] == "850g"
+    medium = next(item for item in regular["bag_type_groups"] if item.get("bag_type") == "medium")
+    assert medium["bag_count"] == 2
+    assert medium["total_amount_label"] == "850g"
+    assert {item["amount_label"] for item in medium["breakdowns"]} == {"400g", "450g"}
+
+
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003")
@@ -178,6 +310,28 @@ def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     assert job is not None
     assert job.get("status") == "running"
     assert job.get("error_message") in {None, ""}
+
+
+def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-default-llm")
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["ocr_prompt"] = ocr_prompt
+        captured["ocr_provider"] = ocr_provider
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/reparse")
+
+    assert res.status_code == 202
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_provider"] is None
+    assert captured["llm_assist"] is True
 
 
 def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
