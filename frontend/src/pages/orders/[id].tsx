@@ -4,6 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
 import {
+  buildMarkdownTable,
+  buildPreviewBlocks,
+  countMarkdownLines,
+  extractFirstTable,
+  extractTableFromPage,
+  getOcrSheetColumnSpec,
+  normalizeHeaderToken,
+} from "../../features/orders/orderDetailOcrUtils";
+import {
   buildBagSummaryRows,
   extractWeekMonthId,
   formatBagCalculationResult,
@@ -15,16 +24,7 @@ import {
   normalizeWeekValue,
   type BagRow,
   type BagSummaryRow,
-} from "./orderDetailUtils";
-import {
-  buildMarkdownTable,
-  buildPreviewBlocks,
-  countMarkdownLines,
-  extractFirstTable,
-  extractTableFromPage,
-  getOcrSheetColumnSpec,
-  normalizeHeaderToken,
-} from "./orderDetailOcrUtils";
+} from "../../features/orders/orderDetailUtils";
 
 type OrderDetail = {
   id: string;
