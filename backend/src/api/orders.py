@@ -37,6 +37,8 @@ RECOVERABLE_OCR_SHEET_ERRORS = {
     "sheet_date_mismatch",
     "sheet_canonical_mismatch",
     "sheet_suspicious_blank_row",
+    "ocr_evidence_recovery_required",
+    "template_resolution_blocked",
 }
 
 
@@ -623,6 +625,11 @@ def get_ocr_pages(order_id: str):
         raise HTTPException(status_code=404, detail="ocr pages not found")
     if error == "ocr_output_pending":
         return JSONResponse(status_code=202, content={"pending": True})
+    if error == "ocr_evidence_recovery_required":
+        return JSONResponse(
+            status_code=409,
+            content={"recovery_required": True, "detail": "ocr evidence recovery required"},
+        )
     if error == "ocr_output_invalid":
         raise HTTPException(status_code=500, detail="ocr output invalid")
     return data

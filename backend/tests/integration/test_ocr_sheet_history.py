@@ -524,7 +524,7 @@ def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_p
         assert len(cache.payload["pages"]) == 1
 
 
-def test_get_ocr_pages_builds_synthetic_preview_from_corrected_pdf_when_overlay_missing(monkeypatch):
+def test_get_ocr_pages_requires_recovery_when_overlay_missing(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-pages-synthetic-001")
     order_service._save_order_ocr_cache(
@@ -537,47 +537,10 @@ def test_get_ocr_pages_builds_synthetic_preview_from_corrected_pdf_when_overlay_
         },
     )
 
-    captured_pdf_bytes: list[bytes] = []
-
-    def _fake_load_bytes(uri: str) -> bytes:
-        if uri == "gs://bucket/corrected.pdf":
-            return b"%PDF-corrected\n%EOF\n"
-        if uri == "file://dummy.pdf":
-            return b"%PDF-raw\n%EOF\n"
-        raise AssertionError(f"unexpected uri: {uri}")
-
-    def _fake_render_pdf_to_png_bytes(
-        *,
-        pdf_bytes: bytes,
-        dpi: int = 220,
-        page: int = 1,
-        max_pixels: int | None = None,
-    ) -> bytes:
-        assert dpi == 220
-        assert page == 1
-        assert max_pixels == 18_000_000
-        captured_pdf_bytes.append(pdf_bytes)
-        return b"\x89PNG\r\n\x1a\nsynthetic"
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
-    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
-    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
-    monkeypatch.setattr(order_service, "detect_table_grid", lambda pdf_bytes, template: None)
-
     pages, error = order_service.get_ocr_pages(order["id"])
 
-    assert error is None
-    assert isinstance(pages, dict)
-    assert pages["combined"]["raw_pdf"] == "signed:file://dummy.pdf"
-    assert pages["combined"]["corrected_pdf"] == "signed:gs://bucket/corrected.pdf"
-    assert captured_pdf_bytes == [b"%PDF-corrected\n%EOF\n"]
-    assert len(pages["pages"]) == 1
-    page = pages["pages"][0]
-    assert page["synthetic"] is True
-    assert page["synthetic_source"] == "pdf_render"
-    assert page["pdf_variant_used"] == "corrected"
-    assert str(page["ocr_overlay_url"]).startswith("data:image/png;base64,")
-    assert page["markdown_text"]
+    assert pages is None
+    assert error == "ocr_evidence_recovery_required"
 
 
 def test_get_ocr_pages_synthesizes_grid_from_template_expected_columns_without_pdf_detection(monkeypatch):

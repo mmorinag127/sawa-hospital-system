@@ -32,6 +32,7 @@ from src.services import config_service, menu_service, facility_service
 from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
+from src.services import evidence_manifest_service, template_resolution_service
 from src.services.fax_extractor import (
     extract_fax_data,
     filter_tokens_by_box,
@@ -4074,7 +4075,37 @@ def _load_order_ocr_cache(order_id: str) -> Optional[dict]:
 
 
 def get_cached_ocr_payload(order_id: str) -> Optional[dict]:
-    return _load_order_ocr_cache(order_id)
+    return evidence_manifest_service.ensure_evidence_manifest(_load_order_ocr_cache(order_id))
+
+
+def _evidence_only_step2_enabled() -> bool:
+    return str(os.getenv("OCR_EVIDENCE_ONLY_STEP2", "false") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _get_template_resolution(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    resolution = payload.get("template_resolution")
+    return resolution if isinstance(resolution, dict) else None
+
+
+def _template_resolution_blockers(payload: dict[str, Any] | None) -> list[str]:
+    resolution = _get_template_resolution(payload)
+    if not isinstance(resolution, dict):
+        return []
+    blockers = resolution.get("blocked_reasons")
+    if not isinstance(blockers, list):
+        return []
+    return [str(item).strip() for item in blockers if str(item).strip()]
+
+
+def _ocr_evidence_missing_artifacts(payload: dict[str, Any] | None) -> list[str]:
+    return evidence_manifest_service.evidence_missing_artifacts(payload)
 
 
 _RECOVERABLE_OCR_SHEET_ERRORS = {
@@ -4090,6 +4121,8 @@ _RECOVERABLE_OCR_SHEET_ERRORS = {
     "sheet_date_mismatch",
     "sheet_canonical_mismatch",
     "sheet_suspicious_blank_row",
+    "ocr_evidence_recovery_required",
+    "template_resolution_blocked",
 }
 
 
@@ -5454,6 +5487,10 @@ _REVIEW_REASON_MESSAGES: dict[str, str] = {
     "reparse_stale": "再解析ジョブが停止しているため、再実行が必要です。",
     "sheet_order_lines_suppressed_reparse_failed": "失敗した再解析の明細は採用せず、OCRの下書きを表示しています。",
     "sheet_structural_projection_requires_review": "広範囲の数量投影が必要だったため、自動反映を止めています。",
+    "ocr_evidence_recovery_required": "OCR成果物が不足しているため、まず復旧が必要です。",
+    "template_resolution_blocked": "施設テンプレートの判定が不安定なため、先に確認が必要です。",
+    "template_mismatch": "OCRが選んだテンプレートと施設設定が一致していません。",
+    "template_confidence_low": "施設テンプレートの判定信頼度が低いため、自動採用を止めています。",
 }
 
 
@@ -5694,6 +5731,8 @@ def _augment_sheet_review_payload(
         "sheet_date_mismatch",
         "sheet_canonical_mismatch",
         "sheet_suspicious_blank_row",
+        "ocr_evidence_recovery_required",
+        "template_resolution_blocked",
     }
 
     if "sheet_weekly_menu_missing" in warnings:
@@ -7688,10 +7727,12 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         return None, "ocr_output_not_found"
     if isinstance(parsed, dict):
         parsed = _sanitize_payload_table_raw(parsed)
+        parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     if persist_cache and not _output_is_pending(parsed):
         _save_order_ocr_cache(order_id, parsed)
     cached_payload = _load_order_ocr_cache(order_id)
     if isinstance(cached_payload, dict):
+        cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
         enriched = dict(parsed) if isinstance(parsed, dict) else {}
         merged = False
         edited = cached_payload.get("_edited_ocr")
@@ -7710,6 +7751,7 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         if synced and persist_cache and not _output_is_pending(parsed):
             _save_order_ocr_cache(order_id, parsed)
     parsed = _attach_edited_ocr_payload(parsed)
+    parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     return _attach_facility_candidates(parsed), None
 
 
@@ -7811,10 +7853,10 @@ def get_ocr_pages(order_id: str):
                 return None, "ocr_output_invalid"
             return None, "ocr_output_not_found"
     if isinstance(parsed, dict) and not _output_is_pending(parsed):
+        parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
         _save_order_ocr_cache(order_id, parsed)
     pages_payload = parsed.get("pages")
     pages: list[dict[str, object]] = []
-    synthetic_pdf_variant_meta: dict[str, Any] | None = None
     if isinstance(pages_payload, list):
         for page in pages_payload:
             if not isinstance(page, dict):
@@ -7850,15 +7892,9 @@ def get_ocr_pages(order_id: str):
                     "pdf_variant_used": page.get("pdf_variant_used"),
                 }
             )
-    if not pages and document_uri:
-        synthetic_pages, synthetic_pdf_variant_meta = _build_synthetic_ocr_pages(
-            document_uri=document_uri,
-            payload=parsed if isinstance(parsed, dict) else None,
-        )
-        if synthetic_pages:
-            pages = synthetic_pages
-    if not pages:
-        return None, "ocr_pages_not_found"
+    evidence_missing = _ocr_evidence_missing_artifacts(parsed if isinstance(parsed, dict) else None)
+    if "overlay_pages" in evidence_missing or not pages:
+        return None, "ocr_evidence_recovery_required"
     if isinstance(parsed, dict) and parsed_source != "cache":
         _save_order_ocr_cache(order_id, parsed)
     combined = parsed.get("combined") if isinstance(parsed.get("combined"), dict) else {}
@@ -7869,11 +7905,6 @@ def get_ocr_pages(order_id: str):
         signed_raw_pdf = _signed_url_from_uri(document_uri)
         if signed_raw_pdf:
             combined_urls["raw_pdf"] = signed_raw_pdf
-    if synthetic_pdf_variant_meta and synthetic_pdf_variant_meta.get("used") == "corrected":
-        corrected_uri = _extract_corrected_pdf_uri_from_payload(parsed if isinstance(parsed, dict) else None)
-        signed_corrected_pdf = _signed_url_from_uri(corrected_uri) if corrected_uri else None
-        if signed_corrected_pdf:
-            combined_urls["corrected_pdf"] = signed_corrected_pdf
     table_box = None
     table_units = None
     grid_column_edges = None
@@ -11526,14 +11557,14 @@ def build_recoverable_ocr_sheet_payload(
                 "source_row_index": getattr(line, "source_row_index", None),
             }
             for line in (
-            session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
-            .scalars()
-            .all()
+                session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
+                .scalars()
+                .all()
             )
         ]
     if not facility_id:
         return None, error_code
-    order_lines = raw_order_lines
+    order_lines = [] if _evidence_only_step2_enabled() else raw_order_lines
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -11627,6 +11658,17 @@ def build_recoverable_ocr_sheet_payload(
                 "mapped_mode": "ocr_payload",
             }
             payload["recovery_source"] = "ocr_payload"
+    if isinstance(cached_payload, dict):
+        evidence_missing = _ocr_evidence_missing_artifacts(cached_payload)
+        template_blockers = _template_resolution_blockers(cached_payload)
+        warnings = list(payload.get("warnings") or [])
+        if evidence_missing and "ocr_evidence_recovery_required" not in warnings:
+            warnings.append("ocr_evidence_recovery_required")
+            payload["evidence_missing_artifacts"] = evidence_missing
+        if template_blockers and "template_resolution_blocked" not in warnings:
+            warnings.append("template_resolution_blocked")
+            payload["template_resolution_blockers"] = template_blockers
+        payload["warnings"] = warnings
     return (
         _augment_sheet_review_payload(
             order_id=order_id,
@@ -11642,6 +11684,7 @@ def build_recoverable_ocr_sheet_payload(
 def get_ocr_sheet(order_id: str):
     lines_updated_at: datetime | None = None
     order_status: str | None = None
+    evidence_only_step2 = _evidence_only_step2_enabled()
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -11673,25 +11716,27 @@ def get_ocr_sheet(order_id: str):
             .scalars()
             .first()
         )
-        raw_order_lines = (
-            session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
-            .scalars()
-            .all()
-        )
-        order_lines = [
-            {
-                "id": line.id,
-                "date": line.date,
-                "daypart": line.daypart,
-                "menu_name": line.menu_name,
-                "diet_type": line.diet_type,
-                "area_id": line.area_id,
-                "quantity_original": line.quantity_original,
-                "quantity_corrected": line.quantity_corrected,
-                "change_note": line.change_note,
-            }
-            for line in raw_order_lines
-        ]
+        order_lines = []
+        if not evidence_only_step2:
+            raw_order_lines = (
+                session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
+                .scalars()
+                .all()
+            )
+            order_lines = [
+                {
+                    "id": line.id,
+                    "date": line.date,
+                    "daypart": line.daypart,
+                    "menu_name": line.menu_name,
+                    "diet_type": line.diet_type,
+                    "area_id": line.area_id,
+                    "quantity_original": line.quantity_original,
+                    "quantity_corrected": line.quantity_corrected,
+                    "change_note": line.change_note,
+                }
+                for line in raw_order_lines
+            ]
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -11726,6 +11771,17 @@ def get_ocr_sheet(order_id: str):
     payload, _ = get_ocr_output(order_id, persist_cache=False)
     if isinstance(payload, dict):
         ocr_payload = payload
+    latest_revision = _select_order_sheet_revision(
+        order_id=order_id,
+        payload=ocr_payload,
+        exact_only=False,
+    )
+    evidence_missing = _ocr_evidence_missing_artifacts(ocr_payload)
+    if evidence_missing and not isinstance(latest_revision, dict):
+        return None, "ocr_evidence_recovery_required"
+    template_blockers = _template_resolution_blockers(ocr_payload)
+    if template_blockers and not isinstance(latest_revision, dict):
+        return None, "template_resolution_blocked"
     ocr_metrics = _resolve_sheet_suppression_metrics(
         order_id=order_id,
         ocr_payload=ocr_payload,
@@ -11779,6 +11835,8 @@ def get_ocr_sheet(order_id: str):
         received_at=received_at,
     )
     if not entries:
+        if evidence_only_step2 and isinstance(latest_revision, dict):
+            return build_recoverable_ocr_sheet_payload(order_id, "menu_entries_missing")
         return None, "menu_entries_missing"
 
     payload_rows: list[list[str]] = []
@@ -11790,6 +11848,11 @@ def get_ocr_sheet(order_id: str):
         table_rows_payload = ocr_payload.get("table_rows")
         payload_has_structured_table_rows = isinstance(table_rows_payload, list) and bool(table_rows_payload)
 
+    confirmed_line_dates = {
+        line.get("date")
+        for line in order_lines
+        if isinstance(line, dict) and isinstance(line.get("date"), date)
+    }
     line_dates = {
         line.get("date")
         for line in sheet_lines
@@ -11809,20 +11872,22 @@ def get_ocr_sheet(order_id: str):
         entries=entries,
         fields=fields,
         field_index=field_index,
-        line_dates=line_dates,
+        line_dates=confirmed_line_dates,
         source=entry_source,
         payload_dates=payload_dates,
         payload_row_count=len(payload_rows),
         scope_anchor_date=received_at.date(),
     )
     if not rows:
+        if evidence_only_step2 and isinstance(latest_revision, dict):
+            return build_recoverable_ocr_sheet_payload(order_id, "menu_entries_missing")
         return None, "menu_entries_missing"
 
     if source == "weekly_menu":
         missing_week_dates = _collect_missing_weekly_menu_dates(
             entries=entries,
             rows=rows,
-            line_dates=line_dates,
+            line_dates=confirmed_line_dates,
         )
         if missing_week_dates:
             logger.warning(
@@ -12292,6 +12357,34 @@ def get_ocr_sheet(order_id: str):
             "mapped_mode": mapped_mode,
         },
     }
+    if evidence_missing and "ocr_evidence_recovery_required" not in payload["warnings"]:
+        payload["warnings"].append("ocr_evidence_recovery_required")
+        payload["evidence_missing_artifacts"] = evidence_missing
+    if template_blockers and "template_resolution_blocked" not in payload["warnings"]:
+        payload["warnings"].append("template_resolution_blocked")
+        payload["template_resolution_blockers"] = template_blockers
+    if evidence_only_step2 and isinstance(latest_revision, dict):
+        rebuilt = _build_sheet_payload_from_revision(
+            order_id=order_id,
+            revision=latest_revision,
+            fallback_sheet=payload,
+        )
+        if isinstance(rebuilt, dict):
+            merged_warnings = [
+                str(item).strip()
+                for item in list(payload.get("warnings") or []) + list(rebuilt.get("warnings") or [])
+                if str(item).strip()
+            ]
+            deduped_warnings: list[str] = []
+            for warning in merged_warnings:
+                if warning not in deduped_warnings:
+                    deduped_warnings.append(warning)
+            rebuilt["warnings"] = deduped_warnings
+            if evidence_missing:
+                rebuilt["evidence_missing_artifacts"] = evidence_missing
+            if template_blockers:
+                rebuilt["template_resolution_blockers"] = template_blockers
+            payload = rebuilt
     return (
         _augment_sheet_review_payload(
             order_id=order_id,

@@ -19,8 +19,10 @@ from app.pdf_render import render_pdf_to_page_images, render_pdf_to_png_bytes
 from app.postprocess import _tesseract_digits_text, postprocess_and_retry
 from app.preprocess import build_images_for_match_and_ocr
 from app.quantity_subgrid import build_quantity_subgrid_second_passes
+from app.evidence_manifest import ensure_evidence_manifest
 from app.rois import crop_rois, load_template_config
 from app.template_match import choose_template_and_warp
+from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, run_yomitoku
 
 logging.basicConfig(
@@ -1015,6 +1017,14 @@ def handler():
             "page_correction_artifacts": page_correction_artifacts,
             "warnings": warnings,
         }
+        output_payload["template_resolution"] = build_template_resolution(
+            requested_template_id=template_id,
+            requested_template_ids=template_ids,
+            resolved_template_id=resolved_template_id,
+            classification=classification if isinstance(classification, dict) else None,
+            page_correction_summary=page_correction_summary,
+        )
+        output_payload = ensure_evidence_manifest(output_payload) or output_payload
         gcs.bucket(bucket).blob(output_name).upload_from_string(
             json.dumps(output_payload, ensure_ascii=False),
             content_type="application/json; charset=utf-8",
