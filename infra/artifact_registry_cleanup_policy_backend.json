@@ -1,0 +1,31 @@
+[
+  {
+    "name": "delete-untagged-older-than-3d",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "3d"
+    }
+  },
+  {
+    "name": "delete-tagged-older-than-7d",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "tagState": "tagged",
+      "olderThan": "7d"
+    }
+  },
+  {
+    "name": "keep-most-recent-5",
+    "action": {
+      "type": "Keep"
+    },
+    "mostRecentVersions": {
+      "keepCount": 5
+    }
+  }
+]

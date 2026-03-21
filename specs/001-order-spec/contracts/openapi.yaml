@@ -6,30 +6,33 @@ info:
 servers:
   - url: https://api.example.com
 paths:
-  /ingest/email:
+  /ingest/upload:
     post:
-      summary: Ingest email with PDF attachment
-      description: Accepts metadata and storage reference to an incoming email/PDF for processing.
+      summary: Upload PDF order form for processing
+      description: Accepts a PDF upload and optional hints, then enqueues OCR/order processing.
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
               type: object
-              required: [message_id, pdf_uri, received_at]
+              required: [pdf_file]
               properties:
-                message_id: { type: string }
-                pdf_uri: { type: string, format: uri }
+                pdf_file: { type: string, format: binary }
+                facility_hint: { type: string }
+                week_hint: { type: string }
+                facility_name: { type: string }
                 received_at: { type: string, format: date-time }
       responses:
         '202':
-          description: Accepted for processing with created OrderDocument id.
+          description: Accepted for processing.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  document_id: { type: string }
+                  ingest_job_id: { type: string }
+                  message_id: { type: string }
   /orders:
     get:
       summary: List orders by week/status/facility

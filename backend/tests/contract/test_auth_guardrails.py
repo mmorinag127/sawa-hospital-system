@@ -42,6 +42,10 @@ def test_auth_can_be_explicitly_disabled_in_tests(monkeypatch):
     assert res.status_code == 200
     assert res.json()["auth_disabled"] is True
 
+    me_res = client.get("/auth/me")
+    assert me_res.status_code == 200
+    assert me_res.json()["role"] == "admin"
+
 
 def test_auth_enables_basic_operator_when_env_present(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
@@ -53,6 +57,23 @@ def test_auth_enables_basic_operator_when_env_present(monkeypatch):
     client = TestClient(app)
     res = client.get("/orders", headers=_basic_header("operator", "secret"))
     assert res.status_code == 200
+
+    me_res = client.get("/auth/me", headers=_basic_header("operator", "secret"))
+    assert me_res.status_code == 200
+    assert me_res.json()["role"] == "operator"
+
+
+def test_auth_me_returns_admin_for_basic_admin(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ADMIN_USER", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    res = client.get("/auth/me", headers=_basic_header("admin", "secret"))
+    assert res.status_code == 200
+    assert res.json()["role"] == "admin"
 
 
 def test_operator_basic_cannot_access_admin_route(monkeypatch):

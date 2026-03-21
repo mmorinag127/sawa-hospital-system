@@ -1,6 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from src.api.auth import GOOGLE_OAUTH_CLIENT_IDS, is_auth_disabled
+from src.api.auth import GOOGLE_OAUTH_CLIENT_IDS, UserContext, get_current_user, is_auth_disabled
 
 router = APIRouter()
 
@@ -11,4 +11,12 @@ def get_auth_config():
         "auth_disabled": is_auth_disabled(),
         "google_client_id": GOOGLE_OAUTH_CLIENT_IDS[0] if GOOGLE_OAUTH_CLIENT_IDS else "",
         "google_client_ids": GOOGLE_OAUTH_CLIENT_IDS,
+    }
+
+
+@router.get("/auth/me")
+def get_auth_me(user: UserContext = Depends(get_current_user)):
+    return {
+        "role": user.role,
+        "auth_disabled": is_auth_disabled(),
     }

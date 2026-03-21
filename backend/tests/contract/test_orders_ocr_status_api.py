@@ -1,7 +1,7 @@
 import sys
 import pathlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -40,10 +40,10 @@ def _create_seed_order(message_id: str) -> dict:
     return order_service.create_order_from_ingest(payload, lines=lines)
 
 
-def test_get_order_does_not_override_running_with_cached_payload(monkeypatch):
+def test_get_order_prefers_cached_success_over_non_reparse_running_status(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-001")
-    job_id = f"OCR-{order['id']}"
+    job_id = f"OCR-{order['message_id']}"
     create_job(job_id, input_reference=order["document"], status="running")
 
     def _fake_cached_payload(_order_id: str):
@@ -59,7 +59,31 @@ def test_get_order_does_not_override_running_with_cached_payload(monkeypatch):
     res = client.get(f"/orders/{order['id']}")
     assert res.status_code == 200
     payload = res.json()
-    assert payload.get("ocr_status") == "running"
+    assert payload.get("ocr_status") == "success"
+    assert payload.get("ocr_error") in {None, ""}
+
+
+def test_list_orders_include_ocr_prefers_cached_success_over_non_reparse_running_status(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-001-list")
+    job_id = f"OCR-{order['message_id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+
+    def _fake_cached_payload(_order_id: str):
+        return {
+            "status": "success",
+            "rows": [["dummy"]],
+            "metrics": {"provider": "old"},
+        }
+
+    monkeypatch.setattr(order_service, "get_cached_ocr_payload", _fake_cached_payload)
+
+    client = TestClient(app)
+    res = client.get("/orders?include_ocr=true")
+    assert res.status_code == 200
+    rows = res.json().get("orders") or []
+    row = next(item for item in rows if item.get("id") == order["id"])
+    assert row.get("ocr_status") == "success"
 
 
 def test_get_order_preserves_terminal_reparse_failure_status(tmp_path):
@@ -161,6 +185,23 @@ def test_list_orders_is_stably_sorted_by_received_at_and_id():
     rows = res.json().get("orders") or []
     ids = [row.get("id") for row in rows[:2]]
     assert ids == expected
+
+
+def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-confirm-block")
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_ocr_sheet",
+        lambda _order_id: {"warnings": ["sheet_weekly_menu_missing"]},
+    )
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/confirm")
+
+    assert res.status_code == 409
+    detail = res.json().get("detail") or {}
+    assert detail.get("error") == "weekly_menu_missing"
 
 
 def test_get_bags_rebuilds_stale_materialized_payload():
@@ -332,6 +373,71 @@ def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monk
     assert captured["order_id"] == order["id"]
     assert captured["ocr_provider"] is None
     assert captured["llm_assist"] is True
+
+
+def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-recover")
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["ocr_prompt"] = ocr_prompt
+        captured["ocr_provider"] = ocr_provider
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/ocr-recover")
+
+    assert res.status_code == 202
+    assert res.json()["accepted"] is True
+    assert res.json()["mode"] == "pipeline_recovery"
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_prompt"] is None
+    assert captured["ocr_provider"] == "pipeline"
+    assert captured["llm_assist"] is False
+
+
+def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeypatch):
+    order_service.clear_all()
+    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")
+    order = _create_seed_order("msg-status-api-003-recover-stale")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "processing_stage": "llm_reparse",
+            "result_state": "processing",
+            "stage_updated_at": (datetime.utcnow() - timedelta(minutes=5)).isoformat(),
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["ocr_prompt"] = ocr_prompt
+        captured["ocr_provider"] = ocr_provider
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/ocr-recover")
+
+    assert res.status_code == 202
+    assert res.json()["accepted"] is True
+    assert res.json()["mode"] == "pipeline_recovery"
+    job = get_job(job_id)
+    assert job is not None
+    assert job.get("status") == "running"
+    assert job.get("metrics", {}).get("processing_stage") == "queued"
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_provider"] == "pipeline"
+    assert captured["llm_assist"] is False
 
 
 def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):

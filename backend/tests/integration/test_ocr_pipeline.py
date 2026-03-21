@@ -250,6 +250,8 @@ def test_reparse_order_sets_job_metrics_changed_even_when_counts_match(monkeypat
     assert metrics.get("provider") == "openai"
 
 
+
+
 def test_reparse_order_llm_truncated_uses_pipeline_rows(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-gemini-truncated.pdf"
@@ -2436,6 +2438,84 @@ def test_build_llm_assist_prompt_includes_auto_fallback_context():
     assert "first-pass yomitoku/pipeline OCR did not produce parseable order lines" in prompt
     assert '"reason": "lines_empty"' in prompt
     assert '"from_provider": "pipeline"' in prompt
+
+
+def test_build_llm_assist_prompt_includes_quantity_subgrid_second_pass_context():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    pipeline_output = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "献立", "常食", "備考"],
+                            ["2/15", "朝", "Menu A", "", ""],
+                        ],
+                    }
+                ],
+            }
+        ],
+        "quantity_subgrid_passes": [
+            {
+                "page_index": 1,
+                "table_index": 0,
+                "body_start_row": 2,
+                "menu_col_index": 3,
+                "quantity_start_col_index": 4,
+                "row_count": 56,
+                "quantity_col_count": 7,
+                "crop_box_norm": [0.4, 0.2, 0.9, 0.95],
+                "table_raw": "|47|||||||\n|-|-|-|-|-|-|-|\n|42|||||||",
+                "tables": [
+                    {
+                        "table_id": "qty_t1",
+                        "page_index": 1,
+                        "row_count": 2,
+                        "col_count": 7,
+                        "rows": [["47", "", "", "", "", "", ""], ["42", "", "", "", "", "", ""]],
+                    }
+                ],
+                "normalized_rows": [["47", "", "", "", "", "", ""], ["42", "", "", "", "", "", ""]],
+                "normalization_patches": [
+                    {
+                        "row_index": 0,
+                        "col_index": 0,
+                        "original_text": "47.",
+                        "normalized_text": "47",
+                        "prev_neighbor": "",
+                        "next_neighbor": "42",
+                    }
+                ],
+            }
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=pipeline_output,
+        llm_assist=True,
+    )
+
+    assert prompt is not None
+    assert "Quantity-only second pass on the numeric subgrid" in prompt
+    assert "normalized_rows_preview" in prompt
+    assert "normalization_patches" in prompt
+    assert '"normalized_text": "47"' in prompt
+    assert "Do NOT derive date/daypart/menu anchors from this quantity-only pass." in prompt
+    assert '"quantity_start_col_index": 4' in prompt
+    assert '"table_id": "qty_t1"' in prompt
+    assert "|47|||||||" in prompt
 
 
 def test_build_llm_assist_prompt_includes_baseline_and_evaluator_feedback():
@@ -6297,6 +6377,12 @@ def test_reparse_order_rejects_when_llm_audit_fails(monkeypatch, tmp_path):
     audit = metrics.get("llm_audit") or {}
     assert audit.get("status") == "fail"
     assert int(audit.get("blocking_issue_count") or 0) >= 1
+    cached_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    edited = cached_payload.get("_edited_ocr") or {}
+    latest = edited.get("latest") or {}
+    assert latest.get("draft_kind") == "reparse_reject"
+    assert latest.get("auto_apply_blocked") is True
+    assert latest.get("reject_reason") == "sheet_llm_audit_failed"
 
 
 def test_resolve_llm_audit_provider_defaults_to_cross_model(monkeypatch):
@@ -6972,11 +7058,16 @@ def test_reparse_order_llm_path_uses_rescued_first_pass_payload_and_corrected_pd
         ),
     }
 
-    def _fake_pipeline(**_kwargs):
-        return "file://pipeline-output.json"
+    pipeline_calls: list[dict] = []
+    wait_calls: list[tuple[str | None, float | None]] = []
 
-    def _fake_load_pipeline_output_with_retry(_ref, retries=0, delay=0.0):  # noqa: ARG001
-        return {"status": "success"}
+    def _fake_pipeline(**kwargs):
+        pipeline_calls.append(kwargs)
+        raise AssertionError("existing first-pass OCR should be reused for llm assist")
+
+    def _fake_load_pipeline_output_with_retry(_ref, *, wait_seconds_override=None):  # noqa: ARG001
+        wait_calls.append((_ref, wait_seconds_override))
+        raise AssertionError("llm assist reuse path should not wait for pipeline output")
 
     def _fake_get_ocr_output(order_id: str, *, persist_cache: bool = True):
         assert order_id == order["id"]
@@ -7035,10 +7126,176 @@ def test_reparse_order_llm_path_uses_rescued_first_pass_payload_and_corrected_pd
     assert updated is not None
     assert get_ocr_output_calls
     assert all(flag is False for flag in get_ocr_output_calls)
+    assert pipeline_calls == []
+    assert wait_calls == []
     assert extract_pdf_inputs == [b"%PDF-corrected\n%EOF\n"]
     assert parse_pdf_inputs
     assert all(item == b"%PDF-corrected\n%EOF\n" for item in parse_pdf_inputs if item is not None)
     assert updated["lines"][0]["quantity_original"] == 2
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job["metrics"]["processing_stage"] in {"apply", "applied"}
+    assert job["metrics"]["reused_first_pass"] is True
+    assert job["metrics"]["pipeline_run_skipped"] is True
+
+
+def test_reparse_order_llm_path_fast_fails_when_first_pass_ocr_missing(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-missing-first-pass.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-missing-first-pass-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    pipeline_calls: list[dict] = []
+    wait_calls: list[tuple[str | None, float | None]] = []
+    get_ocr_output_calls: list[bool] = []
+
+    def _fake_pipeline(**kwargs):
+        pipeline_calls.append(kwargs)
+        return "file://pipeline-output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref, *, wait_seconds_override=None):
+        wait_calls.append((_ref, wait_seconds_override))
+        return None
+
+    def _fake_get_ocr_output(order_id: str, *, persist_cache: bool = True):
+        assert order_id == order["id"]
+        get_ocr_output_calls.append(persist_cache)
+        return None, "ocr_output_not_found"
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "get_ocr_output", _fake_get_ocr_output)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "first_pass_ocr_missing"
+    assert len(pipeline_calls) == 1
+    assert len(wait_calls) == 1
+    assert wait_calls[0][1] == 20.0
+    assert get_ocr_output_calls
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job["status"] == "failed"
+    assert job["metrics"]["processing_stage"] == "first_pass_missing"
+    assert job["metrics"]["result_state"] == "hard_failed"
+    assert job["error_message"] == "first_pass_ocr_missing"
+
+
+def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-previous-draft.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-previous-draft-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+
+    facility_config = config_service.get_facility_config("FAC00001") or {}
+    template = dict(facility_config.get("fax_template") or {})
+    order_service._save_reparse_candidate_as_draft(
+        order_id=order["id"],
+        template=template,
+        rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+        before_digest="before-digest",
+        review_state="auto_apply_blocked",
+        review_blockers=["sheet_llm_audit_failed"],
+    )
+
+    first_pass_payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "メニュー", "常食2F"],
+                            [canonical_mmdd, canonical_daypart, canonical_menu, "9"],
+                        ],
+                    }
+                ],
+            }
+        ],
+        "table_raw": (
+            "|日付|区分|メニュー|常食2F|\n"
+            "|---|---|---|---|\n"
+            f"|{canonical_mmdd}|{canonical_daypart}|{canonical_menu}|9|"
+        ),
+    }
+
+    captured_prompt: dict[str, str] = {}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        prompt = str(template.get("gemini_ocr_prompt") or "")
+        if prompt:
+            captured_prompt["value"] = prompt
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "2"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"quantity_only_mode": True, "model": "gemini-2.5-pro"},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 2,
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(
+        order_service,
+        "_load_existing_first_pass_payload_for_reparse",
+        lambda order_id: dict(first_pass_payload) if order_id == order["id"] else None,
+    )
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: b"%PDF-raw\n%EOF\n")
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "detect_table_grid", lambda pdf_bytes, template: None)
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    prompt_text = captured_prompt.get("value") or ""
+    assert "Previous saved LLM candidate rows" in prompt_text
+    assert canonical_menu in prompt_text
+    assert "\"7\"" in prompt_text or "|7|" in prompt_text
 
 
 def test_reparse_order_projects_quantity_only_rows_onto_structural_baseline(monkeypatch, tmp_path):
@@ -7078,6 +7335,117 @@ def test_reparse_order_projects_quantity_only_rows_onto_structural_baseline(monk
     assert stats is not None
     assert stats["projected_row_count"] == 2
     assert stats["rows_with_projected_quantity"] == 2
+
+
+def test_reparse_order_large_structural_projection_requires_manual_review(monkeypatch, tmp_path):
+    order_service.clear_all()
+    _ensure_week_menu_entries("2026-02")
+    pdf_path = tmp_path / "sample-gemini-structural-projection.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-structural-projection-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 1, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    first_pass_payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "メニュー", "常食2F"],
+                            [canonical_mmdd, canonical_daypart, canonical_menu, "9"],
+                        ],
+                    }
+                ],
+            }
+        ],
+        "table_raw": (
+            "|日付|区分|メニュー|常食2F|\n"
+            "|---|---|---|---|\n"
+            f"|{canonical_mmdd}|{canonical_daypart}|{canonical_menu}|9|"
+        ),
+    }
+    order_service._save_order_ocr_cache(order["id"], dict(first_pass_payload))
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[["", "", "", "2"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"quantity_only_mode": True, "model": "gemini-2.5-pro"},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        return [
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 2,
+                "source_row_index": 0,
+            }
+        ]
+
+    monkeypatch.setattr(
+        order_service,
+        "_load_existing_first_pass_payload_for_reparse",
+        lambda order_id: dict(first_pass_payload) if order_id == order["id"] else None,
+    )
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: b"%PDF-raw\n%EOF\n")
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "detect_table_grid", lambda pdf_bytes, template: None)
+    monkeypatch.setattr(order_service, "_should_project_quantity_rows_to_structural_rows", lambda **kwargs: True)
+    monkeypatch.setattr(
+        order_service,
+        "_project_quantity_only_rows_onto_structural_rows",
+        lambda **kwargs: (
+            [[canonical_mmdd, canonical_daypart, canonical_menu, "2"]],
+            {
+                "projected_row_count": 30,
+                "rows_with_projected_quantity": 30,
+                "quantity_cells_copied": 120,
+            },
+        ),
+    )
+    monkeypatch.setattr(order_service, "_evaluate_quantity_only_rows_quality", lambda **kwargs: (None, {}))
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "sheet_structural_projection_requires_review"
+    refreshed = order_service.get_order_by_id(order["id"])
+    assert refreshed is not None
+    assert refreshed.get("lines") == []
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job["metrics"]["result_state"] == "draft_ready_blocked"
+    assert job["metrics"]["error"] == "sheet_structural_projection_requires_review"
 
 
 def test_parse_llm_review_response_returns_yomitoku_compatible_output_payload():

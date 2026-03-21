@@ -56,18 +56,14 @@ tasks:
       - task: backend_run
 
   ocr_test:
-    desc: Send OCR ingest request for the Fureai test PDF.
+    desc: Upload a test PDF to local ingest endpoint.
     env:
       FAX_PDF: "{{.FAX_PDF}}"
     cmds:
       - |
-        curl -X POST http://localhost:8000/ingest/email \
-          -H "Content-Type: application/json" \
-          -d '{
-            "message_id": "test-001",
-            "pdf_uri": "file://{{.FAX_PDF}}",
-            "received_at": "2025-12-28T10:00:00"
-          }'
+        curl -X POST http://localhost:8000/ingest/upload \
+          -F "pdf_file=@{{.FAX_PDF}};type=application/pdf" \
+          -F "received_at=2025-12-28T10:00:00"
 
   ocr_test_cloud:
     desc: Send OCR ingest request via Pub/Sub + GCS (Cloud Run path).
@@ -320,10 +316,3 @@ tasks:
         OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
         WEB_URL="{{.PROD_WEB_URL}}"
         ./scripts/deploy_worker_prod_with_checks.sh "$image" "${ORDER_ID}"
-
-  recover_prod_gmail_watch:
-    desc: Try automatic Gmail watch recovery by probing known secret versions and reloading worker-prod.
-    env:
-      WORKER_URL: "{{.PROD_WORKER_URL}}"
-    cmds:
-      - 'WORKER_URL="{{.PROD_WORKER_URL}}" OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" ./scripts/gmail_watch_recover.sh'

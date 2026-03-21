@@ -36,14 +36,12 @@ def test_confirm_endpoint_triggers_outputs(tmp_path):
     client = TestClient(app)
     pdf_path = tmp_path / "endpoint.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
-    payload = {
-        "message_id": "m-endpoint",
-        "pdf_uri": str(pdf_path),
-        "received_at": "2025-12-23T10:10:00",
-        "facility_hint": "FAC001",
-        "week_hint": "WEK2025W52",
-    }
-    res = client.post("/ingest/email", json=payload)
+    with pdf_path.open("rb") as handle:
+        res = client.post(
+            "/ingest/upload",
+            files={"pdf_file": ("endpoint.pdf", handle.read(), "application/pdf")},
+            data={"facility_hint": "FAC001", "week_hint": "WEK2025W52"},
+        )
     assert res.status_code == 202
     order = order_service.list_orders()[0]
     res2 = client.post(f"/orders/{order['id']}/confirm")

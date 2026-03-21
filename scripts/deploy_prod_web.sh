@@ -39,7 +39,7 @@ YAML
 
 # Predeploy checks
 WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" OPERATOR_USER="$OPERATOR_USER" OPERATOR_PASSWORD="$OPERATOR_PASSWORD" \
-  CHECK_WEB_PROXY="0" STRICT_GMAIL_WATCH="0" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
+  CHECK_WEB_PROXY="0" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
   /Users/mmorinag/Sawa/2025.12/workspace/scripts/predeploy_prod_checks.sh
 
 # Build & deploy
@@ -50,5 +50,5 @@ gcloud run deploy web-prod --project="$PROJECT_ID" --region="$REGION" --image="$
 
 # Postdeploy checks
 WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" OPERATOR_USER="$OPERATOR_USER" OPERATOR_PASSWORD="$OPERATOR_PASSWORD" \
-  CHECK_WEB_PROXY="1" STRICT_GMAIL_WATCH="0" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
+  CHECK_WEB_PROXY="1" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
   /Users/mmorinag/Sawa/2025.12/workspace/scripts/predeploy_prod_checks.sh

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { apiClient } from "../../services/apiClient";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
+
 import TopNav from "../../components/TopNav";
+import { apiClient } from "../../services/apiClient";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
@@ -19,6 +20,15 @@ type Order = {
   id?: string;
   received_at?: string | null;
   message_id?: string | null;
+  ocr_review_state?: string | null;
+  ocr_review_badges?: string[] | null;
+  ocr_has_saved_draft?: boolean | null;
+  ocr_draft_newer_than_lines?: boolean | null;
+  ocr_auto_apply_blocked?: boolean | null;
+  ocr_reject_reasons?: string[] | null;
+  ocr_processing_stage?: string | null;
+  ocr_result_state?: string | null;
+  ocr_confirmed_lines_retained?: boolean | null;
 };
 
 const compareOrdersByReceivedAt = (left: Order, right: Order) => {
@@ -57,24 +67,18 @@ export default function OrdersPage() {
   useEffect(() => {
     if (!router.isReady) return;
     const statusParam = router.query.status;
-    if (typeof statusParam === "string") {
-      setStatusFilter(statusParam);
-    } else if (statusParam === undefined) {
-      setStatusFilter("");
-    }
+    const searchParam = router.query.search;
     const unresolvedParam = router.query.unresolved;
-    if (typeof unresolvedParam === "string") {
-      setUnresolvedOnly(unresolvedParam === "1" || unresolvedParam === "true");
-    } else if (unresolvedParam === undefined) {
-      setUnresolvedOnly(false);
-    }
-  }, [router.isReady, router.query.status, router.query.unresolved]);
+    setStatusFilter(typeof statusParam === "string" ? statusParam : "");
+    setSearch(typeof searchParam === "string" ? searchParam : "");
+    setUnresolvedOnly(
+      typeof unresolvedParam === "string" ? unresolvedParam === "1" || unresolvedParam === "true" : false,
+    );
+  }, [router.isReady, router.query.status, router.query.search, router.query.unresolved]);
 
   useEffect(() => {
     let cancelled = false;
-    const params = statusFilter
-      ? { status: statusFilter, include_ocr: false }
-      : { include_ocr: false };
+    const params = statusFilter ? { status: statusFilter, include_ocr: false } : { include_ocr: false };
     setIsLoading(true);
     setLoadError("");
     apiClient
@@ -122,11 +126,9 @@ export default function OrdersPage() {
         try {
           const candidates = await fetchOrderFacilityCandidates(orderId);
           const best = pickBestFacilityCandidate(candidates);
-          if (best) {
-            results[orderId] = { ...best, order_id: orderId };
-          }
+          if (best) results[orderId] = { ...best, order_id: orderId };
         } catch {
-          // ignore per-order failures (pending / not-found etc.)
+          // ignore per-order failures
         }
       }
     });
@@ -157,25 +159,51 @@ export default function OrdersPage() {
     return "未確定";
   };
 
-  const filteredOrders = orders.filter((order) => {
-    if (unresolvedOnly && order.facility) return false;
-    if (!search) return true;
-    const token = search.toLowerCase();
-    const facilityId = order.facility || "";
-    const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
-    const hint = order.id ? facilityHints[order.id] : null;
-    const hintName = hint?.facility_name ? String(hint.facility_name) : "";
-    return (
-      (order.id || "").toLowerCase().includes(token) ||
-      facilityId.toLowerCase().includes(token) ||
-      facilityName.toLowerCase().includes(token) ||
-      hintName.toLowerCase().includes(token) ||
-      (order.week || "").toLowerCase().includes(token) ||
-      (order.document || "").toLowerCase().includes(token)
-    );
-  });
+  const filteredOrders = useMemo(() => {
+    return orders.filter((order) => {
+      if (unresolvedOnly && order.facility) return false;
+      if (!search) return true;
+      const token = search.toLowerCase();
+      const facilityId = order.facility || "";
+      const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
+      const hint = order.id ? facilityHints[order.id] : null;
+      const hintName = hint?.facility_name ? String(hint.facility_name) : "";
+      return (
+        (order.id || "").toLowerCase().includes(token) ||
+        (order.message_id || "").toLowerCase().includes(token) ||
+        facilityId.toLowerCase().includes(token) ||
+        facilityName.toLowerCase().includes(token) ||
+        hintName.toLowerCase().includes(token) ||
+        (order.week || "").toLowerCase().includes(token) ||
+        (order.document || "").toLowerCase().includes(token)
+      );
+    });
+  }, [facilityHints, facilityNameMap, orders, search, unresolvedOnly]);
 
-  const sortedOrders = [...filteredOrders].sort(compareOrdersByReceivedAt);
+  const sortedOrders = useMemo(() => [...filteredOrders].sort(compareOrdersByReceivedAt), [filteredOrders]);
+
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, { facility: string; week: string; counts: Record<string, number> }>();
+    filteredOrders.forEach((order) => {
+      const facility = order.facility || "未確定";
+      const week = order.week || "未確定";
+      const key = `${facility}__${week}`;
+      const current =
+        groups.get(key) || {
+          facility,
+          week,
+          counts: { 未着: 0, 要確認: 0, 確定: 0, エラー: 0 },
+        };
+      if (current.counts[order.status] !== undefined) {
+        current.counts[order.status] += 1;
+      }
+      groups.set(key, current);
+    });
+    return Array.from(groups.values()).sort((left, right) => {
+      if (left.week !== right.week) return right.week.localeCompare(left.week, "ja");
+      return left.facility.localeCompare(right.facility, "ja");
+    });
+  }, [filteredOrders]);
 
   const formatReceivedAt = (value?: string | null) => {
     if (!value) return "不明";
@@ -199,26 +227,22 @@ export default function OrdersPage() {
     }
   };
 
-  const groups = new Map<
-    string,
-    { facility: string; week: string; counts: Record<string, number> }
-  >();
-  filteredOrders.forEach((order) => {
-    const facility = order.facility || "未確定";
-    const week = order.week || "未確定";
-    const key = `${facility}__${week}`;
-    const current =
-      groups.get(key) || {
-        facility,
-        week,
-        counts: { 未着: 0, 要確認: 0, 確定: 0, エラー: 0 },
-      };
-    if (current.counts[order.status] !== undefined) {
-      current.counts[order.status] += 1;
-    }
-    groups.set(key, current);
-  });
-  const groupedRows = Array.from(groups.values());
+  const reviewToneClass = (order: Order) => {
+    const reviewState = String(order.ocr_review_state || "").trim().toLowerCase();
+    if (reviewState === "processing_failed") return "list-item-error";
+    if (reviewState === "auto_apply_blocked" || reviewState === "draft_ready") return "list-item-review";
+    return "";
+  };
+
+  const processingStageLabel = (value?: string | null) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === "ocr_pipeline") return "OCR準備";
+    if (normalized === "inference") return "推論";
+    if (normalized === "validation") return "検証";
+    if (normalized === "draft_saved") return "下書き保存";
+    if (normalized === "apply" || normalized === "applied") return "明細更新";
+    return "";
+  };
 
   return (
     <main className="page">
@@ -226,7 +250,7 @@ export default function OrdersPage() {
         <div>
           <p className="eyebrow">Orders</p>
           <h1>注文一覧</h1>
-          <p className="subtle">施設×月の進捗と注文明細をまとめて確認できます。</p>
+          <p className="subtle">施設ごとの進捗と注文の状態を一覧で確認できます。</p>
         </div>
         <TopNav />
       </header>
@@ -239,11 +263,7 @@ export default function OrdersPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">ステータス</span>
-            <select
-              className="input"
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-            >
+            <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">全て</option>
               <option value="未着">未着</option>
               <option value="要確認">要確認</option>
@@ -257,7 +277,7 @@ export default function OrdersPage() {
               className="input"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="施設/月/IDなど"
+              placeholder="施設名 / 週 / 注文ID / 受付ID"
             />
           </label>
           <label className="field checkbox">
@@ -273,17 +293,17 @@ export default function OrdersPage() {
 
       <section className="panel">
         <header className="panel-header">
-          <h2>施設×月 進捗</h2>
-          <Link href="/orders" className="ghost-link">
+          <h2>施設×週 進捗</h2>
+          <button className="ghost-link" type="button" onClick={() => setReloadToken((value) => value + 1)}>
             最新に更新
-          </Link>
+          </button>
         </header>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>施設</th>
-                <th>月</th>
+                <th>週</th>
                 <th>未着</th>
                 <th>要確認</th>
                 <th>確定</th>
@@ -321,7 +341,7 @@ export default function OrdersPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>注文リスト</h2>
-          <span className="subtle">クリックで詳細へ</span>
+          <span className="subtle">詳細を開いて処理します。</span>
         </header>
         <div className="list">
           {isLoading ? (
@@ -329,37 +349,50 @@ export default function OrdersPage() {
           ) : loadError ? (
             <div className="error-box">
               <p>{loadError}</p>
-              <button
-                className="retry-button"
-                type="button"
-                onClick={() => setReloadToken((value) => value + 1)}
-              >
+              <button className="retry-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>
                 再読み込み
               </button>
             </div>
           ) : sortedOrders.length === 0 ? (
             <p className="subtle">
-              {orders.length === 0
-                ? "注文データがありません。"
-                : "フィルタ条件に一致する注文がありません。"}
+              {orders.length === 0 ? "注文データがありません。" : "フィルタ条件に一致する注文がありません。"}
             </p>
           ) : (
-            sortedOrders.map((o) => (
-                <div key={o.id || o.document} className="list-item">
-                <div>
-                  <p className="list-title">{o.id}</p>
+            sortedOrders.map((order) => (
+              <div key={order.id || order.document} className={`list-item ${reviewToneClass(order)}`.trim()}>
+                <div className="list-main">
+                  <p className="list-title">{order.id || "注文ID未発行"}</p>
                   <p className="list-meta">
-                    施設: {facilityLabel(o)} / 月: {o.week || "未確定"} / 受信:{" "}
-                    {formatReceivedAt(o.received_at)} / Message: {o.message_id || "不明"}
+                    施設: {facilityLabel(order)} / 週: {order.week || "未確定"} / 受信:{" "}
+                    {formatReceivedAt(order.received_at)} / 受付ID: {order.message_id || "不明"}
                   </p>
+                  {(Array.isArray(order.ocr_review_badges) && order.ocr_review_badges.length) ||
+                  processingStageLabel(order.ocr_processing_stage) ||
+                  order.ocr_confirmed_lines_retained ? (
+                    <div className="review-badges">
+                      {(order.ocr_review_badges || []).map((badge) => (
+                        <span className="review-badge" key={`${order.id || order.document}-${badge}`}>
+                          {badge}
+                        </span>
+                      ))}
+                      {order.ocr_review_state === "processing" && processingStageLabel(order.ocr_processing_stage) ? (
+                        <span className="review-badge">
+                          {processingStageLabel(order.ocr_processing_stage)}
+                        </span>
+                      ) : null}
+                      {order.ocr_confirmed_lines_retained ? (
+                        <span className="review-badge">確定明細保持</span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="list-actions">
-                  <span className={`status-pill ${statusClass(o.status)}`}>{o.status}</span>
-                  <Link href={`/orders/${o.id}`} className="list-link">
+                  <span className={`status-pill ${statusClass(order.status)}`}>{order.status}</span>
+                  <Link href={`/orders/${order.id}`} className="list-link">
                     詳細
                   </Link>
-                  {o.week ? (
-                    <Link href={`/menus/${o.week}`} className="list-link">
+                  {order.week ? (
+                    <Link href={`/menus/${order.week}`} className="list-link">
                       メニュー
                     </Link>
                   ) : null}
@@ -431,6 +464,7 @@ export default function OrdersPage() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 12px;
           margin-bottom: 16px;
         }
 
@@ -439,17 +473,13 @@ export default function OrdersPage() {
           margin: 0;
         }
 
-        .ghost-link {
-          font-size: 13px;
-          color: #5f7b74;
-        }
-
         .badge {
           background: #1f2a2a;
           color: #f7f2e7;
           padding: 4px 10px;
           border-radius: 999px;
           font-size: 12px;
+          white-space: nowrap;
         }
 
         .filters {
@@ -485,6 +515,33 @@ export default function OrdersPage() {
           background: #fbfbf9;
         }
 
+
+        .error-box {
+          border: 1px solid rgba(122, 47, 42, 0.25);
+          background: #fceceb;
+          color: #7a2f2a;
+          padding: 12px 14px;
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .ghost-link {
+          border: none;
+          background: transparent;
+          padding: 0;
+          font-size: 13px;
+          color: #5f7b74;
+          cursor: pointer;
+        }
+
+        .ghost-link:hover {
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+
         .table-wrap {
           overflow-x: auto;
         }
@@ -518,39 +575,65 @@ export default function OrdersPage() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 14px;
           padding: 12px 14px;
           border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.06);
           background: #fbfbf9;
         }
 
+        .list-item-review {
+          border-color: rgba(171, 125, 35, 0.22);
+          background: #fffaf0;
+        }
+
+        .list-item-error {
+          border-color: rgba(148, 47, 44, 0.18);
+          background: #fff4f3;
+        }
+
+        .list-main {
+          min-width: 0;
+        }
+
         .list-title {
           margin: 0 0 4px;
-          font-weight: 600;
+          font-weight: 700;
         }
 
         .list-meta {
           margin: 0;
           font-size: 12px;
           color: #5f7b74;
+          line-height: 1.5;
+        }
+
+        .review-badges {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 8px;
+        }
+
+        .review-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 3px 9px;
+          border-radius: 999px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #f4f1ea;
+          color: #31423f;
+          font-size: 11px;
+          font-weight: 600;
+          white-space: nowrap;
         }
 
         .list-actions {
           display: flex;
           align-items: center;
           gap: 10px;
-        }
-
-        .error-box {
-          border: 1px solid rgba(122, 47, 42, 0.25);
-          background: #fceceb;
-          color: #7a2f2a;
-          padding: 12px 14px;
-          border-radius: 12px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
         }
 
         .retry-button {
@@ -564,16 +647,13 @@ export default function OrdersPage() {
           font-weight: 600;
         }
 
-        .retry-button:hover {
-          background: #62221e;
-        }
-
         .status-pill {
           background: #e6ebe9;
           padding: 4px 10px;
           border-radius: 999px;
           font-size: 12px;
           font-weight: 600;
+          white-space: nowrap;
         }
 
         .status-pill.status-pending {
@@ -616,16 +696,15 @@ export default function OrdersPage() {
           text-underline-offset: 2px;
         }
 
-        :global(.list-link:focus-visible) {
-          outline: 2px solid #5f7b74;
-          outline-offset: 2px;
-        }
-
         @media (max-width: 720px) {
           .list-item {
-            flex-direction: column;
             align-items: flex-start;
-            gap: 10px;
+            flex-direction: column;
+          }
+
+          .list-actions {
+            width: 100%;
+            justify-content: flex-start;
           }
         }
       `}</style>

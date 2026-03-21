@@ -1,9 +1,11 @@
 from io import BytesIO
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from collections import Counter
+from pathlib import Path
 import re
 import unicodedata
 import threading
+from zoneinfo import ZoneInfo
 from loguru import logger
 from uuid import uuid4
 import pandas as pd
@@ -18,9 +20,12 @@ from src.models.menu import (
     MenuMaster,
     MenuFacilityOverride,
 )
-from src.models.facility import FacilityConfig
+from src.models.facility import Facility, FacilityConfig
+from src.models.user import AuditLog
 from src.services.notification_service import record_event
 from src.services import menu_rule_service
+from src.services.menu_vocabulary import normalize_diet_type
+from src.services.storage_service import load_bytes_from_uri
 
 
 MEAL_SLOT_TERMS = {
@@ -83,6 +88,7 @@ _MENU_OVERRIDE_TAG_PREFIX = "TAG:"
 _INVALID_PATCH_VALUE = object()
 _MENU_SCHEMA_INITIALIZED = False
 _MENU_SCHEMA_LOCK = threading.RLock()
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 def _ensure_menu_master_condiments() -> bool:
@@ -125,10 +131,30 @@ def _ensure_monthly_menu_items_menu_master_id() -> bool:
     return "menu_master_id" in columns
 
 
+def _ensure_monthly_menu_entries_scope_column() -> bool:
+    inspector = inspect(engine)
+    if "monthly_menu_entries" not in inspector.get_table_names():
+        return False
+    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_entries")}
+    if "facility_override" in columns:
+        return True
+    migrated = False
+    with engine.begin() as conn:
+        try:
+            conn.execute(text("ALTER TABLE monthly_menu_entries ADD COLUMN facility_override VARCHAR"))
+            migrated = True
+        except Exception as exc:
+            logger.warning("Failed to ensure monthly_menu_entries.facility_override", error=str(exc))
+    if migrated:
+        inspector = inspect(engine)
+        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_entries")}
+    return "facility_override" in columns
+
+
 def _ensure_menu_unique_indexes() -> bool:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
-    required_tables_present = {"menu_facility_overrides", "monthly_menu_items"}.issubset(tables)
+    required_tables_present = {"menu_facility_overrides", "monthly_menu_items", "monthly_menu_entries"}.issubset(tables)
     with engine.begin() as conn:
         if "menu_facility_overrides" in tables:
             try:
@@ -160,6 +186,27 @@ def _ensure_menu_unique_indexes() -> bool:
                     "Failed to ensure unique index for monthly_menu_items",
                     error=str(exc),
                 )
+        if "monthly_menu_entries" in tables:
+            try:
+                conn.execute(
+                    text(
+                        """
+                        CREATE INDEX IF NOT EXISTS ix_monthly_menu_entries_scope_slot
+                        ON monthly_menu_entries(
+                          monthly_menu_id,
+                          menu_date,
+                          daypart,
+                          COALESCE(slot_index, -1),
+                          COALESCE(facility_override, '')
+                        )
+                        """
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to ensure index for monthly_menu_entries",
+                    error=str(exc),
+                )
     return required_tables_present
 
 
@@ -172,9 +219,10 @@ def ensure_menu_schema() -> None:
             return
         condiments_ok = _ensure_menu_master_condiments()
         monthly_item_ok = _ensure_monthly_menu_items_menu_master_id()
+        monthly_entry_ok = _ensure_monthly_menu_entries_scope_column()
         indexes_ok = _ensure_menu_unique_indexes()
         # Only memoize success when the expected tables/columns are actually present.
-        _MENU_SCHEMA_INITIALIZED = bool(condiments_ok and monthly_item_ok and indexes_ok)
+        _MENU_SCHEMA_INITIALIZED = bool(condiments_ok and monthly_item_ok and monthly_entry_ok and indexes_ok)
 
 _TEMP_COLD_HINTS = (
     "サラダ",
@@ -225,6 +273,27 @@ def _normalize_menu_name(value: str) -> str:
     normalized = normalized.translate(str.maketrans({"（": "(", "）": ")", "［": "[", "］": "]"}))
     normalized = re.sub(r"[()\\[\\]{}「」『』<>＜＞]", "", normalized)
     return normalized.strip().lower()
+
+
+def _normalize_temp_type(value: object) -> str | None:
+    if _is_blank_value(value):
+        return None
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    if not text:
+        return None
+    lowered = text.lower().replace(" ", "")
+    compact = lowered.replace("・", "").replace("/", "").replace("-", "").replace("_", "")
+    if compact in {"温冷", "hotcold", "coldhot"}:
+        return None
+    if "冷" in text and "温" not in text:
+        return "cold"
+    if "温" in text and "冷" not in text:
+        return "hot"
+    if lowered in {"cold", "chilled", "cool"}:
+        return "cold"
+    if lowered in {"hot", "warm"}:
+        return "hot"
+    return text
 
 
 def _infer_temp_type(menu_name: str | None) -> str | None:
@@ -335,6 +404,95 @@ def _resolve_override_scope_ids(session, facility_id: str | None) -> list[str]:
     return resolved
 
 
+def _normalize_scope_override(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.upper().startswith(_MENU_OVERRIDE_TAG_PREFIX):
+        normalized_tag = _normalize_override_tag(text)
+        return f"{_MENU_OVERRIDE_TAG_PREFIX}{normalized_tag}" if normalized_tag else None
+    return text
+
+
+def resolve_menu_upload_scope(scope_type: str | None, scope_value: str | None) -> str | None:
+    normalized_type = str(scope_type or "base").strip().lower() or "base"
+    raw_value = str(scope_value or "").strip()
+    if normalized_type == "base":
+        return None
+    if normalized_type == "facility":
+        if not raw_value:
+            raise ValueError("facility scope requires a facility code")
+        return _normalize_scope_override(raw_value)
+    if normalized_type == "tag":
+        if not raw_value:
+            raise ValueError("tag scope requires a tag name")
+        normalized_tag = _normalize_override_tag(raw_value)
+        if not normalized_tag:
+            raise ValueError("tag scope requires a tag name")
+        return f"{_MENU_OVERRIDE_TAG_PREFIX}{normalized_tag}"
+    raise ValueError("scope_type must be one of: base, facility, tag")
+
+
+def list_menu_scope_options() -> dict[str, list[dict]]:
+    ensure_menu_schema()
+    with session_scope() as session:
+        facilities = (
+            session.query(Facility)
+            .order_by(Facility.name.asc(), Facility.id.asc())
+            .all()
+        )
+        facility_payload = [
+            {
+                "id": str(facility.id or ""),
+                "name": str(facility.name or ""),
+            }
+            for facility in facilities
+            if str(facility.id or "").strip() and str(facility.name or "").strip()
+        ]
+
+        configs = session.query(FacilityConfig).all()
+        facilities_by_id = {str(facility.id or ""): facility for facility in facilities}
+        tag_to_facilities: dict[str, list[dict[str, str]]] = {}
+        for config in configs:
+            facility_id = str(config.facility_id or "").strip()
+            if not facility_id:
+                continue
+            facility = facilities_by_id.get(facility_id)
+            facility_name = str(getattr(facility, "name", "") or "").strip()
+            for tag in _extract_menu_override_tags(config.config_json):
+                tag_to_facilities.setdefault(tag, []).append(
+                    {
+                        "id": facility_id,
+                        "name": facility_name or facility_id,
+                    }
+                )
+
+        tag_payload: list[dict[str, object]] = []
+        for tag in sorted(tag_to_facilities.keys()):
+            linked = sorted(
+                tag_to_facilities.get(tag, []),
+                key=lambda item: (str(item.get("name") or ""), str(item.get("id") or "")),
+            )
+            facility_names = [str(item.get("name") or "") for item in linked if str(item.get("name") or "").strip()]
+            facility_ids = [str(item.get("id") or "") for item in linked if str(item.get("id") or "").strip()]
+            tag_payload.append(
+                {
+                    "value": tag,
+                    "scope_override": f"{_MENU_OVERRIDE_TAG_PREFIX}{tag}",
+                    "facility_ids": facility_ids,
+                    "facility_names": facility_names,
+                    "facility_count": len(facility_ids),
+                }
+            )
+
+        return {
+            "facilities": facility_payload,
+            "tags": tag_payload,
+        }
+
+
 def _normalize_cell_value(value: object) -> str:
     if value is None:
         return ""
@@ -364,27 +522,6 @@ def _normalize_menu_value(value: object) -> str:
 def _is_skip_menu_name(value: str) -> bool:
     normalized = value.replace(" ", "").replace("　", "")
     return normalized in SKIP_MENU_NAMES
-
-
-def _normalize_diet_type(value: str | None) -> str | None:
-    if not value:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    compact = text.replace(" ", "")
-    diet = None
-    if "軟菜" in compact:
-        diet = "soft"
-    elif "ミキサー" in compact:
-        diet = "mixer"
-    elif "常食" in compact:
-        diet = "regular"
-    if "1600" in compact or "１６００" in compact:
-        if diet:
-            return f"{diet}_1600kcal"
-        return "1600kcal"
-    return diet or text
 
 
 def _extract_month_from_text(value: str) -> tuple[int, int] | None:
@@ -498,6 +635,9 @@ def _apply_rules_to_items(items: list[dict]) -> list[dict]:
                     updated["unit_type"] = selected.get("unit_type")
                 if updated.get("qty_per_serving") is None and selected.get("qty_per_serving") is not None:
                     updated["qty_per_serving"] = selected.get("qty_per_serving")
+                if not updated.get("temp_type") and selected.get("temp_type"):
+                    updated["temp_type"] = _normalize_temp_type(selected.get("temp_type"))
+        updated["temp_type"] = _normalize_temp_type(updated.get("temp_type"))
         if not updated.get("unit_type"):
             updated["unit_type"] = _infer_unit_type(updated.get("name"))
         if not updated.get("temp_type"):
@@ -534,7 +674,7 @@ def _parse_monthly_menu(
             if not value:
                 continue
             if diet_type is None and "献立種類" in value:
-                diet_type = _normalize_diet_type(value)
+                diet_type = normalize_diet_type(value)
             if month_start is None:
                 parsed = _extract_month_from_text(value)
                 if parsed:
@@ -688,6 +828,28 @@ def _coerce_master_field_value(field: str, value: object) -> object:
         if coerced is None:
             return _INVALID_PATCH_VALUE
         return coerced
+    if field == "temp_type":
+        return _normalize_temp_type(value)
+    if field == "daypart":
+        if _is_blank_value(value):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if "朝" in text:
+            return "朝食"
+        if "昼" in text:
+            return "昼食"
+        if "夕" in text or "夜" in text:
+            return "夕食"
+        lowered = text.lower()
+        if "breakfast" in lowered or lowered == "morning":
+            return "朝食"
+        if "lunch" in lowered or lowered == "noon":
+            return "昼食"
+        if "dinner" in lowered or "supper" in lowered or lowered == "evening":
+            return "夕食"
+        return text
     if _is_blank_value(value):
         return None
     return str(value).strip() if isinstance(value, str) else value
@@ -730,6 +892,11 @@ def _ensure_menu_master(
         candidate = session.get(MenuMaster, menu_master_id)
         if candidate and candidate.normalized_name == normalized:
             master = candidate
+    if master is None:
+        for pending in session.new:
+            if isinstance(pending, MenuMaster) and pending.normalized_name == normalized:
+                master = pending
+                break
     if master is None:
         master = (
             session.execute(select(MenuMaster).where(MenuMaster.normalized_name == normalized))
@@ -862,6 +1029,8 @@ def _build_master_defaults_index(
                 master_value = getattr(master, field)
                 if not _is_blank_value(master_value):
                     value = master_value
+            if field == "temp_type":
+                value = _normalize_temp_type(value)
             if value is not None:
                 payload[field] = value
         if master.condiments:
@@ -1047,7 +1216,16 @@ def _extract_menu_names(file_bytes: bytes, filename: str, sheet_name: str | None
     return names
 
 
-def create_menu(month_id: str, file_bytes: bytes, filename: str, sheet_name: str | None = None):
+def create_menu(
+    month_id: str,
+    file_bytes: bytes,
+    filename: str,
+    sheet_name: str | None = None,
+    *,
+    actor: str = "system",
+    upload_metadata: dict | None = None,
+    scope_override: str | None = None,
+):
     ensure_menu_schema()
     # Seed default rules outside the write transaction to avoid sqlite write-lock contention
     # from nested session_scope calls.
@@ -1069,16 +1247,39 @@ def create_menu(month_id: str, file_bytes: bytes, filename: str, sheet_name: str
         names = [item["name"] for item in parsed_items]
     else:
         names = _extract_menu_names(file_bytes, filename, sheet_name)
+    deduped_names: list[str] = []
+    seen_normalized_names: set[str] = set()
+    for raw_name in names:
+        normalized_name = _normalize_menu_name(raw_name)
+        if not normalized_name or normalized_name in seen_normalized_names:
+            continue
+        seen_normalized_names.add(normalized_name)
+        deduped_names.append(raw_name)
+    names = deduped_names
+    resolved_scope_override = _normalize_scope_override(scope_override)
     with session_scope() as session:
         replaced = False
         menu = session.get(MonthlyMenu, month_id)
         if menu:
             replaced = True
-            menu.filename = filename
-            if month_start:
+            if resolved_scope_override is None:
+                menu.filename = filename
+            if month_start and resolved_scope_override is None:
                 menu.month_start = month_start
-            session.execute(delete(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id))
-            session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == month_id))
+            item_delete = delete(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id)
+            entry_delete = delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == month_id)
+            if resolved_scope_override is None:
+                item_delete = item_delete.where(
+                    or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == "")
+                )
+                entry_delete = entry_delete.where(
+                    or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == "")
+                )
+            else:
+                item_delete = item_delete.where(MonthlyMenuItem.facility_override == resolved_scope_override)
+                entry_delete = entry_delete.where(MonthlyMenuEntry.facility_override == resolved_scope_override)
+            session.execute(item_delete)
+            session.execute(entry_delete)
         else:
             menu = MonthlyMenu(id=month_id, filename=filename, month_start=month_start)
             session.add(menu)
@@ -1098,7 +1299,8 @@ def create_menu(month_id: str, file_bytes: bytes, filename: str, sheet_name: str
                     monthly_menu_id=month_id,
                     menu_master_id=master.id if master else None,
                     name=name,
-                    diet_type=meta.get("diet_type"),
+                    diet_type=normalize_diet_type(meta.get("diet_type")),
+                    facility_override=resolved_scope_override,
                 )
             )
         for entry in entries:
@@ -1110,8 +1312,9 @@ def create_menu(month_id: str, file_bytes: bytes, filename: str, sheet_name: str
                     daypart=entry["daypart"],
                     name=entry["name"],
                     category=entry.get("category"),
-                    diet_type=entry.get("diet_type"),
+                    diet_type=normalize_diet_type(entry.get("diet_type")),
                     slot_index=entry.get("slot_index"),
+                    facility_override=resolved_scope_override,
                 )
             )
         item_count = len(names)
@@ -1121,16 +1324,120 @@ def create_menu(month_id: str, file_bytes: bytes, filename: str, sheet_name: str
             filename=filename,
             replaced=replaced,
             item_count=item_count,
+            scope_override=resolved_scope_override,
         )
         payload = serialize_menu(menu)
+    metadata = {
+        "filename": filename,
+        "replaced": replaced,
+        "item_count": item_count,
+    }
+    if resolved_scope_override:
+        metadata["scope_override"] = resolved_scope_override
+    if sheet_name:
+        metadata["sheet_name"] = sheet_name
+    if upload_metadata:
+        metadata.update(upload_metadata)
     record_event(
         "menu_upload",
-        actor="system",
+        actor=actor,
         target=month_id,
         wek=month_id,
-        metadata={"filename": filename, "replaced": replaced, "item_count": item_count},
+        metadata=metadata,
     )
     return payload, replaced, item_count
+
+
+def list_menu_uploads(month_id: str) -> list[dict]:
+    ensure_menu_schema()
+    with session_scope() as session:
+        logs = (
+            session.query(AuditLog)
+            .filter(AuditLog.action == "menu_upload")
+            .filter(AuditLog.target == month_id)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .all()
+        )
+        items: list[dict] = []
+        for log in logs:
+            metadata = dict(log.metadata_json or {})
+            file_uri = str(metadata.get("file_uri") or "").strip()
+            entry = {
+                "id": log.id,
+                "month_id": month_id,
+                "uploaded_at": log.created_at.isoformat() if log.created_at else None,
+                "filename": metadata.get("filename"),
+                "sheet_name": metadata.get("sheet_name"),
+                "item_count": metadata.get("item_count"),
+                "replaced": bool(metadata.get("replaced")),
+                "actor": log.actor,
+                "download_available": bool(file_uri),
+                "scope_override": metadata.get("scope_override"),
+            }
+            archive_error = metadata.get("archive_error")
+            if archive_error:
+                entry["archive_error"] = archive_error
+            items.append(entry)
+        return items
+
+
+def _format_menu_upload_display(created_at: datetime | None) -> str | None:
+    if created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        created_at = created_at.astimezone(timezone.utc)
+    return f"{created_at.astimezone(_JST).strftime('%Y/%m/%d %H:%M')} アップロード"
+
+
+def _get_latest_menu_upload_log(session, month_id: str) -> AuditLog | None:
+    return (
+        session.query(AuditLog)
+        .filter(AuditLog.action == "menu_upload")
+        .filter(AuditLog.target == month_id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .first()
+    )
+
+
+def get_menu_upload_download(month_id: str, upload_id: str) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        log = (
+            session.query(AuditLog)
+            .filter(AuditLog.id == upload_id)
+            .filter(AuditLog.action == "menu_upload")
+            .filter(AuditLog.target == month_id)
+            .first()
+        )
+        if not log:
+            return None
+        metadata = dict(log.metadata_json or {})
+        file_uri = str(metadata.get("file_uri") or "").strip()
+        if not file_uri:
+            return {
+                "filename": metadata.get("filename") or "monthly-menu.xlsx",
+                "media_type": "application/octet-stream",
+                "bytes": None,
+                "download_available": False,
+            }
+        filename = str(metadata.get("filename") or "monthly-menu.xlsx")
+    payload = load_bytes_from_uri(file_uri)
+    suffix = Path(filename).suffix.lower()
+    media_type = (
+        "text/csv"
+        if suffix == ".csv"
+        else "application/vnd.ms-excel.sheet.macroEnabled.12"
+        if suffix == ".xlsm"
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    return {
+        "filename": filename,
+        "media_type": media_type,
+        "bytes": payload,
+        "download_available": True,
+    }
 
 
 def update_item_status(month_id: str, item_id: str, body: dict) -> str:
@@ -1153,7 +1460,7 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
             else:
                 item.facility_override = str(facility_override).strip()
         if "diet_type" in body:
-            item.diet_type = body.get("diet_type")
+            item.diet_type = normalize_diet_type(body.get("diet_type"))
         name = (item.name or "").strip()
         if not name:
             return "invalid_name"
@@ -1257,8 +1564,15 @@ def create_item_stub(month_id: str, name: str):
         return serialize_item(item)
 
 
-def serialize_menu(menu: MonthlyMenu):
-    return {"id": menu.id, "filename": menu.filename}
+def serialize_menu(menu: MonthlyMenu, latest_upload_log: AuditLog | None = None):
+    uploaded_at = latest_upload_log.created_at.isoformat() if latest_upload_log and latest_upload_log.created_at else None
+    display_name = _format_menu_upload_display(latest_upload_log.created_at if latest_upload_log else None) or menu.filename
+    return {
+        "id": menu.id,
+        "filename": menu.filename,
+        "display_name": display_name,
+        "uploaded_at": uploaded_at,
+    }
 
 
 def serialize_menu_master(master: MenuMaster) -> dict:
@@ -1270,8 +1584,8 @@ def serialize_menu_master(master: MenuMaster) -> dict:
         "qty_per_serving": master.qty_per_serving,
         "bag_max_qty": master.bag_max_qty,
         "bag_max_unit": master.bag_max_unit,
-        "temp_type": master.temp_type,
-        "daypart": master.daypart,
+        "temp_type": _normalize_temp_type(master.temp_type),
+        "daypart": _coerce_master_field_value("daypart", master.daypart),
         "category": master.category,
         "condiments": list(master.condiments or []),
     }
@@ -1314,8 +1628,8 @@ def create_menu_master(body: dict) -> dict:
             qty_per_serving=_coerce_float(body.get("qty_per_serving")),
             bag_max_qty=_coerce_float(body.get("bag_max_qty")),
             bag_max_unit=body.get("bag_max_unit"),
-            temp_type=body.get("temp_type"),
-            daypart=body.get("daypart"),
+            temp_type=_normalize_temp_type(body.get("temp_type")),
+            daypart=_coerce_master_field_value("daypart", body.get("daypart")),
             category=body.get("category"),
             condiments=body.get("condiments") if isinstance(body.get("condiments"), list) else [],
         )
@@ -1356,9 +1670,9 @@ def update_menu_master(master_id: str, body: dict) -> bool:
         if "bag_max_unit" in body:
             master.bag_max_unit = body.get("bag_max_unit") or None
         if "temp_type" in body:
-            master.temp_type = body.get("temp_type") or None
+            master.temp_type = _normalize_temp_type(body.get("temp_type"))
         if "daypart" in body:
-            master.daypart = body.get("daypart") or None
+            master.daypart = _coerce_master_field_value("daypart", body.get("daypart"))
         if "category" in body:
             master.category = body.get("category") or None
         if "condiments" in body:
@@ -1378,10 +1692,10 @@ def serialize_item(item: MonthlyMenuItem):
         "name": item.name,
         "unit_type": item.unit_type,
         "qty_per_serving": item.qty_per_serving,
-        "temp_type": item.temp_type,
-        "daypart": item.daypart,
+        "temp_type": _normalize_temp_type(item.temp_type),
+        "daypart": _coerce_master_field_value("daypart", item.daypart),
         "category": item.category,
-        "diet_type": getattr(item, "diet_type", None),
+        "diet_type": normalize_diet_type(getattr(item, "diet_type", None)),
         "facility_override": item.facility_override,
         "bag_max_qty": None,
         "bag_max_unit": None,
@@ -1393,11 +1707,12 @@ def serialize_entry(entry: MonthlyMenuEntry) -> dict:
         "id": entry.id,
         "month_id": entry.monthly_menu_id,
         "menu_date": entry.menu_date.isoformat() if entry.menu_date else None,
-        "daypart": entry.daypart,
+        "daypart": _coerce_master_field_value("daypart", entry.daypart),
         "name": entry.name,
         "category": entry.category,
-        "diet_type": entry.diet_type,
+        "diet_type": normalize_diet_type(entry.diet_type),
         "slot_index": entry.slot_index,
+        "facility_override": entry.facility_override,
     }
 
 
@@ -1434,17 +1749,101 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[
         if not items:
             return []
 
+        scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
+        rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
+        base_rank = len(scope_ids)
+
         if not facility_id:
             base_rows = [i for i in items if _is_blank(i.facility_override)]
             base_items = [serialize_item(i) for i in _pick_latest_item_by_name(base_rows).values()]
             return _merge_master_defaults(base_items, None)
 
-        base_rows = [i for i in items if _is_blank(i.facility_override)]
-        override_rows = [i for i in items if (i.facility_override or "").strip() == facility_id]
-        base = _pick_latest_item_by_name(base_rows)
-        overrides = _pick_latest_item_by_name(override_rows)
-        merged = {**base, **overrides}
-        return _merge_master_defaults([serialize_item(i) for i in merged.values()], facility_id)
+        selected: dict[str, tuple[int, MonthlyMenuItem]] = {}
+        for item in items:
+            scope = (item.facility_override or "").strip()
+            if scope:
+                if scope not in rank:
+                    continue
+                row_rank = rank[scope]
+            else:
+                row_rank = base_rank
+            key = (item.name or "").strip()
+            if not key:
+                continue
+            current = selected.get(key)
+            if current is None or row_rank < current[0] or (
+                row_rank == current[0] and (item.id or "") > (current[1].id or "")
+            ):
+                selected[key] = (row_rank, item)
+        merged = [serialize_item(payload[1]) for payload in selected.values()]
+        return _merge_master_defaults(merged, facility_id)
+
+
+def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> list[dict]:
+    ensure_menu_schema()
+    with session_scope() as session:
+        entries = (
+            session.query(MonthlyMenuEntry)
+            .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .order_by(
+                MonthlyMenuEntry.menu_date,
+                MonthlyMenuEntry.daypart,
+                MonthlyMenuEntry.slot_index,
+                MonthlyMenuEntry.id.asc(),
+            )
+            .all()
+        )
+        if not entries:
+            return []
+        if not facility_id:
+            return [serialize_entry(entry) for entry in entries if _is_blank(entry.facility_override)]
+
+        scope_ids = _resolve_override_scope_ids(session, facility_id)
+        rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
+        base_rank = len(scope_ids)
+        selected: dict[tuple[object, object, int], tuple[int, MonthlyMenuEntry]] = {}
+        for entry in entries:
+            scope = (entry.facility_override or "").strip()
+            if scope:
+                if scope not in rank:
+                    continue
+                row_rank = rank[scope]
+            else:
+                row_rank = base_rank
+            key = (
+                entry.menu_date,
+                entry.daypart,
+                int(entry.slot_index) if entry.slot_index is not None else -1,
+            )
+            current = selected.get(key)
+            if current is None or row_rank < current[0] or (
+                row_rank == current[0] and (entry.id or "") > (current[1].id or "")
+            ):
+                selected[key] = (row_rank, entry)
+        resolved = [serialize_entry(payload[1]) for payload in selected.values()]
+        resolved.sort(
+            key=lambda entry: (
+                entry.get("menu_date") or "",
+                entry.get("daypart") or "",
+                int(entry.get("slot_index") or 0),
+                str(entry.get("id") or ""),
+            )
+        )
+        return resolved
+
+
+def get_menu_for_facility(month_id: str, facility_id: str | None) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        menu = session.get(MonthlyMenu, month_id)
+        if not menu:
+            return None
+        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
+        return {
+            "menu": serialize_menu(menu, latest_upload_log),
+            "items": get_menu_items_for_facility(month_id, facility_id),
+            "entries": get_menu_entries_for_facility(month_id, facility_id),
+        }
 
 
 def get_menu(month_id: str) -> dict | None:
@@ -1453,6 +1852,7 @@ def get_menu(month_id: str) -> dict | None:
         menu = session.get(MonthlyMenu, month_id)
         if not menu:
             return None
+        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
         items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
         entries = (
             session.query(MonthlyMenuEntry)
@@ -1462,7 +1862,7 @@ def get_menu(month_id: str) -> dict | None:
         )
         payload = [serialize_item(i) for i in items]
         return {
-            "menu": serialize_menu(menu),
+            "menu": serialize_menu(menu, latest_upload_log),
             "items": _merge_master_defaults(payload, None),
             "entries": [serialize_entry(entry) for entry in entries],
         }

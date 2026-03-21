@@ -51,8 +51,8 @@ def _resolve_facility(facility_id: str) -> dict:
     return facility
 
 
-def _collect_menu_entries(month_id: str) -> list[dict]:
-    payload = menu_service.get_menu(month_id)
+def _collect_menu_entries(month_id: str, facility_id: str) -> list[dict]:
+    payload = menu_service.get_menu_for_facility(month_id, facility_id)
     if not payload:
         raise ValueError("monthly menu not found")
     entries = payload.get("entries")
@@ -81,7 +81,7 @@ def build_order_form_excel(
 ) -> Path:
     normalized_month = _normalize_month_id(month_id)
     facility = _resolve_facility(facility_id)
-    entries = _collect_menu_entries(normalized_month)
+    entries = _collect_menu_entries(normalized_month, facility_id)
     pattern = _resolve_pattern(facility, pattern_id)
 
     wb = Workbook()

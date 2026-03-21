@@ -97,6 +97,12 @@ def _seed_monthly_menu_daypart_order_2099_11() -> None:
         )
 
 
+def _clear_monthly_menu(month_id: str) -> None:
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).filter(MonthlyMenuEntry.monthly_menu_id == month_id).delete()
+        session.query(MonthlyMenu).filter(MonthlyMenu.id == month_id).delete()
+
+
 def _create_seed_order(message_id: str) -> dict:
     _seed_monthly_menu_2026_01()
     payload = IngestEmailPayload(
@@ -261,6 +267,42 @@ def test_orders_week_options_and_save_api_flow():
     assert order_res.json().get("week_label") == selected.get("label")
 
 
+def test_orders_week_options_include_future_calendar_ranges_without_menu():
+    order_service.clear_all()
+    _clear_monthly_menu("2026-03")
+    client = TestClient(app)
+    payload = IngestEmailPayload(
+        message_id="msg-api-week-future-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 3, 11, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-03",
+    )
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": "2026-03-22",
+                "daypart": "昼",
+                "menu_name": "Future Menu",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 3,
+            }
+        ],
+    )
+
+    res = client.get(f"/orders/{order['id']}/week-options")
+    assert res.status_code == 200
+    options = res.json().get("options") or []
+    target = next((item for item in options if item.get("week_id") == "2026-03@2026-03-22~2026-03-28"), None)
+    assert isinstance(target, dict)
+    assert target.get("date_from") == "2026-03-22"
+    assert target.get("date_to") == "2026-03-28"
+    assert target.get("selected") is True
+
+
 def test_orders_week_save_api_rejects_invalid_week():
     order_service.clear_all()
     client = TestClient(app)
@@ -332,7 +374,7 @@ def test_orders_facility_template_columns_save_api_flow():
         assert facility_service.update_config(order["facility"], previous_config)
 
 
-def test_orders_facility_template_columns_requires_admin_auth(monkeypatch):
+def test_orders_facility_template_columns_allows_operator_auth(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-secret")
@@ -359,7 +401,7 @@ def test_orders_facility_template_columns_requires_admin_auth(monkeypatch):
         json={"columns": columns},
         headers=_basic_header("operator", "operator-secret"),
     )
-    assert operator_res.status_code == 403
+    assert operator_res.status_code == 200
 
     admin_res = client.put(
         f"/orders/{order['id']}/facility-template-columns",

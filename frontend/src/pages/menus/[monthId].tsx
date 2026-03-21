@@ -2,6 +2,7 @@ import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
+import { DIET_TYPE_OPTIONS, formatDietTypeLabel } from "../../services/menuVocabulary";
 
 type MenuItem = {
   id: string;
@@ -27,17 +28,53 @@ type MenuEntry = {
   category?: string | null;
   diet_type?: string | null;
   slot_index?: number | null;
+  facility_override?: string | null;
 };
 
 type MonthlyMenu = {
   id: string;
   filename?: string | null;
+  display_name?: string | null;
+  uploaded_at?: string | null;
+};
+
+type MenuUploadEntry = {
+  id: string;
+  month_id: string;
+  uploaded_at?: string | null;
+  filename?: string | null;
+  sheet_name?: string | null;
+  item_count?: number | null;
+  replaced?: boolean;
+  actor?: string | null;
+  download_available?: boolean;
+  archive_error?: string | null;
+  scope_override?: string | null;
+};
+
+type FacilityOption = {
+  id: string;
+  name: string;
+};
+
+type TagScopeOption = {
+  value: string;
+  scope_override?: string | null;
+  facility_ids?: string[];
+  facility_names?: string[];
+  facility_count?: number;
 };
 
 const unitChoices = [
   { value: "g", label: "グラム(g)" },
   { value: "count", label: "個数" },
   { value: "cut", label: "切" },
+];
+
+const tempTypeChoices = [
+  { value: "", label: "未選択" },
+  { value: "hot", label: "温" },
+  { value: "cold", label: "冷" },
 ];
 
 const uniqueValues = (items: MenuItem[], field: keyof MenuItem) => {
@@ -55,13 +92,50 @@ export default function MonthlyMenuEditorPage() {
   const [entries, setEntries] = useState<MenuEntry[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [sheetName, setSheetName] = useState<string>("");
+  const [scopeType, setScopeType] = useState<string>("base");
+  const [scopeValue, setScopeValue] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [lastUpload, setLastUpload] = useState<string>("");
+  const [uploadHistory, setUploadHistory] = useState<MenuUploadEntry[]>([]);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
+  const [downloadingUploadId, setDownloadingUploadId] = useState<string | null>(null);
+  const [facilities, setFacilities] = useState<FacilityOption[]>([]);
+  const [tagOptions, setTagOptions] = useState<TagScopeOption[]>([]);
   const [condimentFile, setCondimentFile] = useState<File | null>(null);
   const [condimentUploading, setCondimentUploading] = useState<boolean>(false);
   const [condimentMessage, setCondimentMessage] = useState<string>("");
+
+  const formatScopeLabel = (scopeOverride?: string | null) => {
+    const value = (scopeOverride || "").trim();
+    if (!value) return "共通(base)";
+    if (value.startsWith("TAG:")) {
+      return `タグ:${value.slice(4)}`;
+    }
+    const facility = facilities.find((item) => item.id === value);
+    return facility ? `施設:${facility.name}` : `施設:${value}`;
+  };
+
+  const loadUploadHistory = async () => {
+    if (!monthId || Array.isArray(monthId)) return;
+    try {
+      const res = await apiClient.get(`/monthly-menus/${monthId}/uploads`);
+      setUploadHistory(res.data?.items || []);
+    } catch {
+      setUploadHistory([]);
+    }
+  };
+
+  const loadScopeOptions = async () => {
+    try {
+      const res = await apiClient.get("/monthly-menus/scope-options");
+      setFacilities(res.data?.facilities || []);
+      setTagOptions(res.data?.tags || []);
+    } catch {
+      setFacilities([]);
+      setTagOptions([]);
+    }
+  };
 
   const loadMenu = async () => {
     if (!monthId || Array.isArray(monthId)) return;
@@ -71,16 +145,25 @@ export default function MonthlyMenuEditorPage() {
       setItems(res.data.items || []);
       setEntries(res.data.entries || []);
       setMessage("");
-    } catch (err) {
+    } catch (err: any) {
       setMenu(null);
       setItems([]);
       setEntries([]);
-      setMessage("月次メニューがまだ登録されていません。");
+      const status = err?.response?.status;
+      if (status === 403) {
+        setMessage("権限がありません。月次メニューの操作にはユーザー2以上の権限が必要です。");
+      } else if (status === 404) {
+        setMessage("月次メニューがまだ登録されていません。");
+      } else {
+        setMessage("月次メニューの読込に失敗しました。");
+      }
     }
+    await loadUploadHistory();
   };
 
   useEffect(() => {
     loadMenu();
+    loadScopeOptions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monthId]);
 
@@ -90,26 +173,67 @@ export default function MonthlyMenuEditorPage() {
       setMessage("アップロードするファイルを選択してください。");
       return;
     }
+    if (scopeType !== "base" && !scopeValue.trim()) {
+      setMessage(scopeType === "facility" ? "施設差分を登録する施設を選択してください。" : "タグ差分のタグを選択してください。");
+      return;
+    }
     setUploading(true);
     const formData = new FormData();
     formData.append("file", file);
     try {
       const res = await apiClient.post("/monthly-menus", formData, {
-        params: { month_id: monthId, sheet_name: sheetName || undefined },
+        params: {
+          month_id: monthId,
+          sheet_name: sheetName || undefined,
+          scope_type: scopeType,
+          scope_value: scopeType === "base" ? undefined : scopeValue || undefined,
+        },
         headers: { "Content-Type": "multipart/form-data" },
       });
       setFile(null);
       await loadMenu();
       const itemCount = res.data?.item_count ?? 0;
       const replaced = res.data?.replaced ? "置換" : "新規";
-      const uploadMessage = `${file.name} を${replaced}で反映（${itemCount}件）`;
+      const scopeLabel = formatScopeLabel(res.data?.scope_override || (scopeType === "base" ? null : scopeValue));
+      const uploadMessage = `${file.name} を${replaced}で反映（${itemCount}件 / ${scopeLabel}）`;
       setLastUpload(uploadMessage);
       setMessage("アップロードしました。");
+      await loadUploadHistory();
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      setMessage(detail ? `アップロード失敗: ${detail}` : "アップロードに失敗しました。");
+      const status = err?.response?.status;
+      if (status === 403) {
+        setMessage("アップロード失敗: 権限がありません。");
+      } else {
+        setMessage(detail ? `アップロード失敗: ${detail}` : "アップロードに失敗しました。");
+      }
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDownloadUpload = async (upload: MenuUploadEntry) => {
+    if (!monthId || Array.isArray(monthId)) return;
+    setDownloadingUploadId(upload.id);
+    try {
+      const res = await apiClient.get(`/monthly-menus/${monthId}/uploads/${upload.id}/download`, {
+        responseType: "blob",
+      });
+      const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
+      const disposition = String(res.headers?.["content-disposition"] || "");
+      const matched = disposition.match(/filename=\"?([^\";]+)\"?/i);
+      const filename = matched?.[1] || upload.filename || "monthly-menu.xlsx";
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setMessage(detail ? `ダウンロードに失敗しました: ${detail}` : "ダウンロードに失敗しました。");
+    } finally {
+      setDownloadingUploadId(null);
     }
   };
 
@@ -132,7 +256,12 @@ export default function MonthlyMenuEditorPage() {
       setCondimentFile(null);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      setCondimentMessage(detail ? `反映に失敗しました: ${detail}` : "反映に失敗しました。");
+      const status = err?.response?.status;
+      if (status === 403) {
+        setCondimentMessage("反映に失敗しました: 権限がありません。");
+      } else {
+        setCondimentMessage(detail ? `反映に失敗しました: ${detail}` : "反映に失敗しました。");
+      }
     } finally {
       setCondimentUploading(false);
     }
@@ -170,17 +299,19 @@ export default function MonthlyMenuEditorPage() {
       await loadMenu();
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      setMessage(detail ? `保存に失敗しました: ${detail}` : "保存に失敗しました。");
+      const status = err?.response?.status;
+      if (status === 403) {
+        setMessage("保存に失敗しました: 権限がありません。");
+      } else {
+        setMessage(detail ? `保存に失敗しました: ${detail}` : "保存に失敗しました。");
+      }
     } finally {
       setSavingId(null);
     }
   };
 
-  const tempOptions = uniqueValues(items, "temp_type");
   const daypartOptions = uniqueValues(items, "daypart");
   const categoryOptions = uniqueValues(items, "category");
-  const dietOptions = uniqueValues(items, "diet_type");
-
   return (
     <main className="page">
       <header className="hero">
@@ -198,8 +329,8 @@ export default function MonthlyMenuEditorPage() {
         </header>
         <div className="upload-grid">
           <div>
-            <p className="field-label">ファイル</p>
-            <p className="summary-value">{menu?.filename || "未登録"}</p>
+            <p className="field-label">最終登録</p>
+            <p className="summary-value">{menu?.display_name || "未登録"}</p>
           </div>
           <div>
             <p className="field-label">項目数</p>
@@ -218,11 +349,106 @@ export default function MonthlyMenuEditorPage() {
             value={sheetName}
             onChange={(e) => setSheetName(e.target.value)}
           />
+          <select
+            className="input scope-select"
+            value={scopeType}
+            onChange={(e) => {
+              setScopeType(e.target.value);
+              setScopeValue("");
+            }}
+          >
+            <option value="base">共通(base)</option>
+            <option value="facility">施設差分</option>
+            <option value="tag">タグ差分</option>
+          </select>
+          {scopeType === "facility" && (
+            <select className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
+              <option value="">施設を選択</option>
+              {facilities.map((facility) => (
+                <option key={facility.id} value={facility.id}>
+                  {facility.name} ({facility.id})
+                </option>
+              ))}
+            </select>
+          )}
+          {scopeType === "tag" && (
+            <select className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
+              <option value="">タグを選択</option>
+              {tagOptions.map((tag) => (
+                <option key={tag.value} value={tag.value}>
+                  {tag.value}
+                  {tag.facility_count ? ` (${tag.facility_count}施設)` : ""}
+                </option>
+              ))}
+            </select>
+          )}
           <button className="btn primary" onClick={handleUpload} disabled={uploading}>
             {uploading ? "アップロード中..." : "アップロード"}
           </button>
         </div>
+        <p className="subtle scope-note">
+          通常は <strong>共通(base)</strong> を使います。施設だけ違う献立は <strong>施設差分</strong>、複数施設で共通の差分は
+          <strong> タグ差分</strong> を選びます。
+        </p>
+        {scopeType === "tag" && tagOptions.length === 0 && (
+          <p className="subtle scope-note">タグがまだありません。施設設定でタグを登録してから選択してください。</p>
+        )}
         {message && <p className="message">{message}</p>}
+        <div className="upload-history">
+          <div className="history-header">
+            <h3>これまでのアップロード</h3>
+            <p className="subtle">新しい履歴はダウンロードできます。過去分はファイル未保存のため一覧のみです。</p>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>登録日時</th>
+                  <th>ファイル名</th>
+                  <th>シート名</th>
+                  <th>適用先</th>
+                  <th>件数</th>
+                  <th>更新種別</th>
+                  <th>ダウンロード</th>
+                </tr>
+              </thead>
+              <tbody>
+                {uploadHistory.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>履歴はまだありません。</td>
+                  </tr>
+                ) : (
+                  uploadHistory.map((upload) => (
+                    <tr key={upload.id}>
+                      <td>{upload.uploaded_at ? new Date(upload.uploaded_at).toLocaleString("ja-JP") : "-"}</td>
+                      <td>{upload.filename || "-"}</td>
+                      <td>{upload.sheet_name || "-"}</td>
+                      <td>{formatScopeLabel(upload.scope_override)}</td>
+                      <td>{upload.item_count ?? "-"}</td>
+                      <td>{upload.replaced ? "置換" : "新規"}</td>
+                      <td>
+                        {upload.download_available ? (
+                          <button
+                            className="btn"
+                            type="button"
+                            onClick={() => handleDownloadUpload(upload)}
+                            disabled={downloadingUploadId === upload.id}
+                          >
+                            {downloadingUploadId === upload.id ? "取得中..." : "ダウンロード"}
+                          </button>
+                        ) : (
+                          <span className="history-note">
+                            {upload.archive_error ? "保存失敗" : "履歴のみ"}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <section className="panel">
@@ -256,7 +482,7 @@ export default function MonthlyMenuEditorPage() {
                 <th>時間帯</th>
                 <th>区分</th>
                 <th>食種</th>
-                <th>施設上書き</th>
+                <th>適用先</th>
                 <th>保存</th>
               </tr>
             </thead>
@@ -320,12 +546,17 @@ export default function MonthlyMenuEditorPage() {
                       </select>
                     </td>
                     <td>
-                      <input
+                      <select
                         className="input"
                         value={item.temp_type || ""}
-                        list="temp-type-options"
                         onChange={(e) => updateItemField(idx, "temp_type", e.target.value)}
-                      />
+                      >
+                        {tempTypeChoices.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <input
@@ -344,18 +575,24 @@ export default function MonthlyMenuEditorPage() {
                       />
                     </td>
                     <td>
-                      <input
+                      <select
                         className="input"
                         value={item.diet_type || ""}
-                        list="diet-type-options"
                         onChange={(e) => updateItemField(idx, "diet_type", e.target.value)}
-                      />
+                      >
+                        {DIET_TYPE_OPTIONS.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <input
                         className="input"
                         value={item.facility_override || ""}
                         onChange={(e) => updateItemField(idx, "facility_override", e.target.value)}
+                        placeholder="共通(base) / FACxxxx / TAG:xxx"
                       />
                     </td>
                     <td>
@@ -369,11 +606,6 @@ export default function MonthlyMenuEditorPage() {
             </tbody>
           </table>
         </div>
-        <datalist id="temp-type-options">
-          {tempOptions.map((value) => (
-            <option key={value} value={value} />
-          ))}
-        </datalist>
         <datalist id="daypart-options">
           {daypartOptions.map((value) => (
             <option key={value} value={value} />
@@ -381,11 +613,6 @@ export default function MonthlyMenuEditorPage() {
         </datalist>
         <datalist id="category-options">
           {categoryOptions.map((value) => (
-            <option key={value} value={value} />
-          ))}
-        </datalist>
-        <datalist id="diet-type-options">
-          {dietOptions.map((value) => (
             <option key={value} value={value} />
           ))}
         </datalist>
@@ -405,12 +632,13 @@ export default function MonthlyMenuEditorPage() {
                 <th>メニュー名</th>
                 <th>区分</th>
                 <th>食種</th>
+                <th>適用先</th>
               </tr>
             </thead>
             <tbody>
               {entries.length === 0 ? (
                 <tr>
-                  <td colSpan={5}>日付別の献立がありません。</td>
+                  <td colSpan={6}>日付別の献立がありません。</td>
                 </tr>
               ) : (
                 entries.map((entry) => (
@@ -419,7 +647,8 @@ export default function MonthlyMenuEditorPage() {
                     <td>{entry.daypart || "-"}</td>
                     <td>{entry.name}</td>
                     <td>{entry.category || "-"}</td>
-                    <td>{entry.diet_type || "-"}</td>
+                    <td>{formatDietTypeLabel(entry.diet_type)}</td>
+                    <td>{formatScopeLabel(entry.facility_override)}</td>
                   </tr>
                 ))
               )}
@@ -557,6 +786,24 @@ export default function MonthlyMenuEditorPage() {
           padding: 8px 12px;
           border-radius: 10px;
           background: #f0f4f2;
+          font-size: 13px;
+        }
+
+        .upload-history {
+          margin-top: 18px;
+        }
+
+        .history-header {
+          margin-bottom: 12px;
+        }
+
+        .history-header h3 {
+          margin: 0 0 4px;
+          font-size: 15px;
+        }
+
+        .history-note {
+          color: #667570;
           font-size: 13px;
         }
 

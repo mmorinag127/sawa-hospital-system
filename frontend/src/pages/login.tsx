@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/router";
-import TopNav from "../components/TopNav";
+import PublicNav from "../components/PublicNav";
 import { setBasicAuth, setBearerToken } from "../services/apiClient";
 
 declare global {
@@ -118,9 +119,16 @@ export default function LoginPage() {
         <div>
           <p className="eyebrow">Sign In</p>
           <h1>オペレーター認証</h1>
-          <p className="subtle">推奨はGoogleログインです。</p>
+          <p className="subtle">
+            推奨はGoogleログインです。注文書アップロード運用でも、この認証を使います。
+          </p>
+          <p className="subtle links">
+            <Link href="/about">ホームページ</Link>
+            <Link href="/privacy">プライバシーポリシー</Link>
+            <Link href="/terms">利用規約</Link>
+          </p>
         </div>
-        <TopNav />
+        <PublicNav />
       </header>
 
       <section className="panel">
@@ -222,6 +230,18 @@ export default function LoginPage() {
         .subtle {
           color: #51615c;
           margin: 0;
+        }
+
+        .links {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          margin-top: 12px;
+        }
+
+        .links :global(a) {
+          text-decoration: underline;
+          text-underline-offset: 3px;
         }
 
         .nav {

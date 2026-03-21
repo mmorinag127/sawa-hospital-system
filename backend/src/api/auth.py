@@ -241,6 +241,20 @@ def get_current_operator(request: Request) -> UserContext:
     _raise_basic_unauthorized("Operator")
 
 
+def get_current_user(request: Request) -> UserContext:
+    if is_auth_disabled():
+        return UserContext(role="admin")
+    try:
+        return get_current_admin(request)
+    except HTTPException as exc:
+        if exc.status_code not in {
+            status.HTTP_401_UNAUTHORIZED,
+            status.HTTP_403_FORBIDDEN,
+        }:
+            raise
+    return get_current_operator(request)
+
+
 def require_role(required: str):
     dependency_source = get_current_admin if required == "admin" else get_current_operator
 

@@ -21,6 +21,6 @@
 ## Notes
 
 - Secrets must not be stored in state; only create containers in Secret Manager.
-- Watch (Gmail) must refresh ≤7日（推奨毎日） via Scheduler; log/alert failures.
+- Intake is manual-upload based; no Gmail watch scheduler is required.
 - Pub/Sub push must use dedicated SA with `roles/run.invoker`; worker endpoints require auth.
 - raw bucket lifecycle: 1〜2ヶ月保持（configurable）。

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { DIET_TYPE_OPTIONS } from "../services/menuVocabulary";
 
 type BaseMenuItem = {
   id?: string;
@@ -22,6 +23,14 @@ const normalizeNumber = (value: string) => {
   if (!value) return null;
   const num = Number(value);
   return Number.isNaN(num) ? null : num;
+};
+
+const formatTempType = (value?: string | null) => {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "-";
+  if (raw === "hot") return "温";
+  if (raw === "cold") return "冷";
+  return value || "-";
 };
 
 export default function BaseMenusPage() {
@@ -220,11 +229,17 @@ export default function BaseMenusPage() {
                     />
                   </td>
                   <td>
-                    <input
+                    <select
                       className="input"
                       value={item.diet_type ?? ""}
                       onChange={(e) => updateField(idx, "diet_type", e.target.value)}
-                    />
+                    >
+                      {DIET_TYPE_OPTIONS.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <input
@@ -240,7 +255,7 @@ export default function BaseMenusPage() {
                       ? "-"
                       : Number(item.qty_per_serving)}
                   </td>
-                  <td className="readonly">{item.temp_type || "-"}</td>
+                  <td className="readonly">{formatTempType(item.temp_type)}</td>
                   <td className="readonly">
                     {item.bag_max_qty == null || Number.isNaN(Number(item.bag_max_qty))
                       ? "-"

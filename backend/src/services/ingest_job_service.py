@@ -7,6 +7,7 @@ from sqlalchemy import select, update, func, desc
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
+from src.services.ocr_job_service import get_job_stale_at, is_job_stale
 
 
 def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,6 +263,29 @@ def summarize_backlog_metrics() -> dict[str, Any]:
             ).scalar_one()
             or 0
         )
+        active_jobs = [
+            {
+                "id": job.id,
+                "status": job.status,
+                "metrics": job.metrics,
+                "updated_at": job.updated_at,
+            }
+            for job in (
+                session.execute(
+                    select(OcrJob).where(OcrJob.status.in_(["running", "pending"]))
+                )
+                .scalars()
+                .all()
+            )
+        ]
+    stale_jobs = [job for job in active_jobs if is_job_stale(job)]
+    stale_oldest_seconds = None
+    if stale_jobs:
+        stale_ats = [get_job_stale_at(job) for job in stale_jobs]
+        stale_ats = [value for value in stale_ats if value is not None]
+        if stale_ats:
+            oldest_stale_at = min(stale_ats)
+            stale_oldest_seconds = max(int((now - oldest_stale_at).total_seconds()), 0)
     ingest_queue_depth = int(ingest_summary.get("eligible_backlog_count") or 0)
     oldest_pending_seconds = ingest_summary.get("oldest_pending_seconds")
     status = "ok"
@@ -292,5 +316,7 @@ def summarize_backlog_metrics() -> dict[str, Any]:
             "recent_backlog_skipped_count": recent_backlog_skipped_count,
             "recent_failed_count": recent_failed_count,
             "recent_window_hours": int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")),
+            "stale_count": len(stale_jobs),
+            "stale_oldest_seconds": stale_oldest_seconds,
         },
     }

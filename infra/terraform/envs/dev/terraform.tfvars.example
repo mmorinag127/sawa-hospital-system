@@ -6,7 +6,7 @@ location   = "ASIA-NORTHEAST1"
 raw_retention_days     = 60
 firestore_location_id  = "asia-northeast1"
 
-secret_ids = ["gmail-refresh-token", "db-password"]
+secret_ids = ["db-password"]
 
 cloudrun_services = {
   web    = "gcr.io/your-project/web:latest"
@@ -32,13 +32,4 @@ db_tier = "db-f1-micro"
 # pubsub_topic_name        = "orders-dev"
 # pubsub_subscription_name = "orders-dev-push"
 
-gmail_watch_schedule = "0 9 * * *"
-gmail_watch_path     = "/watch-refresh"
-# gmail_watch_job_name = "gmail-watch-refresh-dev"
-
-gmail_ingest_query = "is:unread has:attachment filename:pdf"
-gmail_ingest_label_ids = []
-gmail_ingest_max_results = 10
-gmail_ingest_mark_read = true
-gmail_ingest_prefix = "gmail"
 # worker_service_name  = "worker-dev"

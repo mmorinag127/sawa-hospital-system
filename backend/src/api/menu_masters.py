@@ -6,12 +6,12 @@ from src.services import menu_service
 router = APIRouter()
 
 
-@router.get("/menu-masters", dependencies=[Depends(require_role("admin"))])
+@router.get("/menu-masters", dependencies=[Depends(require_role("operator"))])
 def list_menu_masters(q: str | None = None, limit: int = 1000):
     return {"items": menu_service.list_menu_masters(query=q, limit=limit)}
 
 
-@router.post("/menu-masters", dependencies=[Depends(require_role("admin"))])
+@router.post("/menu-masters", dependencies=[Depends(require_role("operator"))])
 def create_menu_master(body: dict):
     try:
         item = menu_service.create_menu_master(body)
@@ -20,7 +20,7 @@ def create_menu_master(body: dict):
     return {"item": item}
 
 
-@router.put("/menu-masters/{item_id}", dependencies=[Depends(require_role("admin"))])
+@router.put("/menu-masters/{item_id}", dependencies=[Depends(require_role("operator"))])
 def update_menu_master(item_id: str, body: dict):
     try:
         updated = menu_service.update_menu_master(item_id, body)

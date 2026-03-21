@@ -5,6 +5,7 @@ from loguru import logger
 
 from src.db import session_scope
 from src.models.menu import MenuRule
+from src.services.menu_vocabulary import normalize_diet_type
 
 
 ALLOWED_RULE_TYPES = {"global", "menu", "facility"}
@@ -29,7 +30,7 @@ def _serialize_rule(rule: MenuRule) -> dict:
         "facility_id": rule.facility_id,
         "daypart": rule.daypart,
         "category": rule.category,
-        "diet_type": rule.diet_type,
+        "diet_type": normalize_diet_type(rule.diet_type),
         "unit_type": rule.unit_type,
         "qty_per_serving": rule.qty_per_serving,
         "priority": rule.priority,
@@ -83,7 +84,7 @@ def create_rule(payload: dict) -> dict:
         facility_id=payload.get("facility_id"),
         daypart=payload.get("daypart"),
         category=payload.get("category"),
-        diet_type=payload.get("diet_type"),
+        diet_type=normalize_diet_type(payload.get("diet_type")),
         unit_type=payload.get("unit_type"),
         qty_per_serving=qty_value,
         priority=priority_value,
@@ -133,7 +134,10 @@ def update_rule(rule_id: str, payload: dict) -> bool:
             "active",
         ]:
             if field in payload:
-                setattr(rule, field, payload[field])
+                value = payload[field]
+                if field == "diet_type":
+                    value = normalize_diet_type(value)
+                setattr(rule, field, value)
         return True
 
 

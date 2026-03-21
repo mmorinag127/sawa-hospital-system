@@ -35,9 +35,7 @@ variable "firestore_enabled" {
 variable "secret_ids" {
   type    = list(string)
   default = [
-    "gmail-client-id",
-    "gmail-client-secret",
-    "gmail-refresh-token",
+    "db-password",
   ]
 }
 
@@ -74,46 +72,6 @@ variable "pubsub_topic_name" {
 }
 
 variable "pubsub_subscription_name" {
-  type    = string
-  default = ""
-}
-
-variable "gmail_watch_schedule" {
-  type    = string
-  default = "0 9 * * *"
-}
-
-variable "gmail_watch_path" {
-  type    = string
-  default = "/watch-refresh"
-}
-
-variable "gmail_ingest_query" {
-  type    = string
-  default = "is:unread has:attachment filename:pdf"
-}
-
-variable "gmail_ingest_label_ids" {
-  type    = list(string)
-  default = []
-}
-
-variable "gmail_ingest_max_results" {
-  type    = number
-  default = 10
-}
-
-variable "gmail_ingest_mark_read" {
-  type    = bool
-  default = true
-}
-
-variable "gmail_ingest_prefix" {
-  type    = string
-  default = "gmail"
-}
-
-variable "gmail_watch_state_uri" {
   type    = string
   default = ""
 }
@@ -196,11 +154,6 @@ variable "notification_channels" {
 }
 
 variable "cloudrun_worker_url_override" {
-  type    = string
-  default = ""
-}
-
-variable "gmail_watch_job_name" {
   type    = string
   default = ""
 }

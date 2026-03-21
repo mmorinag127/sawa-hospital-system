@@ -31,25 +31,25 @@ def test_users_api_upsert_and_update():
 
     create_res = client.post(
         "/users",
-        json={"account": "addonmeal2023@gmail.com", "role": "operator", "status": "active"},
+        json={"account": "operator@example.com", "role": "operator", "status": "active"},
     )
     assert create_res.status_code == 200
     create_payload = create_res.json()
     assert create_payload.get("created") is True
     user = create_payload.get("user") or {}
-    assert user.get("account") == "addonmeal2023@gmail.com"
+    assert user.get("account") == "operator@example.com"
     assert user.get("role") == "operator"
     assert user.get("status") == "active"
 
     upsert_res = client.post(
         "/users",
-        json={"account": "addonmeal2023@gmail.com", "role": "admin", "status": "active"},
+        json={"account": "operator@example.com", "role": "admin", "status": "active"},
     )
     assert upsert_res.status_code == 200
     upsert_payload = upsert_res.json()
     assert upsert_payload.get("created") is False
     upsert_user = upsert_payload.get("user") or {}
-    assert upsert_user.get("account") == "addonmeal2023@gmail.com"
+    assert upsert_user.get("account") == "operator@example.com"
     assert upsert_user.get("role") == "admin"
 
     user_id = str(upsert_user.get("id") or "")
@@ -63,6 +63,6 @@ def test_users_api_upsert_and_update():
     assert list_res.status_code == 200
     items = list_res.json().get("items") or []
     assert len(items) == 1
-    assert items[0].get("account") == "addonmeal2023@gmail.com"
+    assert items[0].get("account") == "operator@example.com"
     assert items[0].get("role") == "admin"
     assert items[0].get("status") == "inactive"

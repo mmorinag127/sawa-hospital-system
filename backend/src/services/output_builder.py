@@ -3,7 +3,6 @@ import json
 import math
 import calendar
 import re
-import zipfile
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
 from io import BytesIO
@@ -13,7 +12,7 @@ from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 
 from src.db import session_scope
@@ -2151,11 +2150,160 @@ def _safe_filename_segment(value: object, fallback: str) -> str:
     return text or fallback
 
 
+def _safe_sheet_title(value: object, fallback: str, used_titles: set[str]) -> str:
+    text = str(value or "").strip() or fallback
+    text = re.sub(r'[\\/*?:\[\]]+', "_", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        text = fallback
+    base = text[:31] or fallback
+    title = base
+    suffix = 2
+    while title in used_titles:
+        tail = f"-{suffix}"
+        title = f"{base[: max(31 - len(tail), 1)]}{tail}"
+        suffix += 1
+    used_titles.add(title)
+    return title
+
+
+def _copy_sheet_contents(source_ws, target_ws) -> None:
+    for row in source_ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            target = target_ws.cell(row=cell.row, column=cell.column)
+            target.value = cell.value
+            _copy_cell_style(cell, target)
+    for merged_range in source_ws.merged_cells.ranges:
+        target_ws.merge_cells(str(merged_range))
+    for col_key, dim in source_ws.column_dimensions.items():
+        target_dim = target_ws.column_dimensions[col_key]
+        target_dim.width = dim.width
+        target_dim.hidden = dim.hidden
+        target_dim.bestFit = dim.bestFit
+    for row_key, dim in source_ws.row_dimensions.items():
+        target_dim = target_ws.row_dimensions[row_key]
+        target_dim.height = dim.height
+        target_dim.hidden = dim.hidden
+    target_ws.sheet_view.showGridLines = source_ws.sheet_view.showGridLines
+    target_ws.freeze_panes = source_ws.freeze_panes
+    target_ws.sheet_format.defaultRowHeight = source_ws.sheet_format.defaultRowHeight
+    target_ws.sheet_format.defaultColWidth = source_ws.sheet_format.defaultColWidth
+    target_ws.page_margins = copy(source_ws.page_margins)
+    target_ws.print_options = copy(source_ws.print_options)
+    target_ws.page_setup = copy(source_ws.page_setup)
+
+
+def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
+    ws.append(fieldnames)
+    for row in rows:
+        ws.append([row.get(field, "") for field in fieldnames])
+
+
+def _create_daily_labels_sheet(
+    workbook,
+    used_titles: set[str],
+    *,
+    title_seed: str,
+    bags: list[dict],
+    label_profile: dict,
+    facility_name: str | None,
+) -> str:
+    labels, label_fields, _ = _build_label_rows(bags, label_profile, facility_name)
+    if not labels:
+        raise ValueError("label rows not found for target date")
+    ws = workbook.create_sheet(title=_safe_sheet_title(title_seed, "ラベル", used_titles))
+    _populate_label_sheet(ws, label_fields, labels)
+    return ws.title
+
+
+def _create_daily_delivery_sheet(
+    workbook,
+    used_titles: set[str],
+    *,
+    title_seed: str,
+    rows: list[dict],
+    invoice_template: dict,
+    facility_name: str | None,
+    order_id: str,
+) -> str:
+    if not rows:
+        raise ValueError("delivery rows not found for target date")
+    temp_path = OUTPUT_DIR / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
+    try:
+        _write_delivery_note(
+            temp_path,
+            rows,
+            invoice_template.get("columns", []),
+            invoice_template.get("template_uri"),
+            bool(invoice_template.get("include_menu_name", False)),
+            invoice_template.get("sheet_name"),
+            facility_name,
+        )
+        rendered = load_workbook(temp_path)
+        source_ws = rendered.active
+        ws = workbook.create_sheet(title=_safe_sheet_title(title_seed, "納品書", used_titles))
+        _copy_sheet_contents(source_ws, ws)
+        return ws.title
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _merge_delivery_bundle_rows(rows: list[dict], invoice_template: dict | None) -> list[dict]:
+    columns = invoice_template.get("columns", []) if isinstance(invoice_template, dict) else []
+    quantity_names = [
+        str(col.get("name") or "").strip()
+        for col in columns
+        if col.get("source") == "quantity" and str(col.get("name") or "").strip()
+    ]
+    if not rows or not quantity_names:
+        return rows
+
+    merged: dict[tuple[object, object, object, object], dict] = {}
+    for row in rows:
+        key = (
+            _ensure_date(row.get("date")),
+            row.get("daypart"),
+            row.get("menu_category"),
+            row.get("menu_name"),
+        )
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(row)
+            continue
+        target = existing
+        if target.get("_order_index") is None and row.get("_order_index") is not None:
+            target["_order_index"] = row.get("_order_index")
+        if not target.get("menu_display") and row.get("menu_display"):
+            target["menu_display"] = row.get("menu_display")
+        if not target.get("note") and row.get("note"):
+            target["note"] = row.get("note")
+        for name in quantity_names:
+            value = row.get(name)
+            if value in (None, ""):
+                continue
+            target[name] = (target.get(name) or 0) + float(value)
+
+    result = list(merged.values())
+    result.sort(
+        key=lambda row: (
+            row.get("date") or "",
+            row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
+            row.get("menu_name") or "",
+        )
+    )
+    return result
+
+
 def build_daily_output_bundle(
     target_date: dt_date,
     *,
     bundle_type: str = "both",
-    status: str | None = "確定",
+    status: str | None = None,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
     if normalized_type not in {"labels", "delivery", "both"}:
@@ -2163,69 +2311,169 @@ def build_daily_output_bundle(
 
     orders = order_service.list_orders_by_line_date(target_date, status=status)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    bundle_name = f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.zip"
+    bundle_name = f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.xlsx"
     bundle_path = OUTPUT_DIR / bundle_name
 
     manifest_items: list[dict] = []
-    success_count = 0
+    grouped_outputs: dict[str, dict[str, Any]] = {}
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    used_titles: set[str] = set()
 
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for order_summary in orders:
-            order_id = str(order_summary.get("id") or "").strip()
-            if not order_id:
-                continue
-            facility_code = str(order_summary.get("facility") or "").strip()
-            facility_name = ""
-            if facility_code:
-                try:
-                    facility_config = config_service.get_facility_config(facility_code) or {}
-                    facility_name = str(facility_config.get("facility_name") or "").strip()
-                except Exception:
-                    facility_name = ""
-            filename_prefix = "_".join(
-                [
-                    _safe_filename_segment(target_date.isoformat(), "date"),
-                    _safe_filename_segment(facility_name or facility_code, "facility"),
-                    _safe_filename_segment(order_id, "order"),
-                ]
-            )
-            item_payload: dict[str, object] = {
-                "order_id": order_id,
-                "facility_code": facility_code or None,
-                "facility_name": facility_name or None,
-                "status": "ok",
-                "files": [],
-            }
+    for order_summary in orders:
+        order_id = str(order_summary.get("id") or "").strip()
+        if not order_id:
+            continue
+        facility_code = str(order_summary.get("facility") or "").strip()
+        facility_name = ""
+        if facility_code:
             try:
-                if normalized_type in {"labels", "both"}:
-                    label_output = build_output_preview(order_id, "labels")
-                    label_path = Path(label_output["labels"])
-                    arcname = f"labels/{filename_prefix}_labels.csv"
-                    zf.write(label_path, arcname=arcname)
-                    item_payload["files"].append(arcname)
-                if normalized_type in {"delivery", "both"}:
-                    delivery_output = build_output_preview(order_id, "delivery")
-                    delivery_path = Path(delivery_output["delivery_note"])
-                    arcname = f"delivery/{filename_prefix}_delivery.xlsx"
-                    zf.write(delivery_path, arcname=arcname)
-                    item_payload["files"].append(arcname)
-                success_count += 1
-            except Exception as exc:  # noqa: BLE001
-                item_payload["status"] = "error"
-                item_payload["error"] = str(exc)
-            manifest_items.append(item_payload)
+                facility_config = config_service.get_facility_config(facility_code) or {}
+                facility_name = str(facility_config.get("facility_name") or "").strip()
+            except Exception:
+                facility_name = ""
+        try:
+            ctx = _prepare_output_context(order_id)
+            facility_config = ctx.get("facility_config") or {}
+            facility_name = str(facility_config.get("facility_name") or facility_name or "").strip()
+            facility_code = str(ctx.get("order_for_outputs", {}).get("facility") or facility_code or "").strip()
+            group_key = facility_code or facility_name or order_id
+            sheet_seed = facility_name or facility_code or order_id
+            group = grouped_outputs.get(group_key)
+            if not group:
+                group = {
+                    "facility_code": facility_code or None,
+                    "facility_name": facility_name or None,
+                    "sheet_seed": sheet_seed,
+                    "order_ids": [],
+                    "label_profile": ctx["label_profile"],
+                    "invoice_template": ctx["invoice_template"],
+                    "quantity_rules": ctx["quantity_rules"],
+                    "facility_config": facility_config,
+                    "ocr_menu_meta": ctx.get("ocr_menu_meta"),
+                    "bags": [],
+                    "delivery_rows": [],
+                }
+                grouped_outputs[group_key] = group
 
-        manifest = {
-            "date": target_date.isoformat(),
-            "bundle_type": normalized_type,
-            "status_filter": status,
-            "created_at": datetime.utcnow().isoformat(),
-            "total_orders": len(orders),
-            "success_orders": success_count,
-            "error_orders": max(len(orders) - success_count, 0),
-            "items": manifest_items,
+            group["order_ids"].append(order_id)
+            if normalized_type in {"labels", "both"}:
+                filtered_bags = [
+                    bag for bag in ctx["bags"] if _ensure_date(bag.get("date")) == target_date
+                ]
+                group["bags"].extend(filtered_bags)
+            if normalized_type in {"delivery", "both"}:
+                delivery_rows = _build_delivery_rows(
+                    ctx["order_for_outputs"],
+                    ctx["invoice_template"],
+                    ctx["quantity_rules"],
+                    facility_config,
+                    ctx.get("ocr_menu_meta"),
+                )
+                filtered_delivery_rows = [
+                    row for row in delivery_rows if _ensure_date(row.get("date")) == target_date
+                ]
+                group["delivery_rows"].extend(filtered_delivery_rows)
+        except Exception as exc:  # noqa: BLE001
+            manifest_items.append(
+                {
+                    "order_id": order_id,
+                    "facility_code": facility_code or None,
+                    "facility_name": facility_name or None,
+                    "status": "error",
+                    "error": str(exc),
+                    "files": [],
+                }
+            )
+
+    success_count = 0
+    for group in grouped_outputs.values():
+        item_payload: dict[str, object] = {
+            "order_ids": list(group["order_ids"]),
+            "facility_code": group["facility_code"],
+            "facility_name": group["facility_name"],
+            "status": "ok",
+            "files": [],
         }
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        try:
+            has_label_rows = bool(group["bags"])
+            merged_delivery_rows = _merge_delivery_bundle_rows(
+                group["delivery_rows"],
+                group["invoice_template"],
+            ) if normalized_type in {"delivery", "both"} else []
+            has_delivery_rows = bool(merged_delivery_rows)
+
+            should_create_label_sheet = normalized_type in {"labels", "both"} and has_label_rows
+            should_create_delivery_sheet = normalized_type in {"delivery", "both"} and has_delivery_rows
+
+            if normalized_type == "labels" and not should_create_label_sheet:
+                item_payload["status"] = "empty"
+                item_payload["error"] = "label rows not found for target date"
+                manifest_items.append(item_payload)
+                continue
+            if normalized_type == "delivery" and not should_create_delivery_sheet:
+                item_payload["status"] = "empty"
+                item_payload["error"] = "delivery rows not found for target date"
+                manifest_items.append(item_payload)
+                continue
+            if normalized_type == "both" and not should_create_label_sheet and not should_create_delivery_sheet:
+                item_payload["status"] = "empty"
+                item_payload["error"] = "no bundle rows found for target date"
+                manifest_items.append(item_payload)
+                continue
+
+            if should_create_label_sheet:
+                label_title_seed = (
+                    group["sheet_seed"]
+                    if normalized_type == "labels"
+                    else f"ラベル_{group['sheet_seed']}"
+                )
+                sheet_name = _create_daily_labels_sheet(
+                    workbook,
+                    used_titles,
+                    title_seed=label_title_seed,
+                    bags=group["bags"],
+                    label_profile=group["label_profile"],
+                    facility_name=group["facility_config"].get("facility_name"),
+                )
+                item_payload["files"].append(sheet_name)
+            if should_create_delivery_sheet:
+                delivery_title_seed = (
+                    group["sheet_seed"]
+                    if normalized_type == "delivery"
+                    else f"納品書_{group['sheet_seed']}"
+                )
+                sheet_name = _create_daily_delivery_sheet(
+                    workbook,
+                    used_titles,
+                    title_seed=delivery_title_seed,
+                    rows=merged_delivery_rows,
+                    invoice_template=group["invoice_template"],
+                    facility_name=group["facility_config"].get("facility_name"),
+                    order_id=str(group["order_ids"][0]),
+                )
+                item_payload["files"].append(sheet_name)
+            success_count += 1
+        except Exception as exc:  # noqa: BLE001
+            item_payload["status"] = "error"
+            item_payload["error"] = str(exc)
+        manifest_items.append(item_payload)
+
+    if not workbook.sheetnames:
+        raise ValueError("対象日の出力対象がありません")
+
+    workbook.save(bundle_path)
+    manifest = {
+        "date": target_date.isoformat(),
+        "bundle_type": normalized_type,
+        "status_filter": status,
+        "created_at": datetime.utcnow().isoformat(),
+        "total_orders": len(manifest_items),
+        "success_orders": success_count,
+        "error_orders": max(len(manifest_items) - success_count, 0),
+        "items": manifest_items,
+        "file_format": "xlsx",
+    }
 
     return bundle_path, manifest
 

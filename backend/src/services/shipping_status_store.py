@@ -57,6 +57,25 @@ def _summary(items: list[dict]) -> dict:
     }
 
 
+def _latest_items_by_tracking(rows: Sequence[object], *, limit: int) -> list[dict]:
+    latest: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        item = _status_to_dict(row)
+        tracking_key = normalize_tracking_key(
+            str(item.get("tracking_key") or item.get("tracking_number") or "")
+        )
+        if not tracking_key or tracking_key in seen:
+            continue
+        seen.add(tracking_key)
+        if not item.get("tracking_key"):
+            item["tracking_key"] = tracking_key
+        latest.append(item)
+        if len(latest) >= limit:
+            break
+    return latest
+
+
 def _read_float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -235,10 +254,14 @@ def _query_history_rows(
     date_from: date | None = None,
     date_to: date | None = None,
     timezone_name: str = _DEFAULT_TZ,
-) -> list[ShippingTrackingLog]:
+    facility_names: Sequence[str] | None = None,
+) -> list[dict]:
     query_limit = max(1, min(limit, 1_000_000))
     with session_scope() as session:
         query = select(ShippingTrackingLog)
+        normalized_names = [str(name).strip() for name in (facility_names or []) if str(name).strip()]
+        if normalized_names:
+            query = query.where(ShippingTrackingLog.facility_name.in_(normalized_names))
         if date_from:
             start_utc, _ = _day_range_utc(date_from, timezone_name)
             query = query.where(ShippingTrackingLog.looked_up_at >= start_utc)
@@ -252,7 +275,8 @@ def _query_history_rows(
             .scalars()
             .all()
         )
-    return rows
+        items = [_serialize_row(row) for row in rows]
+    return items
 
 
 def get_today_statuses(*, limit: int = 20, timezone_name: str = _DEFAULT_TZ) -> dict:
@@ -297,6 +321,7 @@ def get_status_history(
     date_from: date | None = None,
     date_to: date | None = None,
     timezone_name: str = _DEFAULT_TZ,
+    facility_names: Sequence[str] | None = None,
 ) -> dict:
     zone = _coerce_timezone(timezone_name)
     rows = _query_history_rows(
@@ -304,8 +329,9 @@ def get_status_history(
         date_from=date_from,
         date_to=date_to,
         timezone_name=timezone_name,
+        facility_names=facility_names,
     )
-    items = [_serialize_row(row) for row in rows]
+    items = list(rows)
     return {
         "timezone": str(zone),
         "date_from": date_from.isoformat() if date_from else None,
@@ -314,6 +340,69 @@ def get_status_history(
         "items": items,
         "quota": get_quota_status(),
     }
+
+
+def get_latest_statuses_for_facility(
+    facility_names: Sequence[str],
+    *,
+    limit: int = 10,
+    max_age_days: int = 30,
+    timezone_name: str = _DEFAULT_TZ,
+) -> dict:
+    normalized_names = [str(name).strip() for name in facility_names if str(name).strip()]
+    zone = _coerce_timezone(timezone_name)
+    if not normalized_names:
+        return {
+            "timezone": str(zone),
+            "facility_names": [],
+            "summary": _summary([]),
+            "items": [],
+            "quota": get_quota_status(),
+        }
+    since = datetime.now(zone).date() - timedelta(days=max(max_age_days, 1))
+    rows = _query_history_rows(
+        limit=max(limit * 20, 100),
+        date_from=since,
+        timezone_name=timezone_name,
+        facility_names=normalized_names,
+    )
+    items = _latest_items_by_tracking(rows, limit=max(1, min(limit, 100)))
+    return {
+        "timezone": str(zone),
+        "facility_names": normalized_names,
+        "summary": _summary(items),
+        "items": items,
+        "quota": get_quota_status(),
+    }
+
+
+def get_latest_pending_tracking_numbers(
+    *,
+    limit: int = 100,
+    max_age_days: int = 14,
+    timezone_name: str = _DEFAULT_TZ,
+) -> list[str]:
+    zone = _coerce_timezone(timezone_name)
+    since = datetime.now(zone).date() - timedelta(days=max(max_age_days, 1))
+    rows = _query_history_rows(
+        limit=max(limit * 50, 200),
+        date_from=since,
+        timezone_name=timezone_name,
+    )
+    latest = _latest_items_by_tracking(rows, limit=max(limit * 5, 100))
+    pending: list[str] = []
+    for item in latest:
+        if item.get("delivered"):
+            continue
+        if item.get("error"):
+            continue
+        tracking_number = str(item.get("tracking_number") or item.get("tracking_key") or "").strip()
+        if not tracking_number:
+            continue
+        pending.append(tracking_number)
+        if len(pending) >= limit:
+            break
+    return pending
 
 
 def clear_status_history() -> int:
@@ -340,7 +429,7 @@ def export_status_history(
         date_to=date_to,
         timezone_name=timezone_name,
     )
-    items = [_serialize_row(row) for row in rows]
+    items = list(rows)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if normalized_format == "csv":
         filename = f"shipping_tracking_history_{stamp}.csv"

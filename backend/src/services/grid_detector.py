@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Optional, Tuple
 
+_GRID_DETECTION_MAX_PIXELS = 24_000_000
+_GRID_DETECTION_MIN_DPI = 96
+
 
 @dataclass
 class GridDetectionResult:
@@ -15,6 +18,48 @@ class GridDetectionResult:
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
+
+
+def _cap_detection_dpi(
+    requested_dpi: int,
+    *,
+    page_width_points: float,
+    page_height_points: float,
+    max_pixels: int = _GRID_DETECTION_MAX_PIXELS,
+    min_dpi: int = _GRID_DETECTION_MIN_DPI,
+) -> int:
+    try:
+        width_points = float(page_width_points)
+        height_points = float(page_height_points)
+    except Exception:
+        return max(int(requested_dpi), min_dpi)
+    if width_points <= 0 or height_points <= 0:
+        return max(int(requested_dpi), min_dpi)
+    dpi = max(int(requested_dpi), min_dpi)
+    width_px = width_points * dpi / 72.0
+    height_px = height_points * dpi / 72.0
+    pixels = width_px * height_px
+    if pixels <= max_pixels or pixels <= 0:
+        return dpi
+    scale = (max_pixels / pixels) ** 0.5
+    capped = int(dpi * scale)
+    return max(capped, min_dpi)
+
+
+def _downscale_image_if_needed(image, max_pixels: int = _GRID_DETECTION_MAX_PIXELS):
+    try:
+        width, height = image.size
+    except Exception:
+        return image
+    pixels = int(width) * int(height)
+    if pixels <= max_pixels or pixels <= 0:
+        return image
+    scale = (max_pixels / pixels) ** 0.5
+    target_width = max(1, int(width * scale))
+    target_height = max(1, int(height * scale))
+    if target_width >= width and target_height >= height:
+        return image
+    return image.resize((target_width, target_height))
 
 
 def _group_indices(indices: list[int], max_gap: int = 2) -> list[list[int]]:
@@ -466,6 +511,7 @@ def detect_table_grid_image(image_bytes: bytes, template: dict) -> Optional[Grid
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
     except Exception:
         return None
+    image = _downscale_image_if_needed(image)
     return _detect_grid_from_image(image, template)
 
 
@@ -482,6 +528,12 @@ def detect_table_grid(pdf_bytes: bytes, template: dict) -> Optional[GridDetectio
         if not pdf.pages:
             return None
         page = pdf.pages[page_index] if page_index < len(pdf.pages) else pdf.pages[0]
+        dpi = _cap_detection_dpi(
+            dpi,
+            page_width_points=float(getattr(page, "width", 0.0) or 0.0),
+            page_height_points=float(getattr(page, "height", 0.0) or 0.0),
+        )
         image = page.to_image(resolution=dpi).original
+        image = _downscale_image_if_needed(image)
 
     return _detect_grid_from_image(image, template)

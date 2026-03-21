@@ -1,13 +1,11 @@
 locals {
-  env = var.env
-  pubsub_topic_name = var.pubsub_topic_name != "" ? var.pubsub_topic_name : "orders-${var.env}"
-  pubsub_subscription_name = var.pubsub_subscription_name != "" ? var.pubsub_subscription_name : "orders-${var.env}-push"
-  pubsub_push_path = "/pubsub/push"
-  watch_path = var.gmail_watch_path != "" ? var.gmail_watch_path : "/watch-refresh"
-  watch_job_name = var.gmail_watch_job_name != "" ? var.gmail_watch_job_name : "gmail-watch-refresh-${var.env}"
-  worker_service_name = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
+  env                       = var.env
+  pubsub_topic_name         = var.pubsub_topic_name != "" ? var.pubsub_topic_name : "orders-${var.env}"
+  pubsub_subscription_name  = var.pubsub_subscription_name != "" ? var.pubsub_subscription_name : "orders-${var.env}-push"
+  pubsub_push_path          = "/pubsub/push"
+  worker_service_name       = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
   ocr_pipeline_service_name = var.ocr_pipeline_service_name != "" ? var.ocr_pipeline_service_name : "ocr-pipeline-${var.env}"
-  worker_url = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
+  worker_url                = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
 }
 
 module "apis" {
@@ -37,7 +35,7 @@ module "storage" {
   templates_bucket_readers = [
     "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}",
   ]
-  depends_on         = [module.apis, module.cloudrun]
+  depends_on = [module.apis, module.cloudrun]
 }
 
 module "firestore" {
@@ -56,47 +54,40 @@ module "secrets" {
 }
 
 module "cloudsql" {
-  source                = "../../modules/cloudsql"
-  project_id            = var.project_id
-  region                = var.region
-  instance_name         = var.db_instance_name
-  db_name               = var.db_name
-  db_user               = var.db_user
-  db_tier               = var.db_tier
-  db_password           = var.db_password
-  password_secret_id    = var.db_password_secret_id
-  deletion_protection   = var.db_deletion_protection
-  depends_on            = [module.apis, module.secrets]
+  source              = "../../modules/cloudsql"
+  project_id          = var.project_id
+  region              = var.region
+  instance_name       = var.db_instance_name
+  db_name             = var.db_name
+  db_user             = var.db_user
+  db_tier             = var.db_tier
+  db_password         = var.db_password
+  password_secret_id  = var.db_password_secret_id
+  deletion_protection = var.db_deletion_protection
+  depends_on          = [module.apis, module.secrets]
 }
 
 module "cloudrun" {
-  source    = "../../modules/cloudrun"
-  project_id = var.project_id
-  region     = var.region
-  env        = local.env
-  services   = var.cloudrun_services
+  source          = "../../modules/cloudrun"
+  project_id      = var.project_id
+  region          = var.region
+  env             = local.env
+  services        = var.cloudrun_services
   request_timeout = var.cloudrun_request_timeout
   env_vars = {
-    DB_NAME                  = var.db_name
-    DB_USER                  = var.db_user
-    DB_HOST                  = "/cloudsql/${module.cloudsql.connection_name}"
-    DB_DRIVER                = "postgresql+psycopg2"
-    AUTH_DISABLED            = var.auth_disabled ? "true" : "false"
-    OPERATOR_USER            = var.operator_user
-    OPERATOR_PASSWORD        = var.operator_password
-    GOOGLE_OAUTH_CLIENT_ID   = var.google_oauth_client_id
-    ALLOWED_EMAILS           = join(",", var.allowed_emails)
-    ADMIN_EMAILS             = join(",", var.admin_emails)
-    GCP_PROJECT_ID          = var.project_id
-    GMAIL_WATCH_TOPIC        = "projects/${var.project_id}/topics/${local.pubsub_topic_name}"
-    RAW_BUCKET               = "${var.project_id}-${local.env}-raw"
-    GMAIL_INGEST_QUERY       = var.gmail_ingest_query
-    GMAIL_INGEST_LABEL_IDS   = join(",", var.gmail_ingest_label_ids)
-    GMAIL_INGEST_MAX_RESULTS = tostring(var.gmail_ingest_max_results)
-    GMAIL_INGEST_MARK_READ   = var.gmail_ingest_mark_read ? "true" : "false"
-    GMAIL_INGEST_PREFIX      = var.gmail_ingest_prefix
-    GMAIL_WATCH_STATE_URI    = var.gmail_watch_state_uri != "" ? var.gmail_watch_state_uri : "gs://${var.project_id}-${local.env}-raw/gmail/watch_state.json"
-    FACILITY_MASTER_PATH     = "/app/src/data/facility_master.template.json"
+    DB_NAME                = var.db_name
+    DB_USER                = var.db_user
+    DB_HOST                = "/cloudsql/${module.cloudsql.connection_name}"
+    DB_DRIVER              = "postgresql+psycopg2"
+    AUTH_DISABLED          = var.auth_disabled ? "true" : "false"
+    OPERATOR_USER          = var.operator_user
+    OPERATOR_PASSWORD      = var.operator_password
+    GOOGLE_OAUTH_CLIENT_ID = var.google_oauth_client_id
+    ALLOWED_EMAILS         = join(",", var.allowed_emails)
+    ADMIN_EMAILS           = join(",", var.admin_emails)
+    GCP_PROJECT_ID         = var.project_id
+    RAW_BUCKET             = "${var.project_id}-${local.env}-raw"
+    FACILITY_MASTER_PATH   = "/app/src/data/facility_master.template.json"
     # Allow both the stable a.run.app URL and the regional run.app URL (canonical host redirect).
     CORS_ALLOW_ORIGINS       = "https://web-prod-avlnzjjrca-dt.a.run.app,https://web-prod-167795504375.asia-northeast2.run.app"
     TEMPLATE_COLLECTION      = "templates"
@@ -113,12 +104,14 @@ module "cloudrun" {
       NEXT_PUBLIC_API_BASE_URL = "https://worker-prod-avlnzjjrca-dt.a.run.app"
     }
     worker = {
-      OCR_MAIN_PROVIDER          = "pipeline"
-      OCR_PIPELINE_BUCKET        = "${var.project_id}-${local.env}-raw"
-      OCR_PIPELINE_INPUT_PREFIX  = "input/"
-      OCR_PIPELINE_OUTPUT_PREFIX = "output/"
+      OCR_MAIN_PROVIDER            = "pipeline"
+      OCR_PIPELINE_BUCKET          = "${var.project_id}-${local.env}-raw"
+      OCR_PIPELINE_INPUT_PREFIX    = "input/"
+      OCR_PIPELINE_OUTPUT_PREFIX   = "output/"
+      OCR_PIPELINE_MAX_INFLIGHT    = "4"
+      INGEST_MAX_WORKERS           = "6"
       GOOGLE_SERVICE_ACCOUNT_EMAIL = "worker-exec-${local.env}@${var.project_id}.iam.gserviceaccount.com"
-      ADMIN_SERVICE_ACCOUNTS     = "worker-exec-${local.env}@${var.project_id}.iam.gserviceaccount.com"
+      ADMIN_SERVICE_ACCOUNTS       = "worker-exec-${local.env}@${var.project_id}.iam.gserviceaccount.com"
     }
     "ocr-pipeline" = {
       OCR_YOMITOKU_DEVICE            = "cpu"
@@ -132,13 +125,13 @@ module "cloudrun" {
     }
   }
   service_resources = var.cloudrun_service_resources
-  secret_env_vars = {}
+  secret_env_vars   = {}
   service_secret_env_vars = {
     web    = var.cloudrun_secret_env_vars
     worker = var.cloudrun_secret_env_vars
   }
   cloudsql_instances = [module.cloudsql.connection_name]
-  depends_on = [module.apis, module.secrets, module.cloudsql]
+  depends_on         = [module.apis, module.secrets, module.cloudsql]
 }
 
 module "pubsub" {
@@ -148,22 +141,7 @@ module "pubsub" {
   subscription_name = local.pubsub_subscription_name
   push_endpoint     = "${local.worker_url}${local.pubsub_push_path}"
   push_sa_email     = module.cloudrun.service_accounts["worker"]
-  topic_publisher_members = [
-    "serviceAccount:gmail-api-push@system.gserviceaccount.com",
-  ]
   depends_on        = [module.apis]
-}
-
-module "scheduler" {
-  source          = "../../modules/scheduler"
-  project_id      = var.project_id
-  region          = var.region
-  job_name        = local.watch_job_name
-  schedule        = var.gmail_watch_schedule
-  description     = "Gmail watch refresh"
-  target_url      = "${local.worker_url}${local.watch_path}"
-  target_sa_email = module.cloudrun.service_accounts["worker"]
-  depends_on      = [module.apis]
 }
 
 module "ingest_retry_scheduler" {
@@ -179,30 +157,32 @@ module "ingest_retry_scheduler" {
   depends_on      = [module.apis]
 }
 
-module "gmail_scan_scheduler" {
+module "shipping_tracking_refresh_scheduler" {
   source          = "../../modules/scheduler"
   project_id      = var.project_id
   region          = var.region
-  job_name        = "gmail-scan-${local.env}"
-  schedule        = "*/5 * * * *"
-  description     = "Scan Gmail for PDF attachments"
-  target_url      = "${local.worker_url}/ingest/gmail-scan?sync=true&max_jobs=1&skip_ocr=true"
+  job_name        = "shipping-tracking-refresh-${local.env}"
+  schedule        = "15 * * * *"
+  description     = "Refresh pending Sagawa tracking statuses"
+  target_url      = "${local.worker_url}/shipping/status/refresh-pending?limit=100&max_age_days=14"
   target_sa_email = module.cloudrun.service_accounts["worker"]
+  paused          = false
   depends_on      = [module.apis]
 }
+
 
 module "iam" {
   source     = "../../modules/iam"
   project_id = var.project_id
   run_invoker_bindings = [
     {
-      member  = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
-      service = local.worker_service_name
+      member   = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
+      service  = local.worker_service_name
       location = var.region
     },
     {
-      member  = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
-      service = local.ocr_pipeline_service_name
+      member   = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
+      service  = local.ocr_pipeline_service_name
       location = var.region
     }
   ]
@@ -297,13 +277,13 @@ resource "google_eventarc_trigger" "ocr_pipeline_gcs" {
 }
 
 module "monitoring" {
-  source     = "../../modules/monitoring"
-  project_id = var.project_id
-  env        = local.env
-  region     = var.region
+  source                   = "../../modules/monitoring"
+  project_id               = var.project_id
+  env                      = local.env
+  region                   = var.region
   worker_service_name      = local.worker_service_name
   pubsub_subscription_name = local.pubsub_subscription_name
   notification_emails      = var.notification_emails
   notification_channels    = var.notification_channels
-  depends_on = [module.apis]
+  depends_on               = [module.apis]
 }

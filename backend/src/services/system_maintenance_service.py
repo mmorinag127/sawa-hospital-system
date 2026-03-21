@@ -16,6 +16,7 @@ from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.order_ocr_cache import OrderOcrCache
+from src.models.order_ocr_revision import OrderOcrRevision
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.shipping_tracking import ShippingTrackingLog
 from src.models.user import AuditLog, Notification
@@ -36,6 +37,7 @@ _OPERATIONAL_MODELS: list[tuple[str, Any]] = [
     ("order_lines", OrderLine),
     ("order_documents", OrderDocument),
     ("order_ocr_cache", OrderOcrCache),
+    ("order_ocr_revisions", OrderOcrRevision),
     ("ocr_jobs", OcrJob),
     ("ingest_jobs", IngestJob),
     ("orders", Order),

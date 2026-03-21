@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.workers import celery_app
 from src.workers.ingest_mail_adapter import parse_ingest_payload
-from src.services.order_service import create_order_from_ingest
+from src.services.order_service import create_order_from_ingest, reparse_order as run_order_reparse
 from src.services import config_service
 from src.services.ingest_policy import (
     parse_date_string,
@@ -24,14 +24,85 @@ from src.services.storage_service import (
 from src.services.fax_extractor import extract_fax_data, filter_tokens_by_box
 from src.services.grid_detector import detect_table_grid
 from src.services.fax_parser import parse_order_lines
-from src.services.ocr_job_service import create_job, update_job
+from src.services.ocr_job_service import create_job, update_job, get_job, describe_job_state
 from src.services.ocr_pipeline_service import run_ocr_pipeline
 from src.services import ingest_job_service
-from src.services.gmail_ingest_service import mark_message_read
 from loguru import logger
 
 _INGEST_MAX_WORKERS = int(os.getenv("INGEST_MAX_WORKERS", "4") or 4)
 _INGEST_EXECUTOR = ThreadPoolExecutor(max_workers=_INGEST_MAX_WORKERS)
+_AUTO_REPARSE_MAX_WORKERS = int(os.getenv("OCR_AUTO_LLM_REPARSE_MAX_WORKERS", "2") or 2)
+_AUTO_REPARSE_EXECUTOR = ThreadPoolExecutor(max_workers=_AUTO_REPARSE_MAX_WORKERS)
+
+
+def _auto_llm_reparse_enabled() -> bool:
+    raw = str(os.getenv("OCR_AUTO_LLM_REPARSE_ON_INGEST", "1") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _looks_like_first_pass_ocr_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("table_raw"), str) and payload.get("table_raw", "").strip():
+        return True
+    pages = payload.get("pages")
+    if isinstance(pages, list) and pages:
+        return True
+    tables = payload.get("tables")
+    if isinstance(tables, list) and tables:
+        return True
+    return False
+
+
+def _run_auto_llm_reparse(order_id: str, *, provider: str | None = None) -> None:
+    try:
+        updated, error = run_order_reparse(
+            order_id,
+            ocr_provider=provider,
+            llm_assist=True,
+        )
+        logger.info(
+            "Auto LLM reparse finished",
+            order_id=order_id,
+            provider=provider or "default",
+            updated=bool(updated),
+            error=error,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Auto LLM reparse failed", order_id=order_id, error=str(exc))
+
+
+def _enqueue_auto_llm_reparse(
+    order: dict | None,
+    *,
+    ocr_status: str,
+    pipeline_output: dict | None,
+) -> None:
+    if not _auto_llm_reparse_enabled():
+        return
+    if str(ocr_status or "").strip().lower() != "success":
+        return
+    if not _looks_like_first_pass_ocr_payload(pipeline_output):
+        return
+    if not isinstance(order, dict):
+        return
+    order_id = str(order.get("id") or "").strip()
+    facility_id = str(order.get("facility") or "").strip()
+    document_uri = str(order.get("document") or "").strip()
+    if not order_id or not facility_id or not document_uri:
+        return
+    existing_job = get_job(f"OCR-{order_id}")
+    if isinstance(existing_job, dict):
+        job_state = describe_job_state(existing_job)
+        if str(job_state.get("status") or "").strip().lower() in {"running", "pending", "stalled"}:
+            logger.info(
+                "Skipping auto LLM reparse because reparse job is already active",
+                order_id=order_id,
+                job_status=job_state.get("status"),
+            )
+            return
+    provider = str(os.getenv("OCR_AUTO_LLM_REPARSE_PROVIDER", "") or "").strip().lower() or None
+    _AUTO_REPARSE_EXECUTOR.submit(_run_auto_llm_reparse, order_id, provider=provider)
 
 
 def _build_pipeline_match_text(payload: dict | None) -> str:
@@ -156,46 +227,34 @@ def _get_ocr_storage() -> StorageService:
     return StorageService(base_dir)
 
 
-def enqueue_ingest(payload: dict, force: bool = False):
+def enqueue_ingest(payload: dict, force: bool = False) -> tuple[str, bool]:
     """
     For now process inline to avoid external broker dependency during bring-up.
     """
     job_id, should_enqueue = ingest_job_service.create_ingest_job(payload, force=force)
     if not should_enqueue:
         logger.info("Ingest job already completed", job_id=job_id)
-        return
+        return job_id, False
     process_ingest_job(job_id)
+    return job_id, True
 
 
-def enqueue_ingest_async(payload: dict, force: bool = False) -> None:
+def enqueue_ingest_async(payload: dict, force: bool = False) -> tuple[str, bool]:
     """
     Run ingest on a background thread so API handlers stay responsive.
     """
     if os.getenv("INGEST_RUN_INLINE", "").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
-        enqueue_ingest(payload, force=force)
-        return
+        return enqueue_ingest(payload, force=force)
     job_id, should_enqueue = ingest_job_service.create_ingest_job(payload, force=force)
     if not should_enqueue:
         logger.info("Ingest job already completed", job_id=job_id)
-        return
+        return job_id, False
     enqueue_ingest_job_async(job_id)
+    return job_id, True
 
 
 def enqueue_ingest_job_async(job_id: str) -> None:
     _INGEST_EXECUTOR.submit(process_ingest_job, job_id=job_id)
-
-
-def _maybe_mark_gmail_read(payload: dict) -> None:
-    if not payload.get("gmail_mark_read"):
-        return
-    message_id = payload.get("gmail_message_id")
-    if not message_id:
-        return
-    try:
-        mark_message_read(message_id)
-        logger.info("Gmail message marked read", message_id=message_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to mark Gmail read", message_id=message_id, error=str(exc))
 
 
 def process_ingest_job(job_id: str) -> None:
@@ -216,7 +275,6 @@ def process_ingest_job(job_id: str) -> None:
         logger.exception("Ingest job failed", job_id=job_id)
         return
     ingest_job_service.complete_ingest_job(job_id)
-    _maybe_mark_gmail_read(payload)
 
 
 def _process_ingest_inline(**kwargs):
@@ -384,12 +442,17 @@ def _process_ingest_inline(**kwargs):
                     logger.warning("OCR retries exhausted", attempts=attempt)
     except Exception:  # noqa: BLE001
         logger.exception("OCR pipeline failed; continuing without lines")
-    create_order_from_ingest(
+    order = create_order_from_ingest(
         payload,
         lines=lines,
         ocr_attempts=ocr_attempts or 1,
         document_status=ocr_status,
         error_message=ocr_error,
+    )
+    _enqueue_auto_llm_reparse(
+        order,
+        ocr_status=ocr_status,
+        pipeline_output=pipeline_output if isinstance(pipeline_output, dict) else None,
     )
 
 

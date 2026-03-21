@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -20,6 +21,85 @@ def _job_to_dict(job: OcrJob) -> dict[str, Any]:
         "error_message": job.error_message,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+    }
+
+
+def get_stale_minutes() -> int:
+    raw = str(os.getenv("OCR_JOB_STALE_MINUTES", "30") or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 30
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def get_job_progress_updated_at(job: dict[str, Any] | None) -> datetime | None:
+    if not isinstance(job, dict):
+        return None
+    metrics = job.get("metrics")
+    if isinstance(metrics, dict):
+        stage_updated_at = _coerce_datetime(metrics.get("stage_updated_at"))
+        if isinstance(stage_updated_at, datetime):
+            return stage_updated_at
+    return _coerce_datetime(job.get("updated_at"))
+
+
+def get_job_stale_at(job: dict[str, Any] | None) -> datetime | None:
+    progress_updated_at = get_job_progress_updated_at(job)
+    stale_minutes = get_stale_minutes()
+    if stale_minutes <= 0 or not isinstance(progress_updated_at, datetime):
+        return None
+    return progress_updated_at + timedelta(minutes=stale_minutes)
+
+
+def is_job_stale(job: dict[str, Any] | None) -> bool:
+    stale_at = get_job_stale_at(job)
+    if not isinstance(stale_at, datetime):
+        return False
+    return stale_at <= datetime.utcnow()
+
+
+def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(job, dict):
+        return {
+            "status": "idle",
+            "progress_updated_at": None,
+            "stale_at": None,
+            "stale_threshold_seconds": max(get_stale_minutes(), 0) * 60,
+            "job_id": None,
+        }
+    normalized_status = str(job.get("status") or "").strip().lower() or "idle"
+    effective_status = normalized_status
+    if normalized_status in {"running", "pending"} and is_job_stale(job):
+        effective_status = "stalled"
+    elif normalized_status in {"failed", "error"}:
+        effective_status = "hard_failed"
+    elif normalized_status in {"done", "success", "completed"}:
+        effective_status = "done"
+    progress_updated_at = get_job_progress_updated_at(job)
+    stale_at = get_job_stale_at(job) if effective_status == "stalled" else None
+    return {
+        "status": effective_status,
+        "progress_updated_at": progress_updated_at.isoformat() if isinstance(progress_updated_at, datetime) else None,
+        "stale_at": stale_at.isoformat() if isinstance(stale_at, datetime) else None,
+        "stale_threshold_seconds": max(get_stale_minutes(), 0) * 60,
+        "job_id": str(job.get("id") or "").strip() or None,
     }
 
 

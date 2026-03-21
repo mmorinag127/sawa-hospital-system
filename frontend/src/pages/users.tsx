@@ -125,7 +125,7 @@ export default function UsersPage() {
               className="input"
               value={account}
               onChange={(e) => setAccount(e.target.value)}
-              placeholder="addonmeal2023@gmail.com"
+              placeholder="operator@example.com"
             />
           </label>
           <label className="field">

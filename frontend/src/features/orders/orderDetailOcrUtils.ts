@@ -65,7 +65,7 @@ export const getOcrSheetColumnSpec = (
     return { className: "ocr-sheet-col-qty", width: 86 };
   }
   if (fieldToken.startsWith("date") || headerToken.includes("日付") || headerToken === "date") {
-    return { className: "ocr-sheet-col-date", width: 96 };
+    return { className: "ocr-sheet-col-date", width: 48 };
   }
   if (
     fieldToken === "daypart" ||
@@ -74,7 +74,7 @@ export const getOcrSheetColumnSpec = (
     headerToken.includes("区分") ||
     headerToken === "daypart"
   ) {
-    return { className: "ocr-sheet-col-daypart", width: 88 };
+    return { className: "ocr-sheet-col-daypart", width: 44 };
   }
   if (fieldRaw === "menu_name" || fieldToken === "menuname" || headerToken.includes("メニュー")) {
     return { className: "ocr-sheet-col-menu", width: 168 };

@@ -17,11 +17,11 @@
   - `GET {WEB_URL}/api/orders?include_ocr=false` -> 200 or 308
   - `GET {WEB_URL}/api/system/status` -> 200 or 308
 
-## 4. Gmail/OAuth 状態
+## 4. 認証 / 取込状態
 `/system/status` の値が以下を満たすこと
-- `gmail_config.configured == true`
 - `oauth_config.configured == true`
-- `gmail_watch.status == "ok"`
+- `intake.mode == "manual_upload"`
+- `intake.manual_upload_storage.configured == true`
 
 ## 5. OCR再解析 品質ゲート
 `/system/status` の値が以下を満たすこと

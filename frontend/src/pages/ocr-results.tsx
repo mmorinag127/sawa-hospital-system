@@ -137,9 +137,9 @@ export default function OcrResultsPage() {
     <main className="page">
       <header className="hero">
         <div>
-          <p className="eyebrow">OCR</p>
-          <h1>OCR結果</h1>
-          <p className="subtle">OCRの解析状況と施設・週の判定結果を確認します。</p>
+          <p className="eyebrow">OCR Monitor</p>
+          <h1>OCR結果監視</h1>
+          <p className="subtle">OCRの例外や未確定案件を管理者向けに確認します。</p>
         </div>
         <TopNav />
       </header>

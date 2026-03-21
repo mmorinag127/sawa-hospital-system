@@ -18,7 +18,7 @@ def get_facility_master():
     }
 
 
-@router.put("/facility-master", dependencies=[Depends(require_role("admin"))])
+@router.put("/facility-master", dependencies=[Depends(require_role("operator"))])
 def update_facility_master(body: dict):
     master = body.get("facility_master") if isinstance(body, dict) else None
     if master is None:

@@ -146,6 +146,24 @@ const headerValueToString = (value: unknown) => {
   return String(value);
 };
 
+const extractErrorDetail = async (err: any) => {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === "string" && detail) return detail;
+  const data = err?.response?.data;
+  if (typeof Blob !== "undefined" && data instanceof Blob) {
+    try {
+      const text = await data.text();
+      if (!text) return "";
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.detail === "string" && parsed.detail) return parsed.detail;
+      return text;
+    } catch {
+      return "";
+    }
+  }
+  return "";
+};
+
 const normalizeDietType = (value?: string | null) => {
   const token = String(value || "").trim();
   return token || "unknown";
@@ -341,7 +359,7 @@ export default function DailyDeliveryNotesPage() {
       link.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
+      const detail = await extractErrorDetail(err);
       setMessage(detail ? `ダウンロードに失敗しました: ${detail}` : "ダウンロードに失敗しました。");
     }
   };
@@ -353,10 +371,10 @@ export default function DailyDeliveryNotesPage() {
     }
     const label =
       bundleType === "labels"
-        ? "当日ラベル一括"
+        ? "当日ラベルExcel"
         : bundleType === "delivery"
-          ? "当日納品書一括"
-          : "当日一括（ラベル+納品書）";
+          ? "当日納品書Excel"
+          : "当日一括Excel（ラベル+納品書）";
     setMessage(`${label}を作成中です...`);
     try {
       const res = await apiClient.get("/outputs/daily-bundle", {
@@ -366,7 +384,7 @@ export default function DailyDeliveryNotesPage() {
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
-      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.zip`;
+      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.xlsx`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -380,7 +398,7 @@ export default function DailyDeliveryNotesPage() {
       const errorOrders = Number(res.headers?.["x-daily-bundle-error-orders"] || 0);
       setMessage(`${label}をダウンロードしました。成功 ${successOrders}件 / 失敗 ${errorOrders}件`);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
+      const detail = await extractErrorDetail(err);
       setMessage(detail ? `一括ダウンロードに失敗しました: ${detail}` : "一括ダウンロードに失敗しました。");
     }
   };
@@ -418,6 +436,26 @@ export default function DailyDeliveryNotesPage() {
 
       <section className="panel">
         <header className="panel-header">
+          <h2>この画面で見ること</h2>
+        </header>
+        <div className="guide-grid">
+          <article className="guide-card">
+            <p className="guide-title">発送前の最終確認</p>
+            <p className="guide-text">その日に出す注文、袋分け、納品書、ラベルをまとめて確認します。</p>
+          </article>
+          <article className="guide-card">
+            <p className="guide-title">袋分けを見る</p>
+            <p className="guide-text">「当日袋分け一覧」でメニューごとの袋数と計算結果を確認します。</p>
+          </article>
+          <article className="guide-card">
+            <p className="guide-title">迷ったとき</p>
+            <p className="guide-text">その注文の「詳細」を開いて、元のシートとOCR結果を確認します。</p>
+          </article>
+        </div>
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
           <h2>フィルタ</h2>
           <span className="badge">合計 {orders.length} 件</span>
         </header>
@@ -440,16 +478,16 @@ export default function DailyDeliveryNotesPage() {
             {loading ? "取得中..." : "取得"}
           </button>
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels")} disabled={loading}>
-            当日ラベル一括
+            当日ラベルExcel
           </button>
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("delivery")} disabled={loading}>
-            当日納品書一括
+            当日納品書Excel
           </button>
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("both")} disabled={loading}>
-            当日一括ZIP
+            当日一括Excel
           </button>
         </div>
-        <p className="subtle helper-text">袋分けは選択したステータス、総量は確定注文ベースです。</p>
+        <p className="subtle helper-text">一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。</p>
       </section>
 
       {message ? <p className="message">{message}</p> : null}
@@ -718,6 +756,26 @@ export default function DailyDeliveryNotesPage() {
           align-items: center;
           margin-bottom: 16px;
           gap: 12px;
+        }
+        .guide-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 14px;
+        }
+        .guide-card {
+          border-radius: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #fcfbf7;
+          padding: 16px;
+        }
+        .guide-title {
+          margin: 0 0 8px;
+          font-weight: 800;
+        }
+        .guide-text {
+          margin: 0;
+          color: #51615c;
+          line-height: 1.6;
         }
 
         h2 {

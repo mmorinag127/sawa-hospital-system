@@ -1,5 +1,9 @@
 # Sawa Hospital System ユーザー向けマニュアル（詳細版ドラフト）
 
+> 2026-03-11 更新: 現在の運用に合わせた役割別マニュアルは  
+> [user_manual_user1_user2_20260311.md](/Users/mmorinag/Sawa/2025.12/workspace/docs/user_manual_user1_user2_20260311.md)  
+> を優先して参照してください。こちらは詳細版の旧ドラフトです。
+
 作成日: 2026-01-21  
 対象: オペレーター / 管理者
 

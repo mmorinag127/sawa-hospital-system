@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { DIET_TYPE_OPTIONS } from "../services/menuVocabulary";
 
 type MenuRule = {
   id?: string;
@@ -208,13 +209,19 @@ export default function MenuRulesPage() {
                       />
                     </td>
                     <td>
-                      <input
+                      <select
                         className="input"
                         value={rule.diet_type || ""}
                         onChange={(e) =>
                           updateRuleField(globalRules, setGlobalRules, idx, "diet_type", e.target.value)
                         }
-                      />
+                      >
+                        {DIET_TYPE_OPTIONS.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <select
@@ -358,13 +365,19 @@ export default function MenuRulesPage() {
                       />
                     </td>
                     <td>
-                      <input
+                      <select
                         className="input"
                         value={rule.diet_type || ""}
                         onChange={(e) =>
                           updateRuleField(menuRules, setMenuRules, idx, "diet_type", e.target.value)
                         }
-                      />
+                      >
+                        {DIET_TYPE_OPTIONS.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <select
@@ -524,13 +537,19 @@ export default function MenuRulesPage() {
                       />
                     </td>
                     <td>
-                      <input
+                      <select
                         className="input"
                         value={rule.diet_type || ""}
                         onChange={(e) =>
                           updateRuleField(facilityRules, setFacilityRules, idx, "diet_type", e.target.value)
                         }
-                      />
+                      >
+                        {DIET_TYPE_OPTIONS.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <select

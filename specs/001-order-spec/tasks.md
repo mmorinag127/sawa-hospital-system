@@ -40,7 +40,7 @@
 - [x] T015 [P] [US1] Integration test facility unresolved path in backend/tests/integration/test_facility_unresolved.py.
 
 ### Implementation
-- [x] T016 [US1] Implement /ingest/email endpoint in backend/src/api/ingest.py to enqueue ingest job with PDF URI.
+- [x] T016 [US1] Implement /ingest/upload endpoint in backend/src/api/ingest.py to enqueue ingest job with uploaded PDF.
 - [x] T017 [US1] Implement ingest worker pipeline in backend/src/workers/ingest_worker.py (OCR retries, facility region extraction, create OrderDocument/Order).
 - [x] T018 [US1] Implement duplicate facility-week handling in backend/src/services/order_service.py (supersede older docs, exclude from outputs).
 - [x] T019 [US1] Implement order list API with filters/status in backend/src/api/orders.py.

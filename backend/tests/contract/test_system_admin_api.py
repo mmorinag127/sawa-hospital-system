@@ -56,6 +56,10 @@ def test_system_status_and_admin_endpoints():
     assert pipeline.get("trigger_mode") in {"gcs_only", "gcs_http", "http_only"}
     assert pipeline.get("wait_strategy") == "poll_output_gcs"
     assert isinstance(pipeline.get("sync_wait_supported"), bool)
+    intake = status_payload.get("intake") or {}
+    assert intake.get("mode") == "manual_upload"
+    assert intake.get("manual_upload_enabled") is True
+    assert isinstance((intake.get("manual_upload_storage") or {}).get("configured"), bool)
 
     quota_res = client.get("/system/db/quota")
     assert quota_res.status_code == 200
@@ -77,8 +81,22 @@ def test_system_status_and_admin_endpoints():
     assert clear_payload.get("result", {}).get("total_removed", 0) >= 1
 
 
-def test_health_backlog_returns_real_ingest_and_ocr_metrics():
+def test_system_status_reports_manual_upload_mode(monkeypatch):
+    monkeypatch.setenv("INGEST_MODE", "manual_upload")
+    client = TestClient(app)
+
+    res = client.get("/system/status")
+
+    assert res.status_code == 200
+    payload = res.json()
+    intake = payload.get("intake") or {}
+    assert intake.get("mode") == "manual_upload"
+    assert intake.get("manual_upload_enabled") is True
+
+
+def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch):
     order_service.clear_all()
+    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "10")
     now = datetime.utcnow()
     create_ingest_job(
         {
@@ -136,3 +154,5 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics():
     assert ingest.get("eligible_backlog_count") == 2
     assert ocr.get("active_count") == 1
     assert ocr.get("recent_backlog_skipped_count") == 1
+    assert ocr.get("stale_count") == 1
+    assert int(ocr.get("stale_oldest_seconds") or 0) > 0

@@ -6,7 +6,6 @@ WORKER_URL="${WORKER_URL:-}"
 OPERATOR_USER="${OPERATOR_USER:-}"
 OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-}"
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-0}"
-STRICT_GMAIL_WATCH="${STRICT_GMAIL_WATCH:-0}"
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
 
 fail=0
@@ -69,35 +68,35 @@ if [ "$CHECK_WEB_PROXY" = "1" ]; then
   check_http_code_any "web_api_system_status" "$WEB_URL/api/system/status" "200,308" "$OPERATOR_USER:$OPERATOR_PASSWORD"
 fi
 
-# Validate system/status JSON for Gmail + OAuth
+# Validate system/status JSON for intake + OAuth
 status_json=$(curl -sS -u "$OPERATOR_USER:$OPERATOR_PASSWORD" "$WORKER_URL/system/status" || true)
-python3 - <<'PY' "$status_json" "$STRICT_GMAIL_WATCH" "$STRICT_OCR_QUALITY" || fail=1
+python3 - <<'PY' "$status_json" "$STRICT_OCR_QUALITY" || fail=1
 import json,sys
 raw=sys.argv[1]
-strict_watch=(sys.argv[2] == "1")
-strict_quality=(sys.argv[3] == "1")
+strict_quality=(sys.argv[2] == "1")
 try:
     data=json.loads(raw)
 except Exception:
     print("[FAIL] system_status JSON parse failed")
     raise SystemExit(1)
 
-gmail=data.get("gmail_config", {})
 oauth=data.get("oauth_config", {})
-watch=data.get("gmail_watch", {})
-
-if not gmail.get("configured"):
-    print("[FAIL] gmail_config.configured is false")
+intake=data.get("intake", {})
+intake_mode = str(intake.get("mode") or "").strip().lower()
+if intake_mode != "manual_upload":
+    print(f"[FAIL] intake.mode is invalid: {intake_mode or 'missing'}")
+    raise SystemExit(1)
+if not intake.get("manual_upload_enabled"):
+    print("[FAIL] intake.manual_upload_enabled is false")
+    raise SystemExit(1)
+upload_storage = intake.get("manual_upload_storage") or {}
+if not upload_storage.get("configured"):
+    print("[FAIL] manual_upload_storage.configured is false")
     raise SystemExit(1)
 if not oauth.get("configured"):
     print("[FAIL] oauth_config.configured is false")
     raise SystemExit(1)
-watch_status = watch.get("status")
-if strict_watch and watch_status not in {"ok"}:
-    print(f"[FAIL] gmail_watch.status is {watch_status}")
-    raise SystemExit(1)
-if not strict_watch and watch_status not in {"ok"}:
-    print(f"[WARN] gmail_watch.status is {watch_status} (non-blocking)")
+print(f"[OK]   intake mode: {intake_mode or 'manual_upload'}")
 
 quality = data.get("ocr_reparse_quality")
 gate_status = ""

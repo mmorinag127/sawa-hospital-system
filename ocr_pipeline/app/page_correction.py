@@ -164,7 +164,10 @@ def _save_pdf(images_bgr: Iterable[np.ndarray]) -> bytes:
         return b""
     buffer = BytesIO()
     first, rest = pil_images[0], pil_images[1:]
-    first.save(buffer, format="PDF", save_all=True, append_images=rest)
+    # Keep corrected PDF page dimensions close to the original document size instead of
+    # treating raw pixel dimensions as PDF points. This avoids enormous page geometries
+    # that later explode memory when any downstream code re-rasterizes the corrected PDF.
+    first.save(buffer, format="PDF", save_all=True, append_images=rest, resolution=300.0)
     return buffer.getvalue()
 
 
@@ -173,9 +176,11 @@ def _try_template_warp(
     db: Any,
     page_image_bgr: np.ndarray,
     template_ids: list[str] | None,
+    preferred_template_id: str | None = None,
 ) -> tuple[np.ndarray | None, dict[str, Any] | None]:
     if not template_ids:
         return None, None
+    preferred_token = str(preferred_template_id or "").strip() or None
     best_corrected = None
     best_diag = None
     best_score = -1.0
@@ -189,6 +194,8 @@ def _try_template_warp(
             img_alt_bgr=rotated,
             template_ids=template_ids,
         )
+        if preferred_token and str(matched_template_id or "").strip() != preferred_token:
+            continue
         score = _candidate_score(diagnostics, matched_template_id)
         corrected = warped_ocr if warped_ocr is not None else warped_alt
         if score <= best_score or warped_match is None or corrected is None:
@@ -595,6 +602,7 @@ def correct_page_images(
             db=db,
             page_image_bgr=first_page_image,
             template_ids=template_ids,
+            preferred_template_id=preferred_template_id,
         )
         if isinstance(first_diag, dict):
             document_rotation_deg = int(first_diag.get("right_angle_rotation_deg") or 0) % 360

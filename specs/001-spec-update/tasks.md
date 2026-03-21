@@ -50,19 +50,6 @@
 
 **Checkpoint**: US2 independently testable (push reaches worker with auth).
 
-## Phase 5: US3 Gmail watchを自動更新 (P1)
-
-### Tests
-- [ ] T018 [US3] Scheduler dry-run log shows watch refresh call executes within ≤7日周期 (ideally daily) in infra/terraform/modules/scheduler.
-- [ ] T019 [P] [US3] Verify watch refresh results logged and failure path notifies (placeholder notification target) in infra/terraform/modules/scheduler and docs/runbooks/gmail-watch.md.
-
-### Implementation
-- [ ] T020 [US3] Add Cloud Scheduler job in `infra/terraform/modules/scheduler` to call watch-refresh endpoint (env-specific URL/SA).
-- [ ] T021 [US3] Add IAM for scheduler SA to invoke watch endpoint in `infra/terraform/modules/iam`.
-- [ ] T022 [US3] Document runbook for initial Gmail OAuth/watch setup in `docs/runbooks/gmail-watch.md` (note: manual approval as needed).
-
-**Checkpoint**: US3 independently testable (scheduled watch refresh configured and observable).
-
 ## Phase 7: US5 テンプレ/出力格納先を自動準備 (P2)
 
 ### Tests

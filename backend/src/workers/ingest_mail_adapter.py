@@ -12,9 +12,10 @@ class IngestEmailPayload:
     week_hint: Optional[str] = None
     facility_name: Optional[str] = None
     date_hints: Optional[Iterable[str]] = None
-    gmail_message_id: Optional[str] = None
-    gmail_mark_read: Optional[bool] = None
     skip_ocr: Optional[bool] = None
+    source_kind: Optional[str] = None
+    original_filename: Optional[str] = None
+    content_sha256: Optional[str] = None
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -30,9 +31,10 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         week_hint=data.get("week_hint"),
         facility_name=data.get("facility_name"),
         date_hints=data.get("date_hints"),
-        gmail_message_id=data.get("gmail_message_id"),
-        gmail_mark_read=data.get("gmail_mark_read"),
         skip_ocr=data.get("skip_ocr"),
+        source_kind=data.get("source_kind"),
+        original_filename=data.get("original_filename"),
+        content_sha256=data.get("content_sha256"),
     )
 
 
@@ -46,7 +48,8 @@ def to_job_kwargs(payload: IngestEmailPayload) -> dict:
         "week_hint": payload.week_hint,
         "facility_name": payload.facility_name,
         "date_hints": payload.date_hints,
-        "gmail_message_id": payload.gmail_message_id,
-        "gmail_mark_read": payload.gmail_mark_read,
         "skip_ocr": payload.skip_ocr,
+        "source_kind": payload.source_kind,
+        "original_filename": payload.original_filename,
+        "content_sha256": payload.content_sha256,
     }

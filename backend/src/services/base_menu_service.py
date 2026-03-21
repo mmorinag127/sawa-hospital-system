@@ -8,6 +8,7 @@ from sqlalchemy import delete, inspect, select, text
 from src.db import engine, session_scope
 from src.models.menu import BaseMenuCycleItem
 from src.services import menu_service
+from src.services.menu_vocabulary import normalize_diet_type
 
 
 def _ensure_base_menu_table() -> None:
@@ -42,7 +43,7 @@ def serialize_item(item: BaseMenuCycleItem) -> dict[str, Any]:
         "daypart": item.daypart,
         "category": item.category,
         "name": item.name,
-        "diet_type": item.diet_type,
+        "diet_type": normalize_diet_type(item.diet_type),
         "slot_index": item.slot_index,
         "unit_type": None,
         "qty_per_serving": None,
@@ -122,7 +123,7 @@ def replace_items(items: list[dict]) -> dict:
                 "daypart": (raw.get("daypart") or None),
                 "category": (raw.get("category") or None),
                 "name": name,
-                "diet_type": (raw.get("diet_type") or None),
+                "diet_type": normalize_diet_type(raw.get("diet_type")),
                 "slot_index": raw.get("slot_index"),
             }
         )
@@ -163,6 +164,8 @@ def update_item(item_id: str, body: dict) -> bool:
                 value = body.get(key)
                 if value is None:
                     setattr(item, key, None)
+                elif key == "diet_type":
+                    setattr(item, key, normalize_diet_type(value))
                 else:
                     setattr(item, key, str(value).strip())
         if "slot_index" in body:

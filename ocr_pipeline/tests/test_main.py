@@ -77,6 +77,7 @@ def _install_stub_modules() -> None:
 
     pdf_render_module = types.ModuleType("app.pdf_render")
     pdf_render_module.render_pdf_to_png_bytes = lambda *args, **kwargs: []
+    pdf_render_module.render_pdf_to_page_images = lambda *args, **kwargs: []
     sys.modules.setdefault("app.pdf_render", pdf_render_module)
 
     postprocess_module = types.ModuleType("app.postprocess")

@@ -15,9 +15,10 @@ from google.cloud import firestore, storage
 
 from app.issue_detection import detect_table_cell_issues, merge_cell_issues
 from app.page_correction import correct_pdf_for_yomitoku
-from app.pdf_render import render_pdf_to_png_bytes
+from app.pdf_render import render_pdf_to_page_images, render_pdf_to_png_bytes
 from app.postprocess import _tesseract_digits_text, postprocess_and_retry
 from app.preprocess import build_images_for_match_and_ocr
+from app.quantity_subgrid import build_quantity_subgrid_second_passes
 from app.rois import crop_rois, load_template_config
 from app.template_match import choose_template_and_warp
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, run_yomitoku
@@ -61,6 +62,10 @@ OCR_TEMPLATE_MATCH_ALLOW_DISCOVERY = (
 OCR_TEMPLATE_MATCH_DPI = int(os.environ.get("OCR_TEMPLATE_MATCH_DPI", "300"))
 OCR_ENABLE_TEMPLATE_ROI = os.environ.get("OCR_ENABLE_TEMPLATE_ROI", "true").lower() == "true"
 OCR_ENABLE_PAGE_CORRECTION = os.environ.get("OCR_ENABLE_PAGE_CORRECTION", "true").lower() == "true"
+OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS = (
+    os.environ.get("OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS", "true").lower() == "true"
+)
+OCR_QUANTITY_SUBGRID_MAX_PASSES = int(os.environ.get("OCR_QUANTITY_SUBGRID_MAX_PASSES", "1"))
 OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE = (
     os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", "skip").strip().lower()
 )
@@ -723,6 +728,7 @@ def handler():
         uploaded_figures: dict[str, str] = {}
         pages: list[dict] = []
         structured_tables: list[dict] = []
+        quantity_subgrid_passes: list[dict[str, Any]] = []
         markdown_pages: list[str] = []
         overlay_count = 0
         figure_count = 0
@@ -797,6 +803,79 @@ def handler():
                     "tables": page_tables,
                 }
             )
+
+        if OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS and structured_tables:
+            try:
+                quantity_source_pages = yomitoku_page_images or render_pdf_to_page_images(
+                    yomitoku_pdf_bytes,
+                    YOMITOKU_DPI,
+                )
+                subgrid_pass_artifacts = build_quantity_subgrid_second_passes(
+                    page_results=page_results,
+                    page_images=quantity_source_pages,
+                    dpi=YOMITOKU_DPI,
+                    device=YOMITOKU_DEVICE,
+                    visualize=YOMITOKU_VIS,
+                    ignore_line_break=YOMITOKU_IGNORE_LINE_BREAK,
+                    no_figure=YOMITOKU_NO_FIGURE,
+                    figure_width=YOMITOKU_FIGURE_WIDTH,
+                    figure_dir=YOMITOKU_FIGURE_DIR,
+                    max_passes=OCR_QUANTITY_SUBGRID_MAX_PASSES,
+                )
+                for subgrid_pass in subgrid_pass_artifacts:
+                    prefix = (
+                        f"{artifact_prefix}{base}_p{subgrid_pass.page_index}"
+                        f"_t{subgrid_pass.table_index + 1}_qtysubgrid"
+                    )
+                    crop_png_uri = _upload_bytes(
+                        bucket,
+                        f"{prefix}.png",
+                        subgrid_pass.crop_png_bytes,
+                        "image/png",
+                    )
+                    ocr_pdf_uri = None
+                    if subgrid_pass.ocr_pdf:
+                        ocr_pdf_uri = _upload_bytes(
+                            bucket,
+                            f"{prefix}_ocr.pdf",
+                            subgrid_pass.ocr_pdf,
+                            "application/pdf",
+                        )
+                    layout_pdf_uri = None
+                    if subgrid_pass.layout_pdf:
+                        layout_pdf_uri = _upload_bytes(
+                            bucket,
+                            f"{prefix}_layout.pdf",
+                            subgrid_pass.layout_pdf,
+                            "application/pdf",
+                        )
+                    quantity_subgrid_passes.append(
+                        {
+                            "page_index": subgrid_pass.page_index,
+                            "table_index": subgrid_pass.table_index,
+                            "body_start_row": subgrid_pass.spec.body_start_row,
+                            "menu_col_index": subgrid_pass.spec.menu_col_index,
+                            "quantity_start_col_index": subgrid_pass.spec.quantity_start_col_index,
+                            "crop_box_norm": list(subgrid_pass.spec.crop_box_norm),
+                            "row_count": subgrid_pass.spec.row_count,
+                            "quantity_col_count": subgrid_pass.spec.quantity_col_count,
+                            "crop_png_uri": crop_png_uri,
+                            "ocr_pdf_uri": ocr_pdf_uri,
+                            "layout_pdf_uri": layout_pdf_uri,
+                            "table_raw": subgrid_pass.markdown_text,
+                            "tables": subgrid_pass.tables,
+                            "normalized_rows": subgrid_pass.normalized_rows,
+                            "normalization_patches": subgrid_pass.normalization_patches,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                warnings.append("quantity_subgrid_second_pass_error")
+                app.logger.warning(
+                    "OCR quantity-subgrid second pass failed job=%s template_id=%s error=%s",
+                    safe_job_id,
+                    resolved_template_id,
+                    str(exc),
+                )
 
         structured_cell_issues = detect_table_cell_issues(
             tables=structured_tables,
@@ -886,6 +965,12 @@ def handler():
             "page_correction_corrected_pdf_uploaded": bool(
                 page_correction_summary.get("corrected_pdf_uploaded")
             ),
+            "quantity_subgrid_second_pass_count": len(quantity_subgrid_passes),
+            "quantity_subgrid_normalization_patch_count": sum(
+                len(item.get("normalization_patches") or [])
+                for item in quantity_subgrid_passes
+                if isinstance(item, dict)
+            ),
             "elapsed_sec": elapsed,
         }
         if OCR_PIPELINE_MODE == "structured_v2" and not structured_tables:
@@ -908,6 +993,7 @@ def handler():
             "metrics": metrics,
             "pages": pages,
             "tables": structured_tables,
+            "quantity_subgrid_passes": quantity_subgrid_passes,
             "combined": combined,
             "table_raw": table_raw,
             "cell_issues": cell_issues,

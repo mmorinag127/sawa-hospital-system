@@ -114,7 +114,7 @@ def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT
 def download_daily_bundle(
     date: str,
     bundle_type: str = "both",
-    status: str | None = "確定",
+    status: str | None = None,
 ):
     target_date = _parse_iso_date(date)
     try:
@@ -133,10 +133,10 @@ def download_daily_bundle(
         "X-Daily-Bundle-Error-Orders": str(summary.get("error_orders", 0)),
         "X-Daily-Bundle-Type": str(summary.get("bundle_type", bundle_type)),
     }
-    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.zip"
+    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.xlsx"
     return FileResponse(
         str(bundle_path),
-        media_type="application/zip",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename,
         headers=headers,
     )

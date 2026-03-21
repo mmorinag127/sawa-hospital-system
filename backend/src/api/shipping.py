@@ -18,6 +18,24 @@ async def parse_shipping_pdf(file: UploadFile = File(...)):
         records = shipping_service.extract_shipping_records(content)
         if not records:
             raise HTTPException(status_code=400, detail="no records found")
+        tracking_numbers = [record.tracking_number for record in records if str(record.tracking_number).strip()]
+        if tracking_numbers:
+            try:
+                tracking_records = shipping_service.get_tracking_status_records(tracking_numbers)
+                facility_by_tracking = {
+                    str(record.tracking_number).strip(): str(record.facility_name).strip()
+                    for record in records
+                    if str(record.tracking_number).strip() and str(record.facility_name).strip()
+                }
+                shipping_status_store.record_tracking_statuses(
+                    tracking_records,
+                    source="shipping_pdf_parse",
+                    facility_by_tracking=facility_by_tracking,
+                )
+            except Exception:
+                # Parsing the shipping PDF should still succeed even if the
+                # tracking lookup is temporarily unavailable.
+                pass
         output_path = shipping_service.build_shipping_excel(records)
     except HTTPException:
         raise
@@ -116,6 +134,39 @@ def get_shipping_status_history(
         date_from=parsed_from,
         date_to=parsed_to,
     )
+
+
+@router.post("/shipping/status/refresh-pending", dependencies=[Depends(require_role("operator"))])
+def refresh_pending_shipping_statuses(limit: int = 100, max_age_days: int = 14):
+    normalized_limit = max(1, min(limit, 500))
+    normalized_age = max(1, min(max_age_days, 90))
+    tracking_numbers = shipping_status_store.get_latest_pending_tracking_numbers(
+        limit=normalized_limit,
+        max_age_days=normalized_age,
+    )
+    if not tracking_numbers:
+        return {
+            "accepted": True,
+            "tracking_count": 0,
+            "updated": 0,
+            "delivered": 0,
+            "pending": 0,
+        }
+    status_records = shipping_service.get_tracking_status_records(tracking_numbers)
+    inserted = shipping_status_store.record_tracking_statuses(
+        status_records,
+        source="scheduled_refresh",
+    )
+    serialized = [status.serialize() for status in status_records]
+    delivered = sum(1 for item in serialized if item.get("delivered"))
+    pending = max(len(serialized) - delivered, 0)
+    return {
+        "accepted": True,
+        "tracking_count": len(tracking_numbers),
+        "updated": inserted,
+        "delivered": delivered,
+        "pending": pending,
+    }
 
 
 @router.delete("/shipping/status/history", dependencies=[Depends(require_role("admin"))])

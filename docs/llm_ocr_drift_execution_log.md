@@ -86,26 +86,16 @@
 3. web-prod 再デプロイ:
    - `web-prod-00080-bsf`
    - image: `prod-frontend-20260303-131048`
-4. Gmail watch 自動復旧スクリプトを追加:
-   - `scripts/gmail_watch_recover.sh`
-   - Task: `recover_prod_gmail_watch`
-5. Gmail watch 復旧結果:
-   - 既存シークレット全バージョン組み合わせを検証しても有効 refresh token は見つからず。
-   - 状態は `invalid_grant` のまま（OAuth再同意で新 refresh token 発行が必要）。
-
 ### 9. 最終反映と回帰安定化（2026-03-03）
-1. `watch-refresh` の例外契約を本番反映:
-   - `google.auth.exceptions.RefreshError` を `503 invalid_grant` で返却する修正を `worker-prod` にデプロイ。
-   - 本番確認: `POST /watch-refresh` が `503 {"detail":"invalid_grant"}` を返すことを確認。
-2. `worker-prod` 更新:
+1. `worker-prod` 更新:
    - revision: `worker-prod-00151-w7w`
    - image: `asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:prod-backend-20260303-131834`
-3. 回帰テスト安定化:
+2. 回帰テスト安定化:
    - `tests/integration/test_ocr_pipeline.py` の3件を新しい保存前Hard Validation仕様に合わせて修正。
    - 週メニュー canonical key（`date/daypart/menu`）と `source_row_index` を整合させる形へ更新。
-4. 回帰テスト結果:
+3. 回帰テスト結果:
    - `task backend_test_regression_ocr_quality` => `80 passed`
-   - `task predeploy_prod_checks` => pass（Gmail `invalid_grant` は non-blocking warning）
+   - `task predeploy_prod_checks` => pass
 
 ## 変更ファイル
 - `backend/src/services/order_service.py`

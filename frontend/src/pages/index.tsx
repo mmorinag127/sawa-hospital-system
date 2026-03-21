@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
 import TopNav from "../components/TopNav";
-import GmailInvalidGrantRecoverySteps from "../components/GmailInvalidGrantRecoverySteps";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
@@ -23,20 +22,19 @@ type MenuInfo = {
   status: "登録済み" | "未登録" | "確認中";
   itemCount?: number;
   filename?: string | null;
+  displayName?: string | null;
 };
 
 type SystemStatus = {
-  gmail_watch?: {
-    status?: string | null;
-    expiration_iso?: string | null;
-    updated_at?: string | null;
-    error_code?: string | null;
-  };
-  gmail_config?: {
-    configured?: boolean;
-    client_id_set?: boolean;
-    client_secret_set?: boolean;
-    refresh_token_set?: boolean;
+  intake?: {
+    mode?: string | null;
+    manual_upload_enabled?: boolean;
+    manual_upload_storage?: {
+      configured?: boolean;
+      mode?: string | null;
+      persisted?: boolean;
+      bucket?: string | null;
+    } | null;
   };
   oauth_config?: {
     configured?: boolean;
@@ -89,6 +87,11 @@ type ShippingTodayPayload = {
 
 const STATUS_KEYS = ["未着", "要確認", "確定", "エラー"] as const;
 
+const buildMonthId = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+};
+
 const formatDate = (value?: string | null) => {
   if (!value) return "未取得";
   const date = new Date(value);
@@ -101,7 +104,6 @@ const formatSystemStatus = (value?: string | null) => {
   if (!raw) return "未取得";
   if (raw === "ok") return "OK";
   if (raw === "error") return "エラー";
-  if (raw === "invalid_grant") return "失効";
   if (raw === "expired") return "期限切れ";
   if (raw === "misconfigured") return "未設定";
   if (raw === "running") return "実行中";
@@ -112,21 +114,43 @@ export default function HomePage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuInfo, setMenuInfo] = useState<Record<string, MenuInfo>>({});
   const [error, setError] = useState("");
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [shippingToday, setShippingToday] = useState<ShippingTodayPayload | null>(null);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
 
   useEffect(() => {
-    apiClient
-      .get("/orders", { params: { include_ocr: false } })
-      .then((res) => {
-        setOrders(res.data.orders || []);
-        setError("");
-      })
-      .catch(() => {
-        setError("データ取得に失敗しました。");
-      });
+    let cancelled = false;
+    const loadOrders = async () => {
+      setOrdersLoading(true);
+      const maxAttempts = 2;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const res = await apiClient.get("/orders", { params: { include_ocr: false } });
+          if (cancelled) return;
+          setOrders(res.data.orders || []);
+          setError("");
+          setOrdersLoading(false);
+          return;
+        } catch {
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) => window.setTimeout(resolve, 800));
+            if (cancelled) return;
+            continue;
+          }
+          if (cancelled) return;
+          setError("注文一覧の取得に一時失敗しました。再試行してください。");
+        }
+      }
+      if (!cancelled) {
+        setOrdersLoading(false);
+      }
+    };
+    void loadOrders();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -248,6 +272,7 @@ export default function HomePage() {
                 status: "登録済み",
                 itemCount: items.length,
                 filename: res.data?.menu?.filename || null,
+                displayName: res.data?.menu?.display_name || res.data?.menu?.filename || null,
               },
             ] as const;
           } catch {
@@ -339,109 +364,125 @@ export default function HomePage() {
         <TopNav />
       </header>
 
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <div className="error-banner">
+          <p className="error">{error}</p>
+          <button
+            type="button"
+            className="retry-button"
+            onClick={() => window.location.reload()}
+            disabled={ordersLoading}
+          >
+            {ordersLoading ? "再試行中..." : "再読み込み"}
+          </button>
+        </div>
+      )}
 
-      <section className="grid">
-        <Link href="/orders?status=未着" className="card-link">
-          <article className="card kpi tone-new" style={{ animationDelay: "40ms" }}>
-            <p className="card-label">未着</p>
-            <p className="card-value">{stats.counts["未着"]}</p>
-          </article>
-        </Link>
-        <Link href="/orders?status=要確認" className="card-link">
-          <article className="card kpi tone-warn" style={{ animationDelay: "80ms" }}>
-            <p className="card-label">未確定申請</p>
-            <p className="card-value">{stats.counts["要確認"]}</p>
-          </article>
-        </Link>
-        <Link href="/orders?status=確定" className="card-link">
-          <article className="card kpi tone-ok" style={{ animationDelay: "120ms" }}>
-            <p className="card-label">確定</p>
-            <p className="card-value">{stats.counts["確定"]}</p>
-          </article>
-        </Link>
-        <Link href="/orders?status=エラー" className="card-link">
-          <article className="card kpi tone-error" style={{ animationDelay: "160ms" }}>
-            <p className="card-label">エラー</p>
-            <p className="card-value">{stats.counts["エラー"]}</p>
-          </article>
-        </Link>
-        <Link href="/orders?unresolved=1" className="card-link">
-          <article className="card kpi tone-muted" style={{ animationDelay: "200ms" }}>
-            <p className="card-label">施設未確定</p>
-            <p className="card-value">{stats.unresolved}</p>
-          </article>
-        </Link>
-        <Link href="/orders" className="card-link">
-          <article className="card" style={{ animationDelay: "240ms" }}>
-            <p className="card-label">OCR / 取込状況</p>
-            <div className="processing">
-              <div>
-                <p className="mini-label">最新取込</p>
-                <p className="mini-value">{formatDate(stats.latestReceived)}</p>
-              </div>
-              <div>
-                <p className="mini-label">総注文数</p>
-                <p className="mini-value">{stats.total}</p>
-              </div>
-              <div>
-                <p className="mini-label">エラー件数</p>
-                <p className="mini-value">{stats.counts["エラー"]}</p>
-              </div>
-            </div>
-          </article>
-        </Link>
+      <section className="role-grid">
+        <article className="role-card">
+          <p className="role-label">注文系</p>
+          <h2>注文確認と確定</h2>
+          <ol>
+            <li>注文一覧で「要確認」を開く</li>
+            <li>注文詳細でシートを確認して確定する</li>
+            <li>日別出力で袋分け・ラベル・納品書を確認する</li>
+          </ol>
+          <div className="role-actions">
+            <Link href="/orders?status=要確認" className="mini-link">
+              注文一覧へ
+            </Link>
+            <Link href="/daily-delivery-notes" className="mini-link">
+              日別出力へ
+            </Link>
+          </div>
+        </article>
+        <article className="role-card">
+          <p className="role-label">メニュー・施設系</p>
+          <h2>注文書作成と取り込み</h2>
+          <ol>
+            <li>月次メニューや注文書を作る</li>
+            <li>施設から届いたPDFをアップロードする</li>
+            <li>注文一覧で取り込み結果を確認する</li>
+          </ol>
+          <div className="role-actions">
+            <Link href="/pdf-upload" className="mini-link">
+              注文書アップロードへ
+            </Link>
+            <Link href={`/menus/${buildMonthId()}`} className="mini-link">
+              月次メニューへ
+            </Link>
+          </div>
+        </article>
+      </section>
+
+      <section className="summary-strip">
+        <article className="summary-tile tone-new" style={{ animationDelay: "40ms" }}>
+          <p className="summary-label">未着</p>
+          <p className="summary-value">{stats.counts["未着"]}</p>
+        </article>
+        <article className="summary-tile tone-warn" style={{ animationDelay: "80ms" }}>
+          <p className="summary-label">未確定申請</p>
+          <p className="summary-value">{stats.counts["要確認"]}</p>
+        </article>
+        <article className="summary-tile tone-ok" style={{ animationDelay: "120ms" }}>
+          <p className="summary-label">確定</p>
+          <p className="summary-value">{stats.counts["確定"]}</p>
+        </article>
+        <article className="summary-tile tone-error" style={{ animationDelay: "160ms" }}>
+          <p className="summary-label">エラー</p>
+          <p className="summary-value">{stats.counts["エラー"]}</p>
+        </article>
+        <article className="summary-tile tone-muted" style={{ animationDelay: "200ms" }}>
+          <p className="summary-label">施設未確定</p>
+          <p className="summary-value">{stats.unresolved}</p>
+        </article>
+        <article className="summary-tile summary-tile-wide" style={{ animationDelay: "240ms" }}>
+          <p className="summary-label">OCR / 取込状況</p>
+          <div className="summary-inline">
+            <span>最新取込: {formatDate(stats.latestReceived)}</span>
+            <span>総注文数: {stats.total}</span>
+            <span>エラー件数: {stats.counts["エラー"]}</span>
+          </div>
+        </article>
       </section>
 
       <section className="columns">
         <article className="panel system-panel">
           <header className="panel-header">
             <h2>システム状態</h2>
-            <span className="badge">自動取込</span>
+            <span className="badge">
+              {systemStatus?.intake?.mode === "manual_upload" ? "PDF取込" : "自動取込"}
+            </span>
             <Link href="/system-status" className="ghost-link">
               管理画面
             </Link>
           </header>
           <div className="system-grid">
             <div className="system-card">
-              <p className="system-label">Gmail Watch</p>
+              <p className="system-label">取込方式</p>
               <p className="system-value">
-                {formatSystemStatus(systemStatus?.gmail_watch?.status)}
+                {systemStatus?.intake?.mode === "manual_upload" ? "注文書アップロード" : "未取得"}
               </p>
               <p className="system-meta">
-                最終更新: {formatDate(systemStatus?.gmail_watch?.updated_at)}
+                保存先: {systemStatus?.intake?.manual_upload_storage?.mode ?? "未取得"}
               </p>
               <p className="system-meta">
-                有効期限: {systemStatus?.gmail_watch?.expiration_iso ?? "未取得"}
+                永続化: {systemStatus?.intake?.manual_upload_storage?.persisted ? "あり" : "なし"}
               </p>
-              {systemStatus?.gmail_watch?.error_code && (
+              {systemStatus?.intake?.manual_upload_enabled &&
+                !systemStatus?.intake?.manual_upload_storage?.configured && (
                 <p className="system-meta warn">
-                  エラー: {systemStatus.gmail_watch.error_code}
+                  注文書アップロード保存先を確認してください
                 </p>
               )}
             </div>
             <div className="system-card">
-              <p className="system-label">Gmail 設定</p>
-              <p className="system-value">
-                {systemStatus?.gmail_config?.configured ? "OK" : "未設定"}
-              </p>
-              <p className="system-meta">
-                client_id: {systemStatus?.gmail_config?.client_id_set ? "OK" : "NG"}
-              </p>
-              <p className="system-meta">
-                client_secret: {systemStatus?.gmail_config?.client_secret_set ? "OK" : "NG"}
-              </p>
-              <p className="system-meta">
-                refresh_token: {systemStatus?.gmail_config?.refresh_token_set ? "OK" : "NG"}
-              </p>
-            </div>
-            <div className="system-card">
-              <p className="system-label">Web OAuth</p>
+              <p className="system-label">Google 認証</p>
               <p className="system-value">
                 {systemStatus?.oauth_config?.configured ? "OK" : "未設定"}
               </p>
               <p className="system-meta">
-                ログイン不具合時はJS Origin/Redirectを更新
+                ログイン不具合時はOAuth Client ID / Origin / Redirect設定を確認
               </p>
             </div>
             <div className="system-card">
@@ -467,11 +508,6 @@ export default function HomePage() {
                 </p>
               )}
             </div>
-          </div>
-
-          <div className="system-recovery">
-            <h3>Gmail復帰手順</h3>
-            <GmailInvalidGrantRecoverySteps className="recovery-body" />
           </div>
         </article>
 
@@ -615,7 +651,7 @@ export default function HomePage() {
                     <p className="menu-meta">
                       {status === "登録済み" ? `登録済み (${info?.itemCount ?? 0}件)` : status}
                     </p>
-                    {info?.filename && <p className="menu-file">{info.filename}</p>}
+                    {info?.displayName && <p className="menu-file">{info.displayName}</p>}
                   </div>
                   <span className={`menu-status ${statusClass}`}>{status}</span>
                 </Link>
@@ -672,6 +708,55 @@ export default function HomePage() {
           color: #51615c;
           margin: 0;
         }
+        .role-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          gap: 18px;
+          margin-bottom: 24px;
+        }
+        .role-card {
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 20px;
+          box-shadow: 0 10px 30px rgba(27, 35, 33, 0.08);
+          border: 1px solid rgba(25, 32, 30, 0.1);
+        }
+        .role-card h2 {
+          margin: 0 0 12px;
+          font-size: 20px;
+        }
+        .role-label {
+          margin: 0 0 8px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: #7b5c25;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .role-card ol {
+          margin: 0;
+          padding-left: 20px;
+          color: #374240;
+          line-height: 1.7;
+        }
+        .role-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-top: 16px;
+        }
+        .mini-link {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 38px;
+          padding: 0 14px;
+          border-radius: 999px;
+          background: #f6f1e6;
+          color: #1f2a2a;
+          font-weight: 700;
+          text-decoration: none;
+        }
 
         .nav {
           display: flex;
@@ -691,47 +776,31 @@ export default function HomePage() {
           transform: translateY(-2px);
         }
 
-        .grid {
+        .summary-strip {
           display: grid;
-          gap: 16px;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
           margin-bottom: 28px;
         }
 
-        .card {
+        .summary-tile {
           background: #ffffff;
-          border-radius: 16px;
-          padding: 18px;
-          box-shadow: 0 10px 30px rgba(27, 35, 33, 0.08);
-          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 14px;
+          padding: 14px 16px;
+          box-shadow: 0 8px 18px rgba(27, 35, 33, 0.05);
+          border: 1px solid rgba(25, 32, 30, 0.08);
           animation: rise 0.6s ease both;
-        }
-
-        .card-link {
-          display: block;
-        }
-
-        .card-link .card {
-          height: 100%;
-        }
-
-        .card-link:hover .card {
-          transform: translateY(-3px);
-          transition: transform 0.2s ease;
-        }
-
-        .card.kpi {
           position: relative;
           border-top: 3px solid var(--tone, #c7d2ce);
         }
 
-        .card.kpi::after {
+        .summary-tile::after {
           content: "";
           position: absolute;
-          top: 14px;
-          right: 14px;
-          width: 8px;
-          height: 8px;
+          top: 12px;
+          right: 12px;
+          width: 7px;
+          height: 7px;
           border-radius: 999px;
           background: var(--tone, #c7d2ce);
           box-shadow: 0 0 0 4px var(--tone-bg, #f2f4f3);
@@ -762,31 +831,32 @@ export default function HomePage() {
           --tone-bg: #e8eceb;
         }
 
-        .card.muted {
-          background: #1f2a2a;
-          color: #f7f2e7;
-        }
-
-
-        .card-label {
+        .summary-label {
           margin: 0 0 8px;
-          font-size: 12px;
-          letter-spacing: 0.1em;
+          font-size: 11px;
+          letter-spacing: 0.08em;
           text-transform: uppercase;
           color: inherit;
           opacity: 0.7;
         }
 
-        .card-value {
-          font-size: 30px;
+        .summary-value {
+          font-size: 24px;
           font-weight: 700;
           margin: 0;
         }
 
-        .processing {
-          display: grid;
-          gap: 12px;
-          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        .summary-tile-wide {
+          grid-column: span 2;
+        }
+
+        .summary-inline {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px 16px;
+          color: #41514d;
+          font-size: 13px;
+          line-height: 1.5;
         }
 
         .mini-label {
@@ -1089,11 +1159,37 @@ export default function HomePage() {
           color: #7a5a2d;
         }
 
+        .error-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 16px;
+          flex-wrap: wrap;
+        }
+
         .error {
           background: #ffe3e3;
           padding: 10px 14px;
           border-radius: 12px;
-          margin-bottom: 16px;
+          margin: 0;
+          flex: 1 1 320px;
+        }
+
+        .retry-button {
+          border: none;
+          border-radius: 999px;
+          min-height: 40px;
+          padding: 0 16px;
+          background: #1f2a2a;
+          color: #f7f2e7;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .retry-button:disabled {
+          opacity: 0.6;
+          cursor: progress;
         }
 
         @keyframes rise {

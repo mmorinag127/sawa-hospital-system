@@ -3,8 +3,6 @@ locals {
   pubsub_topic_name = var.pubsub_topic_name != "" ? var.pubsub_topic_name : "orders-${var.env}"
   pubsub_subscription_name = var.pubsub_subscription_name != "" ? var.pubsub_subscription_name : "orders-${var.env}-push"
   pubsub_push_path = "/pubsub/push"
-  watch_path = var.gmail_watch_path != "" ? var.gmail_watch_path : "/watch-refresh"
-  watch_job_name = var.gmail_watch_job_name != "" ? var.gmail_watch_job_name : "gmail-watch-refresh-${var.env}"
   worker_service_name = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
   worker_url = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
 }
@@ -62,17 +60,6 @@ module "pubsub" {
   push_endpoint     = "${local.worker_url}${local.pubsub_push_path}"
   push_sa_email     = module.cloudrun.service_accounts["worker"]
   depends_on        = [module.apis]
-}
-
-module "scheduler" {
-  source          = "../../modules/scheduler"
-  project_id      = var.project_id
-  region          = var.region
-  job_name        = local.watch_job_name
-  schedule        = var.gmail_watch_schedule
-  target_url      = "${local.worker_url}${local.watch_path}"
-  target_sa_email = module.cloudrun.service_accounts["worker"]
-  depends_on      = [module.apis]
 }
 
 module "iam" {

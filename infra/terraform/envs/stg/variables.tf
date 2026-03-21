@@ -34,7 +34,7 @@ variable "firestore_enabled" {
 
 variable "secret_ids" {
   type    = list(string)
-  default = ["gmail-refresh-token"]
+  default = []
 }
 
 variable "cloudrun_services" {
@@ -56,21 +56,6 @@ variable "pubsub_subscription_name" {
   default = ""
 }
 
-variable "gmail_watch_schedule" {
-  type    = string
-  default = "0 9 * * *"
-}
-
-variable "gmail_watch_path" {
-  type    = string
-  default = "/watch-refresh"
-}
-
-variable "gmail_watch_state_uri" {
-  type    = string
-  default = ""
-}
-
 variable "notification_emails" {
   type    = list(string)
   default = []
@@ -82,11 +67,6 @@ variable "notification_channels" {
 }
 
 variable "cloudrun_worker_url_override" {
-  type    = string
-  default = ""
-}
-
-variable "gmail_watch_job_name" {
   type    = string
   default = ""
 }

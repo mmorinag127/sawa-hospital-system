@@ -1,21 +1,18 @@
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
-import GmailInvalidGrantRecoverySteps from "../components/GmailInvalidGrantRecoverySteps";
+import { useCurrentUserRole } from "../hooks/useCurrentUserRole";
 
 type SystemStatus = {
-  gmail_watch?: {
-    status?: string | null;
-    expiration_iso?: string | null;
-    updated_at?: string | null;
-    error_code?: string | null;
-  };
-  gmail_config?: {
-    configured?: boolean;
-    client_id_set?: boolean;
-    client_secret_set?: boolean;
-    refresh_token_set?: boolean;
+  intake?: {
+    mode?: string | null;
+    manual_upload_enabled?: boolean;
+    manual_upload_storage?: {
+      configured?: boolean;
+      mode?: string | null;
+      persisted?: boolean;
+      bucket?: string | null;
+    } | null;
   };
   oauth_config?: {
     configured?: boolean;
@@ -99,7 +96,6 @@ const formatStatus = (value?: string | null) => {
   if (!raw) return "未取得";
   if (raw === "ok") return "OK";
   if (raw === "error") return "エラー";
-  if (raw === "invalid_grant") return "失効";
   if (raw === "expired") return "期限切れ";
   if (raw === "misconfigured") return "未設定";
   if (raw === "running") return "実行中";
@@ -151,6 +147,7 @@ const formatQualityGate = (value?: string | null) => {
 };
 
 export default function SystemStatusPage() {
+  const { isAdmin } = useCurrentUserRole();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [error, setError] = useState("");
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
@@ -255,7 +252,7 @@ export default function SystemStatusPage() {
           <p className="eyebrow">System Operations</p>
           <h1>システム状態と復帰手順</h1>
           <p className="subtle">
-            Gmail自動取込・Web OAuth・OCRパイプラインの状態と復帰手順を確認します。
+            取込方式・Google認証・OCRパイプライン・品質ゲートの状態を確認します。
           </p>
         </div>
         <TopNav />
@@ -265,29 +262,26 @@ export default function SystemStatusPage() {
 
       <section className="status-grid">
         <article className="card">
-          <h2>Gmail Watch</h2>
-          <p className="value">{formatStatus(status?.gmail_watch?.status)}</p>
-          <p className="meta">最終更新: {formatDate(status?.gmail_watch?.updated_at)}</p>
-          <p className="meta">有効期限: {status?.gmail_watch?.expiration_iso ?? "未取得"}</p>
-          {status?.gmail_watch?.error_code && (
-            <p className="meta warn">エラー: {status.gmail_watch.error_code}</p>
-          )}
-        </article>
-        <article className="card">
-          <h2>Gmail 設定</h2>
-          <p className="value">{status?.gmail_config?.configured ? "OK" : "未設定"}</p>
-          <p className="meta">client_id: {status?.gmail_config?.client_id_set ? "OK" : "NG"}</p>
+          <h2>取込方式</h2>
+          <p className="value">注文書アップロード</p>
           <p className="meta">
-            client_secret: {status?.gmail_config?.client_secret_set ? "OK" : "NG"}
+            受付方式は手動アップロードに固定しています。
           </p>
           <p className="meta">
-            refresh_token: {status?.gmail_config?.refresh_token_set ? "OK" : "NG"}
+            保存先: {status?.intake?.manual_upload_storage?.mode ?? "未取得"}
           </p>
+          <p className="meta">
+            永続化: {status?.intake?.manual_upload_storage?.persisted ? "あり" : "なし"}
+          </p>
+          {status?.intake?.manual_upload_enabled && !status?.intake?.manual_upload_storage?.configured ? (
+            <p className="meta warn">注文書アップロード保存先が未設定です。</p>
+          ) : null}
         </article>
         <article className="card">
-          <h2>Web OAuth</h2>
+          <h2>Google 認証</h2>
           <p className="value">{status?.oauth_config?.configured ? "OK" : "未設定"}</p>
           <p className="meta">許可されたクライアントID: {(status?.oauth_config?.google_client_ids || []).join(", ") || "未取得"}</p>
+          <p className="meta">Googleログインで利用します。</p>
         </article>
         <article className="card">
           <h2>OCR パイプライン</h2>
@@ -413,61 +407,59 @@ export default function SystemStatusPage() {
           <button className="btn ghost" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy}>
             状態を再取得
           </button>
-          <button className="btn ghost" type="button" onClick={() => downloadDb(false)} disabled={maintenanceBusy}>
-            DBをダウンロード
-          </button>
-          <button className="btn ghost" type="button" onClick={() => downloadDb(true)} disabled={maintenanceBusy}>
-            スナップショットZIP
-          </button>
+          {isAdmin ? (
+            <>
+              <button className="btn ghost" type="button" onClick={() => downloadDb(false)} disabled={maintenanceBusy}>
+                DBをダウンロード
+              </button>
+              <button className="btn ghost" type="button" onClick={() => downloadDb(true)} disabled={maintenanceBusy}>
+                スナップショットZIP
+              </button>
+            </>
+          ) : null}
         </div>
-        <div className="clear-box">
-          <label className="clear-label" htmlFor="clear-confirm">
-            確認文字列
-          </label>
-          <input
-            id="clear-confirm"
-            className="input"
-            value={clearConfirm}
-            onChange={(event) => setClearConfirm(event.target.value)}
-            placeholder="CLEAR_ALL"
-            autoComplete="off"
-          />
-          <button className="btn danger" type="button" onClick={clearAll} disabled={maintenanceBusy}>
-            {maintenanceBusy ? "実行中..." : "全権クリアを実行"}
-          </button>
-        </div>
+        {isAdmin ? (
+          <div className="clear-box">
+            <label className="clear-label" htmlFor="clear-confirm">
+              確認文字列
+            </label>
+            <input
+              id="clear-confirm"
+              className="input"
+              value={clearConfirm}
+              onChange={(event) => setClearConfirm(event.target.value)}
+              placeholder="CLEAR_ALL"
+              autoComplete="off"
+            />
+            <button className="btn danger" type="button" onClick={clearAll} disabled={maintenanceBusy}>
+              {maintenanceBusy ? "実行中..." : "全権クリアを実行"}
+            </button>
+          </div>
+        ) : (
+          <p className="meta">管理者アカウントでログインすると、DBダウンロードと全権クリアが表示されます。</p>
+        )}
         {maintenanceMessage ? <p className="meta warn">{maintenanceMessage}</p> : null}
       </section>
 
       <section className="panel">
-        <h2>復帰手順（詳細）</h2>
-        <p className="meta">
-          UIのみの完全手順:{" "}
-          <Link href="/system-recovery-runbook">/system-recovery-runbook</Link>
-        </p>
-
+        <h2>運用メモ</h2>
         <div className="steps">
-          <h3>1. Gmail Watch の再設定（invalid_grant）</h3>
-          <GmailInvalidGrantRecoverySteps />
-
-          <h3>2. Web OAuth の復帰（ログインエラー時）</h3>
+          <h3>1. 注文書アップロード保存先</h3>
           <ol>
-            <li>Google Cloud Console →「API とサービス」→「認証情報」へ移動。</li>
-            <li>「ウェブ クライアント 1」を開く。</li>
-            <li>「承認済みの JavaScript 生成元」に以下があることを確認（両方あるのが安全）。</li>
-          </ol>
-          <pre>{`https://web-prod-avlnzjjrca-dt.a.run.app
-https://web-prod-167795504375.asia-northeast2.run.app`}</pre>
-          <ol>
-            <li>変更を保存 → ブラウザを再ログイン。</li>
+            <li>保存先が未設定なら、注文書アップロードは受け付けません。</li>
+            <li>このページの「取込方式」で保存先モードを確認してください。</li>
           </ol>
 
-          <h3>3. OCR パイプライン復帰</h3>
+          <h3>2. Google ログインの確認</h3>
           <ol>
-            <li>Cloud Run → `ocr-pipeline-prod` の稼働状況を確認。</li>
-            <li>Worker の環境変数に `OCR_PIPELINE_URL` と `OCR_PIPELINE_BUCKET` があるか確認。</li>
-            <li>`/system/status` の `ocr_pipeline.last_error` を確認。</li>
-            <li>必要なら `ocr-pipeline-prod` の最小インスタンスを 1 に戻す。</li>
+            <li>ログイン障害が出たら Google Cloud の OAuth 設定を確認します。</li>
+            <li>許可されたクライアントIDが未設定なら運用を止めて管理者へ連絡してください。</li>
+          </ol>
+
+          <h3>3. OCR パイプラインの確認</h3>
+          <ol>
+            <li>最終失敗時刻と last_error を見ます。</li>
+            <li>必要なら Cloud Run の `ocr-pipeline-prod` ログを確認します。</li>
           </ol>
         </div>
       </section>

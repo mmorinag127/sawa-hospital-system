@@ -118,6 +118,7 @@ class MonthlyMenuEntry(Base):
     category = Column(String, nullable=True)
     diet_type = Column(String, nullable=True)
     slot_index = Column(Integer, nullable=True)
+    facility_override = Column(String, nullable=True)
 
     menu = relationship("MonthlyMenu", back_populates="entries")
 

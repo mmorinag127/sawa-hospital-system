@@ -6,16 +6,10 @@ location   = "ASIA-NORTHEAST2"
 raw_retention_days     = 60
 firestore_location_id  = "asia-northeast2"
 secret_ids = [
-  "gmail-client-id",
-  "gmail-client-secret",
-  "gmail-refresh-token",
   "db-password",
 ]
 
 cloudrun_secret_env_vars = {
-  GMAIL_CLIENT_ID     = "gmail-client-id"
-  GMAIL_CLIENT_SECRET = "gmail-client-secret"
-  GMAIL_REFRESH_TOKEN = "gmail-refresh-token"
   DB_PASSWORD         = "db-password"
 }
 
@@ -35,9 +29,6 @@ cloudrun_service_resources = {
 # pubsub_topic_name        = "orders-prod"
 # pubsub_subscription_name = "orders-prod-push"
 
-gmail_watch_schedule = "0 9 * * *"
-gmail_watch_path     = "/watch-refresh"
-# gmail_watch_job_name = "gmail-watch-refresh-prod"
 # worker_service_name  = "worker-prod"
 
 auth_disabled = false
@@ -46,11 +37,5 @@ operator_password = "set-admin-password-here"
 google_oauth_client_id = "your-login-client-id.apps.googleusercontent.com"
 allowed_emails = ["user@example.com"]
 admin_emails = ["admin@example.com"]
-
-gmail_ingest_query = "is:unread has:attachment filename:pdf"
-gmail_ingest_label_ids = []
-gmail_ingest_max_results = 10
-gmail_ingest_mark_read = true
-gmail_ingest_prefix = "gmail"
 
 notification_emails = ["alerts@example.com"]

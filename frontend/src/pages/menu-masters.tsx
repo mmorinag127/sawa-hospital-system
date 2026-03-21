@@ -16,6 +16,12 @@ type MenuMasterItem = {
   condiments?: string[] | null;
 };
 
+const TEMP_TYPE_OPTIONS = [
+  { value: "", label: "未選択" },
+  { value: "hot", label: "温" },
+  { value: "cold", label: "冷" },
+];
+
 const parseCondiments = (text: string): string[] => {
   return text
     .split(",")
@@ -226,12 +232,17 @@ export default function MenuMastersPage() {
             value={newItem.bag_max_unit || ""}
             onChange={(event) => setNewItem((prev) => ({ ...prev, bag_max_unit: event.target.value }))}
           />
-          <input
+          <select
             className="input"
-            placeholder="温冷 (hot/cold)"
             value={newItem.temp_type || ""}
             onChange={(event) => setNewItem((prev) => ({ ...prev, temp_type: event.target.value }))}
-          />
+          >
+            {TEMP_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <input
             className="input"
             placeholder="食事帯 (朝/昼/夕)"
@@ -322,11 +333,17 @@ export default function MenuMastersPage() {
                     />
                   </td>
                   <td>
-                    <input
+                    <select
                       className="input"
                       value={item.temp_type || ""}
                       onChange={(event) => updateField(idx, "temp_type", event.target.value)}
-                    />
+                    >
+                      {TEMP_TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <input

@@ -3,8 +3,6 @@ locals {
   pubsub_topic_name = var.pubsub_topic_name != "" ? var.pubsub_topic_name : "orders-${var.env}"
   pubsub_subscription_name = var.pubsub_subscription_name != "" ? var.pubsub_subscription_name : "orders-${var.env}-push"
   pubsub_push_path = "/pubsub/push"
-  watch_path = var.gmail_watch_path != "" ? var.gmail_watch_path : "/watch-refresh"
-  watch_job_name = var.gmail_watch_job_name != "" ? var.gmail_watch_job_name : "gmail-watch-refresh-${var.env}"
   worker_service_name = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
   ocr_pipeline_service_name = var.ocr_pipeline_service_name != "" ? var.ocr_pipeline_service_name : "ocr-pipeline-${var.env}"
   worker_url = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
@@ -88,14 +86,7 @@ module "cloudsql" {
     ALLOWED_EMAILS           = join(",", var.allowed_emails)
     ADMIN_EMAILS             = join(",", var.admin_emails)
     GCP_PROJECT_ID          = var.project_id
-    GMAIL_WATCH_TOPIC        = "projects/${var.project_id}/topics/${local.pubsub_topic_name}"
     RAW_BUCKET               = "${var.project_id}-${local.env}-raw"
-    GMAIL_INGEST_QUERY       = var.gmail_ingest_query
-    GMAIL_INGEST_LABEL_IDS   = join(",", var.gmail_ingest_label_ids)
-    GMAIL_INGEST_MAX_RESULTS = tostring(var.gmail_ingest_max_results)
-    GMAIL_INGEST_MARK_READ   = var.gmail_ingest_mark_read ? "true" : "false"
-    GMAIL_INGEST_PREFIX      = var.gmail_ingest_prefix
-    GMAIL_WATCH_STATE_URI    = var.gmail_watch_state_uri != "" ? var.gmail_watch_state_uri : "gs://${var.project_id}-${local.env}-raw/gmail/watch_state.json"
     FACILITY_MASTER_PATH     = "/app/src/data/facility_master.test.json"
     CORS_ALLOW_ORIGINS       = "https://web-dev-m3j47i2tgq-an.a.run.app,https://web-dev-161384524548.asia-northeast1.run.app"
     TEMPLATE_COLLECTION      = "templates"
@@ -141,22 +132,7 @@ module "pubsub" {
   subscription_name = local.pubsub_subscription_name
   push_endpoint     = "${local.worker_url}${local.pubsub_push_path}"
   push_sa_email     = module.cloudrun.service_accounts["worker"]
-  topic_publisher_members = [
-    "serviceAccount:gmail-api-push@system.gserviceaccount.com",
-  ]
   depends_on        = [module.apis]
-}
-
-module "scheduler" {
-  source          = "../../modules/scheduler"
-  project_id      = var.project_id
-  region          = var.region
-  job_name        = local.watch_job_name
-  schedule        = var.gmail_watch_schedule
-  description     = "Gmail watch refresh"
-  target_url      = "${local.worker_url}${local.watch_path}"
-  target_sa_email = module.cloudrun.service_accounts["worker"]
-  depends_on      = [module.apis]
 }
 
 module "ingest_retry_scheduler" {
@@ -172,17 +148,6 @@ module "ingest_retry_scheduler" {
   depends_on      = [module.apis]
 }
 
-module "gmail_scan_scheduler" {
-  source          = "../../modules/scheduler"
-  project_id      = var.project_id
-  region          = var.region
-  job_name        = "gmail-scan-${local.env}"
-  schedule        = "*/5 * * * *"
-  description     = "Scan Gmail for PDF attachments"
-  target_url      = "${local.worker_url}/ingest/gmail-scan"
-  target_sa_email = module.cloudrun.service_accounts["worker"]
-  depends_on      = [module.apis]
-}
 
 module "iam" {
   source     = "../../modules/iam"

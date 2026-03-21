@@ -3,9 +3,11 @@ from __future__ import annotations
 import pathlib
 import sys
 import unittest
+from io import BytesIO
 
 import cv2
 import numpy as np
+import pdfplumber
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
@@ -86,6 +88,18 @@ def _bbox_center(image: np.ndarray) -> tuple[float, float]:
 
 
 class PageCorrectionTest(unittest.TestCase):
+    def test_save_pdf_uses_reasonable_page_resolution(self):
+        image = _make_form_image(width=2542, height=3506)
+
+        corrected_pdf = page_correction._save_pdf([image])
+
+        with pdfplumber.open(BytesIO(corrected_pdf)) as pdf:
+            page = pdf.pages[0]
+            self.assertLess(page.width, 700)
+            self.assertLess(page.height, 900)
+            self.assertGreater(page.width, 500)
+            self.assertGreater(page.height, 700)
+
     def test_correct_rotation_aligns_small_skewed_form(self):
         base = _make_form_image()
         rotated = _rotate_canvas(base, 5.0)
@@ -197,6 +211,44 @@ class PageCorrectionTest(unittest.TestCase):
         self.assertIsNone(summary["corrected_pdf_uri"])
         self.assertEqual(corrected_pages[0][1].shape, warped_first_page.shape)
         self.assertTrue(len(corrected_pdf) > 0)
+
+    def test_correct_pdf_for_yomitoku_skips_template_warp_when_match_uses_different_template(self):
+        first_page = _make_form_image()
+        warped_first_page = np.full((1400, 1000, 3), 245, dtype=np.uint8)
+
+        original_render = page_correction.render_pdf_to_page_images
+        original_build = page_correction.build_images_for_match_and_ocr
+        original_choose = page_correction.choose_template_and_warp
+        try:
+            page_correction.render_pdf_to_page_images = lambda _pdf_bytes, _dpi: [(1, first_page)]
+            page_correction.build_images_for_match_and_ocr = lambda _png_bytes: (first_page, first_page, first_page)
+            page_correction.choose_template_and_warp = (
+                lambda _db, _match_bgr, _ocr_bgr, img_alt_bgr=None, template_ids=None: (
+                    "fax_layout_floor_2f3f_v1",
+                    _match_bgr,
+                    warped_first_page,
+                    img_alt_bgr,
+                    {"matched": True, "template_ids": template_ids or []},
+                )
+            )
+
+            corrected_pdf, summary, corrected_pages = page_correction.correct_pdf_for_yomitoku(
+                pdf_bytes=b"%PDF-1.4\n%EOF\n",
+                dpi=200,
+                db=None,
+                preferred_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                preferred_template_ids=["fax_layout_floor_2f3f_v1"],
+            )
+        finally:
+            page_correction.render_pdf_to_page_images = original_render
+            page_correction.build_images_for_match_and_ocr = original_build
+            page_correction.choose_template_and_warp = original_choose
+
+        self.assertFalse(summary["applied"])
+        self.assertEqual(summary["template_warp_page_count"], 0)
+        self.assertFalse(summary["corrected_pdf_generated"])
+        self.assertEqual(corrected_pdf, b"%PDF-1.4\n%EOF\n")
+        self.assertIsNone(corrected_pages)
 
     def test_run_yomitoku_uses_supplied_page_images_without_pdf_render(self):
         corrected_page = _make_form_image()

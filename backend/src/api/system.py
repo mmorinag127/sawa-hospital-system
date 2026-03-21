@@ -1,13 +1,11 @@
 from datetime import datetime, timezone
-import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_role, GOOGLE_OAUTH_CLIENT_IDS
-from src.services.gmail_state_store import load_watch_state
-from src.services.gmail_ingest_service import get_gmail_profile_email
 from src.services.ingest_job_service import summarize_ingest_jobs
+from src.services.intake_mode_service import get_intake_status
 from src.services.ocr_pipeline_state_store import load_pipeline_state
 from src.services.ocr_pipeline_service import get_pipeline_config, get_pipeline_runtime_status
 from src.services.ocr_quality_service import summarize_reparse_quality
@@ -20,30 +18,8 @@ from src.services.system_maintenance_service import (
 
 router = APIRouter()
 
-
-def _parse_expiration(expiration: str | None) -> tuple[str | None, str | None, bool]:
-    if not expiration:
-        return None, None, False
-    try:
-        exp_ms = int(expiration)
-    except (TypeError, ValueError):
-        return None, None, False
-    exp_dt = datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc)
-    exp_iso = exp_dt.isoformat()
-    expired = exp_dt < datetime.now(tz=timezone.utc)
-    return str(exp_ms), exp_iso, expired
-
-
 @router.get("/system/status", dependencies=[Depends(require_role("operator"))])
 def system_status():
-    try:
-        state = load_watch_state() or {}
-    except Exception as exc:  # noqa: BLE001
-        state = {
-            "status": "error",
-            "error_code": "state_load_failed",
-            "error_message": str(exc),
-        }
     try:
         pipeline_state = load_pipeline_state() or {}
     except Exception as exc:  # noqa: BLE001
@@ -54,30 +30,8 @@ def system_status():
         }
     pipeline_config = get_pipeline_config()
     pipeline_runtime = get_pipeline_runtime_status()
-    gmail_client_id = os.getenv("GMAIL_CLIENT_ID")
-    gmail_client_secret = os.getenv("GMAIL_CLIENT_SECRET")
-    gmail_refresh_token = os.getenv("GMAIL_REFRESH_TOKEN")
-    gmail_config_ok = bool(gmail_client_id and gmail_client_secret and gmail_refresh_token)
-    gmail_account = None
-    if gmail_config_ok:
-        try:
-            gmail_account = get_gmail_profile_email()
-        except Exception:
-            gmail_account = None
+    intake = get_intake_status()
     oauth_config_ok = bool(GOOGLE_OAUTH_CLIENT_IDS)
-    expiration_ms, expiration_iso, expired = _parse_expiration(state.get("expiration"))
-    error_code = state.get("error_code")
-    status = state.get("status") or "unknown"
-    if error_code == "invalid_grant":
-        status = "invalid_grant"
-    elif expired:
-        status = "expired"
-    elif status == "error":
-        status = "error"
-    elif not gmail_config_ok:
-        status = "misconfigured"
-    else:
-        status = "ok"
     ingest_summary = summarize_ingest_jobs()
     db_quota = get_db_quota_status()
     try:
@@ -88,21 +42,7 @@ def system_status():
             "error": f"quality_summary_failed:{exc}",
         }
     return {
-        "gmail_watch": {
-            "status": status,
-            "expiration_ms": expiration_ms,
-            "expiration_iso": expiration_iso,
-            "updated_at": state.get("updated_at"),
-            "error_code": error_code,
-            "error_message": state.get("error_message"),
-        },
-        "gmail_config": {
-            "client_id_set": bool(gmail_client_id),
-            "client_secret_set": bool(gmail_client_secret),
-            "refresh_token_set": bool(gmail_refresh_token),
-            "configured": gmail_config_ok,
-            "account": gmail_account,
-        },
+        "intake": intake,
         "oauth_config": {
             "google_client_ids": GOOGLE_OAUTH_CLIENT_IDS,
             "configured": oauth_config_ok,

@@ -6,12 +6,12 @@ from src.services import menu_rule_service
 router = APIRouter()
 
 
-@router.get("", dependencies=[Depends(require_role("admin"))])
+@router.get("", dependencies=[Depends(require_role("operator"))])
 def list_menu_rules(rule_type: str | None = None):
     return {"rules": menu_rule_service.list_rules(rule_type)}
 
 
-@router.post("", dependencies=[Depends(require_role("admin"))])
+@router.post("", dependencies=[Depends(require_role("operator"))])
 def create_menu_rule(body: dict):
     try:
         rule = menu_rule_service.create_rule(body)
@@ -20,7 +20,7 @@ def create_menu_rule(body: dict):
     return {"rule": rule}
 
 
-@router.put("/{rule_id}", dependencies=[Depends(require_role("admin"))])
+@router.put("/{rule_id}", dependencies=[Depends(require_role("operator"))])
 def update_menu_rule(rule_id: str, body: dict):
     updated = menu_rule_service.update_rule(rule_id, body)
     if not updated:
@@ -28,7 +28,7 @@ def update_menu_rule(rule_id: str, body: dict):
     return {"updated": True}
 
 
-@router.delete("/{rule_id}", dependencies=[Depends(require_role("admin"))])
+@router.delete("/{rule_id}", dependencies=[Depends(require_role("operator"))])
 def delete_menu_rule(rule_id: str):
     deleted = menu_rule_service.delete_rule(rule_id)
     if not deleted:

@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { useCurrentUserRole } from "../hooks/useCurrentUserRole";
 
 type ShippingHistoryItem = {
   id: string;
@@ -73,6 +74,7 @@ const buildDefaultRange = () => {
 };
 
 export default function ShippingHistoryPage() {
+  const { isAdmin } = useCurrentUserRole();
   const defaultRange = useMemo(buildDefaultRange, []);
   const [dateFrom, setDateFrom] = useState<string>(defaultRange.start);
   const [dateTo, setDateTo] = useState<string>(defaultRange.end);
@@ -214,16 +216,23 @@ export default function ShippingHistoryPage() {
           <button className="btn primary" onClick={loadHistory} disabled={loading}>
             {loading ? "取得中..." : "履歴を更新"}
           </button>
-          <button className="btn ghost" onClick={() => downloadHistory("csv")} disabled={loading}>
-            DBをCSVで保存
-          </button>
-          <button className="btn ghost" onClick={() => downloadHistory("json")} disabled={loading}>
-            DBをJSONで保存
-          </button>
-          <button className="btn danger" onClick={clearAllHistory} disabled={loading}>
-            全件クリア（管理者）
-          </button>
+          {isAdmin ? (
+            <>
+              <button className="btn ghost" onClick={() => downloadHistory("csv")} disabled={loading}>
+                DBをCSVで保存
+              </button>
+              <button className="btn ghost" onClick={() => downloadHistory("json")} disabled={loading}>
+                DBをJSONで保存
+              </button>
+              <button className="btn danger" onClick={clearAllHistory} disabled={loading}>
+                全件クリア（管理者）
+              </button>
+            </>
+          ) : null}
         </div>
+        {!isAdmin ? (
+          <p className="subtle">履歴のエクスポートと全件クリアは管理者アカウントでのみ表示されます。</p>
+        ) : null}
         {message ? <p className="message">{message}</p> : null}
       </section>
 

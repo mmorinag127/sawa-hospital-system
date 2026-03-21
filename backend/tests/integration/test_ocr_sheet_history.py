@@ -17,7 +17,7 @@ from src.services import order_service  # noqa: E402
 from src.services import config_service  # noqa: E402
 from src.services import facility_service  # noqa: E402
 from src.services import fax_extractor  # noqa: E402
-from src.services.ocr_job_service import create_job  # noqa: E402
+from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -546,9 +546,16 @@ def test_get_ocr_pages_builds_synthetic_preview_from_corrected_pdf_when_overlay_
             return b"%PDF-raw\n%EOF\n"
         raise AssertionError(f"unexpected uri: {uri}")
 
-    def _fake_render_pdf_to_png_bytes(*, pdf_bytes: bytes, dpi: int = 220, page: int = 1) -> bytes:
+    def _fake_render_pdf_to_png_bytes(
+        *,
+        pdf_bytes: bytes,
+        dpi: int = 220,
+        page: int = 1,
+        max_pixels: int | None = None,
+    ) -> bytes:
         assert dpi == 220
         assert page == 1
+        assert max_pixels == 18_000_000
         captured_pdf_bytes.append(pdf_bytes)
         return b"\x89PNG\r\n\x1a\nsynthetic"
 
@@ -571,6 +578,175 @@ def test_get_ocr_pages_builds_synthetic_preview_from_corrected_pdf_when_overlay_
     assert page["pdf_variant_used"] == "corrected"
     assert str(page["ocr_overlay_url"]).startswith("data:image/png;base64,")
     assert page["markdown_text"]
+
+
+def test_get_ocr_pages_synthesizes_grid_from_template_expected_columns_without_pdf_detection(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-template-grid-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "markdown_uri": None,
+                    "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                    "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                    "figure_uris": [],
+                }
+            ]
+        },
+    )
+
+    monkeypatch.setattr(
+        config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "fax_template": {
+                "table_box": [0.1, 0.2, 0.9, 0.8],
+                "grid_expected_columns": 4,
+            }
+        },
+    )
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "detect_table_grid",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pdf grid detection should not run")),
+    )
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["table_box"] == [0.1, 0.2, 0.9, 0.8]
+    assert isinstance(pages["grid_column_edges"], list)
+    assert len(pages["grid_column_edges"]) == 5
+    assert abs(pages["grid_column_edges"][0] - 0.1) < 1e-9
+    assert abs(pages["grid_column_edges"][-1] - 0.9) < 1e-9
+    assert pages["grid_row_edges"] is None
+
+
+def test_get_ocr_pages_defers_expensive_grid_detection_in_request_path(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-overlay-grid-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "markdown_uri": None,
+                    "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                    "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                    "figure_uris": [],
+                }
+            ]
+        },
+    )
+
+    monkeypatch.setattr(config_service, "get_facility_config", lambda facility_id: {"fax_template": {}})
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "load_bytes_from_uri",
+        lambda uri: (_ for _ in ()).throw(AssertionError("overlay grid detection should not run in request path")),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "detect_table_grid_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("overlay grid detection should not run")),
+    )
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["table_box"] is None
+    assert pages["grid_column_edges"] is None
+    assert pages["grid_row_edges"] is None
+    assert pages["grid_detection_status"] == "deferred"
+    assert pages["grid_detection_deferred_reason"] == "missing_template_grid_metadata:table_box,grid_column_edges,grid_row_edges"
+
+
+def test_get_ocr_pages_returns_pages_even_when_grid_metadata_cannot_be_recovered(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-no-grid-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "markdown_uri": None,
+                    "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                    "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                    "figure_uris": [],
+                }
+            ]
+        },
+    )
+
+    monkeypatch.setattr(config_service, "get_facility_config", lambda facility_id: {"fax_template": {}})
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: b"overlay-bytes")
+    monkeypatch.setattr(order_service, "detect_table_grid_image", lambda image_bytes, template: None)
+    monkeypatch.setattr(
+        order_service,
+        "detect_table_grid",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pdf grid detection should not run")),
+    )
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert isinstance(pages["pages"], list)
+    assert len(pages["pages"]) == 1
+    assert pages["table_box"] is None
+    assert pages["grid_column_edges"] is None
+    assert pages["grid_row_edges"] is None
+    assert pages["grid_detection_status"] == "deferred"
+
+
+def test_save_order_ocr_cache_preserves_page_artifacts_when_new_payload_is_partial():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-cache-preserve-001")
+
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "status": "success",
+            "pages": [
+                {
+                    "page_index": 1,
+                    "markdown_uri": None,
+                    "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                    "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                    "figure_uris": [],
+                }
+            ],
+            "combined": {"corrected_pdf": "gs://bucket/corrected.pdf"},
+            "template_id": "fax-template",
+            "engine": "yomitoku",
+            "facility_id": "FAC00001",
+        },
+    )
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "status": "success",
+            "table_raw": "|日付|区分|メニュー|常食2F|",
+        },
+    )
+
+    cached = order_service._load_order_ocr_cache(order["id"])
+
+    assert isinstance(cached, dict)
+    assert isinstance(cached.get("pages"), list)
+    assert cached["combined"]["corrected_pdf"] == "gs://bucket/corrected.pdf"
+    assert cached["template_id"] == "fax-template"
+    assert cached["engine"] == "yomitoku"
 
 
 def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_header(tmp_path):
@@ -1544,6 +1720,7 @@ def test_get_ocr_sheet_falls_back_to_ocr_table_when_weekly_menu_missing():
     assert error is None
     assert sheet is not None
     assert sheet["source"] in {"ocr_table", "ocr_table+ocr_payload"}
+    assert "sheet_weekly_menu_missing" in (sheet.get("warnings") or [])
     assert len(sheet["rows"]) >= 2
 
     fields = sheet["fields"]
@@ -3870,6 +4047,146 @@ def test_get_ocr_sheet_weekly_menu_payload_rescue_preserves_zero():
         if row[date_idx] == "11/15" and row[daypart_idx] == "朝" and row[menu_idx] == "朝メニュー"
     )
     assert breakfast[qty_idx] == "0"
+
+
+def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload():
+    order_service.clear_all()
+    _seed_monthly_menu_daypart_order_2099_11()
+    payload = IngestEmailPayload(
+        message_id="msg-sheet-suppress-failed-projection-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2099, 11, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2099-11",
+    )
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "line_id": "line-suppress-1",
+                "date": "2099-11-15",
+                "daypart": "朝",
+                "menu_name": "朝メニュー",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 30,
+            }
+        ],
+    )
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_rows": [
+                ["11/15", "朝", "朝メニュー", "7", "", "", "", "", "", ""],
+            ],
+            "metrics": {
+                "status": "failed",
+                "result_state": "hard_failed",
+                "quality_error": "sheet_column_anomaly",
+                "structural_row_projection": {
+                    "projected_row_count": 30,
+                    "rows_with_projected_quantity": 30,
+                    "quantity_cells_copied": 120,
+                },
+            },
+        },
+    )
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+
+    assert error is None
+    assert sheet is not None
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert "sheet_order_lines_suppressed_reparse_failed" in (sheet.get("warnings") or [])
+    fields = sheet["fields"]
+    qty_idx = fields.index("qty.regular_2f")
+    daypart_idx = fields.index("daypart")
+    menu_idx = fields.index("menu")
+    date_idx = next((idx for idx, field in enumerate(fields) if field.startswith("date")), 0)
+    breakfast = next(
+        row
+        for row in sheet["rows"]
+        if row[date_idx] == "11/15" and row[daypart_idx] == "朝" and row[menu_idx] == "朝メニュー"
+    )
+    assert breakfast[qty_idx] == "7"
+    trace = sheet.get("trace") or {}
+    trace_rows = trace.get("rows") or []
+    target_idx = next(
+        idx
+        for idx, row in enumerate(sheet["rows"])
+        if row[date_idx] == "11/15" and row[daypart_idx] == "朝" and row[menu_idx] == "朝メニュー"
+    )
+    assert trace_rows[target_idx][qty_idx] == "ocr_payload"
+
+
+def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics_fallback():
+    order_service.clear_all()
+    _seed_monthly_menu_daypart_order_2099_11()
+    payload = IngestEmailPayload(
+        message_id="msg-sheet-suppress-failed-job-metrics-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2099, 11, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2099-11",
+    )
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "line_id": "line-suppress-job-1",
+                "date": "2099-11-15",
+                "daypart": "朝",
+                "menu_name": "朝メニュー",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 30,
+            }
+        ],
+    )
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_rows": [
+                ["11/15", "朝", "朝メニュー", "7", "", "", "", "", "", ""],
+            ],
+            "metrics": {
+                "status": "success",
+            },
+        },
+    )
+    create_job(f"OCR-{order['id']}", input_reference="gs://ocr/reparse.json", status="failed")
+    update_job(
+        f"OCR-{order['id']}",
+        metrics={
+            "result_state": "hard_failed",
+            "quality_error": "sheet_column_anomaly",
+            "structural_row_projection": {
+                "projected_row_count": 30,
+                "rows_with_projected_quantity": 30,
+                "quantity_cells_copied": 120,
+            },
+        },
+    )
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+
+    assert error is None
+    assert sheet is not None
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert "sheet_order_lines_suppressed_reparse_failed" in (sheet.get("warnings") or [])
+    fields = sheet["fields"]
+    qty_idx = fields.index("qty.regular_2f")
+    daypart_idx = fields.index("daypart")
+    menu_idx = fields.index("menu")
+    date_idx = next((idx for idx, field in enumerate(fields) if field.startswith("date")), 0)
+    breakfast = next(
+        row
+        for row in sheet["rows"]
+        if row[date_idx] == "11/15" and row[daypart_idx] == "朝" and row[menu_idx] == "朝メニュー"
+    )
+    assert breakfast[qty_idx] == "7"
 
 
 def test_get_ocr_sheet_ocr_table_numeric_rescue_ignores_loose_note_and_unstructured_values():
