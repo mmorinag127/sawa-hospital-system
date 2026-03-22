@@ -16,6 +16,11 @@ from src.models.ocr_job import OcrJob  # noqa: F401
 from src.models.ingest_job import IngestJob  # noqa: F401
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: F401
 from src.models.order_ocr_revision import OrderOcrRevision  # noqa: F401
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: F401
+from src.models.order_sheet_draft import OrderSheetDraft  # noqa: F401
+from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
+from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow  # noqa: F401
 from src.models.user import User, AuditLog, Notification  # noqa: F401
 from src.models.shipping_tracking import ShippingTrackingLog  # noqa: F401

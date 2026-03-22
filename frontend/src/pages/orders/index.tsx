@@ -29,6 +29,19 @@ type Order = {
   ocr_processing_stage?: string | null;
   ocr_result_state?: string | null;
   ocr_confirmed_lines_retained?: boolean | null;
+  workflow_state?: {
+    state?: string | null;
+    headline?: string | null;
+    primary_action?: string | null;
+    blockers_json?: string[] | null;
+    warnings_json?: string[] | null;
+  } | null;
+  apply_gate?: {
+    can_apply?: boolean | null;
+    can_confirm?: boolean | null;
+    blockers?: string[] | null;
+    warnings?: string[] | null;
+  } | null;
 };
 
 const compareOrdersByReceivedAt = (left: Order, right: Order) => {
@@ -228,9 +241,92 @@ export default function OrdersPage() {
   };
 
   const reviewToneClass = (order: Order) => {
+    const workflowState = String(order.workflow_state?.state || "").trim().toLowerCase();
+    if (workflowState === "recovery_required") return "list-item-error";
+    if (
+      workflowState === "choice_required"
+      || workflowState === "identity_choice_required"
+      || workflowState === "layout_choice_required"
+      || workflowState === "draft_ready"
+      || workflowState === "draft_blocked"
+      || workflowState === "review_required"
+      || workflowState === "apply_ready"
+    ) {
+      return "list-item-review";
+    }
     const reviewState = String(order.ocr_review_state || "").trim().toLowerCase();
     if (reviewState === "processing_failed") return "list-item-error";
     if (reviewState === "auto_apply_blocked" || reviewState === "draft_ready") return "list-item-review";
+    return "";
+  };
+
+  const workflowStateLabel = (value?: string | null) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === "uploaded") return "OCR待ち";
+    if (normalized === "evidence_ready") return "証拠確認";
+    if (normalized === "recovery_required") return "復旧待ち";
+    if (normalized === "choice_required") return "選択待ち";
+    if (normalized === "identity_choice_required") return "施設・週の選択待ち";
+    if (normalized === "layout_choice_required") return "OCR候補の選択待ち";
+    if (normalized === "draft_ready") return "下書き確認";
+    if (normalized === "draft_blocked") return "反映前の確認待ち";
+    if (normalized === "review_required") return "要確認";
+    if (normalized === "apply_ready") return "反映可能";
+    if (normalized === "confirmed") return "確定済み";
+    return "";
+  };
+
+  const workflowPrimaryActionLabel = (order: Order) => {
+    const explicit = String(order.workflow_state?.primary_action || "").trim();
+    if (explicit) return explicit;
+    const normalized = String(order.workflow_state?.state || "").trim().toLowerCase();
+    if (normalized === "choice_required") return "候補を選ぶ";
+    if (normalized === "identity_choice_required") return "施設・週を選ぶ";
+    if (normalized === "layout_choice_required") return "OCR候補を選ぶ";
+    if (normalized === "recovery_required") return "復旧する";
+    if (normalized === "evidence_ready") return "OCR結果を確認";
+    if (normalized === "draft_ready") return "下書きを確認";
+    if (normalized === "draft_blocked") return "反映条件を解消";
+    if (normalized === "review_required") return "要確認箇所を確認";
+    if (normalized === "apply_ready") return "反映して確認";
+    if (normalized === "confirmed") return "完了を確認";
+    return "";
+  };
+
+  const visibleReviewBadges = (order: Order) => {
+    const workflowBadge = workflowStateLabel(order.workflow_state?.state);
+    const hasWorkflowSummary = Boolean(
+      String(order.workflow_state?.headline || "").trim() || workflowBadge,
+    );
+    const secondaryBadges = (order.ocr_review_badges || [])
+      .map((badge) => String(badge || "").trim())
+      .filter((badge) => badge && badge !== workflowBadge)
+      .slice(0, hasWorkflowSummary ? 1 : 2);
+    return {
+      workflowBadge,
+      secondaryBadges,
+    };
+  };
+
+  const workflowSupportText = (order: Order) => {
+    const blockers = Array.isArray(order.workflow_state?.blockers_json)
+      ? order.workflow_state?.blockers_json?.map((item) => String(item || "").trim()).filter(Boolean) || []
+      : [];
+    const warnings = Array.isArray(order.workflow_state?.warnings_json)
+      ? order.workflow_state?.warnings_json?.map((item) => String(item || "").trim()).filter(Boolean) || []
+      : [];
+    if (blockers.length) return `要対応 ${blockers.length}件`;
+    if (warnings.length) return `確認 ${warnings.length}件`;
+    return "";
+  };
+
+  const workflowHeadlineText = (order: Order) => {
+    const explicitHeadline = String(order.workflow_state?.headline || "").trim();
+    if (explicitHeadline) return explicitHeadline;
+    const workflowBadge = workflowStateLabel(order.workflow_state?.state);
+    if (workflowBadge) return workflowBadge;
+    const primaryAction = workflowPrimaryActionLabel(order);
+    if (primaryAction) return primaryAction;
     return "";
   };
 
@@ -366,11 +462,28 @@ export default function OrdersPage() {
                     施設: {facilityLabel(order)} / 週: {order.week || "未確定"} / 受信:{" "}
                     {formatReceivedAt(order.received_at)} / 受付ID: {order.message_id || "不明"}
                   </p>
-                  {(Array.isArray(order.ocr_review_badges) && order.ocr_review_badges.length) ||
+                  {workflowHeadlineText(order) ? (
+                    <div className="list-workflow">
+                      <p className="list-workflow-title">{workflowHeadlineText(order)}</p>
+                      {workflowPrimaryActionLabel(order) && workflowPrimaryActionLabel(order) !== workflowHeadlineText(order) ? (
+                        <p className="list-workflow-action">次: {workflowPrimaryActionLabel(order)}</p>
+                      ) : null}
+                      {workflowSupportText(order) ? (
+                        <p className="list-workflow-support">{workflowSupportText(order)}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {visibleReviewBadges(order).workflowBadge ||
+                  visibleReviewBadges(order).secondaryBadges.length ||
                   processingStageLabel(order.ocr_processing_stage) ||
                   order.ocr_confirmed_lines_retained ? (
                     <div className="review-badges">
-                      {(order.ocr_review_badges || []).map((badge) => (
+                      {visibleReviewBadges(order).workflowBadge ? (
+                        <span className="review-badge">
+                          {visibleReviewBadges(order).workflowBadge}
+                        </span>
+                      ) : null}
+                      {visibleReviewBadges(order).secondaryBadges.map((badge) => (
                         <span className="review-badge" key={`${order.id || order.document}-${badge}`}>
                           {badge}
                         </span>
@@ -606,6 +719,33 @@ export default function OrdersPage() {
           font-size: 12px;
           color: #5f7b74;
           line-height: 1.5;
+        }
+
+        .list-workflow {
+          margin-top: 8px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          background: #f4f7f6;
+          border: 1px solid rgba(25, 32, 30, 0.06);
+        }
+
+        .list-workflow-title {
+          margin: 0;
+          font-size: 13px;
+          font-weight: 600;
+          color: #21302d;
+        }
+
+        .list-workflow-action {
+          margin: 4px 0 0;
+          font-size: 12px;
+          color: #52625d;
+        }
+
+        .list-workflow-support {
+          margin: 4px 0 0;
+          font-size: 12px;
+          color: #7a8783;
         }
 
         .review-badges {

@@ -1,6 +1,6 @@
 import sys
 import pathlib
-from datetime import datetime
+from datetime import date, datetime
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -234,7 +234,7 @@ def test_get_ocr_pages_defers_grid_recovery_when_template_metadata_is_partial(mo
     assert pages["grid_detection_deferred_reason"] == "missing_template_grid_metadata:grid_row_edges"
 
 
-def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_when_evidence_only(monkeypatch):
+def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_by_default():
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-phase-step2-evidence-only")
 
@@ -249,21 +249,65 @@ def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_when_evidence
     assert error is None
     assert saved is not None
 
-    monkeypatch.setenv("OCR_EVIDENCE_ONLY_STEP2", "true")
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 21),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        }
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|03/21|朝|Menu A|2||",
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+                "quantity_subgrid_passes": [],
+                "template_resolution": {"resolved_template_id": "tpl-1", "blocked": False, "blocked_reasons": []},
+                "table_box": [0.1, 0.2, 0.9, 0.8],
+                "grid_column_edges": [0.1, 0.5, 0.9],
+                "grid_row_edges": [0.2, 0.4, 0.8],
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["rows"][0][3] == "9"
+    assert sheet["source"].startswith("draft_sheet")
+
+
+def test_build_recoverable_ocr_sheet_payload_never_uses_confirmed_lines_fallback():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-phase-recoverable-no-confirmed-lines")
+
     order_service._save_order_ocr_cache(
         order["id"],
         {
-            "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|03/21|朝|Menu A|2||",
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|4|",
             "pages": [
                 {
                     "page_index": 1,
-                    "markdown_uri": None,
                     "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
                     "layout_overlay_uri": "gs://bucket/layout-page-1.png",
                     "figure_uris": [],
                 }
             ],
-            "quantity_subgrid_passes": [],
             "template_resolution": {"resolved_template_id": "tpl-1", "blocked": False, "blocked_reasons": []},
             "table_box": [0.1, 0.2, 0.9, 0.8],
             "grid_column_edges": [0.1, 0.5, 0.9],
@@ -271,9 +315,12 @@ def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_when_evidence
         },
     )
 
-    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    sheet, error = order_service.build_recoverable_ocr_sheet_payload(
+        order["id"],
+        "ocr_evidence_recovery_required",
+    )
 
-    assert sheet_error is None
+    assert error is None
     assert isinstance(sheet, dict)
-    assert sheet["rows"][0][3] == "9"
-    assert sheet["source"].startswith("edited_sheet")
+    assert sheet.get("recovery_source") != "confirmed_lines"
+    assert (sheet.get("trace") or {}).get("mapped_mode") != "confirmed_lines"

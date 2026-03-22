@@ -42,8 +42,55 @@ RECOVERABLE_OCR_SHEET_ERRORS = {
 }
 
 
+def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
+    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    draft_json = draft_payload.get("draft_sheet_json") if isinstance(draft_payload.get("draft_sheet_json"), dict) else {}
+    warnings = [
+        str(item).strip()
+        for item in (
+            list(draft_json.get("warnings") or [])
+            + list(draft_payload.get("warnings_json") or [])
+        )
+        if str(item).strip()
+    ]
+    deduped_warnings: list[str] = []
+    for item in warnings:
+        if item not in deduped_warnings:
+            deduped_warnings.append(item)
+    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else None
+    return {
+        **draft_payload,
+        "fields": list(draft_json.get("fields") or []),
+        "header": list(draft_json.get("header") or []),
+        "rows": list(draft_json.get("rows") or []),
+        "row_ids": list(draft_json.get("row_ids") or []),
+        "source": str(draft_json.get("source") or draft_payload.get("draft_state") or "draft").strip() or "draft",
+        "warnings": deduped_warnings,
+        "review_state": (
+            str((workflow or {}).get("state") or draft_payload.get("draft_state") or "draft_ready").strip()
+            if isinstance(workflow, dict) or draft_payload.get("draft_state")
+            else "draft_ready"
+        ),
+        "workflow_state": workflow,
+        "apply_gate": apply_gate,
+        "critical_decisions": list((workflow or {}).get("critical_decisions") or []) if isinstance(workflow, dict) else [],
+        "candidate_resolution": (workflow or {}).get("candidate_resolution") if isinstance(workflow, dict) else None,
+        "evidence_run_id": (evidence or {}).get("id") if isinstance(evidence, dict) else None,
+        "evidence_capabilities": (evidence or {}).get("capabilities_json") if isinstance(evidence, dict) else None,
+        "evidence_degraded_reasons": list((evidence or {}).get("degraded_reasons_json") or []) if isinstance(evidence, dict) else [],
+    }
+
+
 def _is_read_timeout_error(value: object) -> bool:
     return isinstance(value, str) and "read operation timed out" in value.lower()
+
+
+def _is_reparse_stale_timeout_error(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower()
+    return normalized.startswith("reparse_stale_timeout>")
 
 
 def _is_terminal_reparse_error(value: object) -> bool:
@@ -79,6 +126,19 @@ def _derive_status_from_payload(payload: dict | None) -> str | None:
     if payload.get("pages") or payload.get("table_raw") or payload.get("rows"):
         return "success"
     return None
+
+
+def _has_persisted_ocr_evidence(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    table_raw = payload.get("table_raw")
+    if isinstance(table_raw, str) and table_raw.strip():
+        return True
+    if isinstance(payload.get("pages"), list) and payload.get("pages"):
+        return True
+    if isinstance(payload.get("tables"), list) and payload.get("tables"):
+        return True
+    return False
 
 
 def _is_running_status(value: object) -> bool:
@@ -140,8 +200,28 @@ def _apply_stale_ocr_status(order: dict, job: dict | None) -> dict | None:
     if not job:
         return job
     job = _mark_stale_order_reparse_job(order, job)
-    status = (order.get("ocr_status") or job.get("status") or "").lower()
+    order_id = str(order.get("id") or "").strip()
+    cached_payload = (
+        order_service.get_cached_ocr_payload(order_id)
+        if order_id and _is_order_reparse_job(job.get("id"), order_id)
+        else None
+    )
+    cached_status = _derive_status_from_payload(cached_payload) if _has_persisted_ocr_evidence(cached_payload) else None
+    status = (job.get("status") or order.get("ocr_status") or "").lower()
     if status not in {"running", "pending"}:
+        if (
+            order_id
+            and _is_order_reparse_job(job.get("id"), order_id)
+            and _is_reparse_stale_timeout_error(job.get("error_message"))
+            and cached_status
+        ):
+            order["ocr_status"] = cached_status
+            order["ocr_error"] = None
+            if job.get("metrics"):
+                order["ocr_metrics"] = job.get("metrics")
+            if job.get("updated_at"):
+                order["ocr_updated_at"] = job.get("updated_at")
+            return job
         if job.get("status"):
             order["ocr_status"] = job.get("status")
         error_message = job.get("error_message")
@@ -242,6 +322,30 @@ def _attach_order_review_summary(
     order.update(review)
 
 
+def _attach_order_workflow_context(order: dict, *, refresh: bool = False) -> None:
+    order_id = str(order.get("id") or "").strip()
+    if not order_id:
+        return
+    workflow = order_service.get_order_workflow_state(order_id, refresh=refresh)
+    if not isinstance(workflow, dict):
+        return
+    if not refresh and (
+        not isinstance(workflow.get("candidate_resolution"), dict)
+        or not isinstance(workflow.get("apply_gate"), dict)
+        or not isinstance(workflow.get("critical_decisions"), list)
+    ):
+        refreshed = order_service.get_order_workflow_state(order_id, refresh=True)
+        if isinstance(refreshed, dict):
+            workflow = refreshed
+    order["workflow_state"] = workflow
+    if isinstance(workflow.get("candidate_resolution"), dict):
+        order["candidate_resolution"] = workflow["candidate_resolution"]
+    if isinstance(workflow.get("critical_decisions"), list):
+        order["critical_decisions"] = workflow["critical_decisions"]
+    if isinstance(workflow.get("apply_gate"), dict):
+        order["apply_gate"] = workflow["apply_gate"]
+
+
 def _is_active_order_reparse_job(job: dict | None, order_id: str) -> bool:
     if not isinstance(job, dict):
         return False
@@ -260,7 +364,9 @@ def _enqueue_order_reparse_job(
     background_tasks: BackgroundTasks,
     *,
     ocr_prompt: str | None = None,
+    prompt_preset: str | None = None,
     ocr_provider: str | None = None,
+    ocr_model: str | None = None,
     llm_assist: bool = True,
     force: bool = False,
     stale_action: str = "retry",
@@ -342,21 +448,33 @@ def _enqueue_order_reparse_job(
         },
         input_reference=input_reference,
     )
-    background_tasks.add_task(_run_reparse_background, order_id, ocr_prompt, ocr_provider, llm_assist)
+    background_tasks.add_task(
+        _run_reparse_background,
+        order_id,
+        ocr_prompt,
+        prompt_preset,
+        ocr_provider,
+        ocr_model,
+        llm_assist,
+    )
     return {"accepted": True, "ocr_job_id": ocr_job_id}
 
 
 def _run_reparse_background(
     order_id: str,
     ocr_prompt: str | None,
+    prompt_preset: str | None = None,
     ocr_provider: str | None = None,
+    ocr_model: str | None = None,
     llm_assist: bool = False,
 ) -> None:
     try:
         _, error = order_service.reparse_order(
             order_id,
             ocr_prompt=ocr_prompt,
+            prompt_preset=prompt_preset,
             ocr_provider=ocr_provider,
+            ocr_model=ocr_model,
             llm_assist=llm_assist,
         )
         if error:
@@ -447,6 +565,7 @@ def list_orders(status: str | None = None, include_ocr: bool = False):
             cached_payload=cache_map.get(order_id),
             ocr_job=review_job,
         )
+        _attach_order_workflow_context(order, refresh=False)
     return {"orders": orders}
 
 
@@ -529,6 +648,7 @@ def get_order(order_id: str):
     job = _apply_cached_status_override(order, order_id, job)
     job = _apply_stale_ocr_status(order, job)
     _attach_order_review_summary(order, ocr_job=job)
+    _attach_order_workflow_context(order, refresh=True)
     return order
 
 
@@ -614,6 +734,87 @@ def rebuild_bag_summary(order_id: str):
         return rebuild_bags(order_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="order not found")
+
+
+@router.get("/{order_id}/evidence", dependencies=[Depends(require_role("operator"))])
+def get_ocr_evidence(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    if not isinstance(evidence, dict):
+        raise HTTPException(status_code=404, detail="ocr evidence not found")
+    return evidence
+
+
+@router.get("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
+def get_draft_sheet(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    draft = order_service.get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    if isinstance(draft, dict):
+        return _flatten_draft_sheet_payload(order_id, draft)
+    initial = order_service.build_initial_sheet_draft(order_id)
+    if not isinstance(initial, dict):
+        raise HTTPException(status_code=404, detail="draft sheet not found")
+    return _flatten_draft_sheet_payload(order_id, {
+        "id": None,
+        "order_id": order_id,
+        "base_evidence_run_id": initial.get("base_evidence_run_id"),
+        "base_template_resolution_id": None,
+        "base_menu_snapshot_id": None,
+        "draft_sheet_json": initial,
+        "draft_state": "draft_ready",
+        "blockers_json": [],
+        "warnings_json": [],
+        "latest_patch_candidate_id": None,
+        "edited_by": None,
+        "edited_at": None,
+        "created_at": None,
+    })
+
+
+@router.get("/{order_id}/workflow-state", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_state(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    if not isinstance(workflow, dict):
+        raise HTTPException(status_code=404, detail="workflow state not found")
+    return workflow
+
+
+@router.get("/{order_id}/critical-decisions", dependencies=[Depends(require_role("operator"))])
+def get_order_critical_decisions(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    return {"decisions": order_service.list_order_critical_decisions(order_id, refresh_workflow=True)}
+
+
+@router.post("/{order_id}/critical-decisions/{decision_type}", dependencies=[Depends(require_role("operator"))])
+def choose_order_critical_decision(order_id: str, decision_type: str, body: dict | None = None):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    selected_value = str((body or {}).get("selected_value") or (body or {}).get("value") or "").strip()
+    if not selected_value:
+        raise HTTPException(status_code=400, detail="selected_value missing")
+    result, error = order_service.choose_critical_decision(
+        order_id,
+        decision_type,
+        selected_value,
+        selected_by="operator",
+    )
+    if error == "decision_not_found":
+        raise HTTPException(status_code=404, detail="critical decision not found")
+    if error in {"facility_update_failed", "week_update_failed", "week_invalid"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error:
+        raise HTTPException(status_code=500, detail="critical decision update failed")
+    return result
 
 
 @router.get("/{order_id}/ocr-pages", dependencies=[Depends(require_role("operator"))])
@@ -755,6 +956,51 @@ def apply_ocr_markdown(order_id: str, body: dict):
     has_rows = isinstance(rows, list) and len(rows) > 0
     if not has_markdown and not has_rows:
         raise HTTPException(status_code=400, detail="markdown or rows is required")
+    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
+    raw_gate_blockers = (
+        [str(item or "").strip() for item in (apply_gate.get("blockers") or []) if str(item or "").strip()]
+        if isinstance(apply_gate, dict)
+        else []
+    )
+    apply_gate_blockers = [
+        item
+        for item in raw_gate_blockers
+        if item
+        in {
+            "facility_missing",
+            "week_missing",
+            "facility_choice_required",
+            "week_choice_required",
+            "template_choice_required",
+            "column_mapping_choice_required",
+            "quantity_choice_required",
+            "facility_unresolved",
+            "week_unresolved",
+        }
+    ]
+    if apply_gate_blockers:
+        primary = apply_gate_blockers[0]
+        messages = {
+            "facility_missing": "facility is missing",
+            "week_missing": "week is missing",
+            "facility_choice_required": "facility choice is required",
+            "week_choice_required": "week choice is required",
+            "template_choice_required": "template choice is required",
+            "column_mapping_choice_required": "column mapping choice is required",
+            "quantity_choice_required": "quantity choice is required",
+            "facility_unresolved": "facility is unresolved",
+            "week_unresolved": "week is unresolved",
+        }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": primary,
+                "message": messages.get(primary, primary),
+                "blockers": apply_gate_blockers,
+                "workflow_state": workflow,
+            },
+        )
     order, error = order_service.apply_ocr_table(
         order_id,
         markdown=markdown if has_markdown else None,
@@ -822,6 +1068,11 @@ def save_ocr_sheet(order_id: str, body: dict):
     if error:
         raise HTTPException(status_code=500, detail="ocr sheet save failed")
     return data
+
+
+@router.post("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
+def save_draft_sheet(order_id: str, body: dict):
+    return save_ocr_sheet(order_id, body)
 
 
 @router.post("/{order_id}/ocr-review", dependencies=[Depends(require_role("operator"))])
@@ -1026,6 +1277,86 @@ def confirm_order(order_id: str, body: dict | None = None):
                 status_code=409,
                 detail={"error": "stale_lines_conflict", "message": "明細が他の画面で更新されました。再読込してください。"},
             )
+    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
+    raw_workflow_blockers = (
+        [str(item or "").strip() for item in (apply_gate.get("blockers") or []) if str(item or "").strip()]
+        if isinstance(apply_gate, dict)
+        else []
+    )
+    workflow_blockers = [
+        item
+        for item in raw_workflow_blockers
+        if item
+        not in {
+            "evidence_view_unavailable",
+            "evidence_edit_unavailable",
+            "draft_rows_empty",
+        }
+    ]
+    if workflow_blockers:
+        primary = workflow_blockers[0]
+        messages = {
+            "facility_missing": "facility is missing",
+            "week_missing": "week is missing",
+            "facility_choice_required": "facility choice is required",
+            "week_choice_required": "week choice is required",
+            "template_choice_required": "template choice is required",
+            "column_mapping_choice_required": "column mapping choice is required",
+            "quantity_choice_required": "quantity choice is required",
+            "facility_unresolved": "facility is unresolved",
+            "week_unresolved": "week is unresolved",
+            "template_unresolved": "template is unresolved",
+        }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": primary,
+                "message": messages.get(primary, primary),
+                "blockers": workflow_blockers,
+                "workflow_state": workflow,
+            },
+        )
+    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
+    gate_blockers = list(apply_gate.get("blockers") or []) if isinstance(apply_gate, dict) else []
+    confirm_gate_blockers = [
+        blocker
+        for blocker in gate_blockers
+        if blocker in {
+            "facility_missing",
+            "week_missing",
+            "facility_choice_required",
+            "week_choice_required",
+            "template_choice_required",
+            "column_mapping_choice_required",
+            "quantity_choice_required",
+            "facility_unresolved",
+            "week_unresolved",
+        }
+    ]
+    if confirm_gate_blockers:
+        primary = str(confirm_gate_blockers[0] or "").strip() or "confirm_blocked"
+        messages = {
+            "facility_missing": "facility is missing",
+            "week_missing": "week is missing",
+            "facility_choice_required": "facility choice is required",
+            "week_choice_required": "week choice is required",
+            "template_choice_required": "template choice is required",
+            "column_mapping_choice_required": "column mapping choice is required",
+            "quantity_choice_required": "quantity choice is required",
+            "facility_unresolved": "facility is unresolved",
+            "week_unresolved": "week is unresolved",
+        }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": primary,
+                "message": messages.get(primary, primary),
+                "blockers": confirm_gate_blockers,
+                "workflow_state": workflow,
+            },
+        )
     sheet_result = order_service.get_ocr_sheet(order_id)
     if isinstance(sheet_result, tuple):
         sheet = sheet_result[0]
@@ -1079,7 +1410,9 @@ def confirm_order(order_id: str, body: dict | None = None):
 )
 def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
     ocr_prompt = None
+    prompt_preset = None
     ocr_provider = None
+    ocr_model = None
     # Explicit user-triggered reparse should follow the OCR reparse directive:
     # keep yomitoku as default baseline, then run evaluator-guided LLM inference.
     llm_assist = True
@@ -1089,12 +1422,39 @@ def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
         raw_prompt = body.get("ocr_prompt")
         if isinstance(raw_prompt, str) and raw_prompt.strip():
             ocr_prompt = raw_prompt.strip()
+        raw_prompt_preset = body.get("prompt_preset")
+        if not isinstance(raw_prompt_preset, str):
+            raw_prompt_preset = body.get("ocr_prompt_preset")
+        if not isinstance(raw_prompt_preset, str):
+            raw_prompt_preset = body.get("promptPreset")
+        if isinstance(raw_prompt_preset, str) and raw_prompt_preset.strip():
+            normalized_prompt_preset = raw_prompt_preset.strip().lower()
+            if normalized_prompt_preset not in {
+                "numeric_verification",
+                "column_missing",
+                "row_alignment",
+                "special_diet_semantics",
+                "freeform",
+            }:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "prompt_preset must be one of "
+                        "numeric_verification|column_missing|row_alignment|special_diet_semantics|freeform"
+                    ),
+                )
+            prompt_preset = normalized_prompt_preset
         raw_provider = body.get("ocr_provider")
         if isinstance(raw_provider, str) and raw_provider.strip():
             normalized_provider = raw_provider.strip().lower()
             if normalized_provider not in {"pipeline", "tesseract", "openai", "gemini"}:
                 raise HTTPException(status_code=400, detail="ocr_provider must be one of pipeline|tesseract|openai|gemini")
             ocr_provider = normalized_provider
+        raw_model = body.get("ocr_model")
+        if not (isinstance(raw_model, str) and raw_model.strip()):
+            raw_model = body.get("llm_model")
+        if isinstance(raw_model, str) and raw_model.strip():
+            ocr_model = raw_model.strip()
         raw_llm_assist = body.get("llm_assist")
         if isinstance(raw_llm_assist, bool):
             llm_assist = raw_llm_assist
@@ -1111,7 +1471,9 @@ def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
         order_id,
         background_tasks,
         ocr_prompt=ocr_prompt,
+        prompt_preset=prompt_preset,
         ocr_provider=ocr_provider,
+        ocr_model=ocr_model,
         llm_assist=llm_assist,
         force=force,
         stale_action=stale_action,
@@ -1128,7 +1490,9 @@ def recover_ocr(order_id: str, background_tasks: BackgroundTasks):
         order_id,
         background_tasks,
         ocr_prompt=None,
+        prompt_preset=None,
         ocr_provider="pipeline",
+        ocr_model=None,
         llm_assist=False,
         force=True,
         stale_action="retry",

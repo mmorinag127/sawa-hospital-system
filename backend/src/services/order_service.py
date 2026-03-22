@@ -23,6 +23,11 @@ from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.document import OrderDocument
 from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_revision import OrderOcrRevision  # noqa: F401
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: F401
+from src.models.order_sheet_draft import OrderSheetDraft  # noqa: F401
+from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
+from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.models.ingest_job import IngestJob  # noqa: F401
 from src.models.user import AuditLog
@@ -32,7 +37,8 @@ from src.services import config_service, menu_service, facility_service
 from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
-from src.services import evidence_manifest_service, template_resolution_service
+from src.services import evidence_manifest_service, template_resolution_service, ocr_evidence_service, draft_sheet_service
+from src.services import workflow_state_service, candidate_resolution_service, critical_decision_service
 from src.services.fax_extractor import (
     extract_fax_data,
     filter_tokens_by_box,
@@ -264,6 +270,11 @@ def clear_all():
         session.execute(delete(DeliveryNote))
         session.execute(delete(ManufacturingAggregateRow))
         session.execute(delete(FacilityConfig))
+        session.execute(delete(OrderCriticalDecision))
+        session.execute(delete(OrderWorkflowState))
+        session.execute(delete(OrderConfirmedSnapshot))
+        session.execute(delete(OrderSheetDraft))
+        session.execute(delete(OrderOcrEvidenceRun))
         session.execute(delete(OrderOcrRevision))
         session.execute(delete(OrderOcrCache))
         session.execute(delete(OrderDocument))
@@ -288,6 +299,11 @@ def delete_orders_by_message_prefix(prefix: str) -> int:
             session.execute(delete(LabelRow).where(LabelRow.order_id == order.id))
             session.execute(delete(Bag).where(Bag.order_id == order.id))
             session.execute(delete(DeliveryNote).where(DeliveryNote.order_id == order.id))
+            session.execute(delete(OrderCriticalDecision).where(OrderCriticalDecision.order_id == order.id))
+            session.execute(delete(OrderWorkflowState).where(OrderWorkflowState.order_id == order.id))
+            session.execute(delete(OrderConfirmedSnapshot).where(OrderConfirmedSnapshot.order_id == order.id))
+            session.execute(delete(OrderSheetDraft).where(OrderSheetDraft.order_id == order.id))
+            session.execute(delete(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id == order.id))
             session.execute(delete(OrderOcrRevision).where(OrderOcrRevision.order_id == order.id))
             session.execute(delete(OrderOcrCache).where(OrderOcrCache.order_id == order.id))
             session.execute(delete(OrderDocument).where(OrderDocument.order_id == order.id))
@@ -321,8 +337,8 @@ def find_order_by_message_id(message_id: str) -> dict | None:
         return {
             "id": order.id,
             "message_id": order.message_id,
-            "facility_id": order.facility_id,
-            "week_id": order.week_id,
+            "facility_id": order.facility_code,
+            "week_id": order.week_code,
             "status": order.status,
             "received_at": order.received_at.isoformat() if order.received_at else None,
         }
@@ -1889,6 +1905,52 @@ def _read_reparse_bool_env(name: str, default: bool) -> bool:
     return bool(default)
 
 
+def _run_reparse_with_heartbeat(
+    job_id: str,
+    *,
+    processing_stage: str,
+    func,
+    result_state: str = "processing",
+    metrics_patch: dict[str, Any] | None = None,
+):
+    interval_seconds = _read_reparse_float_env(
+        "OCR_REPARSE_HEARTBEAT_SECONDS",
+        45.0,
+        min_value=5.0,
+    )
+    stop_event = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                _update_reparse_job_progress(
+                    job_id,
+                    status="running",
+                    processing_stage=processing_stage,
+                    result_state=result_state,
+                    metrics_patch=metrics_patch,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Reparse heartbeat update skipped job_id={} stage={} error={}",
+                    job_id,
+                    processing_stage,
+                    str(exc),
+                )
+
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat,
+        name=f"reparse-heartbeat-{job_id}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        return func()
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=1.0)
+
+
 def _resolve_reparse_soft_warning_codes() -> set[str]:
     raw = str(
         os.getenv(
@@ -3054,6 +3116,10 @@ def create_order_from_ingest(
         session.refresh(order)
         serialized = serialize_order(order)
     _invalidate_orders_cache()
+    try:
+        workflow_state_service.refresh_workflow_state(serialized["id"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after ingest create", order_id=serialized.get("id"), error=str(exc))
     return serialized
 
 
@@ -3197,6 +3263,10 @@ def update_lines(
             metadata={"line_count": event_context.get("line_count", 0)},
         )
     _invalidate_orders_cache()
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after lines update", order_id=order_id, error=str(exc))
     return (True, None) if enforce_conflict_guard else True
 
 
@@ -3281,6 +3351,47 @@ def _register_training_sample_after_confirm(order_id: str) -> None:
         )
 
 
+def _persist_confirmed_snapshot(order_id: str, *, confirmed_by: str | None = None) -> str | None:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None
+        snapshot_json = {
+            "order_id": order.id,
+            "facility": order.facility_code,
+            "week": order.week_code,
+            "status": order.status,
+            "lines_updated_at": order.lines_updated_at.isoformat() if isinstance(order.lines_updated_at, datetime) else None,
+            "lines": [
+                {
+                    "id": line.id,
+                    "date": line.date.isoformat() if isinstance(line.date, date) else None,
+                    "daypart": line.daypart,
+                    "menu_name": line.menu_name,
+                    "diet_type": line.diet_type,
+                    "area_id": line.area_id,
+                    "bag_type": line.bag_type,
+                    "quantity_original": line.quantity_original,
+                    "quantity_corrected": line.quantity_corrected,
+                    "change_note": line.change_note,
+                }
+                for line in (order.lines or [])
+            ],
+        }
+        snapshot_digest = hashlib.sha256(json.dumps(snapshot_json, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        snapshot = OrderConfirmedSnapshot(
+            id=f"OCS{uuid4().hex[:12]}",
+            order_id=order.id,
+            draft_id=(get_latest_sheet_draft(order_id, backfill_from_revision=False) or {}).get("id"),
+            snapshot_digest=snapshot_digest,
+            snapshot_json=snapshot_json,
+            confirmed_by=str(confirmed_by or "").strip() or None,
+        )
+        session.add(snapshot)
+        session.flush()
+        return snapshot.id
+
+
 def confirm_order(order_id: str):
     serialized_order: dict | None = None
     with session_scope() as session:
@@ -3317,6 +3428,11 @@ def confirm_order(order_id: str):
             wek=order.week_code,
         )
         serialized_order = serialize_order(order)
+    _persist_confirmed_snapshot(order_id, confirmed_by="system")
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after confirm", order_id=order_id, error=str(exc))
     _register_training_sample_after_confirm(order_id)
     return serialized_order
 
@@ -4058,6 +4174,16 @@ def _save_order_ocr_cache(order_id: str, payload: dict) -> None:
                     next_payload[preserved_key] = preserved_value
             cache.payload = next_payload
             cache.updated_at = datetime.utcnow()
+        try:
+            persist_ocr_evidence_run(
+                order_id,
+                next_payload,
+                schema_version="v1_legacy",
+                producer_version="legacy-cache-mirror/v1",
+                status=str(next_payload.get("status") or "ready").strip() or "ready",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Order OCR evidence persistence failed", order_id=order_id, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Order OCR cache save failed", order_id=order_id, error=str(exc))
 
@@ -4078,13 +4204,156 @@ def get_cached_ocr_payload(order_id: str) -> Optional[dict]:
     return evidence_manifest_service.ensure_evidence_manifest(_load_order_ocr_cache(order_id))
 
 
+def persist_ocr_evidence_run(
+    order_id: str,
+    payload: dict[str, Any] | None,
+    *,
+    schema_version: str = "v1_legacy",
+    producer_version: str | None = None,
+    status: str = "ready",
+) -> Optional[dict]:
+    persisted = ocr_evidence_service.persist_evidence_run(
+        order_id=order_id,
+        payload=payload,
+        schema_version=schema_version,
+        producer_version=producer_version,
+        status=status,
+    )
+    if persisted is not None:
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after evidence persist", order_id=order_id, error=str(exc))
+    return persisted
+
+
+def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = True) -> Optional[dict]:
+    latest = ocr_evidence_service.get_latest_evidence_run(order_id)
+    if latest is not None or not backfill_from_cache:
+        return latest
+    cached_payload = _load_order_ocr_cache(order_id)
+    if not isinstance(cached_payload, dict):
+        return None
+    return ocr_evidence_service.backfill_evidence_run_from_cached_payload(
+        order_id,
+        cached_payload,
+        schema_version="v1_legacy_backfill",
+        producer_version="legacy-cache-backfill/v1",
+        source="legacy-cache-backfill",
+    )
+
+
+def persist_sheet_draft(
+    *,
+    order_id: str,
+    draft_sheet_json: dict[str, Any] | None,
+    draft_state: str = "draft_ready",
+    blockers: list[str] | None = None,
+    warnings: list[str] | None = None,
+    latest_patch_candidate_id: str | None = None,
+    edited_by: str | None = None,
+) -> Optional[dict]:
+    if not isinstance(draft_sheet_json, dict):
+        return None
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    template_resolution_id = None
+    if isinstance(latest_evidence, dict):
+        payload_json = latest_evidence.get("payload_json")
+        if isinstance(payload_json, dict):
+            resolution = payload_json.get("template_resolution")
+            if isinstance(resolution, dict):
+                template_resolution_id = (
+                    str(resolution.get("resolved_template_id") or resolution.get("template_id") or "").strip() or None
+                )
+    persisted = draft_sheet_service.persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json=draft_sheet_json,
+        base_evidence_run_id=(latest_evidence or {}).get("id") if isinstance(latest_evidence, dict) else None,
+        base_template_resolution_id=template_resolution_id,
+        draft_state=draft_state,
+        blockers=blockers,
+        warnings=warnings,
+        latest_patch_candidate_id=latest_patch_candidate_id,
+        edited_by=edited_by,
+    )
+    if persisted is not None:
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after draft persist", order_id=order_id, error=str(exc))
+    return persisted
+
+
+def get_latest_sheet_draft(order_id: str, *, backfill_from_revision: bool = True) -> Optional[dict]:
+    latest = draft_sheet_service.get_latest_sheet_draft(order_id)
+    if latest is not None or not backfill_from_revision:
+        return latest
+    cached_payload = _load_order_ocr_cache(order_id)
+    revision = _select_order_sheet_revision(
+        order_id=order_id,
+        payload=cached_payload,
+        exact_only=False,
+    )
+    if not isinstance(revision, dict):
+        return None
+    return persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json={
+            "fields": list(revision.get("fields") or []),
+            "header": list(revision.get("header") or []),
+            "rows": list(revision.get("rows") or []),
+            "row_ids": list(revision.get("row_ids") or []),
+            "ui_mode": str(revision.get("ui_mode") or "sheet").strip() or "sheet",
+            "revision_id": str(revision.get("revision_id") or "").strip() or None,
+        },
+        draft_state=str(revision.get("review_state") or "draft_ready").strip() or "draft_ready",
+        blockers=[str(item).strip() for item in (revision.get("review_blockers") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (revision.get("review_warnings") or []) if str(item).strip()],
+        edited_by="legacy-revision-backfill",
+    )
+
+
+def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
+    return draft_sheet_service.build_initial_sheet_draft(order_id)
+
+
+def get_order_workflow_state(order_id: str, *, refresh: bool = False) -> Optional[dict]:
+    if refresh:
+        return workflow_state_service.refresh_workflow_state(order_id)
+    state = workflow_state_service.get_workflow_state(order_id)
+    if state is not None:
+        return state
+    return workflow_state_service.refresh_workflow_state(order_id)
+
+
+def get_order_candidate_resolution(order_id: str) -> Optional[dict]:
+    state = get_order_workflow_state(order_id, refresh=False)
+    if isinstance(state, dict):
+        resolution = state.get("candidate_resolution")
+        if isinstance(resolution, dict):
+            return resolution
+    order = get_order_by_id(order_id)
+    evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    payload = evidence.get("payload_json") if isinstance(evidence, dict) else None
+    return candidate_resolution_service.resolve_order_candidates(
+        order_id=order_id,
+        facility_code=str((order or {}).get("facility") or "").strip() or None,
+        week_code=str((order or {}).get("week_value") or (order or {}).get("week") or "").strip() or None,
+        received_at=(order or {}).get("received_at"),
+        evidence_payload=payload if isinstance(payload, dict) else None,
+    )
+
+
+def list_order_critical_decisions(order_id: str, *, refresh_workflow: bool = False) -> list[dict[str, Any]]:
+    if refresh_workflow:
+        get_order_workflow_state(order_id, refresh=True)
+    return critical_decision_service.list_decisions(order_id)
+
+
 def _evidence_only_step2_enabled() -> bool:
-    return str(os.getenv("OCR_EVIDENCE_ONLY_STEP2", "false") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    # Step2 is now permanently evidence/draft driven. Confirmed order lines are
+    # no longer a valid input source for OCR correction screens.
+    return True
 
 
 def _get_template_resolution(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -4996,6 +5265,48 @@ def _build_sheet_payload_from_revision(
         field_label=_field_label,
         field_value_to_str=_field_value_to_str,
     )
+
+
+def _build_sheet_payload_from_draft(
+    *,
+    order_id: str,
+    draft: dict[str, Any],
+    fallback_sheet: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(draft, dict):
+        return None
+    draft_sheet = draft.get("draft_sheet_json")
+    if not isinstance(draft_sheet, dict):
+        return None
+    base = dict(fallback_sheet) if isinstance(fallback_sheet, dict) else {}
+    fields = list(draft_sheet.get("fields") or base.get("fields") or [])
+    rows = list(draft_sheet.get("rows") or [])
+    if not fields or not isinstance(rows, list):
+        return None
+    header = list(draft_sheet.get("header") or base.get("header") or fields)
+    row_ids = list(draft_sheet.get("row_ids") or base.get("row_ids") or [f"draft-{idx + 1}" for idx in range(len(rows))])
+    payload = dict(base)
+    payload.update(
+        {
+            "order_id": order_id,
+            "fields": fields,
+            "header": header,
+            "rows": rows,
+            "row_ids": row_ids,
+            "source": "draft_sheet",
+            "trace": {
+                "rows": [{"source": "draft_sheet", "row_count": len(rows)}],
+                "mapped_mode": "draft_sheet",
+            },
+        }
+    )
+    merged_warnings: list[str] = []
+    for warning in list(base.get("warnings") or []) + list(draft.get("warnings_json") or []):
+        token = str(warning or "").strip()
+        if token and token not in merged_warnings:
+            merged_warnings.append(token)
+    payload["warnings"] = merged_warnings
+    return payload
 
 
 def _append_edited_ocr_revision(
@@ -6262,6 +6573,10 @@ def apply_ocr_table(
         "changed": before_digest != after_digest,
     }
     serialized["ocr_job_id"] = f"OCR-{order_id}"
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after OCR apply", order_id=order_id, error=str(exc))
     return serialized, None
 
 
@@ -6370,6 +6685,19 @@ def save_ocr_sheet_exact(
             "review_warnings": [],
         },
     )
+    persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json={
+            "fields": snapshot["fields"],
+            "header": snapshot["header"],
+            "rows": snapshot["rows"],
+            "row_ids": snapshot["row_ids"],
+            "ui_mode": resolved_ui_mode,
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+    )
     record_event(
         "ocr_sheet_save",
         actor="system",
@@ -6434,6 +6762,19 @@ def _save_reparse_candidate_as_draft(
             "draft_from_reparse_reject": True,
             "raw_output_override": raw_output_override,
         },
+    )
+    persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json={
+            "fields": candidate_fields,
+            "header": candidate_header,
+            "rows": rows,
+            "row_ids": candidate_row_ids,
+            "ui_mode": "sheet",
+        },
+        draft_state=str(review_state or "draft_ready").strip() or "draft_ready",
+        blockers=[str(item).strip() for item in (review_blockers or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (review_warnings or []) if str(item).strip()],
     )
 
 
@@ -11542,29 +11883,8 @@ def build_recoverable_ocr_sheet_payload(
         facility_id = order.facility_code
         week_id = order.week_code
         lines_updated_at = order.lines_updated_at
-        raw_order_lines = [
-            {
-                "id": line.id,
-                "date": line.date,
-                "daypart": line.daypart,
-                "menu_name": line.menu_name,
-                "diet_type": line.diet_type,
-                "area_id": line.area_id,
-                "bag_type": line.bag_type,
-                "quantity_original": line.quantity_original,
-                "quantity_corrected": line.quantity_corrected,
-                "change_note": line.change_note,
-                "source_row_index": getattr(line, "source_row_index", None),
-            }
-            for line in (
-                session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
-                .scalars()
-                .all()
-            )
-        ]
     if not facility_id:
         return None, error_code
-    order_lines = [] if _evidence_only_step2_enabled() else raw_order_lines
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -11594,6 +11914,7 @@ def build_recoverable_ocr_sheet_payload(
         return None, error_code
     quantity_index = _build_sheet_quantity_index(fields)
     cached_payload = _load_order_ocr_cache(order_id)
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
     latest_revision = _select_order_sheet_revision(
         order_id=order_id,
         payload=cached_payload,
@@ -11617,7 +11938,22 @@ def build_recoverable_ocr_sheet_payload(
         "recovery_source": "none",
     }
     payload = fallback_payload
-    if isinstance(latest_revision, dict):
+    if isinstance(latest_draft, dict):
+        rebuilt = _build_sheet_payload_from_draft(
+            order_id=order_id,
+            draft=latest_draft,
+            fallback_sheet=fallback_payload,
+        )
+        if isinstance(rebuilt, dict):
+            payload = rebuilt
+            payload["source"] = "draft_sheet_blocked"
+            warnings = list(payload.get("warnings") or [])
+            normalized_error = str(error_code).strip()
+            if normalized_error and normalized_error not in warnings:
+                warnings.append(normalized_error)
+            payload["warnings"] = warnings
+            payload["recovery_source"] = "draft_sheet"
+    elif isinstance(latest_revision, dict):
         rebuilt = _build_sheet_payload_from_revision(
             order_id=order_id,
             revision=latest_revision,
@@ -11632,21 +11968,6 @@ def build_recoverable_ocr_sheet_payload(
                 warnings.append(normalized_error)
             payload["warnings"] = warnings
             payload["recovery_source"] = "saved_draft"
-    elif order_lines:
-        recovered_rows, recovered_row_ids = _build_sheet_rows_from_order_lines(
-            fields=fields,
-            quantity_index=quantity_index,
-            order_lines=order_lines,
-        )
-        if recovered_rows:
-            payload = dict(fallback_payload)
-            payload["rows"] = recovered_rows
-            payload["row_ids"] = recovered_row_ids
-            payload["trace"] = {
-                "rows": [{"source": "confirmed_lines", "row_count": len(recovered_rows)}],
-                "mapped_mode": "confirmed_lines",
-            }
-            payload["recovery_source"] = "confirmed_lines"
     elif isinstance(cached_payload, dict):
         recovered_rows = _extract_sheet_rows_from_payload(cached_payload, template)
         if recovered_rows:
@@ -11716,27 +12037,7 @@ def get_ocr_sheet(order_id: str):
             .scalars()
             .first()
         )
-        order_lines = []
-        if not evidence_only_step2:
-            raw_order_lines = (
-                session.execute(select(OrderLine).where(OrderLine.order_id == order_id))
-                .scalars()
-                .all()
-            )
-            order_lines = [
-                {
-                    "id": line.id,
-                    "date": line.date,
-                    "daypart": line.daypart,
-                    "menu_name": line.menu_name,
-                    "diet_type": line.diet_type,
-                    "area_id": line.area_id,
-                    "quantity_original": line.quantity_original,
-                    "quantity_corrected": line.quantity_corrected,
-                    "change_note": line.change_note,
-                }
-                for line in raw_order_lines
-            ]
+        order_lines: list[dict[str, Any]] = []
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -11771,16 +12072,17 @@ def get_ocr_sheet(order_id: str):
     payload, _ = get_ocr_output(order_id, persist_cache=False)
     if isinstance(payload, dict):
         ocr_payload = payload
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
     latest_revision = _select_order_sheet_revision(
         order_id=order_id,
         payload=ocr_payload,
         exact_only=False,
     )
     evidence_missing = _ocr_evidence_missing_artifacts(ocr_payload)
-    if evidence_missing and not isinstance(latest_revision, dict):
+    if evidence_missing and not isinstance(latest_draft, dict) and not isinstance(latest_revision, dict):
         return None, "ocr_evidence_recovery_required"
     template_blockers = _template_resolution_blockers(ocr_payload)
-    if template_blockers and not isinstance(latest_revision, dict):
+    if template_blockers and not isinstance(latest_draft, dict) and not isinstance(latest_revision, dict):
         return None, "template_resolution_blocked"
     ocr_metrics = _resolve_sheet_suppression_metrics(
         order_id=order_id,
@@ -12363,11 +12665,19 @@ def get_ocr_sheet(order_id: str):
     if template_blockers and "template_resolution_blocked" not in payload["warnings"]:
         payload["warnings"].append("template_resolution_blocked")
         payload["template_resolution_blockers"] = template_blockers
-    if evidence_only_step2 and isinstance(latest_revision, dict):
-        rebuilt = _build_sheet_payload_from_revision(
-            order_id=order_id,
-            revision=latest_revision,
-            fallback_sheet=payload,
+    if evidence_only_step2 and (isinstance(latest_draft, dict) or isinstance(latest_revision, dict)):
+        rebuilt = (
+            _build_sheet_payload_from_draft(
+                order_id=order_id,
+                draft=latest_draft,
+                fallback_sheet=payload,
+            )
+            if isinstance(latest_draft, dict)
+            else _build_sheet_payload_from_revision(
+                order_id=order_id,
+                revision=latest_revision,
+                fallback_sheet=payload,
+            )
         )
         if isinstance(rebuilt, dict):
             merged_warnings = [
@@ -13929,6 +14239,7 @@ def _build_llm_assist_prompt(
     template: dict,
     pipeline_output: dict | None,
     llm_assist: bool,
+    prompt_preset: str | None = None,
     failure_context: dict[str, Any] | None = None,
     baseline: dict[str, Any] | None = None,
     evaluator_feedback: dict[str, Any] | None = None,
@@ -13942,6 +14253,9 @@ def _build_llm_assist_prompt(
     if base_custom and not _looks_like_generated_reparse_prompt(base_custom):
         sections.append(f"Facility-specific instruction:\n{base_custom}")
     if llm_assist:
+        preset_text = _build_llm_assist_preset_instruction(prompt_preset)
+        if preset_text:
+            sections.append(f"Operator-selected focus preset:\n{preset_text}")
         first_pass_rows = [list(row) for row in (first_pass_rows_override or []) if isinstance(row, list)]
         if not first_pass_rows and isinstance(pipeline_output, dict):
             first_pass_rows = _extract_first_pass_rows_from_payload(pipeline_output, template)
@@ -14234,6 +14548,39 @@ def _build_llm_assist_prompt(
     if not sections:
         return None
     return "\n\n".join(sections)
+
+
+def _build_llm_assist_preset_instruction(prompt_preset: str | None) -> str | None:
+    normalized = str(prompt_preset or "").strip().lower()
+    if not normalized or normalized == "freeform":
+        return None
+    preset_map = {
+        "numeric_verification": (
+            "- Primary goal: verify quantity digits before changing structure.\n"
+            "- Compare neighboring quantity cells, repeated spans, and quantity-only OCR before editing a number.\n"
+            "- Do not rewrite date/daypart/menu anchors unless the fax clearly contradicts them.\n"
+            "- When uncertain, keep the structural row and leave the quantity blank instead of forcing a guess."
+        ),
+        "column_missing": (
+            "- Primary goal: recover partially clipped or missing quantity columns.\n"
+            "- Focus on whether leftmost/rightmost quantity columns are visible, truncated, or shifted.\n"
+            "- Infer a missing quantity only when the fax shows direct evidence for that column or a clearly indicated repeated span.\n"
+            "- Do not swap stable columns just to fill a gap."
+        ),
+        "row_alignment": (
+            "- Primary goal: preserve row/block alignment across date and daypart boundaries.\n"
+            "- Treat blank-anchor rows and block boundaries as hard constraints.\n"
+            "- Prefer leaving quantities blank over shifting them into earlier or later rows.\n"
+            "- Re-check every row in the same block if one row looks rotated or offset."
+        ),
+        "special_diet_semantics": (
+            "- Primary goal: protect special diet semantics and prohibited-diet columns.\n"
+            "- Pay extra attention to 肉禁, 魚禁, 糖尿, お茶, 袋分け, 常食(袋分け) and similar specialty columns.\n"
+            "- Do not merge specialty quantities into regular columns.\n"
+            "- If a specialty column is ambiguous, keep it unresolved instead of copying a regular quantity."
+        ),
+    }
+    return preset_map.get(normalized)
 
 
 def _resolve_provider_model_name(
@@ -15604,7 +15951,9 @@ def _build_reparse_debug_payload(
 def reparse_order(
     order_id: str,
     ocr_prompt: str | None = None,
+    prompt_preset: str | None = None,
     ocr_provider: str | None = None,
+    ocr_model: str | None = None,
     llm_assist: bool = False,
     auto_fallback_context: dict[str, Any] | None = None,
     evaluator_feedback: dict[str, Any] | None = None,
@@ -15727,6 +16076,11 @@ def reparse_order(
             template_to_use["openai_ocr_enabled"] = True
         elif inference_provider == "gemini":
             template_to_use["gemini_ocr_enabled"] = True
+    if isinstance(ocr_model, str) and ocr_model.strip():
+        if inference_provider == "openai":
+            template_to_use["openai_ocr_model"] = ocr_model.strip()
+        elif inference_provider == "gemini":
+            template_to_use["gemini_ocr_model"] = ocr_model.strip()
     main_provider = str(
         inference_provider
         or os.getenv("OCR_MAIN_PROVIDER")
@@ -15988,16 +16342,22 @@ def reparse_order(
                 anchor_date_count=len(pipeline_anchor_dates),
             )
             if pipeline_rows_for_rescue:
-                llm_pre_inference_audit = _run_llm_reparse_audit(
-                    pdf_bytes=llm_input_pdf_bytes,
-                    provider=effective_provider,
-                    template=template_to_use,
-                    facility_id=facility_id,
-                    preferred_template_id=preferred_template_id,
-                    candidate_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
-                    reference_rows=audit_reference_rows,
-                    baseline_rows=baseline_reference_rows,
-                    expected_row_count=audit_expected_row_count,
+                llm_pre_inference_audit = _run_reparse_with_heartbeat(
+                    ocr_job_id,
+                    processing_stage="inference",
+                    result_state="processing",
+                    metrics_patch=_current_reparse_quality_metadata(),
+                    func=lambda: _run_llm_reparse_audit(
+                        pdf_bytes=llm_input_pdf_bytes,
+                        provider=effective_provider,
+                        template=template_to_use,
+                        facility_id=facility_id,
+                        preferred_template_id=preferred_template_id,
+                        candidate_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                        reference_rows=audit_reference_rows,
+                        baseline_rows=baseline_reference_rows,
+                        expected_row_count=audit_expected_row_count,
+                    ),
                 )
             if ocr_prompt and ocr_prompt.strip():
                 if effective_provider == "openai":
@@ -16009,6 +16369,7 @@ def reparse_order(
                 template=template_to_use,
                 pipeline_output=pipeline_output_payload,
                 llm_assist=llm_assist,
+                prompt_preset=prompt_preset,
                 failure_context=auto_fallback_context,
                 baseline=llm_reparse_baseline,
                 evaluator_feedback=(
@@ -16067,11 +16428,17 @@ def reparse_order(
             result_state="processing",
             metrics_patch=_current_reparse_quality_metadata(),
         )
-        extracted = extract_fax_data(
-            llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
-            template_to_use,
-            facility_id=facility_id,
-            preferred_template_id=preferred_template_id,
+        extracted = _run_reparse_with_heartbeat(
+            ocr_job_id,
+            processing_stage="inference",
+            result_state="processing",
+            metrics_patch=_current_reparse_quality_metadata(),
+            func=lambda: extract_fax_data(
+                llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
+                template_to_use,
+                facility_id=facility_id,
+                preferred_template_id=preferred_template_id,
+            ),
         )
         extracted_data = extracted
         if extracted.ocr_provider:
@@ -16261,11 +16628,17 @@ def reparse_order(
                     repair_template["gemini_ocr_user_prompt"] = repair_user_prompt
                     repair_template["gemini_ocr_enabled"] = True
                 try:
-                    repaired_extracted = extract_fax_data(
-                        llm_input_pdf_bytes,
-                        repair_template,
-                        facility_id=facility_id,
-                        preferred_template_id=preferred_template_id,
+                    repaired_extracted = _run_reparse_with_heartbeat(
+                        ocr_job_id,
+                        processing_stage="inference",
+                        result_state="processing",
+                        metrics_patch=_current_reparse_quality_metadata(),
+                        func=lambda: extract_fax_data(
+                            llm_input_pdf_bytes,
+                            repair_template,
+                            facility_id=facility_id,
+                            preferred_template_id=preferred_template_id,
+                        ),
                     )
                     repaired_rows = repaired_extracted.table_rows or []
                     repaired_tokens = repaired_extracted.tokens or []
@@ -16335,16 +16708,22 @@ def reparse_order(
                 observed_rows=[list(row) for row in rows if isinstance(row, list)],
                 anchor_date_count=len(pipeline_anchor_dates),
             )
-            llm_second_pass_audit = _run_llm_reparse_audit(
-                pdf_bytes=llm_input_pdf_bytes,
-                provider=main_provider,
-                template=template_to_use,
-                facility_id=facility_id,
-                preferred_template_id=preferred_template_id,
-                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
-                reference_rows=audit_reference_rows,
-                baseline_rows=baseline_reference_rows,
-                expected_row_count=audit_expected_row_count,
+            llm_second_pass_audit = _run_reparse_with_heartbeat(
+                ocr_job_id,
+                processing_stage="validation",
+                result_state="processing",
+                metrics_patch=_current_reparse_quality_metadata(),
+                func=lambda: _run_llm_reparse_audit(
+                    pdf_bytes=llm_input_pdf_bytes,
+                    provider=main_provider,
+                    template=template_to_use,
+                    facility_id=facility_id,
+                    preferred_template_id=preferred_template_id,
+                    candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                    reference_rows=audit_reference_rows,
+                    baseline_rows=baseline_reference_rows,
+                    expected_row_count=audit_expected_row_count,
+                ),
             )
             llm_second_pass_audit = _augment_llm_reparse_audit_with_structural_feedback(
                 llm_audit=llm_second_pass_audit,
@@ -16398,6 +16777,7 @@ def reparse_order(
                         template=second_pass_template,
                         pipeline_output=pipeline_output_payload,
                         llm_assist=True,
+                        prompt_preset=prompt_preset,
                         failure_context=auto_fallback_context,
                         baseline=llm_reparse_baseline,
                         evaluator_feedback=llm_second_pass_audit,
@@ -16417,11 +16797,17 @@ def reparse_order(
                             if ocr_prompt and ocr_prompt.strip():
                                 second_pass_template["gemini_ocr_user_prompt"] = ocr_prompt.strip()
                 try:
-                    second_extracted = extract_fax_data(
-                        llm_input_pdf_bytes,
-                        second_pass_template,
-                        facility_id=facility_id,
-                        preferred_template_id=preferred_template_id,
+                    second_extracted = _run_reparse_with_heartbeat(
+                        ocr_job_id,
+                        processing_stage="inference",
+                        result_state="processing",
+                        metrics_patch=_current_reparse_quality_metadata(),
+                        func=lambda: extract_fax_data(
+                            llm_input_pdf_bytes,
+                            second_pass_template,
+                            facility_id=facility_id,
+                            preferred_template_id=preferred_template_id,
+                        ),
                     )
                     second_rows = [list(row) for row in (second_extracted.table_rows or []) if isinstance(row, list)]
                     if second_rows:
@@ -16913,16 +17299,22 @@ def reparse_order(
                 expected_row_count=quality_expected_row_count,
                 reference_rows=pipeline_rows_for_rescue,
             )
-            llm_audit_result = _run_llm_reparse_audit(
-                pdf_bytes=llm_input_pdf_bytes,
-                provider=main_provider,
-                template=template_to_use,
-                facility_id=facility_id,
-                preferred_template_id=preferred_template_id,
-                candidate_rows=[list(row) for row in rows if isinstance(row, list)],
-                reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
-                baseline_rows=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[1],
-                expected_row_count=quality_expected_row_count,
+            llm_audit_result = _run_reparse_with_heartbeat(
+                ocr_job_id,
+                processing_stage="validation",
+                result_state="processing",
+                metrics_patch=_current_reparse_quality_metadata(),
+                func=lambda: _run_llm_reparse_audit(
+                    pdf_bytes=llm_input_pdf_bytes,
+                    provider=main_provider,
+                    template=template_to_use,
+                    facility_id=facility_id,
+                    preferred_template_id=preferred_template_id,
+                    candidate_rows=[list(row) for row in rows if isinstance(row, list)],
+                    reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
+                    baseline_rows=_resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[1],
+                    expected_row_count=quality_expected_row_count,
+                ),
             )
             llm_audit_result = _augment_llm_reparse_audit_with_structural_feedback(
                 llm_audit=llm_audit_result,
@@ -17544,6 +17936,10 @@ def set_facility(
             wek=order.week_code,
         )
     _invalidate_orders_cache()
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after facility update", order_id=order_id, error=str(exc))
     return (True, None) if enforce_conflict_guard else True
 
 
@@ -17583,7 +17979,49 @@ def set_week(
             wek=normalized_week,
         )
     _invalidate_orders_cache()
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after week update", order_id=order_id, error=str(exc))
     return (True, None) if enforce_conflict_guard else True
+
+
+def choose_critical_decision(
+    order_id: str,
+    decision_type: str,
+    selected_value: str,
+    *,
+    selected_by: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    chosen = critical_decision_service.choose_decision(
+        order_id,
+        decision_type,
+        selected_value,
+        selected_by=selected_by,
+    )
+    if not isinstance(chosen, dict):
+        return None, "decision_not_found"
+    normalized_type = str(decision_type or "").strip().lower()
+    if normalized_type == "facility":
+        result = set_facility(order_id, selected_value)
+        if result is False or result == (False, None):
+            return None, "facility_update_failed"
+    elif normalized_type == "week":
+        try:
+            result = set_week(order_id, selected_value)
+        except ValueError:
+            return None, "week_invalid"
+        if result is False or result == (False, None):
+            return None, "week_update_failed"
+    try:
+        workflow = workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after critical choice", order_id=order_id, error=str(exc))
+        workflow = None
+    return {
+        "decision": chosen,
+        "workflow_state": workflow,
+    }, None
 
 
 def save_order_facility_template_columns(

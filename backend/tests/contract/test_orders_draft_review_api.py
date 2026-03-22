@@ -82,7 +82,7 @@ def test_get_ocr_sheet_returns_recoverable_payload_when_apply_is_blocked():
 
     assert res.status_code == 200
     payload = res.json()
-    assert payload["rows"]
+    assert payload["rows"] == []
     assert payload["review_state"] == "review_required"
     assert payload["review_stage"] == "needs_human_review"
     assert payload["can_apply"] is False
@@ -96,10 +96,10 @@ def test_get_ocr_sheet_returns_recoverable_payload_when_apply_is_blocked():
         if isinstance(item, dict)
     }
     assert detail_codes
-    assert payload["draft_line_count"] == 1
+    assert payload["draft_line_count"] == 0
     assert payload["confirmed_line_count"] == 1
-    assert payload["line_count_delta"] == 0
-    assert payload["line_count_mismatch"] is False
+    assert payload["line_count_delta"] == -1
+    assert payload["line_count_mismatch"] is True
 
 
 def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_reason():
@@ -153,10 +153,18 @@ def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_re
     assert row["ocr_reparse_status"] == "blocked"
 
 
-def test_confirm_endpoint_blocks_when_draft_is_newer_than_lines():
+def test_confirm_endpoint_blocks_when_draft_is_newer_than_lines(monkeypatch):
     order_service.clear_all()
     client = TestClient(app)
     order = _create_seed_order("msg-draft-review-confirm-block")
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda _order_id, refresh=False: {
+            "state": "draft_ready",
+            "apply_gate": {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
+        },
+    )
 
     save_res = client.post(
         f"/orders/{order['id']}/ocr-sheet-save",
@@ -562,7 +570,7 @@ def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
     detail_res = client.get(f"/orders/{order['id']}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
-    assert detail["ocr_status"] == "failed"
+    assert detail["ocr_status"] == "success"
     assert detail["ocr_processing_stage"] == "stale_timeout"
     assert detail["ocr_result_state"] == "draft_ready_blocked"
     assert detail["ocr_has_saved_draft"] is True
@@ -666,3 +674,47 @@ def test_reparse_endpoint_returns_recoverable_conflict_when_stale_action_wait(mo
     assert detail.get("recoverable") is True
     assert detail.get("stale_at")
     assert detail.get("stale_threshold_seconds") == 60
+
+
+def test_stale_reparse_keeps_success_status_when_cached_ocr_evidence_exists(monkeypatch):
+    order_service.clear_all()
+    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")
+    client = TestClient(app)
+    order = _create_seed_order("msg-stale-success-status")
+
+    create_job(f"OCR-{order['id']}", input_reference="file://dummy.pdf", status="running")
+    update_job(
+        f"OCR-{order['id']}",
+        status="running",
+        metrics={
+            "processing_stage": "inference",
+            "result_state": "processing",
+        },
+    )
+    with session_scope() as session:
+        job = session.get(OcrJob, f"OCR-{order['id']}")
+        assert job is not None
+        job.updated_at = datetime.utcnow() - timedelta(minutes=5)
+        session.add(job)
+
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "status": "done",
+            "template_id": "fax_layout_regular_2f3f_v1",
+            "pages": [{"page_index": 0, "ocr_overlay_url": "https://example.com/ocr.pdf"}],
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|03/22|朝|Menu A|5|",
+        },
+    )
+
+    detail_res = client.get(f"/orders/{order['id']}")
+    assert detail_res.status_code == 200
+    detail = detail_res.json()
+    assert detail["ocr_status"] == "done"
+    assert detail.get("ocr_error") in {None, ""}
+    assert detail["ocr_reparse_health"] == "hard_failed"
+
+    stale_job = get_job(f"OCR-{order['id']}")
+    assert stale_job is not None
+    assert stale_job["status"] == "failed"
+    assert stale_job["error_message"].startswith("reparse_stale_timeout>")

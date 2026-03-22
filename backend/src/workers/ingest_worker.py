@@ -7,7 +7,7 @@ from pathlib import Path
 from src.workers import celery_app
 from src.workers.ingest_mail_adapter import parse_ingest_payload
 from src.services.order_service import create_order_from_ingest, reparse_order as run_order_reparse
-from src.services import config_service
+from src.services import config_service, ocr_evidence_service
 from src.services.ingest_policy import (
     parse_date_string,
     month_id_from_dates,
@@ -449,6 +449,22 @@ def _process_ingest_inline(**kwargs):
         document_status=ocr_status,
         error_message=ocr_error,
     )
+    if isinstance(order, dict) and isinstance(pipeline_output, dict):
+        try:
+            ocr_evidence_service.persist_evidence_run(
+                order_id=str(order.get("id") or "").strip(),
+                payload=pipeline_output,
+                schema_version="v1_legacy",
+                producer_version="ocr_pipeline_ingest",
+                status="ready",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OCR evidence persistence failed",
+                order_id=str(order.get("id") or "").strip() or None,
+                message_id=payload.message_id,
+                error=str(exc),
+            )
     _enqueue_auto_llm_reparse(
         order,
         ocr_status=ocr_status,

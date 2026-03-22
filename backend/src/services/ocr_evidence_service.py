@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from datetime import datetime
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import text
+
+from src.db import Base, engine, session_scope
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.services import evidence_manifest_service
+
+
+Base.metadata.create_all(bind=engine)
+
+
+def _ensure_order_ocr_evidence_run_schema() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(order_ocr_evidence_runs)")).fetchall()
+        if not rows:
+            return
+        columns = {str(row[1]) for row in rows if len(row) > 1}
+        if "source" not in columns:
+            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN source VARCHAR"))
+
+
+_ensure_order_ocr_evidence_run_schema()
+
+
+_EVIDENCE_META_KEYS = (
+    "job_id",
+    "status",
+    "stage",
+    "engine",
+    "template_id",
+    "facility_id",
+    "facility_candidates",
+    "date_strings",
+    "input_reference",
+    "output_reference",
+    "metrics",
+)
+
+_EVIDENCE_ARTIFACT_KEYS = (
+    "pages",
+    "combined",
+    "table_raw",
+    "tables",
+    "failed_cells",
+    "column_mapping_resolution",
+    "column_mapping_candidates",
+    "quantity_resolution",
+    "critical_quantity_candidates",
+    "quantity_candidates",
+    "quantity_subgrid_passes",
+    "page_correction",
+    "page_correction_artifacts",
+    "template_resolution",
+    "table_box",
+    "grid_column_edges",
+    "grid_row_edges",
+    "roi_extraction",
+    "cell_issues",
+)
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
+    if isinstance(payload.get("pages"), list) and payload.get("pages"):
+        return True
+    if isinstance(payload.get("tables"), list) and payload.get("tables"):
+        return True
+    if str(payload.get("table_raw") or "").strip():
+        return True
+    if isinstance(payload.get("quantity_subgrid_passes"), list) and payload.get("quantity_subgrid_passes"):
+        return True
+    if isinstance(payload.get("template_resolution"), dict):
+        return True
+    if isinstance(payload.get("page_correction"), dict):
+        return True
+    if isinstance(payload.get("page_correction_artifacts"), dict):
+        return True
+    return False
+
+
+def _extract_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    extracted: dict[str, Any] = {}
+    for key in _EVIDENCE_META_KEYS + _EVIDENCE_ARTIFACT_KEYS:
+        if key in payload:
+            extracted[key] = copy.deepcopy(payload.get(key))
+    enriched = evidence_manifest_service.ensure_evidence_manifest(extracted)
+    return dict(enriched) if isinstance(enriched, dict) else extracted
+
+
+def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
+    manifest = payload.get("evidence_manifest")
+    artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else {}
+    overlay_pages = bool((artifacts or {}).get("overlay_pages"))
+    corrected_pdf = bool((artifacts or {}).get("corrected_pdf"))
+    table_raw = bool((artifacts or {}).get("table_raw"))
+    quantity_subgrid = bool((artifacts or {}).get("quantity_subgrid"))
+    template_resolution = payload.get("template_resolution")
+    template_blocked = bool(
+        isinstance(template_resolution, dict)
+        and (
+            template_resolution.get("blocked")
+            or (template_resolution.get("blocked_reasons") or [])
+        )
+    )
+
+    step2_view_ready = overlay_pages or corrected_pdf or bool(payload.get("input_reference"))
+    step2_edit_ready = table_raw or bool(payload.get("tables")) or quantity_subgrid
+    apply_ready = step2_edit_ready and not template_blocked
+    confirm_ready = apply_ready and bool(quantity_subgrid or table_raw)
+    recovery_required = not step2_view_ready or not step2_edit_ready
+    return {
+        "step2_view_ready": bool(step2_view_ready),
+        "step2_edit_ready": bool(step2_edit_ready),
+        "apply_ready": bool(apply_ready),
+        "confirm_ready": bool(confirm_ready),
+        "recovery_required": bool(recovery_required),
+    }
+
+
+def _build_degraded_reasons(payload: dict[str, Any], capabilities: dict[str, bool]) -> list[str]:
+    reasons: list[str] = []
+    missing = evidence_manifest_service.evidence_missing_artifacts(payload)
+    if missing:
+        reasons.extend([f"missing:{item}" for item in missing])
+    resolution = payload.get("template_resolution")
+    if isinstance(resolution, dict):
+        reasons.extend(
+            [
+                f"template:{token}"
+                for token in (
+                    str(item or "").strip() for item in (resolution.get("blocked_reasons") or [])
+                )
+                if token
+            ]
+        )
+    if capabilities.get("recovery_required"):
+        reasons.append("capability:recovery_required")
+    # keep stable order while removing duplicates
+    deduped: list[str] = []
+    for item in reasons:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def build_evidence_run_record(
+    order_id: str,
+    payload: dict[str, Any],
+    *,
+    schema_version: str = "v1_legacy",
+    producer_version: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id or not isinstance(payload, dict):
+        return None
+    extracted = _extract_evidence_payload(payload)
+    if not _has_meaningful_evidence(extracted):
+        return None
+    manifest = extracted.get("evidence_manifest")
+    if not isinstance(manifest, dict):
+        manifest = evidence_manifest_service.build_evidence_manifest(extracted)
+        extracted["evidence_manifest"] = manifest
+    capabilities = _build_capabilities(extracted)
+    degraded_reasons = _build_degraded_reasons(extracted, capabilities)
+    artifact_digest = _digest(extracted)
+    resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
+    return {
+        "order_id": normalized_order_id,
+        "schema_version": schema_version,
+        "producer_version": producer_version or "legacy-cache-mirror/v1",
+        "source": str(source or "unknown").strip() or "unknown",
+        "status": resolved_status,
+        "payload_json": extracted,
+        "artifact_manifest_json": manifest,
+        "artifact_digest": artifact_digest,
+        "capabilities_json": capabilities,
+        "degraded_reasons_json": degraded_reasons,
+    }
+
+
+def persist_evidence_run(
+    order_id: str,
+    payload: dict[str, Any],
+    *,
+    schema_version: str = "v1_legacy",
+    producer_version: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    record = build_evidence_run_record(
+        order_id,
+        payload,
+        schema_version=schema_version,
+        producer_version=producer_version,
+        status=status,
+        source=source,
+    )
+    if not isinstance(record, dict):
+        return None
+    with session_scope() as session:
+        latest = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == record["order_id"])
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .first()
+        )
+        if latest and str(latest.artifact_digest or "") == str(record["artifact_digest"]):
+            return {
+                "id": latest.id,
+                "order_id": latest.order_id,
+                "schema_version": latest.schema_version,
+                "producer_version": latest.producer_version,
+                "source": latest.source,
+                "status": latest.status,
+                "artifact_digest": latest.artifact_digest,
+                "payload_json": latest.payload_json,
+                "artifact_manifest_json": latest.artifact_manifest_json,
+                "capabilities_json": latest.capabilities_json,
+                "degraded_reasons_json": latest.degraded_reasons_json,
+                "created_at": latest.created_at.isoformat() if isinstance(latest.created_at, datetime) else None,
+                "created": False,
+            }
+        run = OrderOcrEvidenceRun(
+            id=f"OEV{uuid4().hex[:12]}",
+            order_id=record["order_id"],
+            schema_version=record["schema_version"],
+            producer_version=record["producer_version"],
+            source=record.get("source"),
+            status=record["status"],
+            payload_json=record["payload_json"],
+            artifact_manifest_json=record["artifact_manifest_json"],
+            artifact_digest=record["artifact_digest"],
+            capabilities_json=record["capabilities_json"],
+            degraded_reasons_json=record["degraded_reasons_json"],
+        )
+        session.add(run)
+        session.flush()
+        return {
+            "id": run.id,
+            "order_id": run.order_id,
+            "schema_version": run.schema_version,
+            "producer_version": run.producer_version,
+            "source": run.source,
+            "status": run.status,
+            "artifact_digest": run.artifact_digest,
+            "payload_json": run.payload_json,
+            "artifact_manifest_json": run.artifact_manifest_json,
+            "capabilities_json": run.capabilities_json,
+            "degraded_reasons_json": run.degraded_reasons_json,
+            "created_at": run.created_at.isoformat() if isinstance(run.created_at, datetime) else None,
+            "created": True,
+        }
+
+
+def backfill_evidence_run_from_cached_payload(
+    order_id: str,
+    payload: dict[str, Any],
+    *,
+    schema_version: str = "v1_legacy",
+    producer_version: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    return persist_evidence_run(
+        order_id,
+        payload,
+        schema_version=schema_version,
+        producer_version=producer_version or "legacy-cache-backfill/v1",
+        status=str(payload.get("status") or "ready").strip() or "ready",
+        source=source or "legacy-cache-backfill",
+    )
+
+
+def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    with session_scope() as session:
+        latest = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .first()
+        )
+        if not latest:
+            return None
+        return {
+            "id": latest.id,
+            "order_id": latest.order_id,
+            "schema_version": latest.schema_version,
+            "producer_version": latest.producer_version,
+            "source": latest.source,
+            "status": latest.status,
+            "artifact_digest": latest.artifact_digest,
+            "payload_json": latest.payload_json,
+            "artifact_manifest_json": latest.artifact_manifest_json,
+            "capabilities_json": latest.capabilities_json,
+            "degraded_reasons_json": latest.degraded_reasons_json,
+            "created_at": latest.created_at.isoformat() if isinstance(latest.created_at, datetime) else None,
+        }
+
+
+def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return []
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .all()
+        )
+        return [
+            {
+                "id": row.id,
+                "order_id": row.order_id,
+                "schema_version": row.schema_version,
+                "producer_version": row.producer_version,
+                "source": row.source,
+                "status": row.status,
+                "artifact_digest": row.artifact_digest,
+                "artifact_manifest_json": row.artifact_manifest_json,
+                "capabilities_json": row.capabilities_json,
+                "degraded_reasons_json": row.degraded_reasons_json,
+                "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
+            }
+            for row in rows
+        ]

@@ -90,6 +90,69 @@ type OrderDetail = {
   ocr_processing_stage?: string | null;
   ocr_result_state?: string | null;
   ocr_confirmed_lines_retained?: boolean | null;
+  workflow_state?: WorkflowStatePayload | null;
+  candidate_resolution?: CandidateResolutionPayload | null;
+  critical_decisions?: CriticalDecisionPayload[] | null;
+  apply_gate?: ApplyGatePayload | null;
+};
+
+type WorkflowStatePayload = {
+  state?: string | null;
+  headline?: string | null;
+  primary_action?: string | null;
+  secondary_actions_json?: string[] | null;
+  blockers_json?: string[] | null;
+  warnings_json?: string[] | null;
+  confidence_band?: string | null;
+  candidate_resolution?: CandidateResolutionPayload | null;
+  critical_decisions?: CriticalDecisionPayload[] | null;
+  apply_gate?: ApplyGatePayload | null;
+};
+
+type ApplyGatePayload = {
+  can_apply?: boolean | null;
+  can_confirm?: boolean | null;
+  blockers?: string[] | null;
+  warnings?: string[] | null;
+};
+
+type CandidateOptionPayload = {
+  value?: string | null;
+  label?: string | null;
+  score?: number | null;
+  reason?: string | null;
+};
+
+type CandidateResolutionEntryPayload = {
+  decision_type?: string | null;
+  resolved_value?: string | null;
+  resolved_label?: string | null;
+  confidence?: string | null;
+  blocked?: boolean | null;
+  blocked_reasons?: string[] | null;
+  requires_user_choice?: boolean | null;
+  candidates?: CandidateOptionPayload[] | null;
+};
+
+type CandidateResolutionPayload = {
+  order_id?: string | null;
+  requires_user_choice?: boolean | null;
+  confidence_band?: string | null;
+  critical_choices?: Array<Record<string, unknown>> | null;
+  resolutions?: Record<string, CandidateResolutionEntryPayload> | null;
+};
+
+type CriticalDecisionPayload = {
+  id?: string | null;
+  decision_type?: string | null;
+  candidate_set_json?: {
+    title?: string | null;
+    candidates?: CandidateOptionPayload[] | null;
+    blocked_reasons?: string[] | null;
+  } | null;
+  selected_value?: string | null;
+  selected_by?: string | null;
+  selected_at?: string | null;
 };
 
 type OcrOutput = {
@@ -174,6 +237,45 @@ type OcrSheetPayload = {
   processing_stage?: string | null;
   result_state?: string | null;
   confirmed_lines_retained?: boolean | null;
+};
+
+type DraftSheetJsonPayload = {
+  fields?: string[] | null;
+  header?: string[] | null;
+  rows?: string[][] | null;
+  row_ids?: string[] | null;
+  rowIds?: string[] | null;
+  source?: string | null;
+  warnings?: string[] | null;
+};
+
+type DraftSheetPayload = {
+  id?: string | null;
+  order_id?: string | null;
+  base_evidence_run_id?: string | null;
+  base_template_resolution_id?: string | null;
+  base_menu_snapshot_id?: string | null;
+  draft_sheet_json?: DraftSheetJsonPayload | null;
+  draft_state?: string | null;
+  blockers_json?: string[] | null;
+  warnings_json?: string[] | null;
+  latest_patch_candidate_id?: string | null;
+  edited_by?: string | null;
+  edited_at?: string | null;
+  created_at?: string | null;
+  fields?: string[] | null;
+  header?: string[] | null;
+  rows?: string[][] | null;
+  row_ids?: string[] | null;
+  source?: string | null;
+  warnings?: string[] | null;
+  review_state?: string | null;
+  workflow_state?: WorkflowStatePayload | null;
+  apply_gate?: ApplyGatePayload | null;
+  candidate_resolution?: CandidateResolutionPayload | null;
+  critical_decisions?: CriticalDecisionPayload[] | null;
+  evidence_capabilities?: Record<string, boolean> | null;
+  evidence_degraded_reasons?: string[] | null;
 };
 
 type NormalizedEditorSheetPayload = {
@@ -643,6 +745,22 @@ const describeReviewState = (state?: string | null) => {
   return "";
 };
 
+const describeWorkflowState = (state?: string | null) => {
+  const normalized = String(state || "").trim().toLowerCase();
+  if (normalized === "uploaded") return "OCR待ち";
+  if (normalized === "evidence_ready") return "証拠確認";
+  if (normalized === "recovery_required") return "復旧待ち";
+  if (normalized === "choice_required") return "選択待ち";
+  if (normalized === "identity_choice_required") return "施設・週の選択待ち";
+  if (normalized === "layout_choice_required") return "OCR候補の選択待ち";
+  if (normalized === "draft_ready") return "下書き確認";
+  if (normalized === "draft_blocked") return "反映前の確認待ち";
+  if (normalized === "review_required") return "要確認";
+  if (normalized === "apply_ready") return "反映可能";
+  if (normalized === "confirmed") return "確定済み";
+  return "";
+};
+
 const describeProcessingStage = (stage?: string | null) => {
   const normalized = String(stage || "").trim().toLowerCase();
   if (normalized === "queued") return "再解析受付済み";
@@ -660,12 +778,29 @@ const describeProcessingStage = (stage?: string | null) => {
   return "";
 };
 
+const dedupeStrings = (items: Array<string | null | undefined>) => {
+  const result: string[] = [];
+  items.forEach((item) => {
+    const normalized = String(item || "").trim();
+    if (normalized && !result.includes(normalized)) {
+      result.push(normalized);
+    }
+  });
+  return result;
+};
+
 const normalizeLlmProviderLabel = (provider?: string | null) => {
   const normalized = String(provider || "").trim().toLowerCase();
   if (normalized === "gemini") return "Gemini";
   if (normalized === "openai") return "OpenAI";
   return "LLM";
 };
+
+const isReparseStaleTimeoutError = (value?: string | null) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .startsWith("reparse_stale_timeout>");
 
 const describeReparseProgressMessage = (
   stage?: string | null,
@@ -696,7 +831,7 @@ const describeReparseProgressMessage = (
     return "結果を確認しています。反映可否を判定中です。";
   }
   if (normalized === "first_pass_missing") {
-    return "OCRの土台が見つからないため、先に「yomitokuを再実行」または「復旧を試す」を実行してください。";
+    return "OCRの土台が見つからないため、先に「OCRパイプラインを再実行」または「OCR基盤を復旧」を実行してください。";
   }
   if (normalized === "stale_timeout") return "再解析がタイムアウトしました。再試行してください。";
   if (normalized === "crashed") return "再解析処理が中断しました。もう一度実行してください。";
@@ -1296,6 +1431,12 @@ export default function OrderDetailPage() {
   const [rowEdgesText, setRowEdgesText] = useState<string>("");
   const [reparsePending, setReparsePending] = useState<boolean>(false);
   const [llmReparseProvider, setLlmReparseProvider] = useState<string>("gemini");
+  const [llmReparseModelMode, setLlmReparseModelMode] = useState<"flash" | "pro" | "other">("flash");
+  const [llmReparseCustomModel, setLlmReparseCustomModel] = useState<string>("");
+  const [llmReparsePromptPreset, setLlmReparsePromptPreset] = useState<
+    "numeric_verification" | "column_missing" | "row_alignment" | "special_diet_semantics" | "freeform"
+  >("numeric_verification");
+  const [criticalDecisionSaving, setCriticalDecisionSaving] = useState<string>("");
   const [ocrRecoverPending, setOcrRecoverPending] = useState<boolean>(false);
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
@@ -1347,6 +1488,16 @@ export default function OrderDetailPage() {
       setWeekDraft(normalizeWeekValue(nextOrder.week_value || nextOrder.week || ""));
     }
     return nextOrder;
+  };
+
+  const getResolvedLlmReparseModel = () => {
+    if (llmReparseProvider !== "gemini") return "";
+    if (llmReparseModelMode === "other") {
+      const customModel = llmReparseCustomModel.trim();
+      if (customModel) return customModel;
+      return "gemini-2.5-flash";
+    }
+    return llmReparseModelMode === "pro" ? "gemini-2.5-pro" : "gemini-2.5-flash";
   };
 
   useEffect(() => {
@@ -1676,6 +1827,25 @@ export default function OrderDetailPage() {
     setOcrSheetWarnings(payload.warnings);
   };
 
+  const normalizeDraftSheetPayload = (payload?: DraftSheetPayload | null): NormalizedEditorSheetPayload => {
+    const draftSheetJson =
+      payload && typeof payload.draft_sheet_json === "object" && payload.draft_sheet_json
+        ? payload.draft_sheet_json
+        : null;
+    return normalizeSheetEditorPayload({
+      fields: draftSheetJson?.fields ?? payload?.fields,
+      header: draftSheetJson?.header ?? payload?.header,
+      rows: draftSheetJson?.rows ?? payload?.rows,
+      rowIds: draftSheetJson?.row_ids ?? draftSheetJson?.rowIds ?? payload?.row_ids,
+      source: String(draftSheetJson?.source || payload?.source || payload?.draft_state || "draft").trim() || "draft",
+      warnings: [
+        ...(Array.isArray(draftSheetJson?.warnings) ? draftSheetJson!.warnings! : []),
+        ...(Array.isArray(payload?.warnings) ? payload!.warnings! : []),
+        ...(Array.isArray(payload?.warnings_json) ? payload!.warnings_json! : []),
+      ],
+    });
+  };
+
   const resetSheetReviewMeta = () => {
     setOcrSheetReviewState("");
     setOcrSheetCanApply(false);
@@ -1711,6 +1881,44 @@ export default function OrderDetailPage() {
     setOcrSheetProcessingStage(String(payload?.processing_stage || "").trim());
     setOcrSheetResultState(String(payload?.result_state || "").trim());
     setOcrSheetConfirmedLinesRetained(Boolean(payload?.confirmed_lines_retained));
+  };
+
+  const buildSheetReviewMetaFromOrderState = (
+    detail?: OrderDetail | null,
+    draftPayload?: DraftSheetPayload | null,
+  ): Partial<OcrSheetPayload> => {
+    const workflow = detail?.workflow_state || draftPayload?.workflow_state || null;
+    const applyGate = detail?.apply_gate || workflow?.apply_gate || draftPayload?.apply_gate || null;
+    const reviewState =
+      String(draftPayload?.review_state || draftPayload?.draft_state || workflow?.state || detail?.ocr_review_state || "").trim() ||
+      "draft_ready";
+    return {
+      review_state: reviewState,
+      can_apply:
+        applyGate?.can_apply != null ? Boolean(applyGate.can_apply) : Boolean(detail?.ocr_can_apply_draft),
+      can_confirm:
+        applyGate?.can_confirm != null ? Boolean(applyGate.can_confirm) : Boolean(detail?.ocr_can_confirm),
+      apply_blockers: Array.isArray(applyGate?.blockers)
+        ? applyGate!.blockers!
+        : Array.isArray(detail?.ocr_apply_blockers)
+          ? detail!.ocr_apply_blockers!
+          : [],
+      confirm_blockers: Array.isArray(applyGate?.blockers)
+        ? applyGate!.blockers!
+        : Array.isArray(detail?.ocr_confirm_blockers)
+          ? detail!.ocr_confirm_blockers!
+          : [],
+      confirm_warnings: Array.isArray(applyGate?.warnings)
+        ? applyGate!.warnings!
+        : Array.isArray(detail?.ocr_confirm_warnings)
+          ? detail!.ocr_confirm_warnings!
+          : [],
+      draft_newer_than_lines: Boolean(detail?.ocr_draft_newer_than_lines),
+      auto_apply_blocked: Boolean(detail?.ocr_auto_apply_blocked),
+      processing_stage: String(detail?.ocr_processing_stage || "").trim(),
+      result_state: String(detail?.ocr_result_state || "").trim(),
+      confirmed_lines_retained: Boolean(detail?.ocr_confirmed_lines_retained),
+    };
   };
 
   const findLatestSheetRevision = (
@@ -2014,24 +2222,19 @@ export default function OrderDetailPage() {
     setOcrSheetAutoRetryBlocked(false);
     setOcrSheetLoading(true);
     try {
-      const res = await apiClient.get(`/orders/${order.id}/ocr-sheet`);
-      const payload = (res.data || {}) as OcrSheetPayload;
-      const normalizedPayload = normalizeSheetEditorPayload({
-        fields: payload.fields,
-        header: payload.header,
-        rows: payload.rows,
-        rowIds: payload.row_ids,
-        source: typeof payload.source === "string" ? payload.source : "",
-        warnings: payload.warnings,
-      });
+      const res = await apiClient.get(`/orders/${order.id}/draft-sheet`);
+      const payload = (res.data || {}) as DraftSheetPayload;
+      const normalizedPayload = normalizeDraftSheetPayload(payload);
       const effectivePayload =
         rebaseSavedSheetRevisionOntoPayload(normalizedPayload, latestSavedSheetRevisionRef.current) ||
         normalizedPayload;
       applyNormalizedSheetEditorPayload(effectivePayload);
-      applySheetReviewMeta(payload);
+      applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, payload));
       setOcrSheetAutoRetryBlocked(false);
       if (!silent) {
-        const reviewStateLabel = describeReviewState(payload.review_state);
+        const reviewStateLabel = describeReviewState(
+          String(payload.review_state || payload.draft_state || order?.workflow_state?.state || "").trim(),
+        );
         setOcrSheetMessage(
           reviewStateLabel
             ? `${reviewStateLabel}のシートを読み込みました。`
@@ -2049,19 +2252,7 @@ export default function OrderDetailPage() {
       const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
       if (savedRevisionPayload) {
         applyNormalizedSheetEditorPayload(savedRevisionPayload);
-        applySheetReviewMeta({
-          review_state: (order?.ocr_review_state as string | undefined) || "draft_ready",
-          can_apply: Boolean(order?.ocr_can_apply_draft),
-          can_confirm: Boolean(order?.ocr_can_confirm),
-          apply_blockers: Array.isArray(order?.ocr_apply_blockers) ? order.ocr_apply_blockers : [],
-          confirm_blockers: Array.isArray(order?.ocr_confirm_blockers) ? order.ocr_confirm_blockers : [],
-          confirm_warnings: Array.isArray(order?.ocr_confirm_warnings) ? order.ocr_confirm_warnings : [],
-          draft_newer_than_lines: order?.ocr_draft_newer_than_lines,
-          auto_apply_blocked: order?.ocr_auto_apply_blocked,
-          processing_stage: order?.ocr_processing_stage,
-          result_state: order?.ocr_result_state,
-          confirmed_lines_retained: order?.ocr_confirmed_lines_retained,
-        });
+        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, null));
         setOcrSheetAutoRetryBlocked(false);
         if (!silent) {
           setOcrSheetMessage("保存済みシートを読み込みました。");
@@ -3103,7 +3294,7 @@ const loadOcrPages = async () => {
     setOcrTableSaving(true);
     setOcrTableMessage("シートを保存中...");
     try {
-      await apiClient.post(`/orders/${order.id}/ocr-sheet-save`, {
+      await apiClient.post(`/orders/${order.id}/draft-sheet`, {
         header: targetHeader,
         rows: targetRows,
         ui_mode: "sheet",
@@ -3392,6 +3583,39 @@ const loadOcrPages = async () => {
     }
   };
 
+  const chooseCriticalDecision = async (decisionType: string, selectedValue: string) => {
+    if (!order?.id) return;
+    const normalizedType = String(decisionType || "").trim();
+    const normalizedValue = String(selectedValue || "").trim();
+    if (!normalizedType || !normalizedValue) return;
+    setCriticalDecisionSaving(normalizedType);
+    setActionMessage("候補を反映中...");
+    try {
+      await apiClient.post(`/orders/${order.id}/critical-decisions/${normalizedType}`, {
+        selected_value: normalizedValue,
+      });
+      await refreshOrderWorkspace({ preserveSelections: false, reloadSheet: true, reloadHistory: true });
+      if (normalizedType === "facility") {
+        setFacility(normalizedValue);
+      }
+      if (normalizedType === "week") {
+        setWeekDraft(normalizeWeekValue(normalizedValue));
+      }
+      setActionMessage("候補を反映しました。");
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        setActionMessage("候補情報が見つかりません。最新状態を読み直してください。");
+      } else if (status === 400) {
+        setActionMessage("候補の反映に失敗しました。");
+      } else {
+        setActionMessage("候補の反映中にエラーが発生しました。");
+      }
+    } finally {
+      setCriticalDecisionSaving("");
+    }
+  };
+
   const updateFacilityTemplateColumn = (
     rowIndex: number,
     key: keyof FacilityTemplateColumn,
@@ -3524,8 +3748,17 @@ const loadOcrPages = async () => {
       if (ocrPrompt.trim()) {
         payload.ocr_prompt = ocrPrompt.trim();
       }
+      if (llmAssist) {
+        payload.prompt_preset = llmReparsePromptPreset;
+      }
       if (providerOverride) {
         payload.ocr_provider = providerOverride;
+      }
+      if (providerOverride === "gemini") {
+        const resolvedModel = getResolvedLlmReparseModel();
+        if (resolvedModel) {
+          payload.llm_model = resolvedModel;
+        }
       }
       if (explicitLlmAssist !== undefined) {
         payload.llm_assist = explicitLlmAssist;
@@ -3579,7 +3812,7 @@ const loadOcrPages = async () => {
                 ) {
                   setActionMessage(
                     withErrorContext(
-                      "OCRの土台が見つからないため、LLM補完再解析を開始できませんでした。先に「yomitokuを再実行」または「復旧を試す」を実行してください。",
+                      "OCRの土台が見つからないため、LLM補完再解析を開始できませんでした。先に「OCRパイプラインを再実行」または「OCR基盤を復旧」を実行してください。",
                       orderId
                     )
                   );
@@ -3740,7 +3973,7 @@ const loadOcrPages = async () => {
         } else if (detailError === "first_pass_ocr_missing") {
           setActionMessage(
             withErrorContext(
-              "OCRの土台が見つからないため、LLM補完再解析を開始できませんでした。先に「yomitokuを再実行」または「復旧を試す」を実行してください。",
+              "OCRの土台が見つからないため、LLM補完再解析を開始できませんでした。先に「OCRパイプラインを再実行」または「OCR基盤を復旧」を実行してください。",
               orderId
             )
           );
@@ -3784,7 +4017,7 @@ const loadOcrPages = async () => {
       if (res.status === 202 || res.data?.accepted) {
         setActionMessage("復旧を試しています。OCRの基盤再作成が完了するまで数分かかる場合があります。");
       } else {
-        setActionMessage("復旧を開始しました。完了まで数分かかる場合があります。");
+        setActionMessage("OCR基盤の復旧を開始しました。完了まで数分かかる場合があります。");
       }
       await Promise.all([
         refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true }),
@@ -4063,7 +4296,13 @@ const loadOcrPages = async () => {
   const step2CriticalBannerMessages = (() => {
     const messages: string[] = [];
     if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
+      if (isReparseStaleTimeoutError(order?.ocr_error)) {
+        messages.push(
+          "LLM補完再解析がタイムアウトしました。OCR結果は残っているため、必要なら再試行してください。",
+        );
+      } else {
       messages.push(order?.ocr_error ? `OCRが失敗しました: ${order.ocr_error}` : "OCRが失敗しました。");
+      }
     } else if (rawOcrStatus === "empty") {
       messages.push(
         hasUsableOverlayPreview
@@ -4300,6 +4539,23 @@ const loadOcrPages = async () => {
     ? order.ocr_review_badges.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
   const dedupedOrderReviewBadges = Array.from(new Set(orderReviewBadges));
+  const workflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
+  const workflowHeadline = String(order?.workflow_state?.headline || "").trim();
+  const workflowApplyGate = order?.apply_gate || order?.workflow_state?.apply_gate || null;
+  const criticalDecisions = Array.isArray(order?.critical_decisions)
+    ? order.critical_decisions.filter((item) => item && !String(item.selected_value || "").trim())
+    : Array.isArray(order?.workflow_state?.critical_decisions)
+      ? (order?.workflow_state?.critical_decisions || []).filter((item) => item && !String(item.selected_value || "").trim())
+      : [];
+  const workflowStateLabel = describeWorkflowState(workflowStateCode);
+  const step1CriticalDecisions = criticalDecisions.filter((decision) => {
+    const decisionType = String(decision?.decision_type || "").trim().toLowerCase();
+    return decisionType === "facility" || decisionType === "week";
+  });
+  const step2CriticalDecisions = criticalDecisions.filter((decision) => {
+    const decisionType = String(decision?.decision_type || "").trim().toLowerCase();
+    return decisionType !== "facility" && decisionType !== "week";
+  });
   const effectiveSheetReviewState = ocrSheetReviewState || String(order?.ocr_review_state || "").trim();
   const effectiveSheetReviewLabel = describeReviewState(effectiveSheetReviewState);
   const effectiveProcessingStage =
@@ -4307,24 +4563,56 @@ const loadOcrPages = async () => {
   const effectiveProcessingStageLabel = describeProcessingStage(effectiveProcessingStage);
   const effectiveConfirmedLinesRetained =
     ocrSheetConfirmedLinesRetained || Boolean(order?.ocr_confirmed_lines_retained);
-  const effectiveConfirmBlockers = ocrSheetConfirmBlockers.length
-    ? ocrSheetConfirmBlockers
-    : Array.isArray(order?.ocr_confirm_blockers)
+  const workflowBlockers = Array.isArray(workflowApplyGate?.blockers)
+    ? workflowApplyGate.blockers.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const workflowWarnings = Array.isArray(workflowApplyGate?.warnings)
+    ? workflowApplyGate.warnings.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const unresolvedCriticalDecisionCount = criticalDecisions.length;
+  const workflowSupportText = (() => {
+    if (unresolvedCriticalDecisionCount > 0) {
+      return `未確定の候補が ${unresolvedCriticalDecisionCount} 件あります。先に候補を選んでください。`;
+    }
+    if (workflowBlockers.length) {
+      return `要対応: ${workflowBlockers.map((item) => describeReviewBlocker(item)).filter(Boolean).join(" / ")}`;
+    }
+    if (workflowWarnings.length) {
+      return `確認: ${workflowWarnings.map((item) => describeReviewBlocker(item)).filter(Boolean).join(" / ")}`;
+    }
+    return "";
+  })();
+  const workflowGateAvailable =
+    workflowApplyGate != null &&
+    (workflowApplyGate?.can_apply != null ||
+      workflowApplyGate?.can_confirm != null ||
+      workflowBlockers.length > 0 ||
+      workflowWarnings.length > 0);
+  const effectiveConfirmBlockers = dedupeStrings([
+    ...(workflowGateAvailable ? workflowBlockers : []),
+    ...ocrSheetConfirmBlockers,
+    ...(Array.isArray(order?.ocr_confirm_blockers)
       ? order.ocr_confirm_blockers.map((item) => String(item || "").trim()).filter(Boolean)
-      : order?.ocr_draft_newer_than_lines
-        ? ["draft_newer_than_lines"]
-        : [];
-  const effectiveConfirmWarnings = ocrSheetConfirmWarnings.length
-    ? ocrSheetConfirmWarnings
-    : Array.isArray(order?.ocr_confirm_warnings)
+      : []),
+    order?.ocr_draft_newer_than_lines ? "draft_newer_than_lines" : "",
+  ]);
+  const effectiveConfirmWarnings = dedupeStrings([
+    ...(workflowGateAvailable ? workflowWarnings : []),
+    ...ocrSheetConfirmWarnings,
+    ...(Array.isArray(order?.ocr_confirm_warnings)
       ? order.ocr_confirm_warnings.map((item) => String(item || "").trim()).filter(Boolean)
-      : order?.ocr_auto_apply_blocked
-        ? ["auto_apply_blocked"]
-        : [];
-  const effectiveCanApply = ocrSheetCanApply || Boolean(order?.ocr_can_apply_draft);
+      : []),
+    order?.ocr_auto_apply_blocked ? "auto_apply_blocked" : "",
+  ]);
+  const effectiveCanApply = workflowGateAvailable
+    ? Boolean(workflowApplyGate?.can_apply)
+    : ocrSheetCanApply || Boolean(order?.ocr_can_apply_draft);
   const effectiveCanConfirm = sheetWeeklyMenuMissing
     ? false
-    : (ocrSheetCanConfirm || Boolean(order?.ocr_can_confirm)) && effectiveConfirmBlockers.length === 0;
+    : (workflowGateAvailable
+        ? Boolean(workflowApplyGate?.can_confirm)
+        : ocrSheetCanConfirm || Boolean(order?.ocr_can_confirm)) &&
+      effectiveConfirmBlockers.length === 0;
   const reviewBlockerText = effectiveConfirmBlockers
     .map((item) => describeReviewBlocker(item))
     .filter(Boolean)
@@ -4338,6 +4626,9 @@ const loadOcrPages = async () => {
     const error = String(order?.ocr_error || "").trim();
     if (!error) return "";
     if (status !== "failed" && status !== "empty") return "";
+    if (isReparseStaleTimeoutError(error)) {
+      return "LLM補完再解析が30分以上進まず停止扱いになりました。OCR結果は残っているため、必要なら再解析をやり直してください。";
+    }
     if (error === "sheet_date_anchor_drift") {
       return "LLM再解析は日付範囲のドリフトを検知したため保存されませんでした。シート再読込では値は変わりません。";
     }
@@ -4433,6 +4724,8 @@ const loadOcrPages = async () => {
   } = step1State;
   const monthlyMenuMonthId = extractWeekMonthId(selectedWeek || persistedWeek || "");
   const monthlyMenuHref = monthlyMenuMonthId ? `/menus/${monthlyMenuMonthId}` : "";
+  const step1ChoiceRequired = step1CriticalDecisions.length > 0;
+  const step2ChoiceRequired = step2CriticalDecisions.length > 0;
   const getStepBlockedReason = (
     index: number,
     state: {
@@ -4443,6 +4736,12 @@ const loadOcrPages = async () => {
     if (index <= 0) return "";
     if (state.step1Incomplete) {
       return state.step1BlockReasons.join(" / ") || "Step1を完了してください";
+    }
+    if (index > 0 && step1ChoiceRequired) {
+      return "施設または週の候補選択が必要です";
+    }
+    if (index > 1 && step2ChoiceRequired) {
+      return "OCR候補の選択が必要です";
     }
     return "";
   };
@@ -4478,13 +4777,18 @@ const loadOcrPages = async () => {
     overlayUnavailableMode &&
     !ocrHasEditableSheet &&
     (showOcrRecoveryAction || ocrPagesUnavailable || ocrTerminalFailureState);
-  const canApplyOcrSheet = ocrHasEditableSheet && effectiveCanApply && !ocrHardRecoveryMode && !ocrRecoverPending;
+  const canApplyOcrSheet =
+    ocrHasEditableSheet &&
+    effectiveCanApply &&
+    !ocrHardRecoveryMode &&
+    !ocrRecoverPending &&
+    !step2ChoiceRequired;
   const showYomitokuRerunAction =
     (normalizedOcrStatus === "failed" || normalizedOcrStatus === "empty" || normalizedOcrStatus === "stalled") &&
     !ocrProcessingNow &&
     !step1Incomplete;
   const ocrApplyBranchEmphasis =
-    !step1Incomplete && ocrHasEditableSheet && effectiveCanApply && !ocrNeedsDraftSave;
+    !step1Incomplete && !step2ChoiceRequired && ocrHasEditableSheet && effectiveCanApply && !ocrNeedsDraftSave;
   const ocrRepairBranchEmphasis =
     !step1Incomplete &&
     (!ocrHasEditableSheet ||
@@ -4492,16 +4796,18 @@ const loadOcrPages = async () => {
       ocrProcessingNow ||
       Boolean(reviewWarningText || ocrReparseBlockedHint));
   const ocrPrimaryActionHint = (() => {
+    if (workflowHeadline) return workflowHeadline;
     if (sheetWeeklyMenuMissing) return "先に対象月のメニューを登録してください";
     if (step1Incomplete) return "Step1で施設と週を保存してください";
+    if (step2ChoiceRequired) return "まず OCR 候補を選択してから、シート修正に進んでください";
     if (ocrPagesUnavailable) {
-      return "OCRページが使えません。先に復旧を試してください。";
+      return "OCRページが使えません。先にOCR基盤を復旧してください。";
     }
     if (showOcrRecoveryAction) {
-      return "OCR土台が不完全です。先に復旧を試してから次の操作に進んでください。";
+      return "OCR土台が不完全です。先にOCR基盤を復旧してから次の操作に進んでください。";
     }
     if (showYomitokuRerunAction && !ocrHasEditableSheet) {
-      return "先にyomitokuを再実行してOCR基盤を更新してください。";
+      return "先にOCRパイプラインを再実行してOCR基盤を更新してください。";
     }
     if ((normalizedOcrStatus === "running" || normalizedOcrStatus === "pending") && effectiveProcessingStageLabel) {
       return `${effectiveProcessingStageLabel}。完了後にシートを確認してください`;
@@ -4516,10 +4822,26 @@ const loadOcrPages = async () => {
     return "必要な数値を修正したら「明細に反映して次へ」を押してください";
   })();
   const ocrPrimaryActionNote = (() => {
+    if (step1ChoiceRequired) {
+      return "Step1 に戻って、施設または週の候補を先に確定してください。";
+    }
+    if (
+      workflowStateCode === "layout_choice_required"
+      || workflowStateCode === "choice_required"
+      || step2ChoiceRequired
+    ) {
+      return "候補が複数あるため、下の候補選択を先に確定してください。";
+    }
+    if (workflowStateCode === "draft_blocked") {
+      return reviewBlockerText || "反映前に残っている条件を先に解消してください。";
+    }
+    if (workflowStateCode === "recovery_required") {
+      return "OCR基盤の復旧が必要です。復旧完了後にシート確認へ進みます。";
+    }
     if (sheetWeeklyMenuMissing) return "登録後にシートを再読込すると、正しいメニュー土台で確認できます。";
     if (step1Incomplete) return "施設と週の設定が保存されるまで次の工程には進めません。";
     if (ocrPagesUnavailable) {
-      return "いまは原本PDFフォールバックだけです。復旧を試すと、OCRページとオーバーレイの再取得を行います。";
+      return "いまは原本PDFフォールバックだけです。OCR基盤を復旧すると、OCRページとオーバーレイの再取得を行います。";
     }
     if (showOcrRecoveryAction) return "復旧を完了すると、シートの再読込と明細反映の復旧チェックを進めやすくなります。";
     if (!ocrHasEditableSheet) return "";
@@ -4614,6 +4936,55 @@ const loadOcrPages = async () => {
     }
   };
 
+  const renderCriticalDecisionPanel = (
+    decisions: CriticalDecisionPayload[],
+    options: { title: string; note: string },
+  ) => {
+    if (!decisions.length) return null;
+    return (
+      <div className="warning-banner critical-choice-panel">
+        <p className="field-label">{options.title}</p>
+        <div className="critical-choice-list">
+          {decisions.map((decision) => {
+            const decisionType = String(decision.decision_type || "").trim();
+            const title = String(decision.candidate_set_json?.title || decisionType || "候補").trim();
+            const candidates = Array.isArray(decision.candidate_set_json?.candidates)
+              ? decision.candidate_set_json?.candidates || []
+              : [];
+            return (
+              <div key={`${decision.id || decisionType}-${title}`} className="critical-choice-card">
+                <p className="facility-chip-name">{title}</p>
+                <div className="facility-suggestion-list">
+                  {candidates.map((candidate) => {
+                    const candidateValue = String(candidate.value || "").trim();
+                    const candidateLabel = String(candidate.label || candidateValue).trim() || candidateValue;
+                    const scoreLabel =
+                      typeof candidate.score === "number" && Number.isFinite(candidate.score)
+                        ? `${Math.round(candidate.score * 100)}%`
+                        : "";
+                    return (
+                      <button
+                        key={`${decisionType}-${candidateValue}`}
+                        type="button"
+                        className={`facility-chip${decision.selected_value === candidateValue ? " auto" : ""}`}
+                        onClick={() => void chooseCriticalDecision(decisionType, candidateValue)}
+                        disabled={!candidateValue || criticalDecisionSaving === decisionType}
+                      >
+                        <span className="facility-chip-name">{candidateLabel}</span>
+                        {scoreLabel ? <span className="facility-chip-score">{scoreLabel}</span> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="subtle">{options.note}</p>
+      </div>
+    );
+  };
+
   return (
     <main className="page">
       <header className="hero">
@@ -4661,7 +5032,34 @@ const loadOcrPages = async () => {
                 </p>
                 {ocrStatusDetail ? <p className="subtle">{ocrStatusDetail}</p> : null}
               </div>
+              <div>
+                <p className="field-label">作業状態</p>
+                <p className="summary-value">
+                  {workflowStateLabel || "未判定"}
+                </p>
+                {workflowHeadline ? <p className="subtle">{workflowHeadline}</p> : null}
+                {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+              </div>
             </div>
+            {workflowHeadline || workflowStateLabel ? (
+              <div className="workflow-summary-card">
+                <div>
+                  <p className="field-label">作業状態</p>
+                  <p className="workflow-summary-title">
+                    {workflowHeadline || workflowStateLabel || "状態を確認してください"}
+                  </p>
+                  {workflowStateLabel && workflowHeadline && workflowStateLabel !== workflowHeadline ? (
+                    <p className="subtle">状態: {workflowStateLabel}</p>
+                  ) : null}
+                  {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+                </div>
+                {order?.workflow_state?.primary_action ? (
+                  <span className="ocr-review-pill ocr-review-pill--state">{order.workflow_state.primary_action}</span>
+                ) : workflowStateLabel ? (
+                  <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
+                ) : null}
+              </div>
+            ) : null}
             <details className="prompt-panel">
               <summary>生OCR（最新）</summary>
               <div className="raw-actions">
@@ -5032,6 +5430,10 @@ const loadOcrPages = async () => {
                     </span>
                   </div>
                 ) : null}
+                {renderCriticalDecisionPanel(step1CriticalDecisions, {
+                  title: "先に確定する候補",
+                  note: "施設や週が曖昧な場合だけ表示されます。ここで確定すると、以降のOCR修正と一覧整理に反映されます。",
+                })}
               </div>
               {pdfUrl ? (
                 <iframe title="order-pdf" src={pdfUrl} className="pdf-frame pdf-frame-wide" />
@@ -5090,7 +5492,7 @@ const loadOcrPages = async () => {
                       </ul>
                       {showOcrRecoveryAction ? (
                         <p className="subtle">
-                          「復旧を試す」は、OCRの基盤(生データ/構造化表/ページ参照)を再構築し、手入力前の作業土台を戻します。
+                          「OCR基盤を復旧」は、OCRの基盤(生データ/構造化表/ページ参照)を再構築し、手入力前の作業土台を戻します。
                         </p>
                       ) : null}
                     </div>
@@ -5129,6 +5531,10 @@ const loadOcrPages = async () => {
                       警告: OCR テーブルを暫定ソースとして表示しています。内容を確認してから保存・反映してください。
                     </p>
                   ) : null}
+                  {renderCriticalDecisionPanel(step2CriticalDecisions, {
+                    title: "OCR修正前に候補を確定",
+                    note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
+                  })}
                   <div className="ocr-workspace">
                     <div className="ocr-workspace-tools">
                       <div className="ocr-edit">
@@ -5155,15 +5561,6 @@ const loadOcrPages = async () => {
                               </span>
                             ) : null}
                           </div>
-                          {technicalReviewItems.length ? (
-                            <div className="ocr-flow-statuses">
-                              {technicalReviewItems.map((item) => (
-                                <span className="ocr-review-pill ocr-review-pill--muted" key={`ocr-flow-status-${item}`}>
-                                  {item}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
                           <div className="ocr-flow-track">
                             <div className={`ocr-flow-step ${ocrHasEditableSheet ? "active" : ""}`}>
                               <span className="ocr-flow-step-index">1</span>
@@ -5229,7 +5626,7 @@ const loadOcrPages = async () => {
                                     onClick={() => void recoverOcrFoundation()}
                                     disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
                                   >
-                                    {ocrRecoverPending ? "復旧中..." : "復旧を試す"}
+                                    {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
                                   </button>
                                 ) : null}
                                 {showYomitokuRerunAction && !showOcrRecoveryAction && !ocrHardRecoveryMode ? (
@@ -5246,22 +5643,89 @@ const loadOcrPages = async () => {
                                     }
                                     disabled={reparsePending || step1Incomplete || ocrRecoverPending || !ocrHasEditableSheet}
                                   >
-                                    {reparsePending ? "再実行中..." : "yomitokuを再実行"}
+                                    {reparsePending ? "再実行中..." : "OCRパイプラインを再実行"}
                                   </button>
                                 ) : null}
                                 <select
+                                  className="input llm-model-select"
+                                  value={llmReparsePromptPreset}
+                                  onChange={(event) =>
+                                    setLlmReparsePromptPreset(
+                                      event.target.value as
+                                        | "numeric_verification"
+                                        | "column_missing"
+                                        | "row_alignment"
+                                        | "special_diet_semantics"
+                                        | "freeform",
+                                    )
+                                  }
+                                  disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                >
+                                  <option value="numeric_verification">数字検証優先</option>
+                                  <option value="column_missing">列欠損・見切れ補完</option>
+                                  <option value="row_alignment">行ずれ・区分ずれ補正</option>
+                                  <option value="special_diet_semantics">特殊食・禁食優先</option>
+                                  <option value="freeform">自由入力中心</option>
+                                </select>
+                                <select
                                   className="input llm-provider-select"
                                   value={llmReparseProvider}
-                                  onChange={(event) => setLlmReparseProvider(event.target.value)}
+                                  onChange={(event) => {
+                                    const nextProvider = event.target.value;
+                                    setLlmReparseProvider(nextProvider);
+                                    if (nextProvider !== "gemini") {
+                                      setLlmReparseModelMode("flash");
+                                      setLlmReparseCustomModel("");
+                                    }
+                                  }}
                                   disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
                                 >
                                   <option value="openai">OpenAI</option>
                                   <option value="gemini">Gemini</option>
                                 </select>
+                                {llmReparseProvider === "gemini" ? (
+                                  <select
+                                    className="input llm-model-select"
+                                    value={llmReparseModelMode}
+                                    onChange={(event) =>
+                                      setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
+                                    }
+                                    disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                  >
+                                    <option value="flash">Flash</option>
+                                    <option value="pro">Pro</option>
+                                    <option value="other">Other</option>
+                                  </select>
+                                ) : null}
+                                {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
+                                  <input
+                                    className="input llm-model-input"
+                                    type="text"
+                                    placeholder="例: gemini-1.5-flash"
+                                    value={llmReparseCustomModel}
+                                    onChange={(event) => setLlmReparseCustomModel(event.target.value)}
+                                    disabled={
+                                      reparsePending ||
+                                      step1Incomplete ||
+                                      ocrRecoverPending ||
+                                      ocrHardRecoveryMode ||
+                                      !ocrHasEditableSheet
+                                    }
+                                  />
+                                ) : null}
                                 <button
                                   className="btn ghost"
                                   onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
-                                  disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                  disabled={
+                                    reparsePending ||
+                                    step1Incomplete ||
+                                    ocrRecoverPending ||
+                                    ocrHardRecoveryMode ||
+                                    !ocrHasEditableSheet ||
+                                    (llmReparseProvider === "gemini" &&
+                                      llmReparseModelMode === "other" &&
+                                      !llmReparseCustomModel.trim())
+                                  }
                                 >
                                   {reparsePending ? "再解析中..." : "LLM補完再解析"}
                                 </button>
@@ -5270,7 +5734,7 @@ const loadOcrPages = async () => {
                                 <details className="ocr-inline-details">
                                   <summary>LLM追加指示（任意）</summary>
                                   <p className="subtle">
-                                    LLM補完再解析時、ここに書いた内容だけを追加指示として渡します。
+                                    選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
                                   </p>
                                   <textarea
                                     className="input"
@@ -6545,6 +7009,16 @@ const loadOcrPages = async () => {
           flex: 0 0 auto;
         }
 
+        .llm-model-select {
+          min-width: 130px;
+          flex: 0 0 auto;
+        }
+
+        .llm-model-input {
+          min-width: 220px;
+          flex: 0 0 auto;
+        }
+
         .field {
           display: flex;
           flex-direction: column;
@@ -6603,6 +7077,44 @@ const loadOcrPages = async () => {
         .facility-suggestion-note {
           font-size: 12px;
           color: #6b7b76;
+        }
+
+        .critical-choice-card {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          width: 100%;
+        }
+
+        .critical-choice-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .critical-choice-list {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .workflow-summary-card {
+          margin-top: 14px;
+          padding: 12px 14px;
+          border-radius: 12px;
+          background: #f4f7f6;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+        }
+
+        .workflow-summary-title {
+          margin: 4px 0 0;
+          font-size: 14px;
+          font-weight: 700;
+          color: #21302d;
         }
 
         .input {

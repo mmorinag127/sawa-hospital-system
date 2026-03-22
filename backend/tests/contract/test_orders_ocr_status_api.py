@@ -192,6 +192,14 @@ def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
     order = _create_seed_order("msg-status-api-confirm-block")
     monkeypatch.setattr(
         orders_api.order_service,
+        "get_order_workflow_state",
+        lambda _order_id, refresh=False: {
+            "state": "draft_ready",
+            "apply_gate": {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
         "get_ocr_sheet",
         lambda _order_id: {"warnings": ["sheet_weekly_menu_missing"]},
     )
@@ -209,13 +217,13 @@ def test_get_bags_rebuilds_stale_materialized_payload():
     payload = IngestEmailPayload(
         message_id="msg-status-api-bags-001",
         pdf_uri="file://dummy-bags.pdf",
-        received_at=datetime(2026, 2, 18, 9, 0, 0),
+        received_at=datetime(2026, 4, 18, 9, 0, 0),
         facility_hint="FAC00003",
-        week_hint="2026-02",
+        week_hint="2026-04",
     )
     lines = [
         {
-            "date": "2026-02-18",
+            "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
             "diet_type": "regular",
@@ -224,7 +232,7 @@ def test_get_bags_rebuilds_stale_materialized_payload():
             "quantity_original": 9,
         },
         {
-            "date": "2026-02-18",
+            "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
             "diet_type": "regular",
@@ -236,14 +244,14 @@ def test_get_bags_rebuilds_stale_materialized_payload():
     order = order_service.create_order_from_ingest(payload, lines=lines)
     with session_scope() as session:
         session.add(
-            Bag(
-                id="BAGstale001",
-                order_id=order["id"],
-                date=datetime(2026, 2, 18).date(),
-                daypart="昼",
-                menu_name="筑前煮",
-                diet_type="regular",
-                area_id=None,
+                Bag(
+                    id="BAGstale001",
+                    order_id=order["id"],
+                    date=datetime(2026, 4, 18).date(),
+                    daypart="昼",
+                    menu_name="筑前煮",
+                    diet_type="regular",
+                    area_id=None,
                 bag_type="large",
                 quantity=99,
             )
@@ -358,10 +366,12 @@ def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monk
     order = _create_seed_order("msg-status-api-003-default-llm")
     captured: dict[str, object] = {}
 
-    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
         captured["order_id"] = order_id
         captured["ocr_prompt"] = ocr_prompt
+        captured["prompt_preset"] = prompt_preset
         captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
         captured["llm_assist"] = llm_assist
 
     monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
@@ -372,6 +382,89 @@ def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monk
     assert res.status_code == 202
     assert captured["order_id"] == order["id"]
     assert captured["ocr_provider"] is None
+    assert captured["ocr_model"] is None
+    assert captured["llm_assist"] is True
+
+
+def test_reparse_endpoint_passes_explicit_ocr_model(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-model")
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["ocr_prompt"] = ocr_prompt
+        captured["prompt_preset"] = prompt_preset
+        captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(
+        f"/orders/{order['id']}/reparse",
+        json={"ocr_provider": "gemini", "ocr_model": "gemini-2.5-pro", "llm_assist": True},
+    )
+
+    assert res.status_code == 202
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_provider"] == "gemini"
+    assert captured["ocr_model"] == "gemini-2.5-pro"
+    assert captured["llm_assist"] is True
+
+
+def test_reparse_endpoint_accepts_llm_model_alias(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-llm-model")
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["prompt_preset"] = prompt_preset
+        captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(
+        f"/orders/{order['id']}/reparse",
+        json={"ocr_provider": "gemini", "llm_model": "gemini-2.5-flash", "llm_assist": True},
+    )
+
+    assert res.status_code == 202
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_provider"] == "gemini"
+    assert captured["ocr_model"] == "gemini-2.5-flash"
+    assert captured["llm_assist"] is True
+
+
+def test_reparse_endpoint_accepts_prompt_preset(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-preset")
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
+        captured["order_id"] = order_id
+        captured["ocr_prompt"] = ocr_prompt
+        captured["prompt_preset"] = prompt_preset
+        captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
+        captured["llm_assist"] = llm_assist
+
+    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(
+        f"/orders/{order['id']}/reparse",
+        json={"ocr_provider": "gemini", "llm_assist": True, "prompt_preset": "row_alignment"},
+    )
+
+    assert res.status_code == 202
+    assert captured["order_id"] == order["id"]
+    assert captured["prompt_preset"] == "row_alignment"
     assert captured["llm_assist"] is True
 
 
@@ -380,10 +473,12 @@ def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
     order = _create_seed_order("msg-status-api-003-recover")
     captured: dict[str, object] = {}
 
-    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
         captured["order_id"] = order_id
         captured["ocr_prompt"] = ocr_prompt
+        captured["prompt_preset"] = prompt_preset
         captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
         captured["llm_assist"] = llm_assist
 
     monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
@@ -397,6 +492,7 @@ def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
     assert captured["order_id"] == order["id"]
     assert captured["ocr_prompt"] is None
     assert captured["ocr_provider"] == "pipeline"
+    assert captured["ocr_model"] is None
     assert captured["llm_assist"] is False
 
 
@@ -417,10 +513,12 @@ def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeyp
     )
     captured: dict[str, object] = {}
 
-    def _fake_run(order_id, ocr_prompt, ocr_provider=None, llm_assist=False):
+    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
         captured["order_id"] = order_id
         captured["ocr_prompt"] = ocr_prompt
+        captured["prompt_preset"] = prompt_preset
         captured["ocr_provider"] = ocr_provider
+        captured["ocr_model"] = ocr_model
         captured["llm_assist"] = llm_assist
 
     monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
@@ -437,6 +535,7 @@ def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeyp
     assert job.get("metrics", {}).get("processing_stage") == "queued"
     assert captured["order_id"] == order["id"]
     assert captured["ocr_provider"] == "pipeline"
+    assert captured["ocr_model"] is None
     assert captured["llm_assist"] is False
 
 
@@ -451,7 +550,7 @@ def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
 
     monkeypatch.setattr(order_service, "reparse_order", _raise)
 
-    orders_api._run_reparse_background(order["id"], None, "gemini", True)
+    orders_api._run_reparse_background(order["id"], None, None, "gemini", None, True)
 
     job = get_job(job_id)
     assert job is not None
