@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from src.services import config_service
+
 
 def _read_float_env(name: str, default: float) -> float:
     raw = str(os.environ.get(name, "") or "").strip()
@@ -12,6 +14,194 @@ def _read_float_env(name: str, default: float) -> float:
         return float(raw)
     except Exception:
         return float(default)
+
+
+def _normalize_grid_table_box(value: Any) -> list[float] | None:
+    if not isinstance(value, list) or len(value) < 4:
+        return None
+    try:
+        return [float(item) for item in value[:4]]
+    except Exception:
+        return None
+
+
+def _normalize_grid_edges(value: Any) -> list[float] | None:
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    try:
+        return [float(item) for item in value]
+    except Exception:
+        return None
+
+
+def _expected_grid_columns(template: dict[str, Any]) -> int:
+    try:
+        expected = int(template.get("grid_expected_columns") or 0)
+    except Exception:
+        expected = 0
+    if expected >= 2:
+        return expected
+    grid_columns = template.get("grid_columns")
+    if isinstance(grid_columns, list) and len(grid_columns) >= 2:
+        return len(grid_columns)
+    return 0
+
+
+def _synthesize_grid_column_edges(
+    table_box: list[float] | None,
+    template: dict[str, Any],
+) -> list[float] | None:
+    if not isinstance(table_box, list) or len(table_box) < 4:
+        return None
+    expected = _expected_grid_columns(template)
+    if expected < 2:
+        return None
+    left = float(table_box[0])
+    right = float(table_box[2])
+    span = right - left
+    if span <= 0:
+        return None
+    return [left + span * idx / expected for idx in range(expected + 1)]
+
+
+def resolve_effective_grid_metadata(
+    *,
+    template_resolution: dict[str, Any] | None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        table_box = _normalize_grid_table_box(payload.get("table_box"))
+        column_edges = _normalize_grid_edges(payload.get("grid_column_edges"))
+        row_edges = _normalize_grid_edges(payload.get("grid_row_edges"))
+        if table_box and column_edges:
+            return {
+                "source": "payload",
+                "template_id": str(
+                    (
+                        (template_resolution or {}).get("resolved_template_id")
+                        if isinstance(template_resolution, dict)
+                        else payload.get("template_id")
+                    )
+                    or ""
+                ).strip()
+                or None,
+                "table_box": table_box,
+                "grid_column_edges": column_edges,
+                "grid_row_edges": row_edges,
+            }
+
+    candidate_ids: list[str] = []
+    if isinstance(template_resolution, dict):
+        for key in ("resolved_template_id", "requested_template_id", "template_id"):
+            token = str(template_resolution.get(key) or "").strip()
+            if token and token not in candidate_ids:
+                candidate_ids.append(token)
+        for raw_value in template_resolution.get("requested_template_ids") or []:
+            token = str(raw_value or "").strip()
+            if token and token not in candidate_ids:
+                candidate_ids.append(token)
+    if isinstance(payload, dict):
+        token = str(payload.get("template_id") or "").strip()
+        if token and token not in candidate_ids:
+            candidate_ids.append(token)
+
+    if not candidate_ids:
+        return None
+
+    registry = config_service.load_fax_template_registry()
+    if not isinstance(registry, dict) or not registry:
+        return None
+
+    for template_id in candidate_ids:
+        template = registry.get(template_id)
+        if not isinstance(template, dict):
+            continue
+        table_box = _normalize_grid_table_box(
+            template.get("grid_table_box") or template.get("table_box")
+        )
+        column_edges = _normalize_grid_edges(template.get("grid_column_edges")) or _synthesize_grid_column_edges(
+            table_box,
+            template,
+        )
+        row_edges = _normalize_grid_edges(template.get("grid_row_edges"))
+        if table_box and column_edges:
+            return {
+                "source": "template_registry",
+                "template_id": template_id,
+                "table_box": table_box,
+                "grid_column_edges": column_edges,
+                "grid_row_edges": row_edges,
+            }
+    return None
+
+
+def normalize_template_resolution_state(
+    resolution: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(resolution, dict):
+        return None
+    normalized = dict(resolution)
+    requested = str(normalized.get("requested_template_id") or "").strip() or None
+    requested_ids = [
+        token
+        for token in (str(item or "").strip() for item in (normalized.get("requested_template_ids") or []))
+        if token
+    ]
+    if requested and requested not in requested_ids:
+        requested_ids.insert(0, requested)
+    resolved = str(normalized.get("resolved_template_id") or normalized.get("template_id") or "").strip() or None
+    matched = str(normalized.get("matched_template_id") or "").strip() or None
+    requested_scope = requested_ids if requested_ids else ([requested] if requested else [])
+    requested_scope_mismatch = bool(requested_scope and resolved and resolved not in requested_scope)
+    preferred_requested_mismatch = bool(requested and resolved and requested != resolved)
+    classifier_mismatch = bool(
+        matched
+        and (
+            (resolved and matched != resolved)
+            or (not resolved and requested and matched != requested)
+        )
+    )
+    warp_mismatch = bool(normalized.get("warp_mismatch"))
+    mismatch = bool(requested_scope_mismatch or preferred_requested_mismatch or classifier_mismatch or warp_mismatch)
+
+    raw_confidence = normalized.get("confidence")
+    try:
+        confidence = float(raw_confidence) if raw_confidence is not None else None
+    except Exception:
+        confidence = None
+    min_confidence = _read_float_env("OCR_TEMPLATE_MIN_CONFIDENCE", 0.6)
+    confidence_low = confidence is not None and confidence < min_confidence
+
+    raw_blockers = [
+        str(item or "").strip()
+        for item in (normalized.get("blocked_reasons") or [])
+        if str(item or "").strip()
+    ]
+    blocked_reasons: list[str] = []
+    if requested_scope_mismatch or warp_mismatch:
+        blocked_reasons.append("template_mismatch")
+    if warp_mismatch:
+        blocked_reasons.append("page_correction_template_mismatch")
+    if confidence_low:
+        blocked_reasons.append("template_confidence_low")
+    for token in raw_blockers:
+        if token not in {
+            "template_mismatch",
+            "page_correction_template_mismatch",
+            "template_confidence_low",
+        } and token not in blocked_reasons:
+            blocked_reasons.append(token)
+
+    normalized["requested_template_id"] = requested
+    normalized["requested_template_ids"] = requested_ids
+    normalized["resolved_template_id"] = resolved
+    normalized["matched_template_id"] = matched
+    normalized["classifier_mismatch"] = classifier_mismatch
+    normalized["warp_mismatch"] = warp_mismatch
+    normalized["mismatch"] = mismatch
+    normalized["blocked_reasons"] = blocked_reasons
+    normalized["blocked"] = bool(blocked_reasons)
+    return normalized
 
 
 def build_template_resolution(
@@ -35,6 +225,7 @@ def build_template_resolution(
     confidence = None
     candidate_ids: list[str] = []
     mismatch = False
+    classifier_mismatch = False
     warp_mismatch = False
     blocked_reasons: list[str] = []
 
@@ -70,9 +261,19 @@ def build_template_resolution(
             warp_mismatch = True
             break
 
-    if requested and resolved and requested != resolved:
+    requested_scope = requested_ids if requested_ids else ([requested] if requested else [])
+    requested_scope_mismatch = bool(requested_scope and resolved and resolved not in requested_scope)
+    preferred_requested_mismatch = bool(requested and resolved and requested != resolved)
+    classifier_mismatch = bool(
+        matched
+        and (
+            (resolved and matched != resolved)
+            or (not resolved and requested and matched != requested)
+        )
+    )
+    if requested_scope_mismatch or preferred_requested_mismatch:
         mismatch = True
-    if requested and matched and requested != matched:
+    if classifier_mismatch:
         mismatch = True
     if warp_mismatch:
         mismatch = True
@@ -80,7 +281,7 @@ def build_template_resolution(
     min_confidence = _read_float_env("OCR_TEMPLATE_MIN_CONFIDENCE", 0.6)
     confidence_low = confidence is not None and confidence < min_confidence
 
-    if mismatch:
+    if requested_scope_mismatch or warp_mismatch:
         blocked_reasons.append("template_mismatch")
     if warp_mismatch:
         blocked_reasons.append("page_correction_template_mismatch")
@@ -95,6 +296,7 @@ def build_template_resolution(
         "confidence": confidence,
         "candidate_template_ids": candidate_ids,
         "mismatch": mismatch,
+        "classifier_mismatch": classifier_mismatch,
         "warp_mismatch": warp_mismatch,
         "blocked_reasons": blocked_reasons,
         "blocked": bool(blocked_reasons),

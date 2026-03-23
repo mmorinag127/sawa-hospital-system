@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Any
 
+from src.services import template_resolution_service
+
 
 REQUIRED_ARTIFACT_KEYS = (
     "corrected_pdf",
@@ -46,17 +48,11 @@ def _has_overlay_pages(pages: object) -> bool:
 
 
 def _has_grid_metadata(payload: dict[str, Any]) -> bool:
-    table_box = payload.get("table_box")
-    column_edges = payload.get("grid_column_edges")
-    row_edges = payload.get("grid_row_edges")
-    return (
-        isinstance(table_box, list)
-        and len(table_box) >= 4
-        and isinstance(column_edges, list)
-        and len(column_edges) >= 2
-        and isinstance(row_edges, list)
-        and len(row_edges) >= 2
+    resolved = template_resolution_service.resolve_effective_grid_metadata(
+        template_resolution=payload.get("template_resolution") if isinstance(payload, dict) else None,
+        payload=payload,
     )
+    return isinstance(resolved, dict)
 
 
 def _has_evidence_context(payload: dict[str, Any]) -> bool:

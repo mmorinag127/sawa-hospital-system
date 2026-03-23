@@ -5,7 +5,7 @@ from datetime import datetime
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import order_service, workflow_state_service  # noqa: E402
+from src.services import order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -154,6 +154,14 @@ def test_refresh_workflow_state_returns_semantic_shell_only_for_partial_semantic
     _persist_evidence(
         order["id"],
         extra_payload={
+            "template_id": "unknown-template",
+            "template_resolution": {
+                "resolved_template_id": "unknown-template",
+                "candidate_template_ids": ["unknown-template"],
+                "confidence": 0.91,
+                "blocked": False,
+                "blocked_reasons": [],
+            },
             "quantity_subgrid_passes": [],
             "table_box": None,
             "grid_column_edges": [],
@@ -177,6 +185,54 @@ def test_refresh_workflow_state_returns_semantic_shell_only_for_partial_semantic
     assert workflow["state"] == "semantic_shell_only"
     assert workflow["primary_action"] == "rerun_ocr_pipeline"
     assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
+
+
+def test_refresh_workflow_state_does_not_get_stuck_semantic_shell_only_when_resolved_template_can_supply_grid(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-template-grid-reuse", facility_hint="FAC00006", week_hint="2026-03")
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "template_resolution": template_resolution_service.build_template_resolution(
+                requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                requested_template_ids=[
+                    "fax_layout_regular_soft_mixer_forbidden_v1",
+                    "fax_layout_floor_2f3f_v1",
+                ],
+                resolved_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                classification={
+                    "matched_template_id": "fax_layout_floor_2f3f_v1",
+                    "confidence": 0.94,
+                    "candidates": [
+                        {"id": "fax_layout_floor_2f3f_v1", "score": 0.94},
+                        {"id": "fax_layout_regular_soft_mixer_forbidden_v1", "score": 0.91},
+                    ],
+                },
+                page_correction_summary={"pages": [{"mode": "template_warp", "template_id": "fax_layout_regular_soft_mixer_forbidden_v1"}]},
+            ),
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "apply_ready"
+    assert workflow["primary_action"] == "apply_draft"
+    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evidence_differs_from_draft(monkeypatch):
@@ -518,8 +574,19 @@ def test_refresh_workflow_state_returns_layout_choice_required_for_column_mappin
             ],
         },
     )
+    from unittest.mock import patch
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    with patch.object(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    ):
+        workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "layout_choice_required"

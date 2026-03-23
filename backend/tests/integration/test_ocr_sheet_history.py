@@ -4451,8 +4451,10 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_1, history_error_1 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_1 is None
     assert history_1 is not None
-    assert history_1["latest"] is None
-    assert history_1["revisions"] == []
+    assert isinstance(history_1["latest"], dict)
+    assert history_1["latest"]["ui_mode"] == "evidence"
+    assert str(history_1["latest"]["revision_id"]).startswith("OEV")
+    assert len(history_1["revisions"]) == 1
 
     apply_result, apply_error = order_service.apply_patch_candidate_to_draft(
         order["id"],
@@ -4477,8 +4479,10 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_2, history_error_2 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_2 is None
     assert history_2 is not None
-    assert history_2["latest"] is None
-    assert history_2["revisions"] == []
+    assert isinstance(history_2["latest"], dict)
+    assert history_2["latest"]["ui_mode"] == "evidence"
+    assert str(history_2["latest"]["revision_id"]).startswith("OEV")
+    assert len(history_2["revisions"]) == 1
 
     assert "Previous yomitoku/LLM markdown" in captured_prompts[0]["user"]
     assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
@@ -4600,8 +4604,10 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     history, history_error = order_service.get_ocr_edit_history(order["id"])
     assert history_error is None
     assert history is not None
-    assert history["latest"] is None
-    assert history["revisions"] == []
+    assert isinstance(history["latest"], dict)
+    assert history["latest"]["ui_mode"] == "evidence"
+    assert str(history["latest"]["revision_id"]).startswith("OEV")
+    assert len(history["revisions"]) == 1
 
 
 def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(monkeypatch):

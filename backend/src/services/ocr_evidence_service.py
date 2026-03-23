@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from src.db import Base, engine, session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
-from src.services import evidence_manifest_service
+from src.services import evidence_manifest_service, template_resolution_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -134,8 +134,52 @@ def _extract_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
     for key in _EVIDENCE_META_KEYS + _EVIDENCE_ARTIFACT_KEYS:
         if key in payload:
             extracted[key] = copy.deepcopy(payload.get(key))
+    resolution = template_resolution_service.normalize_template_resolution_state(
+        extracted.get("template_resolution") if isinstance(extracted.get("template_resolution"), dict) else None
+    )
+    if isinstance(resolution, dict):
+        extracted["template_resolution"] = resolution
+    effective_grid_metadata = template_resolution_service.resolve_effective_grid_metadata(
+        template_resolution=resolution if isinstance(resolution, dict) else None,
+        payload=extracted,
+    )
+    if isinstance(effective_grid_metadata, dict):
+        if not extracted.get("table_box") and isinstance(effective_grid_metadata.get("table_box"), list):
+            extracted["table_box"] = copy.deepcopy(effective_grid_metadata.get("table_box"))
+        if not extracted.get("grid_column_edges") and isinstance(effective_grid_metadata.get("grid_column_edges"), list):
+            extracted["grid_column_edges"] = copy.deepcopy(effective_grid_metadata.get("grid_column_edges"))
+        if not extracted.get("grid_row_edges") and isinstance(effective_grid_metadata.get("grid_row_edges"), list):
+            extracted["grid_row_edges"] = copy.deepcopy(effective_grid_metadata.get("grid_row_edges"))
     enriched = evidence_manifest_service.ensure_evidence_manifest(extracted)
     return dict(enriched) if isinstance(enriched, dict) else extracted
+
+
+def payload_has_quantity_column_semantics(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    resolution = template_resolution_service.normalize_template_resolution_state(
+        payload.get("template_resolution") if isinstance(payload.get("template_resolution"), dict) else None
+    )
+    effective_grid_metadata = template_resolution_service.resolve_effective_grid_metadata(
+        template_resolution=resolution if isinstance(resolution, dict) else None,
+        payload=payload,
+    )
+    if not isinstance(effective_grid_metadata, dict):
+        return False
+    table_box = effective_grid_metadata.get("table_box")
+    column_edges = effective_grid_metadata.get("grid_column_edges")
+    template_present = bool(
+        isinstance(resolution, dict)
+        and str(resolution.get("resolved_template_id") or resolution.get("template_id") or "").strip()
+    )
+    template_blocked = bool(
+        isinstance(resolution, dict)
+        and (
+            resolution.get("blocked")
+            or (resolution.get("blocked_reasons") or [])
+        )
+    )
+    return bool(template_present and not template_blocked and isinstance(table_box, list) and isinstance(column_edges, list))
 
 
 def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
@@ -146,8 +190,14 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     table_raw = bool((artifacts or {}).get("table_raw"))
     tables = bool(payload.get("tables"))
     quantity_subgrid = bool((artifacts or {}).get("quantity_subgrid"))
-    grid_metadata = bool(payload.get("table_box")) and bool(payload.get("grid_column_edges")) and bool(payload.get("grid_row_edges"))
-    template_resolution = payload.get("template_resolution")
+    effective_grid_metadata = template_resolution_service.resolve_effective_grid_metadata(
+        template_resolution=payload.get("template_resolution") if isinstance(payload, dict) else None,
+        payload=payload,
+    )
+    grid_metadata = isinstance(effective_grid_metadata, dict)
+    template_resolution = template_resolution_service.normalize_template_resolution_state(
+        payload.get("template_resolution") if isinstance(payload.get("template_resolution"), dict) else None
+    )
     template_blocked = bool(
         isinstance(template_resolution, dict)
         and (
@@ -158,12 +208,15 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     template_present = isinstance(template_resolution, dict) and bool(
         str(template_resolution.get("resolved_template_id") or template_resolution.get("template_id") or "").strip()
     )
+    quantity_column_semantics_ready = payload_has_quantity_column_semantics(payload)
 
     step2_view_ready = overlay_pages or corrected_pdf or bool(payload.get("input_reference"))
     step2_edit_ready = table_raw or tables or quantity_subgrid
-    semantic_shell_only = bool(step2_view_ready and step2_edit_ready and (not template_present or not grid_metadata))
+    semantic_shell_only = bool(
+        step2_view_ready and step2_edit_ready and (not template_present or not quantity_column_semantics_ready)
+    )
     numeric_trust_low = bool(step2_edit_ready and (not quantity_subgrid or semantic_shell_only))
-    apply_ready = step2_edit_ready and not template_blocked and template_present and grid_metadata
+    apply_ready = step2_edit_ready and not template_blocked and template_present and quantity_column_semantics_ready
     confirm_ready = apply_ready and bool(quantity_subgrid or table_raw)
     recovery_required = not step2_view_ready or not step2_edit_ready
     return {
@@ -171,6 +224,8 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
         "step2_edit_ready": bool(step2_edit_ready),
         "semantic_shell_only": bool(semantic_shell_only),
         "numeric_trust_low": bool(numeric_trust_low),
+        "quantity_column_semantics_ready": bool(quantity_column_semantics_ready),
+        "grid_metadata_complete": bool(grid_metadata),
         "rerunnable": bool(step2_view_ready or step2_edit_ready or payload.get("input_reference")),
         "switch_candidate_available": False,
         "apply_ready": bool(apply_ready),
@@ -271,21 +326,9 @@ def persist_evidence_run(
             .first()
         )
         if latest and str(latest.artifact_digest or "") == str(record["artifact_digest"]):
-            return {
-                "id": latest.id,
-                "order_id": latest.order_id,
-                "schema_version": latest.schema_version,
-                "producer_version": latest.producer_version,
-                "source": latest.source,
-                "status": latest.status,
-                "artifact_digest": latest.artifact_digest,
-                "payload_json": latest.payload_json,
-                "artifact_manifest_json": latest.artifact_manifest_json,
-                "capabilities_json": latest.capabilities_json,
-                "degraded_reasons_json": latest.degraded_reasons_json,
-                "created_at": latest.created_at.isoformat() if isinstance(latest.created_at, datetime) else None,
-                "created": False,
-            }
+            existing = _serialize_evidence_run(latest, include_payload=True)
+            existing["created"] = False
+            return existing
         run = OrderOcrEvidenceRun(
             id=f"OEV{uuid4().hex[:12]}",
             order_id=record["order_id"],
@@ -301,21 +344,9 @@ def persist_evidence_run(
         )
         session.add(run)
         session.flush()
-        return {
-            "id": run.id,
-            "order_id": run.order_id,
-            "schema_version": run.schema_version,
-            "producer_version": run.producer_version,
-            "source": run.source,
-            "status": run.status,
-            "artifact_digest": run.artifact_digest,
-            "payload_json": run.payload_json,
-            "artifact_manifest_json": run.artifact_manifest_json,
-            "capabilities_json": run.capabilities_json,
-            "degraded_reasons_json": run.degraded_reasons_json,
-            "created_at": run.created_at.isoformat() if isinstance(run.created_at, datetime) else None,
-            "created": True,
-        }
+        created = _serialize_evidence_run(run, include_payload=True)
+        created["created"] = True
+        return created
 
 
 def backfill_evidence_run_from_cached_payload(
@@ -349,20 +380,7 @@ def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
         )
         if not latest:
             return None
-        return {
-            "id": latest.id,
-            "order_id": latest.order_id,
-            "schema_version": latest.schema_version,
-            "producer_version": latest.producer_version,
-            "source": latest.source,
-            "status": latest.status,
-            "artifact_digest": latest.artifact_digest,
-            "payload_json": latest.payload_json,
-            "artifact_manifest_json": latest.artifact_manifest_json,
-            "capabilities_json": latest.capabilities_json,
-            "degraded_reasons_json": latest.degraded_reasons_json,
-            "created_at": latest.created_at.isoformat() if isinstance(latest.created_at, datetime) else None,
-        }
+        return _serialize_evidence_run(latest, include_payload=True)
 
 
 def get_evidence_run(evidence_run_id: str) -> dict[str, Any] | None:
@@ -373,20 +391,7 @@ def get_evidence_run(evidence_run_id: str) -> dict[str, Any] | None:
         row = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
         if not row:
             return None
-        return {
-            "id": row.id,
-            "order_id": row.order_id,
-            "schema_version": row.schema_version,
-            "producer_version": row.producer_version,
-            "source": row.source,
-            "status": row.status,
-            "artifact_digest": row.artifact_digest,
-            "payload_json": row.payload_json,
-            "artifact_manifest_json": row.artifact_manifest_json,
-            "capabilities_json": row.capabilities_json,
-            "degraded_reasons_json": row.degraded_reasons_json,
-            "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
-        }
+        return _serialize_evidence_run(row, include_payload=True)
 
 
 def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:
@@ -400,19 +405,34 @@ def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .all()
         )
-        return [
-            {
-                "id": row.id,
-                "order_id": row.order_id,
-                "schema_version": row.schema_version,
-                "producer_version": row.producer_version,
-                "source": row.source,
-                "status": row.status,
-                "artifact_digest": row.artifact_digest,
-                "artifact_manifest_json": row.artifact_manifest_json,
-                "capabilities_json": row.capabilities_json,
-                "degraded_reasons_json": row.degraded_reasons_json,
-                "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
-            }
-            for row in rows
-        ]
+        return [_serialize_evidence_run(row, include_payload=False) for row in rows]
+
+
+def _serialize_evidence_run(
+    row: OrderOcrEvidenceRun,
+    *,
+    include_payload: bool,
+) -> dict[str, Any]:
+    payload_json = _extract_evidence_payload(row.payload_json if isinstance(row.payload_json, dict) else {})
+    manifest = payload_json.get("evidence_manifest")
+    if not isinstance(manifest, dict):
+        manifest = evidence_manifest_service.build_evidence_manifest(payload_json)
+    capabilities = _build_capabilities(payload_json)
+    capabilities["legacy_editable"] = bool(str(row.schema_version or "").startswith("v1_legacy"))
+    degraded_reasons = _build_degraded_reasons(payload_json, capabilities)
+    serialized = {
+        "id": row.id,
+        "order_id": row.order_id,
+        "schema_version": row.schema_version,
+        "producer_version": row.producer_version,
+        "source": row.source,
+        "status": row.status,
+        "artifact_digest": row.artifact_digest,
+        "artifact_manifest_json": manifest,
+        "capabilities_json": capabilities,
+        "degraded_reasons_json": degraded_reasons,
+        "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
+    }
+    if include_payload:
+        serialized["payload_json"] = payload_json
+    return serialized

@@ -12,7 +12,7 @@ sys.path.append(str(ROOT))
 import src.api.orders as orders_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
-from src.services import ocr_evidence_service, order_service  # noqa: E402
+from src.services import ocr_evidence_service, order_service, template_resolution_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
 
@@ -225,3 +225,42 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
     assert isinstance(evidence, dict)
     assert evidence["producer_version"] == "ocr_pipeline_ingest"
     assert evidence["capabilities_json"]["step2_view_ready"] is True
+
+
+def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when_classifier_differs():
+    order_service.clear_all()
+    order = _seed_order("msg-evidence-registry-grid")
+    payload = _sample_payload("6")
+    payload["template_resolution"] = template_resolution_service.build_template_resolution(
+        requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+        requested_template_ids=[
+            "fax_layout_regular_soft_mixer_forbidden_v1",
+            "fax_layout_floor_2f3f_v1",
+        ],
+        resolved_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+        classification={
+            "matched_template_id": "fax_layout_floor_2f3f_v1",
+            "confidence": 0.94,
+            "candidates": [
+                {"id": "fax_layout_floor_2f3f_v1", "score": 0.94},
+                {"id": "fax_layout_regular_soft_mixer_forbidden_v1", "score": 0.91},
+            ],
+        },
+        page_correction_summary={"pages": [{"mode": "template_warp", "template_id": "fax_layout_regular_soft_mixer_forbidden_v1"}]},
+    )
+    payload["table_box"] = None
+    payload["grid_column_edges"] = []
+    payload["grid_row_edges"] = []
+
+    evidence = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=payload,
+        schema_version="v2_evidence_rerun",
+        producer_version="test",
+        source="test",
+    )
+
+    assert isinstance(evidence, dict)
+    assert evidence["artifact_manifest_json"]["artifacts"]["grid_metadata"] is True
+    assert evidence["capabilities_json"]["semantic_shell_only"] is False
+    assert evidence["capabilities_json"]["apply_ready"] is True

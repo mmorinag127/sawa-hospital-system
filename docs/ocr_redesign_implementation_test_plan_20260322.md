@@ -815,6 +815,9 @@ Phase 3:
 - `OCRパイプライン再実行` は常時見える
 - rerun 成功後に current draft が自動で消えない
 - new evidence を採用するかどうかが operator に明確に見える
+- `classifier mismatch` だけでは block せず、resolved template が requested scope 内で安定していて
+  template registry から quantity column semantics を供給できる場合は `semantic_shell_only` に落とさない
+- `ocr-history` は legacy revision が空でも、latest evidence run から最低限の履歴を構成できる
 
 ---
 

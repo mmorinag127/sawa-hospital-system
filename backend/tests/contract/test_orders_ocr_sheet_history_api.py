@@ -242,6 +242,46 @@ def test_orders_ocr_sheet_save_api_flow():
     assert latest.get("rows") == [["01/08", "昼", "Menu A", "8", "exact-save"]]
 
 
+def test_orders_ocr_history_falls_back_to_latest_evidence_run_when_revision_history_empty():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-history-evidence-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "status": "done",
+            "pages": [
+                {
+                    "page_index": 1,
+                    "tables": [
+                        {
+                            "table_id": "p1_t1",
+                            "rows": [["日付", "区分", "メニュー", "常食2F"], ["01/08", "昼", "Menu A", "3"]],
+                        }
+                    ],
+                    "ocr_overlay_uri": "gs://dummy/overlay.png",
+                }
+            ],
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|01/08|昼|Menu A|3|",
+            "template_resolution": {"resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1"},
+            "table_box": [0.1, 0.1, 0.9, 0.9],
+            "grid_column_edges": [0.1, 0.5, 0.9],
+            "grid_row_edges": [0.1, 0.5, 0.9],
+        },
+    )
+
+    history_res = client.get(f"/orders/{order['id']}/ocr-history")
+    assert history_res.status_code == 200
+    history_payload = history_res.json()
+    latest = history_payload.get("latest")
+    assert isinstance(latest, dict)
+    assert latest.get("ui_mode") == "evidence"
+    assert str(latest.get("revision_id") or "").startswith("OEV")
+    assert latest.get("sheet_save_mode") == "evidence_run"
+    assert len(history_payload.get("revisions") or []) == 1
+    assert isinstance(history_payload.get("raw_output"), dict)
+
+
 def test_orders_week_options_and_save_api_flow():
     order_service.clear_all()
     client = TestClient(app)

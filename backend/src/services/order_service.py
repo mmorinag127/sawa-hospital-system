@@ -5510,7 +5510,10 @@ def _get_template_resolution(payload: dict[str, Any] | None) -> dict[str, Any] |
     if not isinstance(payload, dict):
         return None
     resolution = payload.get("template_resolution")
-    return resolution if isinstance(resolution, dict) else None
+    if not isinstance(resolution, dict):
+        return None
+    normalized = template_resolution_service.normalize_template_resolution_state(resolution)
+    return normalized if isinstance(normalized, dict) else resolution
 
 
 def _template_resolution_blockers(payload: dict[str, Any] | None) -> list[str]:
@@ -5541,9 +5544,12 @@ def _sheet_payload_mapping_blocked(
     if any(str(item or "").strip() for item in (template_blockers or [])):
         return True
     missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
-    # Weekly-menu rescue can only be trusted when template/grid semantics are known.
-    # Otherwise, payload-row projection tends to smear OCR noise into semantic quantity columns.
-    return bool({"template_resolution", "grid_metadata"} & missing)
+    if "template_resolution" in missing:
+        return True
+    # Weekly-menu rescue can only be trusted when quantity-column semantics are known.
+    # Full row-edge metadata is useful for overlays, but Step2 quantity mapping only needs a
+    # resolved template plus stable quantity column boundaries.
+    return not ocr_evidence_service.payload_has_quantity_column_semantics(ocr_payload)
 
 
 _RECOVERABLE_OCR_SHEET_ERRORS = {
@@ -6420,6 +6426,66 @@ def _load_order_sheet_revisions(
             deduped.append(revision)
         return deduped[: max(1, limit)], cached_raw_output
     return [], cached_raw_output
+
+
+def _build_ocr_history_fallback_from_evidence_run(
+    evidence_run: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(evidence_run, dict):
+        return None
+    evidence_id = str(evidence_run.get("id") or "").strip()
+    if not evidence_id:
+        return None
+    payload = evidence_run.get("payload_json")
+    if not isinstance(payload, dict):
+        return None
+    structured_tables = payload.get("tables")
+    page_tables = payload.get("pages")
+    row_count = 0
+    if isinstance(structured_tables, list):
+        for table in structured_tables:
+            if not isinstance(table, dict):
+                continue
+            rows = table.get("rows")
+            if isinstance(rows, list):
+                row_count += len(rows)
+    elif isinstance(page_tables, list):
+        for page in page_tables:
+            if not isinstance(page, dict):
+                continue
+            tables = page.get("tables")
+            if not isinstance(tables, list):
+                continue
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                rows = table.get("rows")
+                if isinstance(rows, list):
+                    row_count += len(rows)
+    return {
+        "revision_id": evidence_id,
+        "edited_at": str(evidence_run.get("created_at") or "").strip() or None,
+        "ui_mode": "evidence",
+        "row_count": row_count,
+        "changed": False,
+        "sheet_save_only": False,
+        "sheet_save_mode": "evidence_run",
+        "source": str(evidence_run.get("source") or "").strip() or "evidence_run",
+        "status": str(evidence_run.get("status") or "").strip() or None,
+        "schema_version": str(evidence_run.get("schema_version") or "").strip() or None,
+        "producer_version": str(evidence_run.get("producer_version") or "").strip() or None,
+        "artifact_digest": str(evidence_run.get("artifact_digest") or "").strip() or None,
+        "capabilities": evidence_run.get("capabilities_json")
+        if isinstance(evidence_run.get("capabilities_json"), dict)
+        else {},
+        "degraded_reasons": evidence_run.get("degraded_reasons_json")
+        if isinstance(evidence_run.get("degraded_reasons_json"), list)
+        else [],
+        "rows": [],
+        "row_ids": [],
+        "header": [],
+        "fields": [],
+    }
 
 
 def _build_sheet_payload_from_revision(
@@ -13821,6 +13887,15 @@ def get_ocr_edit_history(order_id: str):
             return None, "order_not_found"
     payload = _load_order_ocr_cache(order_id)
     revisions, raw_output = _load_order_sheet_revisions(order_id=order_id, payload=payload, limit=20)
+    if not revisions:
+        latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+        if isinstance(latest_evidence, dict):
+            evidence_payload = latest_evidence.get("payload_json")
+            synthetic_revision = _build_ocr_history_fallback_from_evidence_run(latest_evidence)
+            if isinstance(synthetic_revision, dict):
+                revisions = [synthetic_revision]
+                if not isinstance(raw_output, dict) and isinstance(evidence_payload, dict):
+                    raw_output = evidence_payload
     latest = revisions[-1] if revisions else None
     return {
         "order_id": order_id,
