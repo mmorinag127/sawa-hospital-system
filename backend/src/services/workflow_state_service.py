@@ -193,19 +193,14 @@ def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, dr
     )
 
 
-def _latest_evidence_is_new_candidate(
-    evidence_run: dict[str, Any] | None,
-    draft_sheet: dict[str, Any] | None,
-) -> bool:
-    latest_evidence_run_id = str((evidence_run or {}).get("id") or "").strip() or None
-    draft_base_evidence_run_id = (
-        str((draft_sheet or {}).get("base_evidence_run_id") or "").strip() or None
-        if isinstance(draft_sheet, dict)
-        else None
-    )
-    if not latest_evidence_run_id or not draft_base_evidence_run_id:
-        return False
-    return latest_evidence_run_id != draft_base_evidence_run_id
+def _job_candidate_evidence_run_id(reparse_job: dict[str, Any] | None) -> str | None:
+    if not isinstance(reparse_job, dict):
+        return None
+    metrics = reparse_job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    if metrics.get("new_evidence_available") is not True:
+        return None
+    return str(metrics.get("evidence_run_id") or "").strip() or None
 
 
 def _infer_reparse_request_mode(
@@ -238,6 +233,23 @@ def _resolve_active_evidence_run(
         return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     resolved = ocr_evidence_service.get_evidence_run(draft_base_evidence_run_id)
     return resolved if isinstance(resolved, dict) else (latest_evidence_run if isinstance(latest_evidence_run, dict) else None)
+
+
+def _resolve_candidate_evidence_run(
+    latest_evidence_run: dict[str, Any] | None,
+    active_evidence_run: dict[str, Any] | None,
+    reparse_job: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    active_evidence_run_id = str((active_evidence_run or {}).get("id") or "").strip() or None
+    rerun_candidate_id = _job_candidate_evidence_run_id(reparse_job)
+    if rerun_candidate_id and rerun_candidate_id != active_evidence_run_id:
+        rerun_candidate = ocr_evidence_service.get_evidence_run(rerun_candidate_id)
+        if isinstance(rerun_candidate, dict):
+            return rerun_candidate
+    latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None
+    if latest_evidence_run_id and latest_evidence_run_id != active_evidence_run_id:
+        return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
+    return None
 
 
 def _decision_selected_label(decision: dict[str, Any], selected_value: str) -> str:
@@ -430,10 +442,15 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
                 "blockers_json": [],
                 "warnings_json": [],
             }
-    active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
-    has_new_candidate = _latest_evidence_is_new_candidate(evidence_run, draft_sheet)
-    evidence_payload = active_evidence_run.get("payload_json") if isinstance(active_evidence_run, dict) else None
     reparse_job = get_ocr_job(f"OCR-{normalized_order_id}")
+    active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
+    candidate_evidence_run = _resolve_candidate_evidence_run(
+        evidence_run,
+        active_evidence_run,
+        reparse_job if isinstance(reparse_job, dict) else None,
+    )
+    has_new_candidate = isinstance(candidate_evidence_run, dict)
+    evidence_payload = active_evidence_run.get("payload_json") if isinstance(active_evidence_run, dict) else None
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
     reparse_request_mode = _infer_reparse_request_mode(
         reparse_job if isinstance(reparse_job, dict) else None,
@@ -520,11 +537,7 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     serialized["candidate_resolution"] = candidate_resolution
     serialized["critical_decisions"] = synced_decisions
     serialized["apply_gate"] = apply_gate
-    serialized["candidate_evidence_run_id"] = (
-        str((evidence_run or {}).get("id") or "").strip() or None
-        if _latest_evidence_is_new_candidate(evidence_run, draft_sheet)
-        else None
-    )
+    serialized["candidate_evidence_run_id"] = str((candidate_evidence_run or {}).get("id") or "").strip() or None
     serialized["active_evidence_run_id"] = str((active_evidence_run or {}).get("id") or "").strip() or None
     serialized["reparse_state"] = reparse_state
     return serialized

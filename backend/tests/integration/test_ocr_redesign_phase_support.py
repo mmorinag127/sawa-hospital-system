@@ -333,6 +333,48 @@ def test_get_ocr_output_and_sheet_prefer_active_evidence_over_stale_cache(monkey
     assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", "9"]
 
 
+def test_get_ocr_output_prefers_active_evidence_over_stale_job_output(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-active-over-job-001")
+    order_service.persist_ocr_evidence_run(
+        order["id"],
+        {
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|9|",
+            "table_rows": [["03/21", "朝", "Menu A", "9"]],
+            "pages": [{"page_index": 1}],
+            "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/21", "朝", "Menu A", "9"]]}],
+        },
+        schema_version="v2_evidence_rerun",
+        producer_version="test",
+        source="ocr-rerun",
+    )
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_job",
+        lambda _job_id: {
+            "id": f"OCR-{order['id']}",
+            "status": "done",
+            "output_reference": "gs://bucket/stale-output.json",
+            "metrics": {},
+        },
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_load_job_output",
+        lambda _job, _source: {
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|3|",
+            "table_rows": [["03/21", "朝", "Menu A", "3"]],
+            "pages": [{"page_index": 1}],
+        },
+    )
+
+    payload, payload_error = order_service.get_ocr_output(order["id"], persist_cache=False)
+
+    assert payload_error is None
+    assert isinstance(payload, dict)
+    assert "|03/21|朝|Menu A|9|" in str(payload.get("table_raw") or "")
+
+
 def test_get_ocr_pages_prefers_active_evidence_over_stale_cache(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-pages-active-evidence-001")

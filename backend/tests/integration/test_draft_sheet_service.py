@@ -496,7 +496,7 @@ def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(monkeyp
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda _order_id, use_saved_draft=True: (
+        lambda _order_id, use_saved_draft=True, evidence_run_override=None: (
             {
                 "source": "weekly_menu+ocr_payload",
                 "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],

@@ -285,6 +285,65 @@ def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evide
     assert workflow["apply_gate"]["can_apply"] is True
 
 
+def test_refresh_workflow_state_uses_rerun_job_metrics_to_surface_new_candidate(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-rerun-candidate", facility_hint="FAC00001", week_hint="2026-03")
+    first = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "5"]],
+            "row_ids": ["row-1"],
+        },
+        edited_by="tester",
+    )
+    assert isinstance(saved, dict)
+    assert saved["base_evidence_run_id"] == first["id"]
+    second = _persist_evidence(
+        order["id"],
+        extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|"},
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "get_ocr_job",
+        lambda _job_id: {
+            "id": f"OCR-{order['id']}",
+            "status": "done",
+            "metrics": {
+                "request_mode": "ocr_rerun",
+                "new_evidence_available": True,
+                "evidence_run_id": second["id"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "describe_job_state",
+        lambda _job: {"status": "done", "job_id": f"OCR-{order['id']}"},
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "new_evidence_available"
+    assert workflow["active_evidence_run_id"] == first["id"]
+    assert workflow["candidate_evidence_run_id"] == second["id"]
+
+
 def test_refresh_workflow_state_returns_rerun_in_progress_when_ocr_rerun_running(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-rerun-running", facility_hint="FAC00001", week_hint="2026-03")

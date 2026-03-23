@@ -5027,8 +5027,13 @@ def _build_best_available_semantic_draft(
     order_id: str,
     *,
     use_saved_draft: bool = True,
+    evidence_run_override: dict[str, Any] | None = None,
 ) -> Optional[dict[str, Any]]:
-    sheet_payload, sheet_error = get_ocr_sheet(order_id, use_saved_draft=use_saved_draft)
+    sheet_payload, sheet_error = get_ocr_sheet(
+        order_id,
+        use_saved_draft=use_saved_draft,
+        evidence_run_override=evidence_run_override,
+    )
     candidates: list[dict[str, Any]] = []
     if isinstance(sheet_payload, dict):
         candidates.append(sheet_payload)
@@ -5441,7 +5446,11 @@ def switch_draft_to_latest_evidence(
     if current_base_evidence_id == latest_evidence_id:
         return current_draft, "already_current"
 
-    draft_payload = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
+    draft_payload = _build_best_available_semantic_draft(
+        order_id,
+        use_saved_draft=False,
+        evidence_run_override=latest_evidence,
+    )
     if not isinstance(draft_payload, dict):
         return None, "switch_draft_unavailable"
 
@@ -9161,14 +9170,22 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         message_id = order.message_id
     active_evidence_payload = None
     active_evidence_run = None
+    active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
     job = get_ocr_job(f"OCR-{order_id}")
-    parsed = _load_job_output(job, "order")
-    parsed_source = "job"
-    order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
-    if _output_is_pending(parsed):
-        parsed = None
-    elif not _payload_has_first_pass_ocr_content(parsed):
-        parsed = None
+    parsed = None
+    parsed_source = ""
+    order_job_pending = _job_is_pending(job)
+    if _payload_has_first_pass_ocr_content(active_evidence_payload):
+        parsed = active_evidence_payload
+        parsed_source = "active_evidence"
+    else:
+        parsed = _load_job_output(job, "order")
+        parsed_source = "job"
+        order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
+        if _output_is_pending(parsed):
+            parsed = None
+        elif not _payload_has_first_pass_ocr_content(parsed):
+            parsed = None
     fallback_job = None
     if (
         message_id
@@ -9182,11 +9199,6 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         if _payload_has_first_pass_ocr_content(fallback_parsed):
             parsed = fallback_parsed
             parsed_source = "message"
-    if parsed is None:
-        active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
-        if _payload_has_first_pass_ocr_content(active_evidence_payload):
-            parsed = active_evidence_payload
-            parsed_source = "active_evidence"
     if parsed is None:
         parsed = _load_order_ocr_cache(order_id)
         parsed_source = "cache"
@@ -13144,7 +13156,12 @@ def build_recoverable_ocr_sheet_payload(
     )
 
 
-def get_ocr_sheet(order_id: str, *, use_saved_draft: bool = True):
+def get_ocr_sheet(
+    order_id: str,
+    *,
+    use_saved_draft: bool = True,
+    evidence_run_override: dict[str, Any] | None = None,
+):
     lines_updated_at: datetime | None = None
     order_status: str | None = None
     evidence_only_step2 = _evidence_only_step2_enabled()
@@ -13211,9 +13228,13 @@ def get_ocr_sheet(order_id: str, *, use_saved_draft: bool = True):
     quantity_index = _build_sheet_quantity_index(fields)
 
     ocr_payload: dict[str, Any] | None = None
-    payload, _ = get_ocr_output(order_id, persist_cache=False)
-    if isinstance(payload, dict):
-        ocr_payload = payload
+    override_payload = evidence_run_override.get("payload_json") if isinstance(evidence_run_override, dict) else None
+    if isinstance(override_payload, dict):
+        ocr_payload = evidence_manifest_service.ensure_evidence_manifest(dict(override_payload))
+    else:
+        payload, _ = get_ocr_output(order_id, persist_cache=False)
+        if isinstance(payload, dict):
+            ocr_payload = payload
     latest_draft = (
         get_latest_sheet_draft(order_id, backfill_from_revision=True)
         if use_saved_draft
