@@ -712,6 +712,47 @@ def _extract_entry_date_from_sheet_cell(value: object, received_at: datetime) ->
     return _normalize_entry_date(text)
 
 
+_WEEKDAY_HINT_MAP = {
+    "月": 0,
+    "火": 1,
+    "水": 2,
+    "木": 3,
+    "金": 4,
+    "土": 5,
+    "日": 6,
+}
+
+
+def _extract_weekday_hint(value: object) -> int | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text.strip():
+        return None
+    match = re.search(r"[（(]\s*([月火水木金土日])\s*[)）]", text)
+    if not match:
+        return None
+    return _WEEKDAY_HINT_MAP.get(match.group(1))
+
+
+def _infer_following_date_from_weekday_hint(
+    previous_date: date | None,
+    raw_value: object,
+) -> date | None:
+    if not isinstance(previous_date, date):
+        return None
+    weekday_hint = _extract_weekday_hint(raw_value)
+    if weekday_hint is None:
+        return None
+    if previous_date.weekday() == weekday_hint:
+        return previous_date
+    for delta in range(1, 8):
+        candidate = previous_date + timedelta(days=delta)
+        if candidate.weekday() == weekday_hint:
+            return candidate
+    return None
+
+
 def _build_position_menu_entries_from_ocr_payload(
     *,
     payload: dict[str, Any] | None,
@@ -760,6 +801,7 @@ def _build_position_menu_entries_from_ocr_payload(
     date_candidates = _collect_sheet_dates_from_payload(source_payload, received_at)
     default_date = min(date_candidates) if date_candidates else None
     first_date_in_table: date | None = None
+    latest_resolved_date: date | None = None
     carry_forward: dict[str, Any] = {role: None for role in fill_forward_roles}
     entries: list[dict] = []
 
@@ -772,7 +814,11 @@ def _build_position_menu_entries_from_ocr_payload(
         raw_menu_name = row_values[menu_idx] if menu_idx < len(row_values) else ""
         menu_name = str(raw_menu_name or "").strip()
         menu_date = _extract_entry_date_from_sheet_cell(raw_date, received_at)
+        if menu_date is None:
+            menu_date = _infer_following_date_from_weekday_hint(latest_resolved_date, raw_date)
         daypart = str(raw_daypart or "").strip()
+        if isinstance(menu_date, date):
+            latest_resolved_date = menu_date
 
         base = {
             "date": menu_date,
@@ -4969,6 +5015,149 @@ def _draft_fields_look_generic(fields: object) -> bool:
     return all(re.fullmatch(r"col\d+", token) for token in normalized)
 
 
+def _sheet_row_identity_key(fields: list[str], row: list[Any]) -> tuple[str, str, str] | None:
+    if not isinstance(fields, list) or not isinstance(row, list):
+        return None
+    try:
+        date_idx = fields.index("date_mmdd")
+        daypart_idx = fields.index("daypart")
+        menu_idx = fields.index("menu")
+    except ValueError:
+        return None
+    parts = []
+    for idx in (date_idx, daypart_idx, menu_idx):
+        if idx >= len(row):
+            return None
+        token = str(row[idx] or "").strip()
+        if not token:
+            return None
+        parts.append(token)
+    return tuple(parts)
+
+
+def _merge_saved_draft_into_semantic_sheet(
+    current_sheet: dict[str, Any] | None,
+    fresh_sheet: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
+        return fresh_sheet if isinstance(fresh_sheet, dict) else current_sheet
+    current_fields = [str(field).strip() for field in (current_sheet.get("fields") or []) if str(field).strip()]
+    fresh_fields = [str(field).strip() for field in (fresh_sheet.get("fields") or []) if str(field).strip()]
+    fresh_rows = [list(row) for row in (fresh_sheet.get("rows") or []) if isinstance(row, list)]
+    if not current_fields or not fresh_fields or not fresh_rows:
+        return fresh_sheet
+
+    current_rows = [list(row) for row in (current_sheet.get("rows") or []) if isinstance(row, list)]
+    current_row_ids = [str(item).strip() for item in (current_sheet.get("row_ids") or []) if str(item).strip()]
+    fresh_row_ids = [str(item).strip() for item in (fresh_sheet.get("row_ids") or []) if str(item).strip()]
+    if len(fresh_row_ids) < len(fresh_rows):
+        fresh_row_ids.extend([f"row-{idx + 1}" for idx in range(len(fresh_row_ids), len(fresh_rows))])
+
+    current_index = {field: idx for idx, field in enumerate(current_fields)}
+    fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
+    current_by_key: dict[tuple[str, str, str], tuple[list[Any], str | None]] = {}
+    unmatched_current: list[tuple[list[Any], str | None]] = []
+    for idx, row in enumerate(current_rows):
+        row_key = _sheet_row_identity_key(current_fields, row)
+        row_id = current_row_ids[idx] if idx < len(current_row_ids) else None
+        if row_key is None:
+            unmatched_current.append((row, row_id))
+            continue
+        current_by_key[row_key] = (row, row_id)
+
+    merged_rows: list[list[Any]] = []
+    merged_row_ids: list[str] = []
+    matched_keys: set[tuple[str, str, str]] = set()
+    for idx, fresh_row in enumerate(fresh_rows):
+        row_key = _sheet_row_identity_key(fresh_fields, fresh_row)
+        merged_row = list(fresh_row)
+        merged_row_id = fresh_row_ids[idx] if idx < len(fresh_row_ids) else f"row-{idx + 1}"
+        if row_key is not None and row_key in current_by_key:
+            current_row, current_row_id = current_by_key[row_key]
+            matched_keys.add(row_key)
+            for field_name, current_idx in current_index.items():
+                fresh_idx = fresh_index.get(field_name)
+                if fresh_idx is None or current_idx >= len(current_row):
+                    continue
+                current_value = current_row[current_idx]
+                if str(current_value or "").strip() != "":
+                    merged_row[fresh_idx] = current_value
+            if current_row_id:
+                merged_row_id = current_row_id
+        merged_rows.append(merged_row)
+        merged_row_ids.append(merged_row_id)
+
+    for row_key, (current_row, current_row_id) in current_by_key.items():
+        if row_key in matched_keys:
+            continue
+        appended = [""] * len(fresh_fields)
+        for field_name, current_idx in current_index.items():
+            fresh_idx = fresh_index.get(field_name)
+            if fresh_idx is None or current_idx >= len(current_row):
+                continue
+            appended[fresh_idx] = current_row[current_idx]
+        merged_rows.append(appended)
+        merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
+
+    for current_row, current_row_id in unmatched_current:
+        appended = [""] * len(fresh_fields)
+        for field_name, current_idx in current_index.items():
+            fresh_idx = fresh_index.get(field_name)
+            if fresh_idx is None or current_idx >= len(current_row):
+                continue
+            appended[fresh_idx] = current_row[current_idx]
+        if any(str(cell or "").strip() for cell in appended):
+            merged_rows.append(appended)
+            merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
+
+    merged_warnings: list[str] = []
+    for warning in list(current_sheet.get("warnings") or []) + list(fresh_sheet.get("warnings") or []):
+        token = str(warning or "").strip()
+        if token and token not in merged_warnings:
+            merged_warnings.append(token)
+
+    merged = dict(fresh_sheet)
+    merged["rows"] = merged_rows
+    merged["row_ids"] = merged_row_ids
+    merged["warnings"] = merged_warnings
+    ui_mode = str(current_sheet.get("ui_mode") or fresh_sheet.get("ui_mode") or "").strip()
+    if ui_mode:
+        merged["ui_mode"] = ui_mode
+    return merged
+
+
+def _maybe_refresh_semantic_sheet_draft(
+    order_id: str,
+    draft: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(draft, dict):
+        return draft
+    draft_sheet_json = draft.get("draft_sheet_json")
+    if not isinstance(draft_sheet_json, dict):
+        return draft
+    fresh_sheet = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
+    if not isinstance(fresh_sheet, dict) or _draft_fields_look_generic(fresh_sheet.get("fields")):
+        return draft
+    merged_sheet = _merge_saved_draft_into_semantic_sheet(draft_sheet_json, fresh_sheet)
+    if not isinstance(merged_sheet, dict):
+        return draft
+    if (
+        draft_sheet_json.get("fields") == merged_sheet.get("fields")
+        and draft_sheet_json.get("header") == merged_sheet.get("header")
+        and draft_sheet_json.get("rows") == merged_sheet.get("rows")
+    ):
+        return draft
+    refreshed = persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json=merged_sheet,
+        draft_state=str(draft.get("draft_state") or "draft_ready").strip() or "draft_ready",
+        blockers=[str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (merged_sheet.get("warnings") or []) if str(item).strip()],
+        edited_by="semantic-sheet-refresh",
+    )
+    return refreshed if isinstance(refreshed, dict) else draft
+
+
 def _maybe_upgrade_generic_sheet_draft(
     order_id: str,
     draft: dict[str, Any] | None,
@@ -5002,6 +5191,7 @@ def get_latest_sheet_draft(
 ) -> Optional[dict]:
     latest = draft_sheet_service.get_latest_sheet_draft(order_id)
     if latest is not None:
+        latest = _maybe_refresh_semantic_sheet_draft(order_id, latest)
         if upgrade_generic_from_sheet:
             return _maybe_upgrade_generic_sheet_draft(order_id, latest)
         return latest
@@ -9960,8 +10150,10 @@ def _sheet_month_distance(from_month_id: str | None, to_month_id: str | None) ->
 def _collect_sheet_dates_from_payload(payload: dict[str, Any], received_at: datetime) -> list[date]:
     dates: list[date] = []
     seen: set[str] = set()
+    latest_resolved_date: date | None = None
 
     def _push(raw: object) -> None:
+        nonlocal latest_resolved_date
         if raw is None:
             return
         parsed: date | None = None
@@ -9983,20 +10175,24 @@ def _collect_sheet_dates_from_payload(payload: dict[str, Any], received_at: date
                         )
                     except Exception:
                         parsed = None
+            if not parsed:
+                parsed = _infer_following_date_from_weekday_hint(latest_resolved_date, text)
         if not parsed:
             return
         key = parsed.isoformat()
         if key in seen:
+            latest_resolved_date = parsed
             return
         seen.add(key)
         dates.append(parsed)
+        latest_resolved_date = parsed
 
     for raw in payload.get("date_strings") or []:
         _push(raw)
 
     table_rows = payload.get("table_rows")
     if isinstance(table_rows, list):
-        for row in table_rows[:40]:
+        for row in table_rows[:200]:
             if not isinstance(row, list):
                 continue
             for cell in row[:2]:

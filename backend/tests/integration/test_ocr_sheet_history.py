@@ -2721,6 +2721,49 @@ OV:LL 08/10/920Z
     assert all(item.month == 2 for item in dates)
 
 
+def test_collect_sheet_dates_infers_weekday_hint_beyond_legacy_row_scan_window():
+    received_at = datetime(2026, 3, 23, 9, 0, 0)
+    payload = {
+        "table_rows": [
+            ["3/22", "朝", "A", "10"],
+            ["3/23", "朝", "B", "10"],
+            ["3/24", "朝", "C", "10"],
+            ["3/25", "朝", "D", "10"],
+            ["3/26", "朝", "E", "10"],
+        ]
+        + [["", "", "", ""] for _ in range(36)]
+        + [["LZ/E\n(金)", "", "F", "10"]]
+    }
+
+    dates = order_service._collect_sheet_dates_from_payload(payload, received_at)
+
+    assert date(2026, 3, 27) in dates
+
+
+def test_build_position_menu_entries_from_ocr_payload_infers_noisy_weekday_anchor():
+    template = {
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        "large_cell_mode": True,
+    }
+    payload = {
+        "table_rows": [
+            ["3/26\n(木)", "朝", "ごぼうと竹輪の煮物", "7"],
+            ["", "", "いんげんの味噌和え", "7"],
+            ["LZ/E\n(金)", "朝", "豆腐と大根の含め煮", "7"],
+            ["", "", "白菜のおかか和え", "7"],
+        ]
+    }
+
+    entries = order_service._build_position_menu_entries_from_ocr_payload(
+        payload=payload,
+        template=template,
+        received_at=datetime(2026, 3, 23, 9, 0, 0),
+    )
+
+    dates = sorted({item.get("menu_date") for item in entries if item.get("menu_date")})
+    assert dates == [date(2026, 3, 26), date(2026, 3, 27)]
+
+
 def test_get_ocr_sheet_without_facility_returns_error():
     order_service.clear_all()
     order = _seed_order_without_facility(message_id="msg-sheet-no-fac-001")
