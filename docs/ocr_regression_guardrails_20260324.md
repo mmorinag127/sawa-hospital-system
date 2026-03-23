@@ -12,6 +12,36 @@ The repeated failures were not random. They came from the same process defects:
 - verifying helper output instead of the exact live order payload
 - deploying after local tests without confirming the target order in live
 
+## Hard recurrence-prevention measures
+
+These are the rules that should prevent the same class of mistakes from recurring.
+
+1. Freeze the winning path before editing
+- For every production-visible bug, write down the exact endpoint or page payload that currently drives the symptom.
+
+2. Freeze the visible success condition before editing
+- State the expected result in one line.
+- Example: `ORDe9cabe7e` must show `03/27` in `draft-sheet`.
+
+3. Require one canonical owner for the changed concept
+- Date extraction, quantity mapping, week resolution, and current draft adoption must each have an identified winning path.
+- If multiple active paths remain, the task is not finished.
+
+4. Treat candidate/current state as separate by default
+- Rerun success is not a visible fix until current draft/evidence is switched or rebuilt.
+
+5. Require representation-matched regressions
+- If production failed on `tables.rows`, the regression must use `tables.rows`.
+
+6. Require exact live before/after verification
+- Health checks and helper output are never enough by themselves.
+
+7. Do not close on symptom movement
+- `empty -> stale`
+- `col3 -> wrong semantic rows`
+- `candidate fixed -> current still stale`
+  These are not completions.
+
 ## Recurrent failure classes
 
 ### 1. Duplicated extraction logic
@@ -63,6 +93,7 @@ Purpose:
 - force end-to-end path tracing before editing
 - prevent legacy fallback from re-entering current flow
 - require regression tests for the exact failed representation
+- require explicit success criteria and hard stop conditions
 
 Location:
 - `/Users/mmorinag/.codex/skills/sawa-ocr-implementation-guardrails`
@@ -75,6 +106,7 @@ Purpose:
 - require baseline capture on the exact reported order
 - require live verification after deploy
 - prevent “fixed” claims before the exact user-visible symptom is checked
+- require before/after proof on the same order and same action sequence
 
 Location:
 - `/Users/mmorinag/.codex/skills/sawa-live-verification-guardrails`
