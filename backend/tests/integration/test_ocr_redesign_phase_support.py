@@ -5,7 +5,7 @@ from datetime import date, datetime
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import config_service, order_service  # noqa: E402
+from src.services import config_service, order_service, template_resolution_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -233,6 +233,152 @@ def test_get_ocr_pages_defers_grid_recovery_when_template_metadata_is_partial(mo
     assert pages["grid_row_edges"] is None
     assert pages["grid_detection_status"] == "deferred"
     assert pages["grid_detection_deferred_reason"] == "missing_template_grid_metadata:grid_row_edges"
+
+
+def test_get_ocr_output_and_sheet_prefer_active_evidence_over_stale_cache(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-active-evidence-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|3|",
+            "table_rows": [["03/21", "朝", "Menu A", "3"]],
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/stale-overlay.png",
+                    "layout_overlay_uri": "gs://bucket/stale-layout.png",
+                    "figure_uris": [],
+                }
+            ],
+            "template_resolution": {
+                "requested_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "requested_template_ids": [
+                    "fax_layout_regular_soft_mixer_forbidden_v1",
+                    "fax_layout_floor_2f3f_v1",
+                ],
+                "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "matched_template_id": "fax_layout_floor_2f3f_v1",
+                "blocked": True,
+                "blocked_reasons": ["template_mismatch"],
+            },
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+        },
+    )
+    order_service.persist_ocr_evidence_run(
+        order["id"],
+        {
+            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|9|",
+            "table_rows": [["03/21", "朝", "Menu A", "9"]],
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/fresh-overlay.png",
+                    "layout_overlay_uri": "gs://bucket/fresh-layout.png",
+                    "figure_uris": [],
+                }
+            ],
+            "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/21", "朝", "Menu A", "9"]]}],
+            "template_resolution": template_resolution_service.build_template_resolution(
+                requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                requested_template_ids=[
+                    "fax_layout_regular_soft_mixer_forbidden_v1",
+                    "fax_layout_floor_2f3f_v1",
+                ],
+                resolved_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                classification={
+                    "matched_template_id": "fax_layout_floor_2f3f_v1",
+                    "confidence": 0.94,
+                    "candidates": [
+                        {"id": "fax_layout_floor_2f3f_v1", "score": 0.94},
+                        {"id": "fax_layout_regular_soft_mixer_forbidden_v1", "score": 0.91},
+                    ],
+                },
+                page_correction_summary={"pages": [{"mode": "template_warp", "template_id": "fax_layout_regular_soft_mixer_forbidden_v1"}]},
+            ),
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+        },
+        schema_version="v2_evidence_rerun",
+        producer_version="test",
+        source="ocr-rerun",
+    )
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_position_menu_entries_safe",
+        lambda *_args, **_kwargs: [
+            {
+                "menu_name": "Menu A",
+                "menu_date": date(2026, 3, 21),
+                "daypart_key": "breakfast",
+                "slot_index": 0,
+                "order": 0,
+            }
+        ],
+    )
+
+    payload, payload_error = order_service.get_ocr_output(order["id"], persist_cache=False)
+    assert payload_error is None
+    assert isinstance(payload, dict)
+    assert "|03/21|朝|Menu A|9|" in str(payload.get("table_raw") or "")
+
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", "9"]
+
+
+def test_get_ocr_pages_prefers_active_evidence_over_stale_cache(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-pages-active-evidence-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/stale-overlay.png",
+                    "layout_overlay_uri": "gs://bucket/stale-layout.png",
+                    "figure_uris": [],
+                }
+            ]
+        },
+    )
+    order_service.persist_ocr_evidence_run(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/fresh-overlay.png",
+                    "layout_overlay_uri": "gs://bucket/fresh-layout.png",
+                    "figure_uris": [],
+                }
+            ],
+            "template_resolution": {
+                "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "blocked": False,
+                "blocked_reasons": [],
+            },
+        },
+        schema_version="v2_evidence_rerun",
+        producer_version="test",
+        source="ocr-rerun",
+    )
+
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+
+    pages, error = order_service.get_ocr_pages(order["id"])
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["pages"][0]["ocr_overlay_uri"] == "gs://bucket/fresh-overlay.png"
+    assert pages["pages"][0]["ocr_overlay_url"] == "signed:gs://bucket/fresh-overlay.png"
 
 
 def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_by_default():

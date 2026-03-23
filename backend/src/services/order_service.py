@@ -4850,7 +4850,12 @@ def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = Tr
     latest = ocr_evidence_service.get_latest_evidence_run(order_id)
     if latest is not None or not backfill_from_cache:
         return latest
-    cached_payload = _load_order_ocr_cache(order_id)
+    active_evidence_payload, _active_evidence_run = _load_active_ocr_payload(order_id)
+    cached_payload = (
+        active_evidence_payload
+        if isinstance(active_evidence_payload, dict)
+        else _load_order_ocr_cache(order_id)
+    )
     if not isinstance(cached_payload, dict):
         return None
     return ocr_evidence_service.backfill_evidence_run_from_cached_payload(
@@ -4860,6 +4865,21 @@ def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = Tr
         producer_version="legacy-cache-backfill/v1",
         source="legacy-cache-backfill",
     )
+
+
+def _resolve_active_ocr_evidence_run(order_id: str) -> Optional[dict]:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
+    resolved = workflow_state_service._resolve_active_evidence_run(latest_evidence, latest_draft)
+    return resolved if isinstance(resolved, dict) else None
+
+
+def _load_active_ocr_payload(order_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    active_evidence = _resolve_active_ocr_evidence_run(order_id)
+    payload = active_evidence.get("payload_json") if isinstance(active_evidence, dict) else None
+    if not isinstance(payload, dict):
+        return None, active_evidence
+    return evidence_manifest_service.ensure_evidence_manifest(dict(payload)), active_evidence
 
 
 def get_ocr_evidence_run(evidence_run_id: str) -> Optional[dict]:
@@ -9139,6 +9159,8 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         if not order:
             return None, "order_not_found"
         message_id = order.message_id
+    active_evidence_payload = None
+    active_evidence_run = None
     job = get_ocr_job(f"OCR-{order_id}")
     parsed = _load_job_output(job, "order")
     parsed_source = "job"
@@ -9160,6 +9182,11 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         if _payload_has_first_pass_ocr_content(fallback_parsed):
             parsed = fallback_parsed
             parsed_source = "message"
+    if parsed is None:
+        active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
+        if _payload_has_first_pass_ocr_content(active_evidence_payload):
+            parsed = active_evidence_payload
+            parsed_source = "active_evidence"
     if parsed is None:
         parsed = _load_order_ocr_cache(order_id)
         parsed_source = "cache"
@@ -9184,10 +9211,11 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
         enriched = dict(parsed) if isinstance(parsed, dict) else {}
         merged = False
-        edited = cached_payload.get("_edited_ocr")
-        if isinstance(edited, dict) and "_edited_ocr" not in enriched:
-            enriched["_edited_ocr"] = edited
-            merged = True
+        if parsed_source != "active_evidence":
+            edited = cached_payload.get("_edited_ocr")
+            if isinstance(edited, dict) and "_edited_ocr" not in enriched:
+                enriched["_edited_ocr"] = edited
+                merged = True
         reparse_debug = cached_payload.get("_reparse_debug")
         if isinstance(reparse_debug, dict) and "_reparse_debug" not in enriched:
             enriched["_reparse_debug"] = reparse_debug
@@ -9256,6 +9284,7 @@ def get_ocr_pages(order_id: str):
         message_id = order.message_id
         facility_id = order.facility_code
         document_uri = order.document_uri
+    active_evidence_payload = None
     job = get_ocr_job(f"OCR-{order_id}")
     parsed = _load_job_output(job, "order")
     parsed_source = "job"
@@ -9279,6 +9308,11 @@ def get_ocr_pages(order_id: str):
             parsed_source = "message"
             if isinstance(parsed, dict) and not _output_is_pending(parsed):
                 _save_order_ocr_cache(order_id, parsed)
+    if parsed is None:
+        active_evidence_payload, _active_evidence_run = _load_active_ocr_payload(order_id)
+        if _payload_has_page_artifacts(active_evidence_payload):
+            parsed = active_evidence_payload
+            parsed_source = "active_evidence"
     if parsed is None:
         parsed = _load_order_ocr_cache(order_id)
         parsed_source = "cache"
