@@ -2740,6 +2740,29 @@ def test_collect_sheet_dates_infers_weekday_hint_beyond_legacy_row_scan_window()
     assert date(2026, 3, 27) in dates
 
 
+def test_collect_sheet_dates_reads_structured_table_rows_for_weekday_hint():
+    received_at = datetime(2026, 3, 23, 9, 0, 0)
+    payload = {
+        "tables": [
+            {
+                "table_id": "t1",
+                "page_index": 1,
+                "rows": [
+                    ["3/26\n(木)", "朝", "ごぼうと竹輪の煮物", "7"],
+                    ["", "", "いんげんの味噌和え", "7"],
+                    ["LZ/E\n(金)", "朝", "豆腐と大根の含め煮", "7"],
+                    ["", "", "白菜のおかか和え", "7"],
+                ],
+            }
+        ]
+    }
+
+    dates = order_service._collect_sheet_dates_from_payload(payload, received_at)
+
+    assert date(2026, 3, 26) in dates
+    assert date(2026, 3, 27) in dates
+
+
 def test_build_position_menu_entries_from_ocr_payload_infers_noisy_weekday_anchor():
     template = {
         "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
@@ -2762,6 +2785,26 @@ def test_build_position_menu_entries_from_ocr_payload_infers_noisy_weekday_ancho
 
     dates = sorted({item.get("menu_date") for item in entries if item.get("menu_date")})
     assert dates == [date(2026, 3, 26), date(2026, 3, 27)]
+
+
+def test_merge_weekly_menu_entries_with_ocr_tail_appends_out_of_range_days_only():
+    weekly_entries = [
+        {"menu_date": date(2026, 3, 22), "daypart_key": "朝", "menu_name": "A", "slot_index": 0, "order": 0},
+        {"menu_date": date(2026, 3, 26), "daypart_key": "夕", "menu_name": "B", "slot_index": 1, "order": 1},
+    ]
+    ocr_entries = [
+        {"menu_date": date(2026, 3, 26), "daypart_key": "夕", "menu_name": "B", "slot_index": 1, "order": 1},
+        {"menu_date": date(2026, 3, 27), "daypart_key": "朝", "menu_name": "C", "slot_index": 2, "order": 2},
+    ]
+
+    merged = order_service._merge_weekly_menu_entries_with_ocr_tail(weekly_entries, ocr_entries)
+
+    assert [item.get("menu_date") for item in merged] == [
+        date(2026, 3, 22),
+        date(2026, 3, 26),
+        date(2026, 3, 27),
+    ]
+    assert [item.get("menu_name") for item in merged] == ["A", "B", "C"]
 
 
 def test_get_ocr_sheet_without_facility_returns_error():

@@ -856,6 +856,62 @@ def _build_position_menu_entries_from_ocr_payload(
     return entries
 
 
+def _merge_weekly_menu_entries_with_ocr_tail(
+    weekly_entries: list[dict[str, Any]] | None,
+    ocr_entries: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    base_entries = [dict(item) for item in (weekly_entries or []) if isinstance(item, dict)]
+    if not base_entries:
+        return [dict(item) for item in (ocr_entries or []) if isinstance(item, dict)]
+    extra_entries = [dict(item) for item in (ocr_entries or []) if isinstance(item, dict)]
+    if not extra_entries:
+        return base_entries
+
+    weekly_dates = [
+        item.get("menu_date")
+        for item in base_entries
+        if isinstance(item.get("menu_date"), date)
+    ]
+    if not weekly_dates:
+        return base_entries
+    min_weekly_date = min(weekly_dates)
+    max_weekly_date = max(weekly_dates)
+    seen_keys = {
+        (
+            item.get("menu_date"),
+            _normalize_daypart_key(item.get("daypart_key")),
+            str(item.get("menu_name") or "").strip(),
+        )
+        for item in base_entries
+    }
+    merged = list(base_entries)
+    for item in extra_entries:
+        menu_date = item.get("menu_date")
+        if not isinstance(menu_date, date):
+            continue
+        if min_weekly_date <= menu_date <= max_weekly_date:
+            continue
+        dedupe_key = (
+            menu_date,
+            _normalize_daypart_key(item.get("daypart_key")),
+            str(item.get("menu_name") or "").strip(),
+        )
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        merged.append(item)
+    merged.sort(
+        key=lambda item: (
+            item.get("menu_date") or date.min,
+            _daypart_sort_components(item.get("daypart_key"))[0],
+            _daypart_sort_components(item.get("daypart_key"))[1],
+            int(item.get("slot_index") or 0),
+            int(item.get("order") or 0),
+        )
+    )
+    return merged
+
+
 def _build_sheet_menu_entries(
     *,
     week_id: str,
@@ -866,6 +922,14 @@ def _build_sheet_menu_entries(
 ) -> tuple[list[dict], str]:
     entries = _build_position_menu_entries_safe(week_id, facility_id)
     if entries:
+        ocr_entries = _build_position_menu_entries_from_ocr_payload(
+            payload=ocr_payload,
+            template=template,
+            received_at=received_at,
+        )
+        merged_entries = _merge_weekly_menu_entries_with_ocr_tail(entries, ocr_entries)
+        if len(merged_entries) > len(entries):
+            return merged_entries, "weekly_menu"
         return entries, "weekly_menu"
     ocr_entries = _build_position_menu_entries_from_ocr_payload(
         payload=ocr_payload,
@@ -10193,6 +10257,16 @@ def _collect_sheet_dates_from_payload(payload: dict[str, Any], received_at: date
     table_rows = payload.get("table_rows")
     if isinstance(table_rows, list):
         for row in table_rows[:200]:
+            if not isinstance(row, list):
+                continue
+            for cell in row[:2]:
+                _push(cell)
+
+    for table_payload in _collect_structured_tables_from_payload(payload):
+        rows = table_payload.get("rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows[:200]:
             if not isinstance(row, list):
                 continue
             for cell in row[:2]:
