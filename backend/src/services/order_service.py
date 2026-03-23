@@ -4850,12 +4850,7 @@ def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = Tr
     latest = ocr_evidence_service.get_latest_evidence_run(order_id)
     if latest is not None or not backfill_from_cache:
         return latest
-    active_evidence_payload, _active_evidence_run = _load_active_ocr_payload(order_id)
-    cached_payload = (
-        active_evidence_payload
-        if isinstance(active_evidence_payload, dict)
-        else _load_order_ocr_cache(order_id)
-    )
+    cached_payload = _load_order_ocr_cache(order_id)
     if not isinstance(cached_payload, dict):
         return None
     return ocr_evidence_service.backfill_evidence_run_from_cached_payload(
@@ -5550,26 +5545,30 @@ def _ocr_evidence_missing_artifacts(payload: dict[str, Any] | None) -> list[str]
     return evidence_manifest_service.evidence_missing_artifacts(payload)
 
 
-def _sheet_payload_mapping_blocked(
+def _sheet_payload_mapping_block_reason(
     *,
     source: str,
     ocr_payload: dict[str, Any] | None,
     evidence_missing: list[str] | None,
     template_blockers: list[str] | None,
-) -> bool:
+) -> str | None:
     if source != "weekly_menu":
-        return False
+        return None
     if not isinstance(_get_template_resolution(ocr_payload), dict):
-        return True
+        return "unresolved_template"
     if any(str(item or "").strip() for item in (template_blockers or [])):
-        return True
+        return "unresolved_template"
     missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
     if "template_resolution" in missing:
-        return True
+        return "unresolved_template"
     # Weekly-menu rescue can only be trusted when quantity-column semantics are known.
     # Full row-edge metadata is useful for overlays, but Step2 quantity mapping only needs a
     # resolved template plus stable quantity column boundaries.
-    return not ocr_evidence_service.payload_has_quantity_column_semantics(ocr_payload)
+    if not ocr_evidence_service.payload_has_quantity_column_semantics(ocr_payload):
+        return "unresolved_template"
+    if ocr_evidence_service.payload_has_high_risk_numeric_issues(ocr_payload):
+        return "numeric_review_required"
+    return None
 
 
 _RECOVERABLE_OCR_SHEET_ERRORS = {
@@ -7054,6 +7053,7 @@ _REVIEW_REASON_MESSAGES: dict[str, str] = {
     "reparse_stale": "再解析ジョブが停止しているため、再実行が必要です。",
     "sheet_order_lines_suppressed_reparse_failed": "失敗した再解析の明細は採用せず、OCRの下書きを表示しています。",
     "sheet_structural_projection_requires_review": "広範囲の数量投影が必要だったため、自動反映を止めています。",
+    "sheet_payload_mapping_blocked_numeric_review_required": "数量OCRの信頼度が低いため、自動投影を止めています。",
     "ocr_evidence_recovery_required": "OCR成果物が不足しているため、まず復旧が必要です。",
     "template_resolution_blocked": "施設テンプレートの判定が不安定なため、先に確認が必要です。",
     "template_mismatch": "OCRが選んだテンプレートと施設設定が一致していません。",
@@ -13355,12 +13355,13 @@ def get_ocr_sheet(order_id: str, *, use_saved_draft: bool = True):
     mapped_mode = "identity"
     rows = _clone_sheet_rows(base_rows)
     sheet_warnings: list[str] = []
-    payload_mapping_blocked = _sheet_payload_mapping_blocked(
+    payload_mapping_block_reason = _sheet_payload_mapping_block_reason(
         source=source,
         ocr_payload=ocr_payload,
         evidence_missing=evidence_missing,
         template_blockers=template_blockers,
     )
+    payload_mapping_blocked = bool(payload_mapping_block_reason)
     if payload_mapping_blocked and sheet_lines_source == "ocr_payload":
         sheet_lines = []
         sheet_lines_source = "suppressed"
@@ -13375,7 +13376,10 @@ def get_ocr_sheet(order_id: str, *, use_saved_draft: bool = True):
     if suppress_order_lines_reason:
         _append_sheet_warning(suppress_order_lines_reason)
     if payload_mapping_blocked and payload_rows:
-        _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
+        if payload_mapping_block_reason == "numeric_review_required":
+            _append_sheet_warning("sheet_payload_mapping_blocked_numeric_review_required")
+        else:
+            _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
 
     llm_allows_cluster_fill = _llm_allows_order_line_cluster_consensus_fill(ocr_payload)
 

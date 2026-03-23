@@ -817,6 +817,8 @@ Phase 3:
 - new evidence を採用するかどうかが operator に明確に見える
 - `classifier mismatch` だけでは block せず、resolved template が requested scope 内で安定していて
   template registry から quantity column semantics を供給できる場合は `semantic_shell_only` に落とさない
+- `merged_numeric_cell` など high-risk 数量シグナルがある evidence では、
+  semantic shell を維持しつつ payload 数量の自動投影を止める
 - `ocr-history` は legacy revision が空でも、latest evidence run から最低限の履歴を構成できる
 
 ---

@@ -114,6 +114,7 @@ def evaluate_apply_gate(
             confirm_blockers.append("menu_entries_missing")
 
     capabilities = (evidence_run or {}).get("capabilities_json") if isinstance(evidence_run, dict) else {}
+    quantity_selected_via_user_choice = False
     if isinstance(capabilities, dict):
         if not capabilities.get("step2_view_ready"):
             apply_blockers.append("evidence_view_unavailable")
@@ -124,9 +125,6 @@ def evaluate_apply_gate(
         if capabilities.get("semantic_shell_only"):
             apply_blockers.append("semantic_shell_only")
             confirm_blockers.append("semantic_shell_only")
-        if capabilities.get("numeric_trust_low"):
-            apply_warnings.append("numeric_trust_low")
-            confirm_warnings.append("numeric_trust_low")
         if capabilities.get("recovery_required"):
             apply_warnings.append("recovery_recommended")
             confirm_warnings.append("recovery_recommended")
@@ -144,6 +142,7 @@ def evaluate_apply_gate(
                 confirm_blockers.append(f"{decision_type}_unresolved")
         column_mapping = resolutions.get("column_mapping") if isinstance(resolutions.get("column_mapping"), dict) else None
         quantity = resolutions.get("quantity") if isinstance(resolutions.get("quantity"), dict) else None
+        quantity_selected_via_user_choice = bool(isinstance(quantity, dict) and quantity.get("selected_via_user_choice"))
         if (
             isinstance(column_mapping, dict)
             and column_mapping.get("attention_required")
@@ -158,6 +157,9 @@ def evaluate_apply_gate(
         ):
             apply_warnings.append("quantity_review_required")
             confirm_warnings.append("quantity_review_required")
+    if isinstance(capabilities, dict) and capabilities.get("numeric_trust_low") and not quantity_selected_via_user_choice:
+        apply_warnings.append("numeric_trust_low")
+        confirm_warnings.append("numeric_trust_low")
 
     draft_payload = None
     if isinstance(draft_sheet, dict):

@@ -68,6 +68,15 @@ _EVIDENCE_ARTIFACT_KEYS = (
     "cell_issues",
 )
 
+_HIGH_RISK_NUMERIC_ISSUE_CODES = {
+    "merged_numeric_cell",
+    "overextended_span",
+    "invalid_numeric_spike",
+    "all_quantity_blank",
+    "unexpected_dense_fill",
+    "missing_blank_anchor_rows",
+}
+
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -182,6 +191,33 @@ def payload_has_quantity_column_semantics(payload: dict[str, Any] | None) -> boo
     return bool(template_present and not template_blocked and isinstance(table_box, list) and isinstance(column_edges, list))
 
 
+def payload_has_high_risk_numeric_issues(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    failed_cells = payload.get("failed_cells")
+    if isinstance(failed_cells, list) and failed_cells:
+        return True
+    for issue in payload.get("cell_issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        code = str(issue.get("issue_code") or "").strip()
+        if code in _HIGH_RISK_NUMERIC_ISSUE_CODES:
+            return True
+    quantity_resolution = payload.get("quantity_resolution")
+    if isinstance(quantity_resolution, dict):
+        if quantity_resolution.get("requires_user_choice"):
+            return True
+        if quantity_resolution.get("blocked"):
+            return True
+        blocked_reasons = quantity_resolution.get("blocked_reasons")
+        if isinstance(blocked_reasons, list) and any(str(item or "").strip() for item in blocked_reasons):
+            return True
+    critical_candidates = payload.get("critical_quantity_candidates")
+    if isinstance(critical_candidates, list) and critical_candidates:
+        return True
+    return False
+
+
 def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     manifest = payload.get("evidence_manifest")
     artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else {}
@@ -215,7 +251,14 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     semantic_shell_only = bool(
         step2_view_ready and step2_edit_ready and (not template_present or not quantity_column_semantics_ready)
     )
-    numeric_trust_low = bool(step2_edit_ready and (not quantity_subgrid or semantic_shell_only))
+    numeric_trust_low = bool(
+        step2_edit_ready
+        and (
+            not quantity_subgrid
+            or semantic_shell_only
+            or payload_has_high_risk_numeric_issues(payload)
+        )
+    )
     apply_ready = step2_edit_ready and not template_blocked and template_present and quantity_column_semantics_ready
     confirm_ready = apply_ready and bool(quantity_subgrid or table_raw)
     recovery_required = not step2_view_ready or not step2_edit_ready

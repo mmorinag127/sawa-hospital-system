@@ -105,6 +105,48 @@ def test_payload_has_quantity_column_semantics_when_template_registry_can_supply
     assert ocr_evidence_service.payload_has_quantity_column_semantics(payload) is True
 
 
+def test_payload_high_risk_numeric_issues_drive_numeric_trust_low() -> None:
+    payload = {
+        "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+        "pages": [
+            {
+                "page_index": 1,
+                "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+            }
+        ],
+        "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/22|朝|Menu A|21|",
+        "tables": [{"rows": [["03/22", "朝", "Menu A", "21"]]}],
+        "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "21"]]}],
+        "template_resolution": {
+            "requested_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "requested_template_ids": [
+                "fax_layout_regular_soft_mixer_forbidden_v1",
+                "fax_layout_floor_2f3f_v1",
+            ],
+            "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "matched_template_id": "fax_layout_floor_2f3f_v1",
+            "blocked": False,
+            "blocked_reasons": [],
+        },
+        "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+        "table_box": None,
+        "grid_column_edges": [],
+        "grid_row_edges": [],
+    }
+
+    evidence = ocr_evidence_service.persist_evidence_run(
+        order_id="ORD-test-numeric-trust",
+        payload=payload,
+        source="test",
+    )
+
+    assert evidence is not None
+    assert ocr_evidence_service.payload_has_quantity_column_semantics(evidence["payload_json"]) is True
+    assert ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence["payload_json"]) is True
+    assert evidence["capabilities_json"]["numeric_trust_low"] is True
+
+
 def test_legacy_payload_without_evidence_context_does_not_trigger_blocker():
     payload = {
         "rows": [

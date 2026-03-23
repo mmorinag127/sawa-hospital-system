@@ -349,9 +349,17 @@ def _derive_state(
             or "quantity_review_required" in warnings
         )
     )
+    quantity_resolution = resolutions.get("quantity") if isinstance(resolutions, dict) else None
+    quantity_selected_via_user_choice = bool(
+        isinstance(quantity_resolution, dict) and quantity_resolution.get("selected_via_user_choice")
+    )
     capabilities = evidence_run.get("capabilities_json") if isinstance(evidence_run, dict) else {}
     semantic_shell_only = bool(isinstance(capabilities, dict) and capabilities.get("semantic_shell_only"))
-    numeric_trust_low = bool(isinstance(capabilities, dict) and capabilities.get("numeric_trust_low"))
+    numeric_trust_low = bool(
+        isinstance(capabilities, dict)
+        and capabilities.get("numeric_trust_low")
+        and not quantity_selected_via_user_choice
+    )
     reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
     normalized_reparse_request_mode = str(reparse_request_mode or "").strip().lower()
     if order_status == "確定":

@@ -627,6 +627,64 @@ def test_get_ocr_sheet_projects_payload_quantities_when_template_registry_can_su
     assert "sheet_payload_mapping_blocked_unresolved_template" not in (sheet.get("warnings") or [])
 
 
+def test_get_ocr_sheet_blocks_payload_projection_when_numeric_trust_is_low_even_with_template_semantics():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-template-grid-registry-numeric-risk")
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 21),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        }
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|03/21|朝|Menu A|21||",
+                "table_rows": [["03/21", "朝", "Menu A", "21", ""]],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+                "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/21", "朝", "Menu A", "21"]]}],
+                "template_resolution": {
+                    "requested_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                    "requested_template_ids": [
+                        "fax_layout_regular_soft_mixer_forbidden_v1",
+                        "fax_layout_floor_2f3f_v1",
+                    ],
+                    "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                    "matched_template_id": "fax_layout_floor_2f3f_v1",
+                    "blocked": False,
+                    "blocked_reasons": [],
+                },
+                "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "weekly_menu"
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", ""]
+    assert "sheet_payload_mapping_blocked_numeric_review_required" in (sheet.get("warnings") or [])
+
+
 def test_build_confirm_materialization_candidate_prefers_latest_draft_rows():
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-confirm-candidate-001")

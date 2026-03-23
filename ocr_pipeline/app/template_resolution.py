@@ -35,6 +35,7 @@ def build_template_resolution(
     confidence = None
     candidate_ids: list[str] = []
     mismatch = False
+    classifier_mismatch = False
     warp_mismatch = False
     blocked_reasons: list[str] = []
 
@@ -70,9 +71,19 @@ def build_template_resolution(
             warp_mismatch = True
             break
 
-    if requested and resolved and requested != resolved:
+    requested_scope = requested_ids if requested_ids else ([requested] if requested else [])
+    requested_scope_mismatch = bool(requested_scope and resolved and resolved not in requested_scope)
+    preferred_requested_mismatch = bool(requested and resolved and requested != resolved)
+    classifier_mismatch = bool(
+        matched
+        and (
+            (resolved and matched != resolved)
+            or (not resolved and requested and matched != requested)
+        )
+    )
+    if requested_scope_mismatch or preferred_requested_mismatch:
         mismatch = True
-    if requested and matched and requested != matched:
+    if classifier_mismatch:
         mismatch = True
     if warp_mismatch:
         mismatch = True
@@ -80,7 +91,7 @@ def build_template_resolution(
     min_confidence = _read_float_env("OCR_TEMPLATE_MIN_CONFIDENCE", 0.6)
     confidence_low = confidence is not None and confidence < min_confidence
 
-    if mismatch:
+    if requested_scope_mismatch or warp_mismatch:
         blocked_reasons.append("template_mismatch")
     if warp_mismatch:
         blocked_reasons.append("page_correction_template_mismatch")
@@ -95,6 +106,7 @@ def build_template_resolution(
         "confidence": confidence,
         "candidate_template_ids": candidate_ids,
         "mismatch": mismatch,
+        "classifier_mismatch": classifier_mismatch,
         "warp_mismatch": warp_mismatch,
         "blocked_reasons": blocked_reasons,
         "blocked": bool(blocked_reasons),
