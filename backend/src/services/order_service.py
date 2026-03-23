@@ -5107,6 +5107,25 @@ def _ocr_evidence_missing_artifacts(payload: dict[str, Any] | None) -> list[str]
     return evidence_manifest_service.evidence_missing_artifacts(payload)
 
 
+def _sheet_payload_mapping_blocked(
+    *,
+    source: str,
+    ocr_payload: dict[str, Any] | None,
+    evidence_missing: list[str] | None,
+    template_blockers: list[str] | None,
+) -> bool:
+    if source != "weekly_menu":
+        return False
+    if not isinstance(_get_template_resolution(ocr_payload), dict):
+        return True
+    if any(str(item or "").strip() for item in (template_blockers or [])):
+        return True
+    missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
+    # Weekly-menu rescue can only be trusted when template/grid semantics are known.
+    # Otherwise, payload-row projection tends to smear OCR noise into semantic quantity columns.
+    return bool({"template_resolution", "grid_metadata"} & missing)
+
+
 _RECOVERABLE_OCR_SHEET_ERRORS = {
     "week_unresolved",
     "menu_entries_missing",
@@ -12808,6 +12827,15 @@ def get_ocr_sheet(order_id: str):
     mapped_mode = "identity"
     rows = _clone_sheet_rows(base_rows)
     sheet_warnings: list[str] = []
+    payload_mapping_blocked = _sheet_payload_mapping_blocked(
+        source=source,
+        ocr_payload=ocr_payload,
+        evidence_missing=evidence_missing,
+        template_blockers=template_blockers,
+    )
+    if payload_mapping_blocked and sheet_lines_source == "ocr_payload":
+        sheet_lines = []
+        sheet_lines_source = "suppressed"
 
     def _append_sheet_warning(code: str) -> None:
         token = str(code or "").strip()
@@ -12818,6 +12846,8 @@ def get_ocr_sheet(order_id: str):
         _append_sheet_warning("sheet_weekly_menu_missing")
     if suppress_order_lines_reason:
         _append_sheet_warning(suppress_order_lines_reason)
+    if payload_mapping_blocked and payload_rows:
+        _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
 
     llm_allows_cluster_fill = _llm_allows_order_line_cluster_consensus_fill(ocr_payload)
 
@@ -12898,7 +12928,7 @@ def get_ocr_sheet(order_id: str):
                 quantity_index=quantity_index,
             )
 
-            if payload_rows:
+            if payload_rows and not payload_mapping_blocked:
                 rows_by_payload_index = _clone_sheet_rows(base_rows)
                 payload_match_stats = _apply_payload_quantities_numeric_only(
                     rows=rows_by_payload_index,
@@ -12999,7 +13029,7 @@ def get_ocr_sheet(order_id: str):
                     mapped_count = payload_mapped_count
                     mapped_mode = "payload_row"
                     rows = rows_by_payload_index
-        elif payload_rows:
+        elif payload_rows and not payload_mapping_blocked:
             rows_by_payload_index = _clone_sheet_rows(base_rows)
             payload_match_stats = _apply_payload_quantities_numeric_only(
                 rows=rows_by_payload_index,

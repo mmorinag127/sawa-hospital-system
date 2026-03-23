@@ -375,8 +375,53 @@ def test_get_ocr_sheet_keeps_semantic_sheet_when_template_resolution_is_blocked(
     assert sheet_error is None
     assert isinstance(sheet, dict)
     assert sheet["fields"][:4] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
-    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", "2"]
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", ""]
     assert "template_resolution_blocked" in (sheet.get("warnings") or [])
+    assert "sheet_payload_mapping_blocked_unresolved_template" in (sheet.get("warnings") or [])
+
+
+def test_get_ocr_sheet_does_not_project_payload_quantities_when_template_semantics_are_missing():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-template-missing-payload-blocked")
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 21),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        }
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|03/21|朝|Menu A|9||",
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "weekly_menu"
+    assert sheet["fields"][:4] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", ""]
+    assert "sheet_payload_mapping_blocked_unresolved_template" in (sheet.get("warnings") or [])
 
 
 def test_build_confirm_materialization_candidate_prefers_latest_draft_rows():

@@ -5763,7 +5763,7 @@ const loadOcrPages = async () => {
                                   <textarea
                                     id="llm-freeform-prompt"
                                     className="input"
-                                    rows={4}
+                                    rows={10}
                                     value={ocrPrompt}
                                     onChange={(e) => setOcrPrompt(e.target.value)}
                                     placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
@@ -5777,7 +5777,7 @@ const loadOcrPages = async () => {
                                   </p>
                                   <textarea
                                     className="input"
-                                    rows={4}
+                                    rows={8}
                                     value={ocrPrompt}
                                     onChange={(e) => setOcrPrompt(e.target.value)}
                                     placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
@@ -7949,7 +7949,8 @@ const loadOcrPages = async () => {
         .ocr-inline-prompt textarea {
           margin-top: 8px;
           width: 100%;
-          min-height: 140px;
+          min-height: 240px;
+          resize: vertical;
         }
 
         .ocr-inline-details summary {
