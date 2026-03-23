@@ -370,6 +370,7 @@ def _enqueue_order_reparse_job(
     llm_assist: bool = True,
     force: bool = False,
     stale_action: str = "retry",
+    request_mode: str | None = None,
 ) -> dict:
     order = order_service.get_order_by_id(order_id)
     if not order:
@@ -444,6 +445,10 @@ def _enqueue_order_reparse_job(
             "processing_stage": "queued",
             "result_state": "processing",
             "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+            "request_mode": str(
+                request_mode or ("llm_reparse" if llm_assist else "ocr_reparse")
+            ).strip()
+            or ("llm_reparse" if llm_assist else "ocr_reparse"),
             "status": "running",
         },
         input_reference=input_reference,
@@ -495,6 +500,114 @@ def _run_reparse_background(
         except Exception:  # noqa: BLE001
             logger.exception("Failed to update OCR job status after reparse crash", order_id=order_id)
         logger.exception("Reparse background crashed", order_id=order_id, error=str(exc))
+
+
+def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
+    try:
+        _, error = order_service.rerun_ocr_evidence_only(order_id, job_id=ocr_job_id)
+        if error:
+            logger.warning("OCR evidence-only rerun failed", order_id=order_id, error=error)
+    except Exception as exc:  # noqa: BLE001
+        current_order = order_service.get_order_by_id(order_id)
+        retained_lines = bool(current_order.get("lines_updated_at")) if isinstance(current_order, dict) else False
+        try:
+            update_ocr_job(
+                ocr_job_id,
+                status="failed",
+                error_message=f"ocr_rerun_crashed:{exc}",
+                metrics={
+                    "error": str(exc),
+                    "request_mode": "ocr_rerun",
+                    "processing_stage": "crashed",
+                    "result_state": "hard_failed",
+                    "confirmed_lines_retained": retained_lines,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to update OCR rerun status after crash", order_id=order_id)
+        logger.exception("OCR evidence-only rerun crashed", order_id=order_id, error=str(exc))
+
+
+def _enqueue_order_evidence_rerun(
+    order_id: str,
+    background_tasks: BackgroundTasks,
+    *,
+    stale_action: str = "retry",
+) -> dict:
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    if not order.get("facility"):
+        raise HTTPException(status_code=400, detail="facility missing")
+    if not order.get("document"):
+        raise HTTPException(status_code=404, detail="document not found")
+    if not config_service.get_facility_config(order.get("facility")):
+        raise HTTPException(status_code=404, detail="facility not found")
+
+    ocr_job_id = f"OCR-{order_id}"
+    existing_job = get_ocr_job(ocr_job_id)
+    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(ocr_job_id, order_id) else None)
+    if existing_job_state.get("status") == "stalled":
+        if stale_action == "wait":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "reparse_in_progress",
+                    "message": "stale rerun requires retry",
+                    "recoverable": True,
+                    "ocr_job_id": ocr_job_id,
+                    "stale_at": existing_job_state.get("stale_at"),
+                    "stale_threshold_seconds": existing_job_state.get("stale_threshold_seconds"),
+                },
+            )
+        existing_job = _mark_stale_order_reparse_job(order, existing_job)
+    if _is_active_order_reparse_job(existing_job, order_id):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "reparse_in_progress",
+                "message": "OCR rerun already running",
+                "recoverable": False,
+                "ocr_job_id": ocr_job_id,
+            },
+        )
+
+    input_reference = str(order.get("document") or "")
+    _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
+    if not created:
+        existing_job = get_ocr_job(ocr_job_id)
+        if _is_active_order_reparse_job(existing_job, order_id):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "reparse_in_progress",
+                    "message": "OCR rerun already running",
+                    "recoverable": False,
+                    "ocr_job_id": ocr_job_id,
+                },
+            )
+    update_ocr_job(
+        ocr_job_id,
+        status="running",
+        error_message=None,
+        template_id=None,
+        output_reference=None,
+        input_reference=input_reference,
+        metrics={
+            "job_id": ocr_job_id,
+            "processing_stage": "queued",
+            "result_state": "processing",
+            "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+            "request_mode": "ocr_rerun",
+            "status": "running",
+        },
+    )
+    try:
+        workflow_state = order_service.get_order_workflow_state(order_id, refresh=True)
+    except Exception:
+        workflow_state = None
+    background_tasks.add_task(_run_ocr_rerun_background, order_id, ocr_job_id)
+    return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow_state": workflow_state}
 
 
 @router.get("", dependencies=[Depends(require_role("operator"))])
@@ -814,6 +927,14 @@ def choose_order_critical_decision(order_id: str, decision_type: str, body: dict
     )
     if error == "decision_not_found":
         raise HTTPException(status_code=404, detail="critical decision not found")
+    if error == "decision_stale":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "decision_stale",
+                "message": "新しいOCR候補があるため、候補選択をやり直してください。",
+            },
+        )
     if error in {"facility_update_failed", "week_update_failed", "week_invalid"}:
         raise HTTPException(status_code=400, detail=error)
     if error:
@@ -1096,6 +1217,32 @@ def save_ocr_sheet(order_id: str, body: dict):
 @router.post("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
 def save_draft_sheet(order_id: str, body: dict):
     return save_ocr_sheet(order_id, body)
+
+
+@router.post("/{order_id}/draft-sheet/switch-evidence", dependencies=[Depends(require_role("operator"))])
+def switch_draft_sheet_evidence(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    draft, error = order_service.switch_draft_to_latest_evidence(
+        order_id,
+        edited_by="switch-evidence",
+    )
+    if error == "evidence_not_found":
+        raise HTTPException(status_code=404, detail="latest evidence not found")
+    if error in {"already_current", "switch_draft_unavailable"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": error,
+                "message": "新しいOCR候補へはまだ切り替えられません。",
+            },
+        )
+    if error == "switch_draft_failed":
+        raise HTTPException(status_code=500, detail="failed to switch draft evidence")
+    if not isinstance(draft, dict):
+        raise HTTPException(status_code=500, detail="failed to switch draft evidence")
+    return _flatten_draft_sheet_payload(order_id, draft)
 
 
 @router.post("/{order_id}/draft-sheet/apply-patch-candidate", dependencies=[Depends(require_role("operator"))])
@@ -1472,7 +1619,31 @@ def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
         llm_assist=llm_assist,
         force=force,
         stale_action=stale_action,
+        request_mode="llm_reparse" if llm_assist else "ocr_reparse",
     )
+
+
+@router.post(
+    "/{order_id}/ocr-rerun",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role("operator"))],
+)
+def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
+    stale_action = "retry"
+    if isinstance(body, dict):
+        raw_stale_action = body.get("stale_action")
+        if isinstance(raw_stale_action, str) and raw_stale_action.strip():
+            normalized_stale_action = raw_stale_action.strip().lower()
+            if normalized_stale_action not in {"retry", "wait"}:
+                raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
+            stale_action = normalized_stale_action
+    result = _enqueue_order_evidence_rerun(
+        order_id,
+        background_tasks,
+        stale_action=stale_action,
+    )
+    result["mode"] = "pipeline_rerun"
+    return result
 
 
 @router.post(
@@ -1491,6 +1662,7 @@ def recover_ocr(order_id: str, background_tasks: BackgroundTasks):
         llm_assist=False,
         force=True,
         stale_action="retry",
+        request_mode="ocr_recover",
     )
     result["mode"] = "pipeline_recovery"
     return result

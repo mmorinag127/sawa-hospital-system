@@ -638,6 +638,198 @@ Phase 3:
 - quantity_subgrid 欠損
 - template candidate 競合
 - stale telemetry
+
+---
+
+## 9. 直近の修正波: Partial-State / Rerun Candidate 対応
+
+この節は、`ORD71873bb1` 系で露出した「semantic shell only」「常時 rerun」「new evidence available」問題を潰すための具体計画である。
+
+### 9.1 対象にする failure mode
+
+優先度 P0/P1 とする。
+
+- `semantic shell only`
+  - semantic rows はあるが数量は信用できない
+- `new evidence available`
+  - rerun/recover 成功後、新 evidence はあるが current draft は保持されている
+- `rerun overwrites current draft`
+  - rerun が current draft/confirmed を暗黙上書きする
+- `decision invalidated by new evidence`
+  - 施設/週/テンプレ/列/数量の選択が、古い evidence run に対するまま残る
+- `legacy payload false block`
+  - old evidence に new required を当てて不自然に block する
+
+### 9.2 今回の実装スコープ
+
+今回の修正波で最低限入れるもの:
+
+1. `workflow_state` に中間状態を追加
+   - `semantic_shell_only`
+   - `rerun_in_progress`
+   - `new_evidence_available`
+   - `rerun_failed_keep_current`
+2. `OCRパイプライン再実行` を常時可能にする
+3. rerun 成功時に current draft を自動上書きしない
+4. `switch-evidence` API を追加し、明示切替でのみ draft を更新
+5. `critical_decision` を `evidence_run_id` と照合し、古い選択を無条件再利用しない
+6. frontend Step2 を
+   - `基盤`
+   - `候補`
+   - `LLM`
+   の 3 ブロックへ整理する
+
+### 9.3 backend 変更詳細
+
+#### A. migration / model
+
+対象:
+- [backend/src/models/order_workflow_state.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/models/order_workflow_state.py)
+- [backend/src/models/order_ocr_evidence_run.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/models/order_ocr_evidence_run.py)
+- `backend/migrations/*`
+
+追加候補:
+- `order_workflow_states.candidate_evidence_run_id`
+- `order_workflow_states.state_reason`
+- `order_ocr_evidence_runs.parent_evidence_run_id`
+- `order_ocr_evidence_runs.trigger`
+
+最低限の受け入れ条件:
+- new evidence candidate を current evidence と区別して保存できる
+- workflow row だけで `new_evidence_available` を表現できる
+
+#### B. evidence capabilities
+
+対象:
+- [backend/src/services/ocr_evidence_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/ocr_evidence_service.py)
+- [backend/src/services/evidence_manifest_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/evidence_manifest_service.py)
+
+追加:
+- `semantic_shell_only`
+- `numeric_trust_low`
+- `rerunnable`
+- `switch_candidate_available`
+- `legacy_editable`
+
+ルール:
+- `template_resolution / grid_metadata / quantity evidence` が無い時は、semantic shell まで
+- 数量投影はしない
+
+#### C. rerun / switch flow
+
+対象:
+- [backend/src/api/orders.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/api/orders.py)
+- [backend/src/services/order_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/order_service.py)
+- [backend/src/services/draft_sheet_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/draft_sheet_service.py)
+- [backend/src/services/workflow_state_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/workflow_state_service.py)
+
+新規/変更 API:
+- `POST /orders/{id}/ocr-rerun`
+  - 常時利用可能
+  - current draft/confirmed を壊さない
+- `POST /orders/{id}/draft-sheet/switch-evidence`
+  - latest candidate evidence を採用して draft を再初期化
+- 既存 `POST /orders/{id}/ocr-recover`
+  - hard recovery 用に維持
+
+ルール:
+- rerun は新しい `evidence_run` を candidate として作る
+- rerun 成功後は `new_evidence_available`
+- adopt は `switch-evidence` でのみ行う
+- rerun 失敗時は `rerun_failed_keep_current`
+
+#### D. critical decision binding
+
+対象:
+- [backend/src/services/critical_decision_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/critical_decision_service.py)
+- [backend/src/services/candidate_resolution_service.py](/Users/mmorinag/Sawa/2025.12/workspace/backend/src/services/candidate_resolution_service.py)
+
+ルール:
+- decision は `base_evidence_run_id` を持つ
+- current latest evidence とずれたら `decision_invalidated_by_new_evidence`
+- 再選択が必要
+
+### 9.4 frontend 変更詳細
+
+対象:
+- [frontend/src/pages/orders/[id].tsx](/Users/mmorinag/Sawa/2025.12/workspace/frontend/src/pages/orders/[id].tsx)
+- [frontend/src/features/orders/orderDetailOcrUtils.ts](/Users/mmorinag/Sawa/2025.12/workspace/frontend/src/features/orders/orderDetailOcrUtils.ts)
+
+実装:
+- `workflow_state` に応じた単一 CTA 帯
+- `semantic_shell_only`
+  - 主: `OCRパイプラインを再実行`
+  - 副: `OCR基盤を復旧`
+- `rerun_in_progress`
+  - 進行表示のみ
+- `new_evidence_available`
+  - 主: `新しいOCR候補を確認`
+  - 副: `現在のシートを維持`
+- `LLM補完再解析`
+  - `基盤` ブロックの後ろへ配置
+  - freeform textarea は専用 panel に分離
+
+### 9.5 テスト matrix
+
+#### backend integration
+
+- `semantic_shell_only` evidence で apply/confirm 不可
+- `POST /ocr-rerun` は `done` 注文でも `202`
+- rerun 中は重複 rerun が `409`
+- rerun 成功で `new_evidence_available`
+- current draft がある時も自動上書きしない
+- `switch-evidence` 時だけ `base_evidence_run_id` が更新
+- stale decision は current evidence に再適用されない
+
+#### backend contract
+
+- `GET /orders/{id}` に新 state が載る
+- `GET /orders/{id}/workflow-state` に `candidate_evidence_run_id` 相当が載る
+- `POST /orders/{id}/draft-sheet/switch-evidence`
+  - success
+  - no candidate
+  - already current
+  - stale choice invalidation
+
+#### frontend
+
+- `semantic_shell_only` で rerun が primary CTA
+- `recovery_required` で recover が primary CTA
+- `new_evidence_available` で switch/keep の 2 択
+- freeform prompt panel が full-width で表示される
+- choice_required 時は他 action を抑制
+
+### 9.6 rollout 順
+
+1. migration / model
+2. backend evidence capabilities
+3. rerun + switch-evidence API
+4. workflow_state 拡張
+5. frontend Step2 整理
+6. targeted tests
+7. live spot check
+
+### 9.7 完了条件
+
+- `ORD71873bb1` 型で、壊れた数量投影ではなく `semantic_shell_only` として止まる
+- `OCRパイプライン再実行` は常時見える
+- rerun 成功後に current draft が自動で消えない
+- new evidence を採用するかどうかが operator に明確に見える
+
+---
+
+## 10. 追加 failure matrix テスト観点
+
+少なくとも以下の組み合わせは regression に入れる。
+
+- `legacy payload + missing template_resolution + weekly_menu shell + payload rescue`
+- `bad latest draft + rerun success + no explicit switch`
+- `patch candidate + stale draft lineage`
+- `facility ambiguity + early grouping`
+- `week ambiguity + semantic shell`
+- `template mismatch + column ambiguity + numeric rescue`
+- `telemetry stale + evidence usable`
+- `confirmed exists + current draft blocked`
 - bad confirmed lines 既存保持
 - LLM patch が row rewrite を返す
 

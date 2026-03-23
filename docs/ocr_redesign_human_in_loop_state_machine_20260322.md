@@ -109,6 +109,35 @@
 - 原因:
   - page correction と template resolution が分離していない
 
+### 2.7 Partial-State / State-Corruption Failure
+
+この再設計で一番重要なのは、`完全失敗` ではなく `中途半端に成立して見える失敗` を first-class に扱うことです。
+
+特に設計へ正式に取り込むべき壊れ方は次です。
+
+- `semantic shell only`
+  - semantic な `日付 / 区分 / メニュー` は作れる
+  - しかし数量はまだ信用できない
+- `semantic_rows_numeric_untrusted`
+  - semantic rows はある
+  - ただし `template_resolution / grid_metadata / quantity evidence` が足りず、数量投影は禁止
+- `new_evidence_available`
+  - rerun/recover は成功した
+  - しかし current draft は保持されており、自動上書きしてはならない
+- `decision_invalidated_by_new_evidence`
+  - 施設/週/テンプレ/列/数量の選択が、古い evidence run に紐づいている
+  - 新 evidence では再選択が必要
+
+典型的な危険パターン:
+
+- `legacy payload + missing template_resolution + weekly_menu shell + payload rescue`
+- `template unresolved + payload rows present + semantic bootstrap`
+- `new evidence available + old draft current`
+- `patch candidate from stale draft lineage`
+- `facility/week ambiguity + early grouping`
+
+この failure class は「一般的に起こりうる」ものとして扱う。個別例外として扱ってはならない。
+
 ---
 
 ## 3. 再設計の大原則
@@ -307,6 +336,21 @@ Step3 で `明細へ反映` 可能な状態。
 - stale conflict なし
 - unresolved blocker なし
 
+### 5.5 追加 capability
+
+中間状態を安全に扱うため、以下を capability として持つ。
+
+- `semantic_shell_only`
+  - semantic rows は構成できるが、数量や列意味はまだ信用できない
+- `numeric_trust_low`
+  - quantity evidence が弱く、数量は review または rerun が必要
+- `rerunnable`
+  - current draft/confirmed を保持したまま、新しい evidence candidate を作れる
+- `switch_candidate_available`
+  - current draft とは別に、新しい evidence run が存在する
+- `legacy_editable`
+  - schema version は古いが、Step2 view/edit までは許容できる
+
 ---
 
 ## 6. 状態遷移
@@ -316,12 +360,17 @@ Step3 で `明細へ反映` 可能な状態。
 - `uploaded`
 - `evidence_building`
 - `evidence_ready`
+- `evidence_ready_raw`
+- `evidence_ready_semantic_shell_only`
 - `candidate_resolution`
 - `choice_required`
 - `draft_building`
 - `draft_ready`
 - `draft_blocked`
 - `recovery_required`
+- `rerun_in_progress`
+- `new_evidence_available`
+- `rerun_failed_keep_current`
 - `apply_ready`
 - `applied_unconfirmed`
 - `confirmed`
@@ -337,6 +386,8 @@ Step3 で `明細へ反映` 可能な状態。
 - `修正待ち`
 - `選択待ち`
 - `復旧待ち`
+- `再取得中`
+- `新しいOCR候補あり`
 - `反映待ち`
 - `確定可能`
 - `確定済み`
@@ -371,6 +422,34 @@ Step3 で `明細へ反映` 可能な状態。
 #### `draft_building -> draft_blocked`
 
 - evidence はあるが apply-safe ではない
+
+#### `evidence_ready -> evidence_ready_semantic_shell_only`
+
+- preview / menu / template snapshot により semantic rows は組める
+- ただし `template_resolution / grid_metadata / quantity evidence` が不足
+- この状態では数量投影をしてはならない
+
+#### `* -> rerun_in_progress`
+
+- `OCRパイプライン再実行` を開始
+- current draft / confirmed snapshot は保持
+- 新しい `evidence_run` を candidate として構築
+
+#### `rerun_in_progress -> new_evidence_available`
+
+- rerun 成功
+- current draft はそのまま
+- latest evidence run と draft の `base_evidence_run_id` が異なる
+- ユーザーには
+  - `現在のシートを維持`
+  - `新しいOCR候補に切替`
+  の 2 択だけを提示
+
+#### `rerun_in_progress -> rerun_failed_keep_current`
+
+- rerun 失敗
+- current draft / confirmed は不変
+- operator には failure を見せるが、作業面は巻き戻さない
 
 #### `draft_ready -> apply_ready`
 
@@ -441,6 +520,19 @@ Step3 で `明細へ反映` 可能な状態。
 
 この判定は `candidate_resolution_service` のみが行う。
 
+### 7.4 critical decision の束縛
+
+critical decision は、常に次へ束縛される。
+
+- `order_id`
+- `decision_type`
+- `candidate_set`
+- `selected_value`
+- `base_evidence_run_id`
+- `base_draft_id` (必要時)
+
+新しい evidence run が current draft とずれた時は、古い decision を自動再利用してはならない。`decision_invalidated_by_new_evidence` として再判定する。
+
 ---
 
 ## 8. 人間介入の原則
@@ -461,11 +553,31 @@ critical ambiguity に限定する。
 - overlay や manifest の内部状態
 - telemetry の意味
 
+追加:
+
+- rerun が失敗した時に recovery へ行くか再 rerun するか
+- fallback を許すかどうか
+- bad patch candidate を採用するかどうか
+
 ### 8.3 ユーザー介入の設計制約
 
 - 1注文につき原則 1 回、多くても 2 回
 - 選択肢は原則 2 件、多くても 3 件
 - 同じ facility/layout family で同じ回答が続く場合は、以後自動化候補に格上げする
+
+### 8.4 新しいOCR候補への切替
+
+`OCRパイプライン再実行` を常時可能にする場合、operator に聞いてよい追加選択は 1 つだけである。
+
+- `現在のシートを維持`
+- `新しいOCR候補に切替`
+
+この選択は recovery 手段の選択ではなく、`candidate evidence adoption` の選択である。よって許可する。
+
+禁止:
+
+- rerun 成功時に current draft を自動上書きすること
+- confirmed snapshot / OrderLine を自動更新すること
 
 ---
 
@@ -522,6 +634,117 @@ LLM は `patch candidate` のみ返す。
 - quantity cell の `replace`
 
 禁止:
+
+- sheet 全体の真実化
+- template / facility / week の暗黙確定
+- stale draft に対する無条件 patch
+- quantity が不確かな状態での構造 rewrite
+
+---
+
+## 13. Failure Taxonomy Deep Dive
+
+状態を壊す状況は「実際に起きたか」ではなく、「起きた時に invariant を破るか」で分類する。
+
+### 13.1 Evidence 構築系
+
+- partial OCR payload 保存
+- overlay/pages 欠損
+- corrected PDF だけ欠損
+- quantity_subgrid 欠損
+- template_resolution / grid_metadata 欠損
+- read-time 再生成
+
+安全状態:
+
+- `evidence_unusable`
+- `raw_only_recoverable`
+- `semantic_shell_only`
+
+### 13.2 Semantic 汚染系
+
+- `weekly_menu` はある
+- `payload rows` もある
+- そこで数量 rescue を走らせる
+
+安全規則:
+
+- `template semantics` が無い時は数量投影禁止
+- `semantic shell` と `trusted quantity` を別状態にする
+
+### 13.3 Lineage / Draft 汚染系
+
+- stale tab save
+- old draft resurrection
+- rerun 後の auto-switch
+- stale patch candidate apply
+
+安全規則:
+
+- draft は `base_evidence_run_id` 必須
+- patch candidate は `base_evidence_run_id/base_draft_id` 必須
+- stale lineage からの保存は 409
+
+### 13.4 Candidate Collapse 系
+
+- facility/week/template/column/quantity 候補を silent auto-accept
+
+安全規則:
+
+- 2 候補競合時は collapse しない
+- `choice_required` へ送る
+
+### 13.5 Apply / Confirm / Output 汚染系
+
+- apply と confirm が別 truth を見る
+- downstream output が draft と confirmed を混ぜる
+
+安全規則:
+
+- `apply/confirm/downstream` は confirmed lineage だけを見る
+
+---
+
+## 14. Always-Available OCR Rerun Policy
+
+`OCRパイプライン再実行` は常時可能にしてよい。ただし意味は「現在の作業中シートの置換」ではなく「新しい evidence candidate の生成」である。
+
+### 14.1 rerun の正しい意味
+
+- current draft は保持
+- confirmed snapshot / OrderLine も保持
+- rerun は新しい `evidence_run` を別に作る
+- 成功後は `new_evidence_available`
+- adopt は明示的な `switch-evidence` でのみ行う
+
+### 14.2 禁止事項
+
+- rerun 成功で current draft を自動上書き
+- rerun 成功で confirmed snapshot / OrderLine を自動更新
+- rerun と recover と LLM を operator に選ばせる
+
+### 14.3 UI で見せるべき最小導線
+
+- `semantic_shell_only`
+  - 主: `OCRパイプラインを再実行`
+  - 副: `OCR基盤を復旧`
+- `rerun_in_progress`
+  - 進行表示のみ
+- `new_evidence_available`
+  - 主: `新しいOCR候補を確認`
+  - 副: `現在のシートを維持`
+
+---
+
+## 15. 設計上の追加 invariant
+
+追加で厳守する。
+
+1. `semantic shell` と `trusted quantities` を同一視してはならない
+2. current draft と new OCR candidate は別物である
+3. critical decision は evidence run に束縛される
+4. rerun/recover/reparse は current draft/confirmed を即時に壊さない
+5. old payload には schema-version-aware readiness を使う
 
 - 行追加
 - 行削除
@@ -713,4 +936,3 @@ LLM は `patch candidate` のみ返す。
 1. `Step2 must never use OrderLine as input again.`
 2. `Workflow state must not be derived directly from job telemetry.`
 3. `Human choice is only for critical ambiguity, never for recovery mechanics.`
-

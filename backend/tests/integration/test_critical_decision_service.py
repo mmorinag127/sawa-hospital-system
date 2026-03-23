@@ -147,3 +147,76 @@ def test_sync_pending_decisions_preserves_structured_choice_metadata() -> None:
     assert candidate_set["ambiguity_scope"] == "high_impact_quantity"
     assert candidate_set["decision_source"] == "critical_quantity_candidates"
     assert candidate_set["evidence_ref"] == {"page": 1, "row_index": 7, "column_index": 4}
+
+
+def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage_changes() -> None:
+    order_service.clear_all()
+
+    critical_decision_service.sync_pending_decisions(
+        "ORD-CRIT-5",
+        [
+            {
+                "decision_type": "facility",
+                "title": "施設候補を選択",
+                "base_evidence_run_id": "EVD-OLD",
+                "candidates": [{"value": "FAC00001", "label": "施設A"}],
+                "blocked_reasons": ["facility_choice_required"],
+            }
+        ],
+        base_evidence_run_id="EVD-OLD",
+    )
+    chosen = critical_decision_service.choose_decision(
+        "ORD-CRIT-5",
+        "facility",
+        "FAC00001",
+        selected_by="operator",
+        current_evidence_run_id="EVD-OLD",
+    )
+    assert isinstance(chosen, dict)
+    assert chosen["selected_value"] == "FAC00001"
+
+    refreshed = critical_decision_service.sync_pending_decisions(
+        "ORD-CRIT-5",
+        [
+            {
+                "decision_type": "facility",
+                "title": "施設候補を選択",
+                "base_evidence_run_id": "EVD-NEW",
+                "candidates": [{"value": "FAC00002", "label": "施設B"}],
+                "blocked_reasons": ["facility_choice_required"],
+            }
+        ],
+        base_evidence_run_id="EVD-NEW",
+    )
+
+    assert len(refreshed) == 1
+    assert refreshed[0]["base_evidence_run_id"] == "EVD-NEW"
+    assert refreshed[0]["selected_value"] is None
+
+
+def test_choose_decision_returns_none_when_evidence_lineage_is_stale() -> None:
+    order_service.clear_all()
+
+    critical_decision_service.sync_pending_decisions(
+        "ORD-CRIT-6",
+        [
+            {
+                "decision_type": "week",
+                "title": "対象週を選択",
+                "base_evidence_run_id": "EVD-CURRENT",
+                "candidates": [{"value": "2026-03@2026-03-22~2026-03-28", "label": "2026-03"}],
+                "blocked_reasons": ["week_choice_required"],
+            }
+        ],
+        base_evidence_run_id="EVD-CURRENT",
+    )
+
+    stale = critical_decision_service.choose_decision(
+        "ORD-CRIT-6",
+        "week",
+        "2026-03@2026-03-22~2026-03-28",
+        selected_by="operator",
+        current_evidence_run_id="EVD-NEXT",
+    )
+
+    assert stale is None

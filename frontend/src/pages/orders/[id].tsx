@@ -107,6 +107,16 @@ type WorkflowStatePayload = {
   candidate_resolution?: CandidateResolutionPayload | null;
   critical_decisions?: CriticalDecisionPayload[] | null;
   apply_gate?: ApplyGatePayload | null;
+  candidate_evidence_run_id?: string | null;
+  reparse_state?: ReparseStatePayload | null;
+};
+
+type ReparseStatePayload = {
+  status?: string | null;
+  progress_updated_at?: string | null;
+  stale_at?: string | null;
+  stale_threshold_seconds?: number | null;
+  job_id?: string | null;
 };
 
 type ApplyGatePayload = {
@@ -749,6 +759,9 @@ const describeWorkflowState = (state?: string | null) => {
   const normalized = String(state || "").trim().toLowerCase();
   if (normalized === "uploaded") return "OCR待ち";
   if (normalized === "evidence_ready") return "証拠確認";
+  if (normalized === "semantic_shell_only") return "数量要確認";
+  if (normalized === "rerun_in_progress") return "OCR再取得中";
+  if (normalized === "new_evidence_available") return "新しいOCR候補あり";
   if (normalized === "recovery_required") return "復旧待ち";
   if (normalized === "choice_required") return "選択待ち";
   if (normalized === "identity_choice_required") return "施設・週の選択待ち";
@@ -759,6 +772,21 @@ const describeWorkflowState = (state?: string | null) => {
   if (normalized === "apply_ready") return "反映可能";
   if (normalized === "confirmed") return "確定済み";
   return "";
+};
+
+const describeWorkflowPrimaryAction = (action?: string | null) => {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (normalized === "run_ocr_pipeline" || normalized === "rerun_ocr_pipeline") return "OCR再実行";
+  if (normalized === "recover_ocr_evidence") return "基盤復旧";
+  if (normalized === "switch_to_new_evidence") return "候補切替";
+  if (normalized === "keep_current_draft") return "現シート維持";
+  if (normalized === "resolve_identity_choice") return "施設・週を選択";
+  if (normalized === "resolve_layout_choice") return "OCR候補を選択";
+  if (normalized === "review_critical_cells") return "高リスク箇所を確認";
+  if (normalized === "apply_draft") return "明細へ反映";
+  if (normalized === "edit_draft") return "下書きを確認";
+  if (normalized === "wait_for_rerun" || normalized === "wait") return "完了待ち";
+  return String(action || "").trim();
 };
 
 const describeProcessingStage = (stage?: string | null) => {
@@ -1438,6 +1466,8 @@ export default function OrderDetailPage() {
   >("numeric_verification");
   const [criticalDecisionSaving, setCriticalDecisionSaving] = useState<string>("");
   const [ocrRecoverPending, setOcrRecoverPending] = useState<boolean>(false);
+  const [switchEvidencePending, setSwitchEvidencePending] = useState<boolean>(false);
+  const [keptCurrentCandidateEvidenceId, setKeptCurrentCandidateEvidenceId] = useState<string>("");
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
   const [bagLoading, setBagLoading] = useState<boolean>(false);
@@ -1505,6 +1535,22 @@ export default function OrderDetailPage() {
     void loadOrderDetail(String(id));
     setOcrPrompt(DEFAULT_OCR_PROMPT);
   }, [id]);
+
+  useEffect(() => {
+    const candidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+    if (!candidateEvidenceRunId) {
+      if (keptCurrentCandidateEvidenceId) {
+        setKeptCurrentCandidateEvidenceId("");
+      }
+      return;
+    }
+    if (
+      keptCurrentCandidateEvidenceId
+      && keptCurrentCandidateEvidenceId !== candidateEvidenceRunId
+    ) {
+      setKeptCurrentCandidateEvidenceId("");
+    }
+  }, [order?.workflow_state?.candidate_evidence_run_id, keptCurrentCandidateEvidenceId]);
 
   const loadShippingStatuses = async (silent: boolean = false) => {
     if (!id) return;
@@ -3634,6 +3680,45 @@ const loadOcrPages = async () => {
     }
   };
 
+  const keepCurrentDraft = () => {
+    const candidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+    if (!candidateEvidenceRunId) {
+      setActionMessage("現在は新しいOCR候補がありません。");
+      return;
+    }
+    setKeptCurrentCandidateEvidenceId(candidateEvidenceRunId);
+    setActionMessage("現在のシートを維持します。必要ならあとで新しいOCR候補へ切り替えられます。");
+  };
+
+  const switchDraftToLatestEvidence = async () => {
+    if (!order?.id) return;
+    setSwitchEvidencePending(true);
+    setActionMessage("新しいOCR候補に切り替えています...");
+    try {
+      await apiClient.post(`/orders/${order.id}/draft-sheet/switch-evidence`);
+      setKeptCurrentCandidateEvidenceId("");
+      await refreshOrderWorkspace({
+        preserveSelections: true,
+        reloadSheet: true,
+        reloadHistory: true,
+      });
+      await loadOcrSheet({ silent: true });
+      setActionMessage("新しいOCR候補に切り替えました。");
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      if (status === 404) {
+        setActionMessage("新しいOCR候補への切替APIがまだ利用できません。現在のシートはそのままです。");
+      } else if (status === 409) {
+        setActionMessage(detail?.message || "新しいOCR候補へ切り替えられませんでした。");
+      } else {
+        setActionMessage("新しいOCR候補への切替に失敗しました。");
+      }
+    } finally {
+      setSwitchEvidencePending(false);
+    }
+  };
+
   const updateFacilityTemplateColumn = (
     rowIndex: number,
     key: keyof FacilityTemplateColumn,
@@ -4018,6 +4103,88 @@ const loadOcrPages = async () => {
     }
   };
 
+  const rerunOcrPipeline = async () => {
+    if (!order) return;
+    if (ocrHardRecoveryMode) {
+      setActionMessage("現在は基盤復旧待ちのため、OCRパイプライン再実行は保留しました。");
+      return;
+    }
+    const orderId = order.id;
+    if (reparseTimerRef.current !== null) {
+      window.clearTimeout(reparseTimerRef.current);
+      reparseTimerRef.current = null;
+    }
+    setReparsePending(true);
+    setActionMessage("OCRパイプラインを再実行しています。新しいOCR候補を作成します。");
+    const pollRerun = async () => {
+      try {
+        const statusRes = await apiClient.get(`/orders/${orderId}`);
+        const updated = statusRes.data as OrderDetail;
+        setOrder(updated);
+        const nextState = String(updated?.workflow_state?.state || "").trim().toLowerCase();
+        const nextReparseStatus = String(updated?.workflow_state?.reparse_state?.status || "").trim().toLowerCase();
+        if (nextState === "new_evidence_available") {
+          setReparsePending(false);
+          reparseTimerRef.current = null;
+          setActionMessage("新しいOCR候補ができました。候補ブロックから切り替えるか選んでください。");
+          await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
+          return;
+        }
+        if (nextState === "rerun_failed_keep_current" || nextReparseStatus === "hard_failed" || nextReparseStatus === "failed") {
+          setReparsePending(false);
+          reparseTimerRef.current = null;
+          setActionMessage("OCRパイプライン再実行に失敗しました。現在のシートは保持されています。");
+          await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
+          return;
+        }
+        if (nextState === "rerun_in_progress" || ["running", "pending", "queued"].includes(nextReparseStatus)) {
+          reparseTimerRef.current = window.setTimeout(pollRerun, 5000);
+          return;
+        }
+        setReparsePending(false);
+        reparseTimerRef.current = null;
+        await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
+        setActionMessage("OCRパイプライン再実行が完了しました。最新状態を確認してください。");
+      } catch {
+        setReparsePending(false);
+        reparseTimerRef.current = null;
+        setActionMessage("OCRパイプライン再実行の状態取得に失敗しました。最新状態を再読込してください。");
+      }
+    };
+    try {
+      const res = await apiClient.post(`/orders/${orderId}/ocr-rerun`, { stale_action: "retry" }, { timeout: 900000 });
+      if (res.status === 202 || res.data?.accepted) {
+        setOrder({
+          ...order,
+          ocr_status: "running",
+          ocr_error: null,
+          ocr_processing_stage: "queued",
+          ocr_updated_at: new Date().toISOString(),
+          workflow_state: {
+            ...(order.workflow_state || {}),
+            state: "rerun_in_progress",
+          },
+        });
+        reparseTimerRef.current = window.setTimeout(pollRerun, 2000);
+        return;
+      }
+      setReparsePending(false);
+      setActionMessage("OCRパイプライン再実行を開始できませんでした。");
+    } catch (err: any) {
+      setReparsePending(false);
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const detailError = typeof detail === "string" ? detail : detail?.error || "";
+      if (status === 409 && detailError === "reparse_in_progress") {
+        setActionMessage("別の画面でOCRパイプライン再実行中です。完了を待つか、最新状態を再読込してください。");
+      } else if (status === 404) {
+        setActionMessage("OCRパイプライン再実行の対象が見つかりません。");
+      } else {
+        setActionMessage("OCRパイプライン再実行に失敗しました。");
+      }
+    }
+  };
+
   const recoverOcrFoundation = async () => {
     if (!order) return;
     if (ocrRecoverPending) return;
@@ -4313,6 +4480,37 @@ const loadOcrPages = async () => {
   const hasUsableOverlayPreview = showOcrOverlay || usingSyntheticOverlay;
   const step2CriticalBannerMessages = (() => {
     const messages: string[] = [];
+    const bannerWorkflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
+    const bannerCandidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+    const bannerReparseStateStatus = String(order?.workflow_state?.reparse_state?.status || "").trim().toLowerCase();
+    const bannerShowNewEvidenceChoice =
+      bannerWorkflowStateCode === "new_evidence_available"
+      && Boolean(
+        bannerCandidateEvidenceRunId
+        && bannerCandidateEvidenceRunId !== keptCurrentCandidateEvidenceId,
+      );
+    const bannerKeepingCurrentDraftChoice =
+      bannerWorkflowStateCode === "new_evidence_available"
+      && Boolean(
+        bannerCandidateEvidenceRunId
+        && bannerCandidateEvidenceRunId === keptCurrentCandidateEvidenceId,
+      );
+    const bannerRerunInProgress =
+      bannerWorkflowStateCode === "rerun_in_progress"
+      || bannerReparseStateStatus === "running"
+      || bannerReparseStateStatus === "pending";
+    const bannerSemanticShellOnly = bannerWorkflowStateCode === "semantic_shell_only";
+    if (bannerShowNewEvidenceChoice) {
+      messages.push("新しいOCR候補があります。切り替えるか、現在のシートを維持するかを選んでください。");
+    } else if (bannerKeepingCurrentDraftChoice) {
+      messages.push("現在のシートを維持しています。必要ならあとで新しいOCR候補へ切り替えられます。");
+    }
+    if (bannerRerunInProgress) {
+      messages.push("OCRパイプラインを再実行しています。完了後に新しいOCR候補を確認してください。");
+    }
+    if (bannerSemanticShellOnly) {
+      messages.push("メニュー枠はありますが、数量はまだ信用できません。先にOCRパイプラインを再実行してください。");
+    }
     if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
       if (isReparseStaleTimeoutError(order?.ocr_error)) {
         messages.push(
@@ -4560,6 +4758,7 @@ const loadOcrPages = async () => {
   const workflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
   const workflowHeadline = String(order?.workflow_state?.headline || "").trim();
   const workflowApplyGate = order?.apply_gate || order?.workflow_state?.apply_gate || null;
+  const workflowCandidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
   const criticalDecisions = Array.isArray(order?.critical_decisions)
     ? order.critical_decisions.filter((item) => item && !String(item.selected_value || "").trim())
     : Array.isArray(order?.workflow_state?.critical_decisions)
@@ -4590,6 +4789,20 @@ const loadOcrPages = async () => {
     ? workflowApplyGate.warnings.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
   const unresolvedCriticalDecisionCount = criticalDecisions.length;
+  const semanticShellOnly = workflowStateCode === "semantic_shell_only";
+  const rerunInProgressState = workflowStateCode === "rerun_in_progress";
+  const showNewEvidenceChoice =
+    workflowStateCode === "new_evidence_available" &&
+    Boolean(
+      workflowCandidateEvidenceRunId &&
+      workflowCandidateEvidenceRunId !== keptCurrentCandidateEvidenceId,
+    );
+  const keepingCurrentDraftChoice =
+    workflowStateCode === "new_evidence_available" &&
+    Boolean(
+      workflowCandidateEvidenceRunId &&
+      workflowCandidateEvidenceRunId === keptCurrentCandidateEvidenceId,
+    );
   const workflowSupportText = (() => {
     if (unresolvedCriticalDecisionCount > 0) {
       return `未確定の候補が ${unresolvedCriticalDecisionCount} 件あります。先に候補を選んでください。`;
@@ -4775,7 +4988,8 @@ const loadOcrPages = async () => {
   const ocrProcessingNow =
     normalizedOcrStatus === "running" ||
     normalizedOcrStatus === "pending" ||
-    Boolean(reparsePending);
+    Boolean(reparsePending) ||
+    rerunInProgressState;
   const ocrTerminalFailureState =
     normalizedOcrStatus === "failed" ||
     normalizedOcrStatus === "error" ||
@@ -4804,11 +5018,11 @@ const loadOcrPages = async () => {
     effectiveCanApply &&
     !ocrHardRecoveryMode &&
     !ocrRecoverPending &&
-    !step2ChoiceRequired;
-  const showYomitokuRerunAction =
-    (normalizedOcrStatus === "failed" || normalizedOcrStatus === "empty" || normalizedOcrStatus === "stalled") &&
-    !ocrProcessingNow &&
-    !step1Incomplete;
+    !step2ChoiceRequired &&
+    !semanticShellOnly &&
+    !showNewEvidenceChoice &&
+    !rerunInProgressState;
+  const showOcrPipelineRerunAction = !step1Incomplete;
   const ocrApplyBranchEmphasis =
     !step1Incomplete && !step2ChoiceRequired && ocrHasEditableSheet && effectiveCanApply && !ocrNeedsDraftSave;
   const ocrRepairBranchEmphasis =
@@ -4819,6 +5033,18 @@ const loadOcrPages = async () => {
       Boolean(reviewWarningText || ocrReparseBlockedHint));
   const ocrPrimaryActionHint = (() => {
     if (workflowHeadline) return workflowHeadline;
+    if (showNewEvidenceChoice) {
+      return "新しいOCR候補ができました。切り替えるか、現在のシートを維持するか選んでください";
+    }
+    if (keepingCurrentDraftChoice) {
+      return "現在のシートを維持しています。必要ならあとで新しいOCR候補に切り替えられます";
+    }
+    if (rerunInProgressState) {
+      return "OCRパイプラインを再実行しています。完了後に新しい候補を確認してください";
+    }
+    if (semanticShellOnly) {
+      return "メニュー枠はありますが、数量はまだ信用できません。先にOCRパイプラインを再実行してください";
+    }
     if (sheetWeeklyMenuMissing) return "先に対象月のメニューを登録してください";
     if (step1Incomplete) return "Step1で施設と週を保存してください";
     if (step2ChoiceRequired) return "まず OCR 候補を選択してから、シート修正に進んでください";
@@ -4828,7 +5054,7 @@ const loadOcrPages = async () => {
     if (showOcrRecoveryAction) {
       return "OCR土台が不完全です。先にOCR基盤を復旧してから次の操作に進んでください。";
     }
-    if (showYomitokuRerunAction && !ocrHasEditableSheet) {
+    if (showOcrPipelineRerunAction && !ocrHasEditableSheet) {
       return "先にOCRパイプラインを再実行してOCR基盤を更新してください。";
     }
     if ((normalizedOcrStatus === "running" || normalizedOcrStatus === "pending") && effectiveProcessingStageLabel) {
@@ -4846,6 +5072,18 @@ const loadOcrPages = async () => {
   const ocrPrimaryActionNote = (() => {
     if (step1ChoiceRequired) {
       return "Step1 に戻って、施設または週の候補を先に確定してください。";
+    }
+    if (showNewEvidenceChoice) {
+      return "現在のシートは残したままです。新しいOCR候補に切り替えると、最新のOCR基盤からシートを作り直します。";
+    }
+    if (keepingCurrentDraftChoice) {
+      return "現在のシートで作業を続けます。切り替えが必要になったら、候補ブロックから新しいOCR候補を選べます。";
+    }
+    if (rerunInProgressState) {
+      return "再実行中は現在のシートを維持したまま待機します。完了後に切り替え可否を判断してください。";
+    }
+    if (semanticShellOnly) {
+      return "いまのシートは行と列の枠だけ確認できます。数量はまだ信頼できないため、基盤の再実行または復旧を優先してください。";
     }
     if (
       workflowStateCode === "layout_choice_required"
@@ -5076,7 +5314,9 @@ const loadOcrPages = async () => {
                   {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
                 </div>
                 {order?.workflow_state?.primary_action ? (
-                  <span className="ocr-review-pill ocr-review-pill--state">{order.workflow_state.primary_action}</span>
+                  <span className="ocr-review-pill ocr-review-pill--state">
+                    {describeWorkflowPrimaryAction(order.workflow_state.primary_action)}
+                  </span>
                 ) : workflowStateLabel ? (
                   <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
                 ) : null}
@@ -5553,10 +5793,6 @@ const loadOcrPages = async () => {
                       警告: OCR テーブルを暫定ソースとして表示しています。内容を確認してから保存・反映してください。
                     </p>
                   ) : null}
-                  {renderCriticalDecisionPanel(step2CriticalDecisions, {
-                    title: "OCR修正前に候補を確定",
-                    note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
-                  })}
                   <div className="ocr-workspace">
                     <div className="ocr-workspace-tools">
                       <div className="ocr-edit">
@@ -5623,7 +5859,7 @@ const loadOcrPages = async () => {
                             </section>
                             <section className={`ocr-flow-branch ${ocrRepairBranchEmphasis ? "is-primary" : ""}`}>
                               <p className="ocr-flow-branch-label">いいえ / 迷う</p>
-                              <h4>手で直すか、LLM補完再解析を使う</h4>
+                              <h4>基盤を整えてから、必要なら候補選択とLLM補完へ進む</h4>
                               <p className="subtle">
                                 {ocrProcessingNow
                                   ? describeReparseProgressMessage(effectiveProcessingStage, {
@@ -5632,158 +5868,217 @@ const loadOcrPages = async () => {
                                     }) || "いま再解析中です。完了後にもう一度シートを確認してください。"
                                   : "先にシートを保存して下書きを残し、必要な時だけ再解析を使います。"}
                               </p>
-                              <div className="ocr-flow-branch-actions">
-                                <button
-                                  className={saveSheetButtonClassName}
-                                  type="button"
-                                  onClick={saveOcrSheetExact}
-                                  disabled={ocrTableSaving || !canSaveDraftSheet}
-                                >
-                                  {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
-                                </button>
-                                {showOcrRecoveryAction || ocrHardRecoveryMode ? (
-                                  <button
-                                    className="btn"
-                                    type="button"
-                                    onClick={() => void recoverOcrFoundation()}
-                                    disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
-                                  >
-                                    {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
-                                  </button>
-                                ) : null}
-                                {showYomitokuRerunAction && !showOcrRecoveryAction && !ocrHardRecoveryMode ? (
-                                  <button
-                                    className="btn ghost"
-                                    type="button"
-                                    onClick={() =>
-                                      void reparse({
-                                        ocrProvider: "pipeline",
-                                        llmAssist: false,
-                                        force: true,
-                                        staleAction: "retry",
-                                      })
-                                    }
-                                    disabled={reparsePending || step1Incomplete || ocrRecoverPending || !ocrHasEditableSheet}
-                                  >
-                                    {reparsePending ? "再実行中..." : "OCRパイプラインを再実行"}
-                                  </button>
-                                ) : null}
-                                <select
-                                  className="input llm-model-select"
-                                  value={llmReparsePromptPreset}
-                                  onChange={(event) =>
-                                    setLlmReparsePromptPreset(
-                                      event.target.value as
-                                        | "numeric_verification"
-                                        | "column_missing"
-                                        | "row_alignment"
-                                        | "special_diet_semantics"
-                                        | "freeform",
-                                    )
-                                  }
-                                  disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
-                                >
-                                  <option value="numeric_verification">数字検証優先</option>
-                                  <option value="column_missing">列欠損・見切れ補完</option>
-                                  <option value="row_alignment">行ずれ・区分ずれ補正</option>
-                                  <option value="special_diet_semantics">特殊食・禁食優先</option>
-                                  <option value="freeform">自由入力中心</option>
-                                </select>
-                                <select
-                                  className="input llm-provider-select"
-                                  value={llmReparseProvider}
-                                  onChange={(event) => {
-                                    const nextProvider = event.target.value;
-                                    setLlmReparseProvider(nextProvider);
-                                    if (nextProvider !== "gemini") {
-                                      setLlmReparseModelMode("flash");
-                                      setLlmReparseCustomModel("");
-                                    }
-                                  }}
-                                  disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
-                                >
-                                  <option value="openai">OpenAI</option>
-                                  <option value="gemini">Gemini</option>
-                                </select>
-                                {llmReparseProvider === "gemini" ? (
-                                  <select
-                                    className="input llm-model-select"
-                                    value={llmReparseModelMode}
-                                    onChange={(event) =>
-                                      setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
-                                    }
-                                    disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
-                                  >
-                                    <option value="flash">Flash</option>
-                                    <option value="pro">Pro</option>
-                                    <option value="other">Other</option>
-                                  </select>
-                                ) : null}
-                                {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
-                                  <input
-                                    className="input llm-model-input"
-                                    type="text"
-                                    placeholder="例: gemini-1.5-flash"
-                                    value={llmReparseCustomModel}
-                                    onChange={(event) => setLlmReparseCustomModel(event.target.value)}
-                                    disabled={
-                                      reparsePending ||
-                                      step1Incomplete ||
-                                      ocrRecoverPending ||
-                                      ocrHardRecoveryMode ||
-                                      !ocrHasEditableSheet
-                                    }
-                                  />
-                                ) : null}
-                                <button
-                                  className="btn ghost"
-                                  onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
-                                  disabled={
-                                    reparsePending ||
-                                    step1Incomplete ||
-                                    ocrRecoverPending ||
-                                    ocrHardRecoveryMode ||
-                                    !ocrHasEditableSheet ||
-                                    (llmReparseProvider === "gemini" &&
-                                      llmReparseModelMode === "other" &&
-                                      !llmReparseCustomModel.trim())
-                                  }
-                                >
-                                  {reparsePending ? "再解析中..." : "LLM補完再解析"}
-                                </button>
+                              <div className="ocr-remediation-groups">
+                                <section className="ocr-remediation-group">
+                                  <p className="ocr-remediation-group-label">基盤</p>
+                                  <h5>作業土台を整える</h5>
+                                  <p className="subtle">
+                                    数量が怪しい時も、まずは現在のシートを残しつつ OCR 基盤を更新します。
+                                  </p>
+                                  <div className="ocr-flow-branch-actions">
+                                    <button
+                                      className={saveSheetButtonClassName}
+                                      type="button"
+                                      onClick={saveOcrSheetExact}
+                                      disabled={ocrTableSaving || !canSaveDraftSheet}
+                                    >
+                                      {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
+                                    </button>
+                                    {showOcrPipelineRerunAction ? (
+                                      <button
+                                        className={semanticShellOnly || showNewEvidenceChoice ? "btn primary" : "btn ghost"}
+                                        type="button"
+                                        onClick={() => void rerunOcrPipeline()}
+                                        disabled={reparsePending || rerunInProgressState || step1Incomplete || ocrRecoverPending}
+                                      >
+                                        {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
+                                      </button>
+                                    ) : null}
+                                    {showOcrRecoveryAction || ocrHardRecoveryMode || semanticShellOnly ? (
+                                      <button
+                                        className="btn"
+                                        type="button"
+                                        onClick={() => void recoverOcrFoundation()}
+                                        disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
+                                      >
+                                        {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </section>
+                                <section className="ocr-remediation-group">
+                                  <p className="ocr-remediation-group-label">候補</p>
+                                  <h5>OCR候補や解釈候補を決める</h5>
+                                  <p className="subtle">
+                                    新しい OCR 候補や複数候補がある時だけ、ここで選んでから修正を続けます。
+                                  </p>
+                                  {showNewEvidenceChoice ? (
+                                    <div className="ocr-evidence-switch-card">
+                                      <p className="ocr-evidence-switch-title">新しいOCR候補があります</p>
+                                      <p className="subtle">
+                                        現在のシートは維持したままです。切り替えると、最新の OCR 結果から下書きを作り直します。
+                                      </p>
+                                      <div className="ocr-flow-branch-actions">
+                                        <button
+                                          className="btn primary"
+                                          type="button"
+                                          onClick={() => void switchDraftToLatestEvidence()}
+                                          disabled={switchEvidencePending || reparsePending || rerunInProgressState || ocrRecoverPending}
+                                        >
+                                          {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
+                                        </button>
+                                        <button
+                                          className="btn ghost"
+                                          type="button"
+                                          onClick={keepCurrentDraft}
+                                          disabled={switchEvidencePending}
+                                        >
+                                          今のシートを維持
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : keepingCurrentDraftChoice ? (
+                                    <div className="ocr-evidence-switch-card ocr-evidence-switch-card--muted">
+                                      <p className="ocr-evidence-switch-title">現在のシートを維持中です</p>
+                                      <p className="subtle">
+                                        新しい OCR 候補は保持しています。必要になったら切り替えを再度選べます。
+                                      </p>
+                                    </div>
+                                  ) : null}
+                                  {renderCriticalDecisionPanel(step2CriticalDecisions, {
+                                    title: "OCR修正前に候補を確定",
+                                    note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
+                                  }) || (
+                                    <p className="subtle ocr-remediation-empty">
+                                      現在、追加で選ぶ OCR 候補はありません。
+                                    </p>
+                                  )}
+                                </section>
+                                <section className="ocr-remediation-group ocr-remediation-group--llm">
+                                  <p className="ocr-remediation-group-label">LLM</p>
+                                  <h5>どう補完するかを選ぶ</h5>
+                                  <p className="subtle">
+                                    基盤や候補が固まってから、必要な時だけ LLM 補完再解析を使います。
+                                  </p>
+                                  <div className="ocr-flow-branch-actions">
+                                    <select
+                                      className="input llm-model-select"
+                                      value={llmReparsePromptPreset}
+                                      onChange={(event) =>
+                                        setLlmReparsePromptPreset(
+                                          event.target.value as
+                                            | "numeric_verification"
+                                            | "column_missing"
+                                            | "row_alignment"
+                                            | "special_diet_semantics"
+                                            | "freeform",
+                                        )
+                                      }
+                                      disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                    >
+                                      <option value="numeric_verification">数字検証優先</option>
+                                      <option value="column_missing">列欠損・見切れ補完</option>
+                                      <option value="row_alignment">行ずれ・区分ずれ補正</option>
+                                      <option value="special_diet_semantics">特殊食・禁食優先</option>
+                                      <option value="freeform">自由入力中心</option>
+                                    </select>
+                                    <select
+                                      className="input llm-provider-select"
+                                      value={llmReparseProvider}
+                                      onChange={(event) => {
+                                        const nextProvider = event.target.value;
+                                        setLlmReparseProvider(nextProvider);
+                                        if (nextProvider !== "gemini") {
+                                          setLlmReparseModelMode("flash");
+                                          setLlmReparseCustomModel("");
+                                        }
+                                      }}
+                                      disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                    >
+                                      <option value="openai">OpenAI</option>
+                                      <option value="gemini">Gemini</option>
+                                    </select>
+                                    {llmReparseProvider === "gemini" ? (
+                                      <select
+                                        className="input llm-model-select"
+                                        value={llmReparseModelMode}
+                                        onChange={(event) =>
+                                          setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
+                                        }
+                                        disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                      >
+                                        <option value="flash">Flash</option>
+                                        <option value="pro">Pro</option>
+                                        <option value="other">Other</option>
+                                      </select>
+                                    ) : null}
+                                    {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
+                                      <input
+                                        className="input llm-model-input"
+                                        type="text"
+                                        placeholder="例: gemini-1.5-flash"
+                                        value={llmReparseCustomModel}
+                                        onChange={(event) => setLlmReparseCustomModel(event.target.value)}
+                                        disabled={
+                                          reparsePending ||
+                                          step1Incomplete ||
+                                          ocrRecoverPending ||
+                                          ocrHardRecoveryMode ||
+                                          !ocrHasEditableSheet
+                                        }
+                                      />
+                                    ) : null}
+                                    <button
+                                      className="btn ghost"
+                                      onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
+                                      disabled={
+                                        reparsePending ||
+                                        step1Incomplete ||
+                                        ocrRecoverPending ||
+                                        ocrHardRecoveryMode ||
+                                        !ocrHasEditableSheet ||
+                                        (llmReparseProvider === "gemini" &&
+                                          llmReparseModelMode === "other" &&
+                                          !llmReparseCustomModel.trim())
+                                      }
+                                    >
+                                      {reparsePending ? "再解析中..." : "LLM補完再解析"}
+                                    </button>
+                                  </div>
+                                  {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
+                                    <div className="ocr-inline-prompt">
+                                      <label className="input-label" htmlFor="llm-freeform-prompt">
+                                        LLM追加指示
+                                      </label>
+                                      <p className="subtle">
+                                        自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
+                                      </p>
+                                      <textarea
+                                        id="llm-freeform-prompt"
+                                        className="input ocr-llm-prompt-textarea"
+                                        rows={18}
+                                        value={ocrPrompt}
+                                        onChange={(e) => setOcrPrompt(e.target.value)}
+                                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                                      />
+                                    </div>
+                                  ) : (
+                                    <details className="ocr-inline-details">
+                                      <summary>LLM追加指示（任意）</summary>
+                                      <p className="subtle">
+                                        選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
+                                      </p>
+                                      <textarea
+                                        className="input ocr-llm-prompt-textarea"
+                                        rows={14}
+                                        value={ocrPrompt}
+                                        onChange={(e) => setOcrPrompt(e.target.value)}
+                                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                                      />
+                                    </details>
+                                  )}
+                                </section>
                               </div>
-                              {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
-                                <div className="ocr-inline-prompt">
-                                  <label className="input-label" htmlFor="llm-freeform-prompt">
-                                    LLM追加指示
-                                  </label>
-                                  <p className="subtle">
-                                    自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
-                                  </p>
-                                  <textarea
-                                    id="llm-freeform-prompt"
-                                    className="input"
-                                    rows={10}
-                                    value={ocrPrompt}
-                                    onChange={(e) => setOcrPrompt(e.target.value)}
-                                    placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
-                                  />
-                                </div>
-                              ) : (
-                                <details className="ocr-inline-details">
-                                  <summary>LLM追加指示（任意）</summary>
-                                  <p className="subtle">
-                                    選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
-                                  </p>
-                                  <textarea
-                                    className="input"
-                                    rows={8}
-                                    value={ocrPrompt}
-                                    onChange={(e) => setOcrPrompt(e.target.value)}
-                                    placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
-                                  />
-                                </details>
-                              )}
                             </section>
                           </div>
                           {reviewBlockerText || reviewWarningText || ocrReparseBlockedHint || ocrHardRecoveryMode ? (
@@ -7895,7 +8190,7 @@ const loadOcrPages = async () => {
         .ocr-flow-branches {
           display: grid;
           gap: 12px;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: minmax(0, 1fr);
         }
 
         .ocr-flow-branch {
@@ -7935,6 +8230,62 @@ const loadOcrPages = async () => {
           align-items: center;
         }
 
+        .ocr-remediation-groups {
+          display: grid;
+          gap: 12px;
+        }
+
+        .ocr-remediation-group {
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(24, 42, 40, 0.1);
+          background: #f9faf8;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .ocr-remediation-group--llm {
+          background: #fcfcfb;
+        }
+
+        .ocr-remediation-group-label {
+          margin: 0;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.04em;
+          color: #66716f;
+          text-transform: uppercase;
+        }
+
+        .ocr-remediation-group h5 {
+          margin: 0;
+          font-size: 15px;
+          color: #243431;
+        }
+
+        .ocr-remediation-empty {
+          margin: 0;
+        }
+
+        .ocr-evidence-switch-card {
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          background: #ffffff;
+        }
+
+        .ocr-evidence-switch-card--muted {
+          background: #f7f7f5;
+        }
+
+        .ocr-evidence-switch-title {
+          margin: 0 0 4px;
+          font-size: 14px;
+          font-weight: 700;
+          color: #243431;
+        }
+
         .ocr-inline-details {
           border-top: 1px dashed rgba(24, 42, 40, 0.12);
           padding-top: 10px;
@@ -7949,7 +8300,7 @@ const loadOcrPages = async () => {
         .ocr-inline-prompt textarea {
           margin-top: 8px;
           width: 100%;
-          min-height: 240px;
+          min-height: 420px;
           resize: vertical;
         }
 
@@ -7967,6 +8318,11 @@ const loadOcrPages = async () => {
 
         .ocr-inline-details textarea {
           margin-top: 8px;
+        }
+
+        .ocr-llm-prompt-textarea {
+          width: 100%;
+          min-height: 420px;
         }
 
         .ocr-review-pill {

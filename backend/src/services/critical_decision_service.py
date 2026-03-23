@@ -12,11 +12,13 @@ Base.metadata.create_all(bind=engine)
 
 
 def _serialize_decision(item: OrderCriticalDecision) -> dict[str, Any]:
+    candidate_set = item.candidate_set_json if isinstance(item.candidate_set_json, dict) else {}
     return {
         "id": item.id,
         "order_id": item.order_id,
         "decision_type": item.decision_type,
-        "candidate_set_json": item.candidate_set_json if isinstance(item.candidate_set_json, dict) else {},
+        "candidate_set_json": candidate_set,
+        "base_evidence_run_id": str(candidate_set.get("base_evidence_run_id") or "").strip() or None,
         "selected_value": item.selected_value,
         "selected_by": item.selected_by,
         "selected_at": item.selected_at.isoformat() if isinstance(item.selected_at, datetime) else None,
@@ -55,12 +57,27 @@ def get_latest_decision(order_id: str, decision_type: str) -> dict[str, Any] | N
         return _serialize_decision(row) if row else None
 
 
-def sync_pending_decisions(order_id: str, critical_choices: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def sync_pending_decisions(
+    order_id: str,
+    critical_choices: list[dict[str, Any]] | None,
+    *,
+    base_evidence_run_id: str | None = None,
+) -> list[dict[str, Any]]:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return []
+    normalized_base_evidence_run_id = str(base_evidence_run_id or "").strip() or None
+
+    def _normalize_candidate_set(item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        if normalized_base_evidence_run_id:
+            normalized["base_evidence_run_id"] = normalized_base_evidence_run_id
+        elif "base_evidence_run_id" in normalized:
+            normalized["base_evidence_run_id"] = str(normalized.get("base_evidence_run_id") or "").strip() or None
+        return normalized
+
     desired = {
-        str(item.get("decision_type") or "").strip(): item
+        str(item.get("decision_type") or "").strip(): _normalize_candidate_set(item)
         for item in (critical_choices or [])
         if isinstance(item, dict) and str(item.get("decision_type") or "").strip()
     }
@@ -70,27 +87,48 @@ def sync_pending_decisions(order_id: str, critical_choices: list[dict[str, Any]]
             .filter(OrderCriticalDecision.order_id == normalized_order_id)
             .all()
         )
+        preserved: dict[str, dict[str, Any]] = {}
         for row in existing_rows:
-            if row.decision_type not in desired:
-                session.delete(row)
-                continue
-            candidate_set = desired.pop(row.decision_type)
-            if row.selected_value:
-                # keep resolved decision, but refresh displayed candidate metadata.
-                row.candidate_set_json = candidate_set
-                continue
-            row.candidate_set_json = candidate_set
-            row.selected_at = datetime.utcnow()
+            current_candidate_set = row.candidate_set_json if isinstance(row.candidate_set_json, dict) else {}
+            preserved[row.decision_type] = {
+                "id": row.id,
+                "selected_value": row.selected_value,
+                "selected_by": row.selected_by,
+                "selected_at": row.selected_at,
+                "base_evidence_run_id": str(current_candidate_set.get("base_evidence_run_id") or "").strip() or None,
+            }
+            session.delete(row)
+        session.flush()
         for decision_type, candidate_set in desired.items():
+            previous = preserved.get(decision_type) or {}
+            next_base_evidence_run_id = str(candidate_set.get("base_evidence_run_id") or "").strip() or None
+            previous_base_evidence_run_id = str(previous.get("base_evidence_run_id") or "").strip() or None
+            keep_selection = bool(
+                previous.get("selected_value")
+                and (
+                    (
+                        not previous_base_evidence_run_id
+                        and not next_base_evidence_run_id
+                    )
+                    or (
+                        previous_base_evidence_run_id
+                        and previous_base_evidence_run_id == next_base_evidence_run_id
+                    )
+                )
+            )
             session.add(
                 OrderCriticalDecision(
-                    id=f"OCD{uuid4().hex[:12]}",
+                    id=str(previous.get("id") or f"OCD{uuid4().hex[:12]}"),
                     order_id=normalized_order_id,
                     decision_type=decision_type,
                     candidate_set_json=candidate_set,
-                    selected_value=None,
-                    selected_by=None,
-                    selected_at=datetime.utcnow(),
+                    selected_value=(str(previous.get("selected_value") or "").strip() or None) if keep_selection else None,
+                    selected_by=(str(previous.get("selected_by") or "").strip() or None) if keep_selection else None,
+                    selected_at=(
+                        previous.get("selected_at")
+                        if keep_selection and isinstance(previous.get("selected_at"), datetime)
+                        else datetime.utcnow()
+                    ),
                 )
             )
         session.flush()
@@ -109,6 +147,7 @@ def choose_decision(
     selected_value: str,
     *,
     selected_by: str | None = None,
+    current_evidence_run_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     normalized_type = str(decision_type or "").strip()
@@ -127,6 +166,12 @@ def choose_decision(
         )
         if not row:
             return None
+        if current_evidence_run_id is not None:
+            candidate_set = row.candidate_set_json if isinstance(row.candidate_set_json, dict) else {}
+            decision_evidence_run_id = str(candidate_set.get("base_evidence_run_id") or "").strip() or None
+            normalized_current_evidence_run_id = str(current_evidence_run_id or "").strip() or None
+            if decision_evidence_run_id and normalized_current_evidence_run_id and decision_evidence_run_id != normalized_current_evidence_run_id:
+                return None
         row.selected_value = normalized_value
         row.selected_by = str(selected_by or "").strip() or None
         row.selected_at = datetime.utcnow()

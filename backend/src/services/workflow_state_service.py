@@ -193,6 +193,53 @@ def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, dr
     )
 
 
+def _latest_evidence_is_new_candidate(
+    evidence_run: dict[str, Any] | None,
+    draft_sheet: dict[str, Any] | None,
+) -> bool:
+    latest_evidence_run_id = str((evidence_run or {}).get("id") or "").strip() or None
+    draft_base_evidence_run_id = (
+        str((draft_sheet or {}).get("base_evidence_run_id") or "").strip() or None
+        if isinstance(draft_sheet, dict)
+        else None
+    )
+    if not latest_evidence_run_id or not draft_base_evidence_run_id:
+        return False
+    return latest_evidence_run_id != draft_base_evidence_run_id
+
+
+def _infer_reparse_request_mode(
+    reparse_job: dict[str, Any] | None,
+    reparse_state: dict[str, Any] | None,
+) -> str:
+    if not isinstance(reparse_job, dict):
+        return ""
+    metrics = reparse_job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    direct_mode = (
+        str(metrics.get("request_mode") or metrics.get("rerun_mode") or "").strip().lower()
+    )
+    if direct_mode:
+        return direct_mode
+    if metrics.get("evidence_only_rerun") is True:
+        return "ocr_rerun"
+    return ""
+
+
+def _resolve_active_evidence_run(
+    latest_evidence_run: dict[str, Any] | None,
+    draft_sheet: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(draft_sheet, dict):
+        return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
+    draft_base_evidence_run_id = str(draft_sheet.get("base_evidence_run_id") or "").strip() or None
+    latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None
+    if not draft_base_evidence_run_id or draft_base_evidence_run_id == latest_evidence_run_id:
+        return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
+    resolved = ocr_evidence_service.get_evidence_run(draft_base_evidence_run_id)
+    return resolved if isinstance(resolved, dict) else (latest_evidence_run if isinstance(latest_evidence_run, dict) else None)
+
+
 def _decision_selected_label(decision: dict[str, Any], selected_value: str) -> str:
     candidate_set = decision.get("candidate_set_json") if isinstance(decision, dict) else {}
     candidates = candidate_set.get("candidates") if isinstance(candidate_set, dict) else []
@@ -279,6 +326,9 @@ def _derive_state(
     draft_sheet: dict[str, Any] | None,
     candidate_resolution: dict[str, Any] | None,
     apply_gate: dict[str, Any] | None,
+    reparse_state: dict[str, Any] | None = None,
+    reparse_request_mode: str | None = None,
+    has_new_candidate: bool = False,
 ) -> tuple[str, str, str | None, list[str], list[str], str]:
     blockers = list((apply_gate or {}).get("blockers") or [])
     warnings = list((apply_gate or {}).get("warnings") or [])
@@ -299,17 +349,47 @@ def _derive_state(
             or "quantity_review_required" in warnings
         )
     )
+    capabilities = evidence_run.get("capabilities_json") if isinstance(evidence_run, dict) else {}
+    semantic_shell_only = bool(isinstance(capabilities, dict) and capabilities.get("semantic_shell_only"))
+    numeric_trust_low = bool(isinstance(capabilities, dict) and capabilities.get("numeric_trust_low"))
+    reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
+    normalized_reparse_request_mode = str(reparse_request_mode or "").strip().lower()
     if order_status == "確定":
         return "confirmed", "確定済み", "none", blockers, warnings, "high"
+    if normalized_reparse_request_mode == "ocr_rerun" and reparse_status in {"running", "pending"}:
+        return "rerun_in_progress", "OCRパイプラインを再取得しています", "wait_for_rerun", blockers, warnings, "low"
+    if (
+        normalized_reparse_request_mode == "ocr_rerun"
+        and reparse_status == "hard_failed"
+        and (isinstance(draft_sheet, dict) or order_status == "確定")
+    ):
+        if "rerun_failed_keep_current" not in warnings:
+            warnings = [*warnings, "rerun_failed_keep_current"]
+        return (
+            "rerun_failed_keep_current",
+            "OCR再取得に失敗しました。現在のシートは保持されています",
+            "rerun_ocr_pipeline",
+            blockers,
+            warnings,
+            "low",
+        )
+    if has_new_candidate:
+        return "new_evidence_available", "新しいOCR候補があります。切替えるか選んでください", "switch_to_new_evidence", blockers, warnings, "medium"
     if identity_choice_required:
         return "identity_choice_required", "施設または週の候補選択が必要です", "resolve_identity_choice", blockers, warnings, "medium"
     if layout_choice_required:
         return "layout_choice_required", "OCR候補の選択が必要です", "resolve_layout_choice", blockers, warnings, "medium"
     if not isinstance(evidence_run, dict):
         return "uploaded", "OCR証拠の生成待ちです", "run_ocr_pipeline", blockers or ["evidence_missing"], warnings, "low"
-    capabilities = evidence_run.get("capabilities_json") if isinstance(evidence_run, dict) else {}
     if isinstance(capabilities, dict) and capabilities.get("recovery_required"):
         return "recovery_required", "OCR基盤の復旧が必要です", "recover_ocr_evidence", blockers or ["evidence_recovery_required"], warnings, "low"
+    semantic_only_blockers = [
+        item
+        for item in blockers
+        if item not in {"semantic_shell_only", "evidence_edit_unavailable", "draft_rows_empty"}
+    ]
+    if (semantic_shell_only or numeric_trust_low) and not semantic_only_blockers:
+        return "semantic_shell_only", "メニュー枠はありますが、数量はまだ信用できません", "rerun_ocr_pipeline", blockers, warnings, "low"
     if isinstance(draft_sheet, dict):
         if attention_required:
             return "review_required", "高リスクなOCR候補を確認してください", "review_critical_cells", blockers, warnings, "medium"
@@ -342,7 +422,17 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
                 "blockers_json": [],
                 "warnings_json": [],
             }
-    evidence_payload = evidence_run.get("payload_json") if isinstance(evidence_run, dict) else None
+    active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
+    has_new_candidate = _latest_evidence_is_new_candidate(evidence_run, draft_sheet)
+    evidence_payload = active_evidence_run.get("payload_json") if isinstance(active_evidence_run, dict) else None
+    reparse_job = get_ocr_job(f"OCR-{normalized_order_id}")
+    reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
+    reparse_request_mode = _infer_reparse_request_mode(
+        reparse_job if isinstance(reparse_job, dict) else None,
+        reparse_state,
+    )
+    if isinstance(reparse_state, dict) and reparse_request_mode:
+        reparse_state = {**reparse_state, "request_mode": reparse_request_mode}
     candidate_resolution = candidate_resolution_service.resolve_order_candidates(
         order_id=normalized_order_id,
         facility_code=str(order_payload.get("facility") or "").strip() or None,
@@ -353,6 +443,7 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     synced_decisions = critical_decision_service.sync_pending_decisions(
         normalized_order_id,
         list(candidate_resolution.get("critical_choices") or []),
+        base_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
     )
     candidate_resolution, _unresolved_types = _merge_selected_decisions_into_resolution(
         candidate_resolution,
@@ -360,7 +451,7 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     )
     apply_gate = apply_gate_service.evaluate_apply_gate(
         order_payload=order_payload,
-        evidence_run=evidence_run,
+        evidence_run=active_evidence_run,
         draft_sheet=draft_sheet,
         candidate_resolution=candidate_resolution,
         menu_context=_build_menu_context(
@@ -375,16 +466,27 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     )
     state, headline, primary_action, blockers, warnings, confidence_band = _derive_state(
         order_payload=order_payload,
-        evidence_run=evidence_run,
+        evidence_run=active_evidence_run,
         draft_sheet=draft_sheet,
         candidate_resolution=candidate_resolution,
         apply_gate=apply_gate,
+        reparse_state=reparse_state,
+        reparse_request_mode=reparse_request_mode,
+        has_new_candidate=has_new_candidate,
     )
     secondary_actions = []
     if state in {"uploaded", "recovery_required"}:
         secondary_actions = ["rerun_yomitoku", "llm_reparse"]
+    elif state == "semantic_shell_only":
+        secondary_actions = ["recover_ocr_evidence", "save_draft"]
+    elif state == "rerun_failed_keep_current":
+        secondary_actions = ["keep_current_draft", "recover_ocr_evidence", "llm_reparse"]
+    elif state == "new_evidence_available":
+        secondary_actions = ["keep_current_draft", "llm_reparse"]
+    elif state == "rerun_in_progress":
+        secondary_actions = ["wait"]
     elif state in {"draft_ready", "draft_blocked", "apply_ready", "review_required"}:
-        secondary_actions = ["save_draft", "llm_reparse"]
+        secondary_actions = ["rerun_yomitoku", "save_draft", "llm_reparse"]
     elif state in {"identity_choice_required", "layout_choice_required"}:
         secondary_actions = ["select_candidate", "save_draft"]
 
@@ -393,7 +495,7 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
         if not row:
             row = OrderWorkflowState(order_id=normalized_order_id)
             session.add(row)
-        row.evidence_run_id = str((evidence_run or {}).get("id") or "").strip() or None
+        row.evidence_run_id = str((active_evidence_run or {}).get("id") or "").strip() or None
         row.draft_id = str((draft_sheet or {}).get("id") or "").strip() or None
         row.confirmed_snapshot_id = _latest_confirmed_snapshot_id(normalized_order_id)
         row.state = state
@@ -410,4 +512,11 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     serialized["candidate_resolution"] = candidate_resolution
     serialized["critical_decisions"] = synced_decisions
     serialized["apply_gate"] = apply_gate
+    serialized["candidate_evidence_run_id"] = (
+        str((evidence_run or {}).get("id") or "").strip() or None
+        if _latest_evidence_is_new_candidate(evidence_run, draft_sheet)
+        else None
+    )
+    serialized["active_evidence_run_id"] = str((active_evidence_run or {}).get("id") or "").strip() or None
+    serialized["reparse_state"] = reparse_state
     return serialized

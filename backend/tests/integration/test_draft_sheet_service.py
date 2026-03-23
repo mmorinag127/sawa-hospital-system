@@ -5,6 +5,8 @@ from datetime import datetime
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
+from src.db import session_scope  # noqa: E402
+from src.models.order import OrderLine  # noqa: E402
 from src.services import draft_sheet_service, ocr_evidence_service, order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -144,7 +146,7 @@ def test_order_service_build_initial_sheet_draft_prefers_semantic_sheet(monkeypa
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda _order_id: (
+        lambda _order_id, **_kwargs: (
             {
                 "source": "weekly_menu+ocr_payload",
                 "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
@@ -189,7 +191,7 @@ def test_get_latest_sheet_draft_upgrades_generic_cols_from_semantic_sheet(monkey
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda _order_id: (
+        lambda _order_id, **_kwargs: (
             {
                 "source": "weekly_menu+ocr_payload",
                 "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
@@ -221,7 +223,7 @@ def test_build_initial_sheet_draft_uses_recoverable_semantic_payload(monkeypatch
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda _order_id: (None, "template_unresolved"),
+        lambda _order_id, **_kwargs: (None, "template_unresolved"),
     )
     monkeypatch.setattr(
         order_service,
@@ -266,7 +268,7 @@ def test_get_latest_sheet_draft_upgrades_generic_cols_from_recoverable_semantic_
     )
     assert isinstance(saved, dict)
 
-    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id: (None, "template_unresolved"))
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (None, "template_unresolved"))
     monkeypatch.setattr(
         order_service,
         "build_recoverable_ocr_sheet_payload",
@@ -293,3 +295,119 @@ def test_get_latest_sheet_draft_upgrades_generic_cols_from_recoverable_semantic_
     draft_json = upgraded["draft_sheet_json"]
     assert draft_json["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_x"]
     assert draft_json["rows"] == [["03/22", "朝", "Menu A", "7"]]
+
+
+def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_current_draft(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-rerun-evidence-only")
+    first = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v1_legacy",
+        producer_version="test",
+        source="test-evidence",
+    )
+    assert isinstance(first, dict)
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+            "row_ids": ["row-1"],
+        },
+        edited_by="tester",
+    )
+    assert isinstance(saved, dict)
+    assert saved["base_evidence_run_id"] == first["id"]
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+    monkeypatch.setattr(
+        order_service,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            **_sample_payload("9"),
+            "status": "done",
+            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "output_reference": "gs://bucket/output.json",
+        },
+    )
+
+    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+
+    assert error is None
+    assert isinstance(rerun, dict)
+    assert rerun["id"] != first["id"]
+
+    current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
+    assert isinstance(current_draft, dict)
+    assert current_draft["id"] == saved["id"]
+    assert current_draft["base_evidence_run_id"] == first["id"]
+
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
+    assert isinstance(latest_evidence, dict)
+    assert latest_evidence["id"] == rerun["id"]
+
+    with session_scope() as session:
+        lines = session.query(OrderLine).filter(OrderLine.order_id == order["id"]).all()
+        assert len(lines) == 1
+        assert lines[0].quantity_original == 3
+
+
+def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-switch-evidence-adopt")
+    first = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v1_legacy",
+        producer_version="test",
+        source="test-evidence",
+    )
+    assert isinstance(first, dict)
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+            "row_ids": ["row-1"],
+        },
+        edited_by="tester",
+    )
+    assert isinstance(saved, dict)
+    second = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("8"),
+        schema_version="v2_evidence_rerun",
+        producer_version="rerun",
+        source="ocr-rerun",
+    )
+    assert isinstance(second, dict)
+
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda _order_id, use_saved_draft=True: (
+            {
+                "source": "weekly_menu+ocr_payload",
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                "header": ["日付", "区分", "メニュー", "常食2F"],
+                "rows": [["03/22", "朝", "Menu A", "8"]],
+                "row_ids": ["row-1"],
+                "base_evidence_run_id": second["id"],
+            },
+            None,
+        ),
+    )
+
+    switched, error = order_service.switch_draft_to_latest_evidence(order["id"], edited_by="switch-test")
+
+    assert error is None
+    assert isinstance(switched, dict)
+    assert switched["base_evidence_run_id"] == second["id"]
+    assert switched["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]

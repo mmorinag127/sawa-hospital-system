@@ -162,6 +162,18 @@ def test_choose_critical_decision_endpoint_validates_and_maps_errors(monkeypatch
     monkeypatch.setattr(
         orders_api.order_service,
         "choose_critical_decision",
+        lambda *_args, **_kwargs: (None, "decision_stale"),
+    )
+    stale = client.post(
+        f"/orders/{order['id']}/critical-decisions/week",
+        json={"selected_value": "2026-03"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["error"] == "decision_stale"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "choose_critical_decision",
         lambda *_args, **_kwargs: (None, "unexpected_failure"),
     )
     failed = client.post(
@@ -198,6 +210,81 @@ def test_confirm_endpoint_blocks_on_workflow_apply_gate(monkeypatch) -> None:
     assert detail["error"] == "facility_choice_required"
     assert "facility_choice_required" in detail["blockers"]
     assert detail["workflow_state"]["state"] == "identity_choice_required"
+
+
+def test_switch_draft_sheet_evidence_endpoint_maps_results(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-switch-001")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "switch_draft_to_latest_evidence",
+        lambda *_args, **_kwargs: (
+            {
+                "id": "ODR001",
+                "order_id": order["id"],
+                "base_evidence_run_id": "EVD002",
+                "draft_sheet_json": {
+                    "source": "weekly_menu",
+                    "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                    "header": ["日付", "区分", "メニュー", "常食2F"],
+                    "rows": [["03/22", "朝", "Menu A", "3"]],
+                    "row_ids": ["row-1"],
+                },
+                "draft_state": "draft_ready",
+                "blockers_json": [],
+                "warnings_json": [],
+                "latest_patch_candidate_id": None,
+                "edited_by": "switch-evidence",
+                "edited_at": None,
+                "created_at": None,
+            },
+            None,
+        ),
+    )
+    ok = client.post(f"/orders/{order['id']}/draft-sheet/switch-evidence")
+    assert ok.status_code == 200
+    assert ok.json()["base_evidence_run_id"] == "EVD002"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "switch_draft_to_latest_evidence",
+        lambda *_args, **_kwargs: (None, "already_current"),
+    )
+    conflict = client.post(f"/orders/{order['id']}/draft-sheet/switch-evidence")
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error"] == "already_current"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "switch_draft_to_latest_evidence",
+        lambda *_args, **_kwargs: (None, "evidence_not_found"),
+    )
+    missing = client.post(f"/orders/{order['id']}/draft-sheet/switch-evidence")
+    assert missing.status_code == 404
+
+
+def test_ocr_rerun_endpoint_enqueues_pipeline_candidate(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-rerun-001")
+
+    called: dict[str, object] = {}
+
+    def _fake_enqueue(order_id, background_tasks, **kwargs):
+        called["order_id"] = order_id
+        called.update(kwargs)
+        return {"accepted": True, "ocr_job_id": f"OCR-{order_id}"}
+
+    monkeypatch.setattr(orders_api, "_enqueue_order_evidence_rerun", _fake_enqueue)
+
+    res = client.post(f"/orders/{order['id']}/ocr-rerun")
+
+    assert res.status_code == 202
+    body = res.json()
+    assert body["accepted"] is True
+    assert body["mode"] == "pipeline_rerun"
+    assert called["order_id"] == order["id"]
+    assert called["stale_action"] == "retry"
 
 
 def test_confirm_endpoint_blocks_on_weekly_menu_missing(monkeypatch) -> None:

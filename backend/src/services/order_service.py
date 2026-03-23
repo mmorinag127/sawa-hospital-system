@@ -4828,6 +4828,7 @@ def persist_ocr_evidence_run(
     schema_version: str = "v1_legacy",
     producer_version: str | None = None,
     status: str = "ready",
+    source: str | None = None,
 ) -> Optional[dict]:
     persisted = ocr_evidence_service.persist_evidence_run(
         order_id=order_id,
@@ -4835,6 +4836,7 @@ def persist_ocr_evidence_run(
         schema_version=schema_version,
         producer_version=producer_version,
         status=status,
+        source=source,
     )
     if persisted is not None:
         try:
@@ -4858,6 +4860,10 @@ def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = Tr
         producer_version="legacy-cache-backfill/v1",
         source="legacy-cache-backfill",
     )
+
+
+def get_ocr_evidence_run(evidence_run_id: str) -> Optional[dict]:
+    return ocr_evidence_service.get_evidence_run(evidence_run_id)
 
 
 def persist_sheet_draft(
@@ -5002,8 +5008,12 @@ def _build_initial_draft_from_sheet_payload(
     }
 
 
-def _build_best_available_semantic_draft(order_id: str) -> Optional[dict[str, Any]]:
-    sheet_payload, sheet_error = get_ocr_sheet(order_id)
+def _build_best_available_semantic_draft(
+    order_id: str,
+    *,
+    use_saved_draft: bool = True,
+) -> Optional[dict[str, Any]]:
+    sheet_payload, sheet_error = get_ocr_sheet(order_id, use_saved_draft=use_saved_draft)
     candidates: list[dict[str, Any]] = []
     if isinstance(sheet_payload, dict):
         candidates.append(sheet_payload)
@@ -5019,10 +5029,215 @@ def _build_best_available_semantic_draft(order_id: str) -> Optional[dict[str, An
 
 
 def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
-    draft_payload = _build_best_available_semantic_draft(order_id)
+    draft_payload = _build_best_available_semantic_draft(order_id, use_saved_draft=True)
     if isinstance(draft_payload, dict):
         return draft_payload
     return draft_sheet_service.build_initial_sheet_draft(order_id)
+
+
+def rerun_ocr_evidence_only(
+    order_id: str,
+    *,
+    job_id: str | None = None,
+) -> tuple[Optional[dict], Optional[str]]:
+    order = get_order_by_id(order_id)
+    if not isinstance(order, dict):
+        return None, "order_not_found"
+    facility_id = str(order.get("facility") or "").strip() or None
+    if not facility_id:
+        return None, "facility_missing"
+    document_uri = str(order.get("document") or "").strip()
+    if not document_uri:
+        return None, "document_not_found"
+
+    ocr_job_id = str(job_id or f"OCR-{order_id}").strip() or f"OCR-{order_id}"
+    _, created = create_job(ocr_job_id, input_reference=document_uri)
+    if not created:
+        update_job(
+            ocr_job_id,
+            status="running",
+            input_reference=document_uri,
+            error_message=None,
+        )
+
+    try:
+        pdf_bytes = load_bytes_from_uri(document_uri)
+    except Exception as exc:  # noqa: BLE001
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="document_load",
+            result_state="hard_failed",
+            error_message=f"document_load_failed:{exc}",
+            metrics_patch={
+                "error": "document_load_failed",
+                "request_mode": "ocr_rerun",
+                "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after OCR rerun document load error", order_id=order_id, error=str(refresh_exc))
+        return None, "document_load_failed"
+
+    facility_config = None
+    try:
+        facility_config = config_service.get_facility_config(facility_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Facility config lookup failed for OCR rerun", facility_id=facility_id, error=str(exc))
+    preferred_template_id, preferred_template_ids = _resolve_preferred_template_ids(facility_config)
+    base_metrics_patch = {
+        "request_mode": "ocr_rerun",
+        "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+    }
+    _update_reparse_job_progress(
+        ocr_job_id,
+        status="running",
+        processing_stage="ocr_pipeline",
+        result_state="processing",
+        error_message=None,
+        metrics_patch=base_metrics_patch,
+    )
+    try:
+        output = _run_reparse_with_heartbeat(
+            ocr_job_id,
+            processing_stage="ocr_pipeline",
+            result_state="processing",
+            metrics_patch=base_metrics_patch,
+            func=lambda: run_ocr_pipeline(
+                pdf_bytes=pdf_bytes,
+                job_id=ocr_job_id,
+                facility_id=facility_id,
+                input_reference=document_uri,
+                preferred_template_id=preferred_template_id,
+                preferred_template_ids=preferred_template_ids,
+                force_upload=True,
+                wait_for_output=True,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="ocr_pipeline",
+            result_state="hard_failed",
+            error_message=f"evidence_rerun_failed:{exc}",
+            metrics_patch={
+                **base_metrics_patch,
+                "error": "evidence_rerun_failed",
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after OCR rerun failure", order_id=order_id, error=str(refresh_exc))
+        return None, "ocr_rerun_failed"
+
+    if not isinstance(output, dict):
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="ocr_pipeline",
+            result_state="hard_failed",
+            error_message="evidence_rerun_invalid_output",
+            metrics_patch={
+                **base_metrics_patch,
+                "error": "evidence_rerun_invalid_output",
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after OCR rerun invalid output", order_id=order_id, error=str(refresh_exc))
+        return None, "ocr_rerun_invalid_output"
+
+    persisted = persist_ocr_evidence_run(
+        order_id,
+        output,
+        schema_version="v2_evidence_rerun",
+        producer_version="ocr_pipeline_rerun",
+        status=str(output.get("status") or "ready").strip() or "ready",
+        source="ocr-rerun",
+    )
+    if not isinstance(persisted, dict):
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="persist_evidence",
+            result_state="hard_failed",
+            error_message="evidence_persist_failed",
+            metrics_patch={
+                **base_metrics_patch,
+                "error": "evidence_persist_failed",
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after OCR rerun persist failure", order_id=order_id, error=str(refresh_exc))
+        return None, "evidence_persist_failed"
+
+    update_job(
+        ocr_job_id,
+        template_id=output.get("template_id"),
+        output_reference=output.get("output_reference"),
+        input_reference=document_uri,
+    )
+    _update_reparse_job_progress(
+        ocr_job_id,
+        status="done",
+        processing_stage="evidence_ready",
+        result_state="evidence_ready",
+        error_message=None,
+        metrics_patch={
+            **base_metrics_patch,
+            "evidence_run_id": persisted.get("id"),
+            "new_evidence_available": True,
+        },
+    )
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after OCR rerun success", order_id=order_id, error=str(exc))
+    return persisted, None
+
+
+def switch_draft_to_latest_evidence(
+    order_id: str,
+    *,
+    edited_by: str | None = None,
+) -> tuple[Optional[dict], Optional[str]]:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    if not isinstance(latest_evidence, dict):
+        return None, "evidence_not_found"
+    latest_evidence_id = str(latest_evidence.get("id") or "").strip() or None
+    if not latest_evidence_id:
+        return None, "evidence_not_found"
+    current_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True, upgrade_generic_from_sheet=False)
+    current_base_evidence_id = (
+        str((current_draft or {}).get("base_evidence_run_id") or "").strip() or None
+        if isinstance(current_draft, dict)
+        else None
+    )
+    if current_base_evidence_id == latest_evidence_id:
+        return current_draft, "already_current"
+
+    draft_payload = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
+    if not isinstance(draft_payload, dict):
+        return None, "switch_draft_unavailable"
+
+    persisted = persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json=draft_payload,
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[str(item).strip() for item in (draft_payload.get("warnings") or []) if str(item).strip()],
+        edited_by=edited_by or "switch-evidence",
+    )
+    if not isinstance(persisted, dict):
+        return None, "switch_draft_failed"
+    return persisted, None
 
 
 def get_order_workflow_state(order_id: str, *, refresh: bool = False) -> Optional[dict]:
@@ -12624,7 +12839,7 @@ def build_recoverable_ocr_sheet_payload(
     )
 
 
-def get_ocr_sheet(order_id: str):
+def get_ocr_sheet(order_id: str, *, use_saved_draft: bool = True):
     lines_updated_at: datetime | None = None
     order_status: str | None = None
     evidence_only_step2 = _evidence_only_step2_enabled()
@@ -12694,11 +12909,19 @@ def get_ocr_sheet(order_id: str):
     payload, _ = get_ocr_output(order_id, persist_cache=False)
     if isinstance(payload, dict):
         ocr_payload = payload
-    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
-    latest_revision = _select_order_sheet_revision(
-        order_id=order_id,
-        payload=ocr_payload,
-        exact_only=False,
+    latest_draft = (
+        get_latest_sheet_draft(order_id, backfill_from_revision=True)
+        if use_saved_draft
+        else None
+    )
+    latest_revision = (
+        _select_order_sheet_revision(
+            order_id=order_id,
+            payload=ocr_payload,
+            exact_only=False,
+        )
+        if use_saved_draft
+        else None
     )
     evidence_missing = _ocr_evidence_missing_artifacts(ocr_payload)
     template_blockers = _template_resolution_blockers(ocr_payload)
@@ -18626,11 +18849,19 @@ def choose_critical_decision(
     *,
     selected_by: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    current_evidence_run_id = str((latest_evidence or {}).get("id") or "").strip() or None
+    current_decision = critical_decision_service.get_latest_decision(order_id, decision_type)
+    if isinstance(current_decision, dict):
+        base_evidence_run_id = str(current_decision.get("base_evidence_run_id") or "").strip() or None
+        if base_evidence_run_id and current_evidence_run_id and base_evidence_run_id != current_evidence_run_id:
+            return None, "decision_stale"
     chosen = critical_decision_service.choose_decision(
         order_id,
         decision_type,
         selected_value,
         selected_by=selected_by,
+        current_evidence_run_id=current_evidence_run_id,
     )
     if not isinstance(chosen, dict):
         return None, "decision_not_found"

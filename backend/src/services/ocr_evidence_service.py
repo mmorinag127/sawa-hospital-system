@@ -110,7 +110,9 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     overlay_pages = bool((artifacts or {}).get("overlay_pages"))
     corrected_pdf = bool((artifacts or {}).get("corrected_pdf"))
     table_raw = bool((artifacts or {}).get("table_raw"))
+    tables = bool(payload.get("tables"))
     quantity_subgrid = bool((artifacts or {}).get("quantity_subgrid"))
+    grid_metadata = bool(payload.get("table_box")) and bool(payload.get("grid_column_edges")) and bool(payload.get("grid_row_edges"))
     template_resolution = payload.get("template_resolution")
     template_blocked = bool(
         isinstance(template_resolution, dict)
@@ -119,15 +121,24 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
             or (template_resolution.get("blocked_reasons") or [])
         )
     )
+    template_present = isinstance(template_resolution, dict) and bool(
+        str(template_resolution.get("resolved_template_id") or template_resolution.get("template_id") or "").strip()
+    )
 
     step2_view_ready = overlay_pages or corrected_pdf or bool(payload.get("input_reference"))
-    step2_edit_ready = table_raw or bool(payload.get("tables")) or quantity_subgrid
-    apply_ready = step2_edit_ready and not template_blocked
+    step2_edit_ready = table_raw or tables or quantity_subgrid
+    semantic_shell_only = bool(step2_view_ready and step2_edit_ready and (not template_present or not grid_metadata))
+    numeric_trust_low = bool(step2_edit_ready and (not quantity_subgrid or semantic_shell_only))
+    apply_ready = step2_edit_ready and not template_blocked and template_present and grid_metadata
     confirm_ready = apply_ready and bool(quantity_subgrid or table_raw)
     recovery_required = not step2_view_ready or not step2_edit_ready
     return {
         "step2_view_ready": bool(step2_view_ready),
         "step2_edit_ready": bool(step2_edit_ready),
+        "semantic_shell_only": bool(semantic_shell_only),
+        "numeric_trust_low": bool(numeric_trust_low),
+        "rerunnable": bool(step2_view_ready or step2_edit_ready or payload.get("input_reference")),
+        "switch_candidate_available": False,
         "apply_ready": bool(apply_ready),
         "confirm_ready": bool(confirm_ready),
         "recovery_required": bool(recovery_required),
@@ -180,6 +191,7 @@ def build_evidence_run_record(
         manifest = evidence_manifest_service.build_evidence_manifest(extracted)
         extracted["evidence_manifest"] = manifest
     capabilities = _build_capabilities(extracted)
+    capabilities["legacy_editable"] = bool(str(schema_version or "").startswith("v1_legacy"))
     degraded_reasons = _build_degraded_reasons(extracted, capabilities)
     artifact_digest = _digest(extracted)
     resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
@@ -315,6 +327,30 @@ def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
             "capabilities_json": latest.capabilities_json,
             "degraded_reasons_json": latest.degraded_reasons_json,
             "created_at": latest.created_at.isoformat() if isinstance(latest.created_at, datetime) else None,
+        }
+
+
+def get_evidence_run(evidence_run_id: str) -> dict[str, Any] | None:
+    normalized_evidence_run_id = str(evidence_run_id or "").strip()
+    if not normalized_evidence_run_id:
+        return None
+    with session_scope() as session:
+        row = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
+        if not row:
+            return None
+        return {
+            "id": row.id,
+            "order_id": row.order_id,
+            "schema_version": row.schema_version,
+            "producer_version": row.producer_version,
+            "source": row.source,
+            "status": row.status,
+            "artifact_digest": row.artifact_digest,
+            "payload_json": row.payload_json,
+            "artifact_manifest_json": row.artifact_manifest_json,
+            "capabilities_json": row.capabilities_json,
+            "degraded_reasons_json": row.degraded_reasons_json,
+            "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
         }
 
 

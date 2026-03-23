@@ -121,6 +121,12 @@ def evaluate_apply_gate(
         if not capabilities.get("step2_edit_ready"):
             apply_blockers.append("evidence_edit_unavailable")
             confirm_blockers.append("evidence_edit_unavailable")
+        if capabilities.get("semantic_shell_only"):
+            apply_blockers.append("semantic_shell_only")
+            confirm_blockers.append("semantic_shell_only")
+        if capabilities.get("numeric_trust_low"):
+            apply_warnings.append("numeric_trust_low")
+            confirm_warnings.append("numeric_trust_low")
         if capabilities.get("recovery_required"):
             apply_warnings.append("recovery_recommended")
             confirm_warnings.append("recovery_recommended")
