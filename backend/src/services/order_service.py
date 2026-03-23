@@ -3637,7 +3637,11 @@ def _build_confirm_materialization_candidate_from_draft(
     existing_week_code: str | None,
     received_at: datetime | None,
 ) -> dict[str, Any] | None:
-    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    latest_draft = get_latest_sheet_draft(
+        order_id,
+        backfill_from_revision=True,
+        upgrade_generic_from_sheet=True,
+    )
     if latest_draft is None:
         initial_draft = build_initial_sheet_draft(order_id)
         if isinstance(initial_draft, dict):
@@ -4897,9 +4901,55 @@ def persist_sheet_draft(
     return persisted
 
 
-def get_latest_sheet_draft(order_id: str, *, backfill_from_revision: bool = True) -> Optional[dict]:
+def _draft_fields_look_generic(fields: object) -> bool:
+    if not isinstance(fields, list) or not fields:
+        return False
+    normalized = [str(field or "").strip() for field in fields if str(field or "").strip()]
+    if not normalized:
+        return False
+    return all(re.fullmatch(r"col\d+", token) for token in normalized)
+
+
+def _maybe_upgrade_generic_sheet_draft(
+    order_id: str,
+    draft: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(draft, dict):
+        return draft
+    draft_sheet_json = draft.get("draft_sheet_json")
+    if not isinstance(draft_sheet_json, dict):
+        return draft
+    if not _draft_fields_look_generic(draft_sheet_json.get("fields")):
+        return draft
+    sheet_payload, sheet_error = get_ocr_sheet(order_id)
+    if sheet_error:
+        return draft
+    upgraded_sheet = _build_initial_draft_from_sheet_payload(order_id, sheet_payload)
+    if not isinstance(upgraded_sheet, dict):
+        return draft
+    upgraded = persist_sheet_draft(
+        order_id=order_id,
+        draft_sheet_json=upgraded_sheet,
+        draft_state=str(draft.get("draft_state") or "draft_ready").strip() or "draft_ready",
+        blockers=[str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (draft.get("warnings_json") or []) if str(item).strip()],
+        edited_by="semantic-sheet-upgrade",
+    )
+    return upgraded if isinstance(upgraded, dict) else draft
+
+
+def get_latest_sheet_draft(
+    order_id: str,
+    *,
+    backfill_from_revision: bool = True,
+    upgrade_generic_from_sheet: bool = False,
+) -> Optional[dict]:
     latest = draft_sheet_service.get_latest_sheet_draft(order_id)
-    if latest is not None or not backfill_from_revision:
+    if latest is not None:
+        if upgrade_generic_from_sheet:
+            return _maybe_upgrade_generic_sheet_draft(order_id, latest)
+        return latest
+    if not backfill_from_revision:
         return latest
     cached_payload = _load_order_ocr_cache(order_id)
     revision = _select_order_sheet_revision(
@@ -7322,7 +7372,11 @@ def _resolve_llm_review_baseline(
     payload: dict[str, Any],
     template: dict[str, Any],
 ) -> dict[str, Any]:
-    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=False)
+    latest_draft = get_latest_sheet_draft(
+        order_id,
+        backfill_from_revision=False,
+        upgrade_generic_from_sheet=True,
+    )
     draft_payload = latest_draft.get("draft_sheet_json") if isinstance(latest_draft, dict) else None
     if isinstance(draft_payload, dict):
         fields = [str(field).strip() for field in (draft_payload.get("fields") or []) if str(field).strip()]

@@ -752,7 +752,11 @@ def get_draft_sheet(order_id: str):
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    draft = order_service.get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    draft = order_service.get_latest_sheet_draft(
+        order_id,
+        backfill_from_revision=True,
+        upgrade_generic_from_sheet=True,
+    )
     if isinstance(draft, dict):
         return _flatten_draft_sheet_payload(order_id, draft)
     initial = order_service.build_initial_sheet_draft(order_id)

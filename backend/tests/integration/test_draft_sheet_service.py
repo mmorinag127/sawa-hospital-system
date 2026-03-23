@@ -165,3 +165,50 @@ def test_order_service_build_initial_sheet_draft_prefers_semantic_sheet(monkeypa
     assert built["header"] == ["日付", "区分", "メニュー", "常食2F"]
     assert built["rows"] == [["03/22", "朝", "Menu A", "6"]]
     assert built["row_ids"] == ["semantic-1"]
+
+
+def test_get_latest_sheet_draft_upgrades_generic_cols_from_semantic_sheet(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-generic-draft-upgrade")
+
+    saved = draft_sheet_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "ocr_evidence",
+            "fields": ["col1", "col2", "col3", "col4"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "5"]],
+            "row_ids": ["row-1"],
+        },
+        draft_state="draft_ready",
+        edited_by="tester",
+    )
+    assert isinstance(saved, dict)
+
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda _order_id: (
+            {
+                "source": "weekly_menu+ocr_payload",
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                "header": ["日付", "区分", "メニュー", "常食2F"],
+                "rows": [["03/22", "朝", "Menu A", "6"]],
+                "row_ids": ["semantic-1"],
+                "warnings": [],
+            },
+            None,
+        ),
+    )
+
+    upgraded = order_service.get_latest_sheet_draft(
+        order["id"],
+        backfill_from_revision=True,
+        upgrade_generic_from_sheet=True,
+    )
+
+    assert isinstance(upgraded, dict)
+    draft_json = upgraded["draft_sheet_json"]
+    assert draft_json["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    assert draft_json["rows"] == [["03/22", "朝", "Menu A", "6"]]
