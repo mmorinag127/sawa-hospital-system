@@ -256,6 +256,45 @@ def _resolve_candidate_evidence_run(
     return None
 
 
+def _load_workflow_draft_sheet(order_id: str) -> dict[str, Any] | None:
+    latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
+    if isinstance(latest_draft, dict):
+        return latest_draft
+    semantic_initial: dict[str, Any] | None = None
+    try:
+        from src.services import order_service as _order_service
+
+        semantic_initial = _order_service.build_initial_sheet_draft(order_id)
+    except Exception:
+        semantic_initial = None
+    if isinstance(semantic_initial, dict):
+        return {
+            "id": None,
+            "order_id": order_id,
+            "base_evidence_run_id": semantic_initial.get("base_evidence_run_id"),
+            "draft_sheet_json": semantic_initial,
+            "draft_state": "draft_ready",
+            "blockers_json": [],
+            "warnings_json": [
+                str(item).strip()
+                for item in (semantic_initial.get("warnings") or [])
+                if str(item).strip()
+            ],
+        }
+    initial = draft_sheet_service.build_initial_sheet_draft(order_id)
+    if isinstance(initial, dict):
+        return {
+            "id": None,
+            "order_id": order_id,
+            "base_evidence_run_id": initial.get("base_evidence_run_id"),
+            "draft_sheet_json": initial,
+            "draft_state": "draft_ready",
+            "blockers_json": [],
+            "warnings_json": [],
+        }
+    return None
+
+
 def _draft_sheet_has_quantity_values(draft_sheet: dict[str, Any] | None) -> bool:
     if not isinstance(draft_sheet, dict):
         return False
@@ -464,19 +503,7 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     if not isinstance(order_payload, dict):
         return None
     evidence_run = ocr_evidence_service.get_latest_evidence_run(normalized_order_id)
-    draft_sheet = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
-    if not isinstance(draft_sheet, dict):
-        initial = draft_sheet_service.build_initial_sheet_draft(normalized_order_id)
-        if isinstance(initial, dict):
-            draft_sheet = {
-                "id": None,
-                "order_id": normalized_order_id,
-                "base_evidence_run_id": initial.get("base_evidence_run_id"),
-                "draft_sheet_json": initial,
-                "draft_state": "draft_ready",
-                "blockers_json": [],
-                "warnings_json": [],
-            }
+    draft_sheet = _load_workflow_draft_sheet(normalized_order_id)
     reparse_job = get_ocr_job(f"OCR-{normalized_order_id}")
     active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
     candidate_evidence_run = _resolve_candidate_evidence_run(

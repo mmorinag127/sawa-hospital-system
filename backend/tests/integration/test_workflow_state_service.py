@@ -835,6 +835,48 @@ def test_refresh_workflow_state_returns_review_required_for_low_trust_populated_
     assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
 
 
+def test_refresh_workflow_state_uses_semantic_initial_draft_for_low_trust_review(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-semantic-bootstrap-review", facility_hint="FAC00006", week_hint="2026-03")
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+    monkeypatch.setattr(
+        order_service,
+        "build_initial_sheet_draft",
+        lambda _order_id: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.mixer_x"],
+            "header": ["日付", "区分", "メニュー", "常食", "ミキサー"],
+            "rows": [["03/22", "朝", "Menu A", "21", "3"]],
+            "row_ids": ["row-1"],
+            "warnings": ["sheet_payload_mapping_low_confidence", "sheet_ocr_review_required"],
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "review_required"
+    assert workflow["primary_action"] == "review_critical_cells"
+    assert workflow["candidate_evidence_run_id"] is None
+    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
+
+
 def test_refresh_workflow_state_blocks_when_weekly_menu_is_missing():
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-missing-menu", facility_hint="FAC00001", week_hint="2199-11")
