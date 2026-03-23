@@ -316,3 +316,53 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
         "fax_layout_regular_diabetes_v1",
         "fax_layout_regular_forbidden_v1",
     ]
+
+
+def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
+    original = facility_service.get_facility_config("FAC00003") or {}
+    next_config = dict(original)
+    override = dict(next_config.get("fax_template_override") or {})
+    override["columns"] = [
+        {"index": 0, "role": "date", "header": "日付"},
+        {"index": 1, "role": "daypart", "header": "区分"},
+        {"index": 2, "role": "menu_name", "header": "メニュー"},
+        {"index": 3, "role": "quantity", "header": "常食花", "diet_type": "regular", "area_id": "花"},
+        {"index": 4, "role": "quantity", "header": "常食月", "diet_type": "regular", "area_id": "月"},
+        {"index": 5, "role": "quantity", "header": "軟菜花", "diet_type": "soft", "area_id": "花"},
+        {"index": 6, "role": "quantity", "header": "軟菜月", "diet_type": "soft", "area_id": "月"},
+        {"index": 7, "role": "quantity", "header": "ミキサー花", "diet_type": "mixer", "area_id": "花"},
+        {"index": 8, "role": "quantity", "header": "ミキサー月", "diet_type": "mixer", "area_id": "月"},
+        {"index": 9, "role": "note", "header": "備考"},
+    ]
+    override.pop("main_ocr_row_fields", None)
+    next_config["fax_template_override"] = override
+
+    try:
+        assert facility_service.update_config("FAC00003", next_config)
+        resolved = config_service.get_facility_config("FAC00003")
+        assert resolved is not None
+        columns = (resolved.get("fax_template") or {}).get("columns") or []
+        qty_columns = [col for col in columns if isinstance(col, dict) and str(col.get("role") or "") == "quantity"]
+        assert [col.get("area_id") for col in qty_columns[:6]] == ["2F", "3F", "2F", "3F", "2F", "3F"]
+        assert [col.get("name") for col in qty_columns[:6]] == [
+            "qty.regular_2f",
+            "qty.regular_3f",
+            "qty.soft_2f",
+            "qty.soft_3f",
+            "qty.mixer_2f",
+            "qty.mixer_3f",
+        ]
+        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_2f",
+            "qty.regular_3f",
+            "qty.soft_2f",
+            "qty.soft_3f",
+            "qty.mixer_2f",
+            "qty.mixer_3f",
+            "remarks",
+        ]
+    finally:
+        facility_service.update_config("FAC00003", original)

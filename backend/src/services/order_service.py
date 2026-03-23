@@ -6144,6 +6144,10 @@ def _normalize_sheet_area(value: object) -> str | None:
     token = _normalize_sheet_text(value).lower()
     if not token:
         return "X"
+    if token in {"花", "hana"}:
+        return "2F"
+    if token in {"月", "tsuki"}:
+        return "3F"
     if re.fullmatch(r"\d+", token):
         return f"{token}F"
     match = re.search(r"(\d)(?:f|階)", token)

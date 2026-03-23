@@ -334,6 +334,10 @@ def _normalize_field_area_token(value: object) -> str:
     token = re.sub(r"[\s　]+", "", token)
     if not token:
         return "x"
+    if token in {"花", "hana"} or "花" in token or "hana" in token:
+        return "2f"
+    if token in {"月", "tsuki"} or "月" in token or "tsuki" in token:
+        return "3f"
     if re.fullmatch(r"\d+", token):
         return f"{token}f"
     match = re.search(r"(\d)(?:f|階)", token)
@@ -417,8 +421,7 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
             col["area_id"] = area.upper() if area != "x" else "X"
             if not header:
                 col["header"] = _default_header_for_quantity(diet, area)
-            if not name:
-                col["name"] = f"qty.{diet}_{area}"
+            col["name"] = f"qty.{diet}_{area}"
         else:
             if not header:
                 default_header = _default_header_for_role(role)

@@ -542,12 +542,47 @@ def test_orders_facility_template_columns_save_refreshes_current_draft(monkeypat
     assert save_res.status_code == 200
     payload = save_res.json()
     assert payload.get("draft_refreshed") is True
+    resolved_columns = ((payload.get("resolved_config") or {}).get("fax_template") or {}).get("columns") or []
+    quantity_columns = [col for col in resolved_columns if isinstance(col, dict) and col.get("role") == "quantity"]
+    assert quantity_columns[0].get("area_id") == "2F"
+    assert quantity_columns[0].get("name") == "qty.regular_2f"
 
     draft_res = client.get(f"/orders/{order['id']}/draft-sheet")
     assert draft_res.status_code == 200
     draft = draft_res.json()
     assert draft["header"][3] == "新常食花"
     assert draft["rows"][0][3] == "9"
+
+
+def test_orders_facility_template_columns_save_accepts_hana_tsuki_headers():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-hanatsuki-001")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        save_res = client.put(
+            f"/orders/{order['id']}/facility-template-columns",
+            json={
+                "columns": [
+                    {"index": 0, "role": "date", "header": "日付"},
+                    {"index": 1, "role": "daypart", "header": "区分"},
+                    {"index": 2, "role": "menu_name", "header": "メニュー"},
+                    {"index": 3, "role": "quantity", "header": "常食花", "diet_type": "regular", "area_id": "花"},
+                    {"index": 4, "role": "quantity", "header": "常食月", "diet_type": "regular", "area_id": "月"},
+                    {"index": 5, "role": "note", "header": "備考"},
+                ]
+            },
+        )
+        assert save_res.status_code == 200
+        payload = save_res.json()
+        resolved_columns = ((payload.get("resolved_config") or {}).get("fax_template") or {}).get("columns") or []
+        quantity_columns = [col for col in resolved_columns if isinstance(col, dict) and col.get("role") == "quantity"]
+        assert [col.get("header") for col in quantity_columns] == ["常食花", "常食月"]
+        assert [col.get("area_id") for col in quantity_columns] == ["2F", "3F"]
+        assert [col.get("name") for col in quantity_columns] == ["qty.regular_2f", "qty.regular_3f"]
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
 
 
 def test_orders_facility_template_columns_save_canonicalizes_invalid_quantity_tokens():
