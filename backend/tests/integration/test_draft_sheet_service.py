@@ -135,3 +135,33 @@ def test_build_initial_sheet_draft_falls_back_to_legacy_cache_revision() -> None
     assert isinstance(built, dict)
     assert built["source"] == "edited_sheet"
     assert built["rows"] == [["03/22", "朝", "Menu A", "8"]]
+
+
+def test_order_service_build_initial_sheet_draft_prefers_semantic_sheet(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-draft-semantic-sheet")
+
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda _order_id: (
+            {
+                "source": "weekly_menu+ocr_payload",
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                "header": ["日付", "区分", "メニュー", "常食2F"],
+                "rows": [["03/22", "朝", "Menu A", "6"]],
+                "row_ids": ["semantic-1"],
+                "warnings": ["sheet_ocr_review_required"],
+            },
+            None,
+        ),
+    )
+
+    built = order_service.build_initial_sheet_draft(order["id"])
+
+    assert isinstance(built, dict)
+    assert built["source"] == "weekly_menu+ocr_payload"
+    assert built["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    assert built["header"] == ["日付", "区分", "メニュー", "常食2F"]
+    assert built["rows"] == [["03/22", "朝", "Menu A", "6"]]
+    assert built["row_ids"] == ["semantic-1"]

@@ -4926,7 +4926,41 @@ def get_latest_sheet_draft(order_id: str, *, backfill_from_revision: bool = True
     )
 
 
+def _build_initial_draft_from_sheet_payload(
+    order_id: str,
+    sheet_payload: dict[str, Any] | None,
+) -> Optional[dict[str, Any]]:
+    if not isinstance(sheet_payload, dict):
+        return None
+    fields = [str(field).strip() for field in (sheet_payload.get("fields") or []) if str(field).strip()]
+    rows = _sanitize_revision_rows(rows_payload=sheet_payload.get("rows"), fields=fields)
+    if not fields or not rows:
+        return None
+    row_ids = [str(item).strip() for item in (sheet_payload.get("row_ids") or []) if str(item).strip()]
+    if len(row_ids) < len(rows):
+        row_ids.extend([f"row-{idx + 1}" for idx in range(len(row_ids), len(rows))])
+    header = [str(cell or "").strip() for cell in (sheet_payload.get("header") or [])]
+    if len(header) < len(fields):
+        header.extend([_field_label(field) for field in fields[len(header) :]])
+    source = str(sheet_payload.get("source") or "ocr_sheet").strip() or "ocr_sheet"
+    warnings = [str(item).strip() for item in (sheet_payload.get("warnings") or []) if str(item).strip()]
+    return {
+        "order_id": order_id,
+        "source": source,
+        "fields": fields,
+        "header": header[: len(fields)],
+        "rows": rows,
+        "row_ids": row_ids[: len(rows)],
+        "warnings": warnings,
+    }
+
+
 def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
+    sheet_payload, sheet_error = get_ocr_sheet(order_id)
+    if not sheet_error:
+        draft_payload = _build_initial_draft_from_sheet_payload(order_id, sheet_payload)
+        if isinstance(draft_payload, dict):
+            return draft_payload
     return draft_sheet_service.build_initial_sheet_draft(order_id)
 
 
@@ -18676,7 +18710,7 @@ def _serialize_line_with_amount(line: OrderLine, menu_meta: dict[str, dict[str, 
 
 
 def serialize_order(order: Order):
-    prompt_enabled = False
+    prompt_enabled = True
     menu_meta = _build_menu_amount_meta(order)
     week_month_id = _to_sheet_month_id(order.week_code)
     week_value = _normalize_sheet_week_value(order.week_code) or week_month_id

@@ -129,6 +129,7 @@ def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_re
     detail_res = client.get(f"/orders/{order['id']}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
+    assert detail["ocr_prompt_enabled"] is True
     assert detail["ocr_review_state"] == "draft_ready"
     assert detail["ocr_review_stage"] == "needs_human_review"
     assert detail["ocr_has_saved_draft"] is True
