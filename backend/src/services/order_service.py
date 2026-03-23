@@ -3573,7 +3573,7 @@ def _build_materialization_candidate_from_draft_record(
         month_id_from_dates(line_dates, effective_received_at, policy) if line_dates else None
     )
     ocr_payload_for_week: dict[str, Any] | None = None
-    payload_for_week, _ = get_ocr_output(order_id, persist_cache=False)
+    payload_for_week, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
     if isinstance(payload_for_week, dict):
         ocr_payload_for_week = payload_for_week
     min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
@@ -3639,7 +3639,7 @@ def _build_confirm_materialization_candidate_from_draft(
 ) -> dict[str, Any] | None:
     latest_draft = get_latest_sheet_draft(
         order_id,
-        backfill_from_revision=True,
+        backfill_from_revision=False,
         upgrade_generic_from_sheet=True,
     )
     if latest_draft is None:
@@ -5038,7 +5038,11 @@ def _build_best_available_semantic_draft(
     if isinstance(sheet_payload, dict):
         candidates.append(sheet_payload)
     if sheet_error in _RECOVERABLE_OCR_SHEET_ERRORS:
-        recovered, recover_error = build_recoverable_ocr_sheet_payload(order_id, sheet_error)
+        recovered, recover_error = build_recoverable_ocr_sheet_payload(
+            order_id,
+            sheet_error,
+            use_saved_draft=use_saved_draft,
+        )
         if recover_error is None and isinstance(recovered, dict):
             candidates.append(recovered)
     for candidate in candidates:
@@ -5049,10 +5053,21 @@ def _build_best_available_semantic_draft(
 
 
 def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
-    draft_payload = _build_best_available_semantic_draft(order_id, use_saved_draft=True)
+    draft_payload = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
+    evidence_draft = draft_sheet_service.build_sheet_draft_from_evidence(order_id)
     if isinstance(draft_payload, dict):
+        warnings = {
+            str(item).strip()
+            for item in (draft_payload.get("warnings") or [])
+            if str(item).strip()
+        }
+        if warnings & {"sheet_weekly_menu_missing", "ocr_evidence_recovery_required"}:
+            if isinstance(evidence_draft, dict):
+                return evidence_draft
         return draft_payload
-    return draft_sheet_service.build_initial_sheet_draft(order_id)
+    if isinstance(evidence_draft, dict):
+        return evidence_draft
+    return None
 
 
 def _get_ocr_output_bucket() -> str | None:
@@ -5437,7 +5452,7 @@ def switch_draft_to_latest_evidence(
     latest_evidence_id = str(latest_evidence.get("id") or "").strip() or None
     if not latest_evidence_id:
         return None, "evidence_not_found"
-    current_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True, upgrade_generic_from_sheet=False)
+    current_draft = get_latest_sheet_draft(order_id, backfill_from_revision=False, upgrade_generic_from_sheet=False)
     current_base_evidence_id = (
         str((current_draft or {}).get("base_evidence_run_id") or "").strip() or None
         if isinstance(current_draft, dict)
@@ -5895,7 +5910,7 @@ def _load_pipeline_output_with_retry(
 
 
 def _load_existing_first_pass_payload_for_reparse(order_id: str) -> dict[str, Any] | None:
-    payload, error = get_ocr_output(order_id, persist_cache=False)
+    payload, error = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
     if error is None and isinstance(payload, dict) and _payload_has_first_pass_ocr_content(payload):
         return payload
     cached_payload = _load_order_ocr_cache(order_id)
@@ -8877,7 +8892,7 @@ def review_ocr_table_with_llm(
         review_meta["llm_review"]["pdf_variant_fallback_reason"] = str(pdf_variant_meta["fallback_reason"])
     if isinstance(prepared_payload.get("output_payload"), dict):
         review_meta["llm_review"]["output_payload"] = prepared_payload["output_payload"]
-    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=False)
     candidate_rows = prepared_payload.get("rows") or baseline_rows
     candidate_row_ids = prepared_payload.get("row_ids") or baseline_row_ids
     candidate_sheet_json = {
@@ -9167,7 +9182,12 @@ def _sync_reparse_debug_from_job_metrics(
     return enriched, True
 
 
-def get_ocr_output(order_id: str, *, persist_cache: bool = True):
+def get_ocr_output(
+    order_id: str,
+    *,
+    persist_cache: bool = True,
+    include_legacy_edits: bool = True,
+):
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -9224,7 +9244,7 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
     if persist_cache and not _output_is_pending(parsed):
         _save_order_ocr_cache(order_id, parsed)
     cached_payload = _load_order_ocr_cache(order_id)
-    if isinstance(cached_payload, dict):
+    if include_legacy_edits and isinstance(cached_payload, dict):
         cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
         enriched = dict(parsed) if isinstance(parsed, dict) else {}
         merged = False
@@ -9244,7 +9264,8 @@ def get_ocr_output(order_id: str, *, persist_cache: bool = True):
         parsed, synced = _sync_reparse_debug_from_job_metrics(parsed, metrics_job)
         if synced and persist_cache and not _output_is_pending(parsed):
             _save_order_ocr_cache(order_id, parsed)
-    parsed = _attach_edited_ocr_payload(parsed)
+    if include_legacy_edits:
+        parsed = _attach_edited_ocr_payload(parsed)
     parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     return _attach_facility_candidates(parsed), None
 
@@ -13034,6 +13055,8 @@ def _should_prefer_source_row_candidate(
 def build_recoverable_ocr_sheet_payload(
     order_id: str,
     error_code: str,
+    *,
+    use_saved_draft: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -13073,11 +13096,19 @@ def build_recoverable_ocr_sheet_payload(
         return None, error_code
     quantity_index = _build_sheet_quantity_index(fields)
     cached_payload = _load_order_ocr_cache(order_id)
-    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
-    latest_revision = _select_order_sheet_revision(
-        order_id=order_id,
-        payload=cached_payload,
-        exact_only=False,
+    latest_draft = (
+        get_latest_sheet_draft(order_id, backfill_from_revision=True)
+        if use_saved_draft
+        else None
+    )
+    latest_revision = (
+        _select_order_sheet_revision(
+            order_id=order_id,
+            payload=cached_payload,
+            exact_only=False,
+        )
+        if use_saved_draft
+        else None
     )
     fallback_payload: dict[str, Any] = {
         "order_id": order_id,
@@ -13237,7 +13268,7 @@ def get_ocr_sheet(
     if isinstance(override_payload, dict):
         ocr_payload = evidence_manifest_service.ensure_evidence_manifest(dict(override_payload))
     else:
-        payload, _ = get_ocr_output(order_id, persist_cache=False)
+        payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
         if isinstance(payload, dict):
             ocr_payload = payload
     latest_draft = (
@@ -13287,7 +13318,7 @@ def get_ocr_sheet(
     if not isinstance(ocr_payload, dict):
         # Weekly menu master missing: build editable rows from this order's OCR table.
         if not has_weekly_menu_entries:
-            payload, _ = get_ocr_output(order_id, persist_cache=False)
+            payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
             if isinstance(payload, dict):
                 ocr_payload = payload
 
@@ -13314,7 +13345,11 @@ def get_ocr_sheet(
     )
     if not entries:
         if evidence_only_step2 and isinstance(latest_revision, dict):
-            return build_recoverable_ocr_sheet_payload(order_id, "menu_entries_missing")
+            return build_recoverable_ocr_sheet_payload(
+                order_id,
+                "menu_entries_missing",
+                use_saved_draft=use_saved_draft,
+            )
         return None, "menu_entries_missing"
 
     payload_rows: list[list[str]] = []
@@ -13358,7 +13393,11 @@ def get_ocr_sheet(
     )
     if not rows:
         if evidence_only_step2 and isinstance(latest_revision, dict):
-            return build_recoverable_ocr_sheet_payload(order_id, "menu_entries_missing")
+            return build_recoverable_ocr_sheet_payload(
+                order_id,
+                "menu_entries_missing",
+                use_saved_draft=use_saved_draft,
+            )
         return None, "menu_entries_missing"
 
     if source == "weekly_menu":
@@ -15380,7 +15419,7 @@ def _build_reparse_structural_baseline(
     if isinstance(fallback_payload, dict):
         ocr_payload = dict(fallback_payload)
     else:
-        payload, _ = get_ocr_output(order_id, persist_cache=False)
+        payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
         if isinstance(payload, dict):
             ocr_payload = payload
 
@@ -17412,7 +17451,7 @@ def reparse_order(
                 wait_seconds_override=llm_wait_seconds,
             )
         if not _payload_has_first_pass_ocr_content(pipeline_output_payload):
-            rescue_payload, rescue_error = get_ocr_output(order_id, persist_cache=False)
+            rescue_payload, rescue_error = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
             if rescue_error is None and isinstance(rescue_payload, dict) and _payload_has_first_pass_ocr_content(rescue_payload):
                 pipeline_output_payload = rescue_payload
                 logger.info(
@@ -18207,7 +18246,7 @@ def reparse_order(
                     output_ref = job.get("output_reference") if job else None
                 parsed_output = _load_pipeline_output_with_retry(output_ref)
             if not isinstance(parsed_output, dict):
-                cached_payload, _ = get_ocr_output(order_id)
+                cached_payload, _ = get_ocr_output(order_id, include_legacy_edits=False)
                 if isinstance(cached_payload, dict):
                     parsed_output = cached_payload
             if parsed_output:
@@ -18439,7 +18478,7 @@ def reparse_order(
     derived_week_id = month_id_from_dates(line_dates, received_at, policy) if line_dates else None
     week_payload = parsed_output_for_debug if isinstance(parsed_output_for_debug, dict) else None
     if not isinstance(week_payload, dict):
-        cached_payload, _ = get_ocr_output(order_id, persist_cache=False)
+        cached_payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
         if isinstance(cached_payload, dict):
             week_payload = cached_payload
     week_id = _resolve_sheet_week_id(

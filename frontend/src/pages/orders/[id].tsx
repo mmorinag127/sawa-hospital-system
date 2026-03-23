@@ -3819,6 +3819,12 @@ const loadOcrPages = async () => {
       setFacilityConfig(nextConfig);
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
+      const refreshedDraftPayload = res.data?.draft_payload || res.data?.draft || null;
+      if (refreshedDraftPayload) {
+        const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
+        applyNormalizedSheetEditorPayload(normalizedDraftPayload);
+        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
+      }
       setFacilityTemplateMessage(
         res.data?.draft_refreshed
           ? "施設テンプレートに保存し、現在のシートにも反映しました。"

@@ -281,17 +281,6 @@ def _load_workflow_draft_sheet(order_id: str) -> dict[str, Any] | None:
                 if str(item).strip()
             ],
         }
-    initial = draft_sheet_service.build_initial_sheet_draft(order_id)
-    if isinstance(initial, dict):
-        return {
-            "id": None,
-            "order_id": order_id,
-            "base_evidence_run_id": initial.get("base_evidence_run_id"),
-            "draft_sheet_json": initial,
-            "draft_state": "draft_ready",
-            "blockers_json": [],
-            "warnings_json": [],
-        }
     return None
 
 

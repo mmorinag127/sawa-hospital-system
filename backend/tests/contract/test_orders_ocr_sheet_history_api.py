@@ -552,6 +552,49 @@ def test_orders_facility_template_columns_save_refreshes_current_draft(monkeypat
     draft = draft_res.json()
     assert draft["header"][3] == "新常食花"
     assert draft["rows"][0][3] == "9"
+    assert isinstance(payload.get("draft_payload"), dict)
+    assert payload["draft_payload"]["header"][3] == "新常食花"
+    assert payload["draft_payload"]["rows"][0][3] == "9"
+
+
+def test_build_recoverable_ocr_sheet_payload_can_skip_saved_draft():
+    order_service.clear_all()
+    order = _create_seed_order("msg-api-facility-template-recoverable-001")
+    seeded = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "旧常食2F", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "2", ""]],
+            "row_ids": ["row-recoverable-1"],
+            "source": "draft_ready",
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+        edited_by="test-seed",
+    )
+    assert seeded is not None
+
+    with_saved, error = order_service.build_recoverable_ocr_sheet_payload(
+        order["id"],
+        "menu_entries_missing",
+        use_saved_draft=True,
+    )
+    assert error is None
+    assert isinstance(with_saved, dict)
+    assert with_saved["source"] == "draft_sheet_blocked"
+    assert with_saved["header"][3] == "旧常食2F"
+
+    without_saved, error = order_service.build_recoverable_ocr_sheet_payload(
+        order["id"],
+        "menu_entries_missing",
+        use_saved_draft=False,
+    )
+    assert error is None
+    assert isinstance(without_saved, dict)
+    assert without_saved["source"] == "review_blocked"
+    assert without_saved["header"][3] != "旧常食2F"
 
 
 def test_orders_facility_template_columns_save_accepts_hana_tsuki_headers():

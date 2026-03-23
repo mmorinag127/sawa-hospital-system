@@ -867,7 +867,7 @@ def get_draft_sheet(order_id: str):
         raise HTTPException(status_code=404, detail="order not found")
     draft = order_service.get_latest_sheet_draft(
         order_id,
-        backfill_from_revision=True,
+        backfill_from_revision=False,
         upgrade_generic_from_sheet=True,
     )
     if isinstance(draft, dict):
@@ -1409,6 +1409,9 @@ def save_facility_template_columns(order_id: str, body: dict):
         )
     if error:
         raise HTTPException(status_code=500, detail="facility template update failed")
+    if isinstance(result, dict) and isinstance(result.get("draft"), dict):
+        result = dict(result)
+        result["draft_payload"] = _flatten_draft_sheet_payload(order_id, result["draft"])
     return result
 
 
@@ -1652,17 +1655,10 @@ def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, body: d
     dependencies=[Depends(require_role("operator"))],
 )
 def recover_ocr(order_id: str, background_tasks: BackgroundTasks):
-    result = _enqueue_order_reparse_job(
+    result = _enqueue_order_evidence_rerun(
         order_id,
         background_tasks,
-        ocr_prompt=None,
-        prompt_preset=None,
-        ocr_provider="pipeline",
-        ocr_model=None,
-        llm_assist=False,
-        force=True,
         stale_action="retry",
-        request_mode="ocr_recover",
     )
     result["mode"] = "pipeline_recovery"
     return result

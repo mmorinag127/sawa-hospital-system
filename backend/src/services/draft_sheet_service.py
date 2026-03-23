@@ -258,3 +258,36 @@ def build_initial_sheet_draft(order_id: str) -> dict[str, Any] | None:
                 base_evidence_run_id=None,
             )
     return None
+
+
+def build_sheet_draft_from_evidence(
+    order_id: str,
+    evidence_run: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    payload = None
+    base_evidence_run_id = None
+    if isinstance(evidence_run, dict):
+        payload = evidence_run.get("payload_json") if isinstance(evidence_run.get("payload_json"), dict) else None
+        base_evidence_run_id = str(evidence_run.get("id") or "").strip() or None
+    if not isinstance(payload, dict):
+        with session_scope() as session:
+            latest_evidence = (
+                session.query(OrderOcrEvidenceRun)
+                .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
+                .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+                .first()
+            )
+            if latest_evidence and isinstance(latest_evidence.payload_json, dict):
+                payload = latest_evidence.payload_json
+                base_evidence_run_id = latest_evidence.id
+    if not isinstance(payload, dict):
+        return None
+    return _build_sheet_from_payload(
+        order_id=normalized_order_id,
+        payload=payload,
+        source="ocr_evidence",
+        base_evidence_run_id=base_evidence_run_id,
+    )

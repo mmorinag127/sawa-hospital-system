@@ -475,15 +475,11 @@ def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
     order = _create_seed_order("msg-status-api-003-recover")
     captured: dict[str, object] = {}
 
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
+    def _fake_run(order_id, ocr_job_id):
         captured["order_id"] = order_id
-        captured["ocr_prompt"] = ocr_prompt
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
+        captured["ocr_job_id"] = ocr_job_id
 
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
 
     client = TestClient(app)
     res = client.post(f"/orders/{order['id']}/ocr-recover")
@@ -492,10 +488,7 @@ def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
     assert res.json()["accepted"] is True
     assert res.json()["mode"] == "pipeline_recovery"
     assert captured["order_id"] == order["id"]
-    assert captured["ocr_prompt"] is None
-    assert captured["ocr_provider"] == "pipeline"
-    assert captured["ocr_model"] is None
-    assert captured["llm_assist"] is False
+    assert captured["ocr_job_id"] == f"OCR-{order['id']}"
 
 
 def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeypatch):
@@ -515,15 +508,11 @@ def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeyp
     )
     captured: dict[str, object] = {}
 
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
+    def _fake_run(order_id, ocr_job_id):
         captured["order_id"] = order_id
-        captured["ocr_prompt"] = ocr_prompt
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
+        captured["ocr_job_id"] = ocr_job_id
 
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
+    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
 
     client = TestClient(app)
     res = client.post(f"/orders/{order['id']}/ocr-recover")
@@ -536,9 +525,7 @@ def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeyp
     assert job.get("status") == "running"
     assert job.get("metrics", {}).get("processing_stage") == "queued"
     assert captured["order_id"] == order["id"]
-    assert captured["ocr_provider"] == "pipeline"
-    assert captured["ocr_model"] is None
-    assert captured["llm_assist"] is False
+    assert captured["ocr_job_id"] == job_id
 
 
 def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
