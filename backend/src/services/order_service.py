@@ -5113,7 +5113,7 @@ def _reconcile_finished_ocr_rerun(order_id: str) -> bool:
     if not isinstance(reparse_job, dict):
         return False
     status = str(reparse_job.get("status") or "").strip().lower()
-    if status not in {"running", "pending"}:
+    if status not in {"running", "pending", "failed"}:
         return False
     metrics = reparse_job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -5134,6 +5134,13 @@ def _reconcile_finished_ocr_rerun(order_id: str) -> bool:
     output_ref, payload = completed_outputs[0]
     payload_state = ocr_evidence_service.classify_evidence_payload(payload)
     order_payload = workflow_state_service._load_order_payload(normalized_order_id)
+    logger.info(
+        "Reconciling OCR rerun from completed output order_id=%s job_status=%s output_reference=%s persistable=%s",
+        normalized_order_id,
+        status or "-",
+        output_ref,
+        bool(payload_state.get("persistable")),
+    )
     base_metrics_patch = {
         "request_mode": "ocr_rerun",
         "confirmed_lines_retained": bool((order_payload or {}).get("lines_updated_at")),
