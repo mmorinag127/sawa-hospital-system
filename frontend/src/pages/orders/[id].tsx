@@ -7940,6 +7940,18 @@ const loadOcrPages = async () => {
           padding-top: 10px;
         }
 
+        .ocr-inline-prompt {
+          width: 100%;
+          border-top: 1px dashed rgba(24, 42, 40, 0.12);
+          padding-top: 10px;
+        }
+
+        .ocr-inline-prompt textarea {
+          margin-top: 8px;
+          width: 100%;
+          min-height: 140px;
+        }
+
         .ocr-inline-details summary {
           cursor: pointer;
           font-size: 12px;

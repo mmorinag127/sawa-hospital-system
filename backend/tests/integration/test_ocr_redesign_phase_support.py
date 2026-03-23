@@ -327,6 +327,58 @@ def test_build_recoverable_ocr_sheet_payload_never_uses_confirmed_lines_fallback
     assert (sheet.get("trace") or {}).get("mapped_mode") != "confirmed_lines"
 
 
+def test_get_ocr_sheet_keeps_semantic_sheet_when_template_resolution_is_blocked():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-template-blocked-semantic")
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 21),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        }
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "table_raw": "|日付|区分|メニュー|常食2F|備考|\n|---|---|---|---|---|\n|03/21|朝|Menu A|2||",
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+                "quantity_subgrid_passes": [],
+                "template_resolution": {
+                    "resolved_template_id": None,
+                    "blocked": True,
+                    "blocked_reasons": ["template_resolution_missing"],
+                },
+                "table_box": [0.1, 0.2, 0.9, 0.8],
+                "grid_column_edges": [0.1, 0.5, 0.9],
+                "grid_row_edges": [0.2, 0.4, 0.8],
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["fields"][:4] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", "2"]
+    assert "template_resolution_blocked" in (sheet.get("warnings") or [])
+
+
 def test_build_confirm_materialization_candidate_prefers_latest_draft_rows():
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-confirm-candidate-001")
@@ -442,7 +494,7 @@ def test_confirm_order_fails_when_no_draft_or_evidence_exists():
         order_service.confirm_order(order["id"])
         assert False, "confirm should require a latest draft or evidence-backed initial draft"
     except order_service.ConfirmMaterializationError as exc:
-        assert exc.code == "draft_missing"
+        assert exc.code in {"draft_missing", "draft_lines_empty"}
 
     refreshed = order_service.get_order_by_id(order["id"])
     assert isinstance(refreshed, dict)

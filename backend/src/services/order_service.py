@@ -12682,11 +12682,11 @@ def get_ocr_sheet(order_id: str):
         exact_only=False,
     )
     evidence_missing = _ocr_evidence_missing_artifacts(ocr_payload)
-    if evidence_missing and not isinstance(latest_draft, dict) and not isinstance(latest_revision, dict):
-        return None, "ocr_evidence_recovery_required"
     template_blockers = _template_resolution_blockers(ocr_payload)
-    if template_blockers and not isinstance(latest_draft, dict) and not isinstance(latest_revision, dict):
-        return None, "template_resolution_blocked"
+    # Step2 should still prefer a semantic sheet when weekly/menu/template data are
+    # sufficient to build one. Missing evidence artifacts or unresolved template
+    # resolution remain warnings/blockers for apply/confirm, but they should not
+    # force an immediate fallback to raw OCR rows.
     ocr_metrics = _resolve_sheet_suppression_metrics(
         order_id=order_id,
         ocr_payload=ocr_payload,
