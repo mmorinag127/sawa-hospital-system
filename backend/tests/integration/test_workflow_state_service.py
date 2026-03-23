@@ -6,6 +6,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import order_service, workflow_state_service  # noqa: E402
+from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -252,6 +253,82 @@ def test_refresh_workflow_state_returns_rerun_in_progress_when_ocr_rerun_running
     assert isinstance(workflow, dict)
     assert workflow["state"] == "rerun_in_progress"
     assert workflow["primary_action"] == "wait_for_rerun"
+
+
+def test_get_order_workflow_state_reconciles_completed_rerun_output(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-rerun-reconcile", facility_hint="FAC00001", week_hint="2026-03")
+    old_evidence = _persist_evidence(
+        order["id"],
+        extra_payload={
+            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|",
+        },
+    )
+    assert isinstance(old_evidence, dict)
+    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="running")
+    update_job(
+        f"OCR-{order['id']}",
+        status="running",
+        metrics={
+            "processing_stage": "ocr_pipeline",
+            "request_mode": "ocr_rerun",
+            "status": "running",
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+    new_payload = {
+        "status": "done",
+        "stage": "done",
+        "input_reference": "gs://bucket/input/OCR-order-rerun.pdf",
+        "output_reference": "gs://bucket/output/OCR-order-rerun.pdf.json",
+        "pages": [
+            {
+                "page_index": 1,
+                "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+                "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
+            }
+        ],
+        "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
+        "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "8"]]}],
+        "template_resolution": {
+            "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+            "confidence": 0.99,
+            "blocked": False,
+            "blocked_reasons": [],
+        },
+        "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "8"]]}],
+        "table_box": [0.1, 0.2, 0.9, 0.8],
+        "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
+        "grid_row_edges": [0.2, 0.4, 0.8],
+    }
+    monkeypatch.setattr(
+        order_service,
+        "_list_latest_completed_ocr_outputs",
+        lambda *_args, **_kwargs: [("gs://bucket/output/OCR-order-rerun.pdf.json", new_payload)],
+    )
+
+    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
+
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
+    rerun_job = get_ocr_job(f"OCR-{order['id']}")
+
+    assert isinstance(workflow, dict)
+    assert isinstance(latest_evidence, dict)
+    assert latest_evidence["source"] == "ocr-rerun-reconcile"
+    assert latest_evidence["id"] != old_evidence["id"]
+    assert isinstance(rerun_job, dict)
+    assert rerun_job["status"] == "done"
+    assert rerun_job["output_reference"] == "gs://bucket/output/OCR-order-rerun.pdf.json"
 
 
 def test_refresh_workflow_state_returns_rerun_failed_keep_current_when_latest_rerun_failed(monkeypatch):

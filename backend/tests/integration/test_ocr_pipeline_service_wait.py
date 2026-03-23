@@ -15,12 +15,14 @@ class _FakeBlob:
         self._payloads = list(payloads)
         self._index = 0
 
-    def exists(self):
+    def exists(self, **_kwargs):
         return True
 
-    def download_as_bytes(self):
+    def download_as_bytes(self, **_kwargs):
         payload = self._payloads[min(self._index, len(self._payloads) - 1)]
         self._index += 1
+        if isinstance(payload, Exception):
+            raise payload
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
@@ -78,3 +80,23 @@ def test_wait_for_output_returns_failed_terminal_payload(monkeypatch):
 
     assert result["status"] == "failed"
     assert result["stage"] == "error"
+
+
+def test_wait_for_output_retries_after_transient_read_error(monkeypatch):
+    payloads = [
+        TimeoutError("temporary read timeout"),
+        {"status": "done", "stage": "done", "pages": [{"page_index": 1}]},
+    ]
+    fake_blob = _FakeBlob(payloads)
+    monkeypatch.setattr(google.cloud.storage, "Client", lambda: _FakeClient(fake_blob))
+    monkeypatch.setattr(ocr_pipeline_service.time, "sleep", lambda _secs: None)
+
+    result = ocr_pipeline_service._wait_for_output(
+        bucket="bucket",
+        object_name="output.json",
+        timeout_seconds=1,
+        poll_interval=0,
+    )
+
+    assert result["status"] == "done"
+    assert fake_blob._index >= 2

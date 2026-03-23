@@ -8263,6 +8263,7 @@ const loadOcrPages = async () => {
 
         .ocr-remediation-group--llm {
           background: #fcfcfb;
+          grid-column: 1 / -1;
         }
 
         .ocr-remediation-group-label {
@@ -8316,8 +8317,10 @@ const loadOcrPages = async () => {
         .ocr-inline-prompt textarea {
           margin-top: 8px;
           width: 100%;
-          min-height: 420px;
+          min-height: 560px;
           resize: vertical;
+          font-size: 14px;
+          line-height: 1.6;
         }
 
         .ocr-inline-details summary {
@@ -8338,7 +8341,9 @@ const loadOcrPages = async () => {
 
         .ocr-llm-prompt-textarea {
           width: 100%;
-          min-height: 420px;
+          min-height: 560px;
+          font-size: 14px;
+          line-height: 1.6;
         }
 
         .ocr-review-pill {

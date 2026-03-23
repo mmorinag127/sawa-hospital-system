@@ -57,7 +57,7 @@ from src.services.fax_extractor import (
 )
 from src.services.fax_parser import parse_order_lines
 from src.services.ingest_policy import parse_date_string, month_id_from_dates
-from src.services.storage_service import load_bytes_from_uri
+from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket
 from src.services.storage_service import generate_signed_url
 from src.services.grid_detector import GridDetectionResult, detect_table_grid, detect_table_grid_image
 from src.services.pdf_render import render_pdf_to_png_bytes
@@ -5035,6 +5035,171 @@ def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
     return draft_sheet_service.build_initial_sheet_draft(order_id)
 
 
+def _get_ocr_output_bucket() -> str | None:
+    return (
+        str(os.getenv("OCR_PIPELINE_BUCKET") or "").strip()
+        or str(os.getenv("OCR_PIPELINE_INPUT_BUCKET") or "").strip()
+        or get_default_output_bucket()
+    )
+
+
+def _get_ocr_output_prefix() -> str:
+    prefix = str(os.getenv("OCR_PIPELINE_OUTPUT_PREFIX") or "output/").strip() or "output/"
+    if not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+    return prefix
+
+
+def _list_latest_completed_ocr_outputs(
+    order_id: str,
+    *,
+    not_before: datetime | None = None,
+    limit: int = 5,
+) -> list[tuple[str, dict[str, Any]]]:
+    bucket = _get_ocr_output_bucket()
+    if not bucket:
+        return []
+    try:
+        from google.cloud import storage  # type: ignore
+    except Exception:
+        return []
+
+    prefix = f"{_get_ocr_output_prefix()}OCR-{str(order_id or '').strip()}_"
+    client = storage.Client()
+    timeout = 15.0
+    candidates: list[tuple[datetime, str]] = []
+    try:
+        for blob in client.list_blobs(bucket, prefix=prefix, timeout=timeout):
+            name = str(getattr(blob, "name", "") or "").strip()
+            if not name.endswith(".pdf.json"):
+                continue
+            updated = getattr(blob, "updated", None)
+            updated_naive: datetime | None = None
+            if isinstance(updated, datetime):
+                updated_naive = updated.astimezone(timezone.utc).replace(tzinfo=None) if updated.tzinfo else updated
+            if isinstance(not_before, datetime) and isinstance(updated_naive, datetime) and updated_naive < not_before:
+                continue
+            candidates.append((updated_naive or datetime.min, name))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OCR output list failed", order_id=order_id, error=str(exc))
+        return []
+
+    completed: list[tuple[str, dict[str, Any]]] = []
+    for _updated, name in sorted(candidates, reverse=True)[: max(limit, 1)]:
+        object_uri = f"gs://{bucket}/{name}"
+        try:
+            raw = client.bucket(bucket).blob(name).download_as_bytes(timeout=timeout, retry=None)
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OCR output read failed", order_id=order_id, uri=object_uri, error=str(exc))
+            continue
+        state = ocr_evidence_service.classify_evidence_payload(payload)
+        status = str(payload.get("status") or "").strip().lower()
+        stage = str(payload.get("stage") or "").strip().lower()
+        if state.get("persistable") and (status == "done" or stage == "done"):
+            completed.append((object_uri, payload))
+            continue
+        if status in {"failed", "error"} or stage in {"failed", "error"}:
+            completed.append((object_uri, payload))
+    return completed
+
+
+def _reconcile_finished_ocr_rerun(order_id: str) -> bool:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return False
+    ocr_job_id = f"OCR-{normalized_order_id}"
+    reparse_job = get_ocr_job(ocr_job_id)
+    if not isinstance(reparse_job, dict):
+        return False
+    status = str(reparse_job.get("status") or "").strip().lower()
+    if status not in {"running", "pending"}:
+        return False
+    metrics = reparse_job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    request_mode = str(metrics.get("request_mode") or metrics.get("rerun_mode") or "").strip().lower()
+    if request_mode != "ocr_rerun":
+        return False
+
+    created_at = reparse_job.get("created_at")
+    if isinstance(created_at, datetime) and created_at.tzinfo is not None:
+        created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+    completed_outputs = _list_latest_completed_ocr_outputs(
+        normalized_order_id,
+        not_before=created_at if isinstance(created_at, datetime) else None,
+    )
+    if not completed_outputs:
+        return False
+
+    output_ref, payload = completed_outputs[0]
+    payload_state = ocr_evidence_service.classify_evidence_payload(payload)
+    order_payload = workflow_state_service._load_order_payload(normalized_order_id)
+    base_metrics_patch = {
+        "request_mode": "ocr_rerun",
+        "confirmed_lines_retained": bool((order_payload or {}).get("lines_updated_at")),
+    }
+    if not payload_state.get("persistable"):
+        error_code = str(payload_state.get("error") or "ocr_rerun_invalid_output").strip() or "ocr_rerun_invalid_output"
+        error_detail = str(payload_state.get("message") or "").strip()
+        error_message = f"{error_code}:{error_detail}" if error_detail else error_code
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage=str(payload_state.get("stage") or "ocr_pipeline").strip() or "ocr_pipeline",
+            result_state="hard_failed",
+            error_message=error_message,
+            metrics_patch={
+                **base_metrics_patch,
+                "error": error_code,
+                "output_reference": output_ref,
+            },
+        )
+        return True
+
+    persisted = ocr_evidence_service.persist_evidence_run(
+        order_id=normalized_order_id,
+        payload=payload,
+        schema_version="v2_evidence_rerun",
+        producer_version="ocr_pipeline_rerun_reconcile",
+        status=str(payload.get("status") or "ready").strip() or "ready",
+        source="ocr-rerun-reconcile",
+    )
+    if not isinstance(persisted, dict):
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="persist_evidence",
+            result_state="hard_failed",
+            error_message="evidence_persist_failed",
+            metrics_patch={
+                **base_metrics_patch,
+                "error": "evidence_persist_failed",
+                "output_reference": output_ref,
+            },
+        )
+        return True
+
+    update_job(
+        ocr_job_id,
+        status="done",
+        template_id=payload.get("template_id"),
+        output_reference=output_ref,
+        input_reference=str(payload.get("input_reference") or reparse_job.get("input_reference") or "").strip() or None,
+        error_message=None,
+        metrics={
+            **metrics,
+            "request_mode": "ocr_rerun",
+            "processing_stage": "evidence_ready",
+            "result_state": "evidence_ready",
+            "evidence_run_id": persisted.get("id"),
+            "new_evidence_available": True,
+            "status": "done",
+            "stage_updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+    return True
+
+
 def rerun_ocr_evidence_only(
     order_id: str,
     *,
@@ -5272,6 +5437,8 @@ def switch_draft_to_latest_evidence(
 
 
 def get_order_workflow_state(order_id: str, *, refresh: bool = False) -> Optional[dict]:
+    if _reconcile_finished_ocr_rerun(order_id):
+        refresh = True
     if refresh:
         return workflow_state_service.refresh_workflow_state(order_id)
     state = workflow_state_service.get_workflow_state(order_id)

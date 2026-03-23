@@ -146,6 +146,15 @@ def _get_request_timeout() -> float:
         return 600.0
 
 
+def _get_output_read_timeout() -> float:
+    raw = os.getenv("OCR_PIPELINE_OUTPUT_READ_TIMEOUT_SECONDS", "15")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        timeout = 15.0
+    return max(timeout, 1.0)
+
+
 def _parse_gs_uri(uri: str) -> tuple[str, str] | None:
     parsed = urlparse(uri)
     if parsed.scheme != "gs":
@@ -190,13 +199,14 @@ def _wait_for_output(
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("google-cloud-storage is required for OCR pipeline output") from exc
     client = storage.Client()
-    blob = client.bucket(bucket).blob(object_name)
     start = time.monotonic()
     deadline = start + timeout_seconds
+    read_timeout = _get_output_read_timeout()
     while time.monotonic() < deadline:
         try:
-            if blob.exists():
-                data = blob.download_as_bytes()
+            blob = client.bucket(bucket).blob(object_name)
+            if blob.exists(timeout=read_timeout, retry=None):
+                data = blob.download_as_bytes(timeout=read_timeout, retry=None)
                 payload = json.loads(data.decode("utf-8"))
                 status = str((payload or {}).get("status") or "").strip().lower()
                 stage = str((payload or {}).get("stage") or "").strip().lower()
@@ -231,9 +241,10 @@ def _wait_for_output(
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "OCR pipeline output read failed bucket=%s name=%s error=%s",
+                "OCR pipeline output poll failed bucket=%s name=%s timeout=%ss error=%s",
                 bucket,
                 object_name,
+                read_timeout,
                 str(exc),
             )
         time.sleep(poll_interval)
