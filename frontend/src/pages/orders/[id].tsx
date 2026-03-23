@@ -5873,7 +5873,9 @@ const loadOcrPages = async () => {
                                 {ocrTableSaving ? "反映中..." : "明細に反映して次へ"}
                               </button>
                             </section>
-                            <section className={`ocr-flow-branch ${ocrRepairBranchEmphasis ? "is-primary" : ""}`}>
+                            <section
+                              className={`ocr-flow-branch ${ocrRepairBranchEmphasis ? "is-primary" : ""} ${ocrProcessingNow ? "is-processing" : ""}`}
+                            >
                               <p className="ocr-flow-branch-label">いいえ / 迷う</p>
                               <h4>基盤を整えてから、必要なら候補選択とLLM補完へ進む</h4>
                               <p className="subtle">
@@ -5884,12 +5886,20 @@ const loadOcrPages = async () => {
                                     }) || "いま再解析中です。完了後にもう一度シートを確認してください。"
                                   : "先にシートを保存して下書きを残し、必要な時だけ再解析を使います。"}
                               </p>
-                              <div className="ocr-remediation-groups">
+                              {ocrProcessingNow ? (
+                                <div className="ocr-processing-banner">
+                                  <strong>いまは OCR パイプラインの完了待ちです。</strong>
+                                  <span>完了までは「シートを保存（暫定）」以外の操作は不要です。</span>
+                                </div>
+                              ) : null}
+                              <div className={`ocr-remediation-groups ${ocrProcessingNow ? "is-processing" : ""}`}>
                                 <section className="ocr-remediation-group">
                                   <p className="ocr-remediation-group-label">基盤</p>
                                   <h5>作業土台を整える</h5>
                                   <p className="subtle">
-                                    数量が怪しい時も、まずは現在のシートを残しつつ OCR 基盤を更新します。
+                                    {ocrProcessingNow
+                                      ? "現在のシートを残しつつ OCR 基盤を更新しています。完了後に次の候補確認へ進みます。"
+                                      : "数量が怪しい時も、まずは現在のシートを残しつつ OCR 基盤を更新します。"}
                                   </p>
                                   <div className="ocr-flow-branch-actions">
                                     <button
@@ -5926,7 +5936,9 @@ const loadOcrPages = async () => {
                                   <p className="ocr-remediation-group-label">候補</p>
                                   <h5>OCR候補や解釈候補を決める</h5>
                                   <p className="subtle">
-                                    新しい OCR 候補や複数候補がある時だけ、ここで選んでから修正を続けます。
+                                    {ocrProcessingNow
+                                      ? "完了後に新しい OCR 候補や解釈候補があれば、ここにまとまって表示されます。"
+                                      : "新しい OCR 候補や複数候補がある時だけ、ここで選んでから修正を続けます。"}
                                   </p>
                                   {showNewEvidenceChoice ? (
                                     <div className="ocr-evidence-switch-card">
@@ -5966,7 +5978,9 @@ const loadOcrPages = async () => {
                                     note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
                                   }) || (
                                     <p className="subtle ocr-remediation-empty">
-                                      現在、追加で選ぶ OCR 候補はありません。
+                                      {ocrProcessingNow
+                                        ? "完了後に候補が必要なら、ここに選択肢が表示されます。"
+                                        : "現在、追加で選ぶ OCR 候補はありません。"}
                                     </p>
                                   )}
                                 </section>
@@ -5974,7 +5988,9 @@ const loadOcrPages = async () => {
                                   <p className="ocr-remediation-group-label">LLM</p>
                                   <h5>どう補完するかを選ぶ</h5>
                                   <p className="subtle">
-                                    基盤や候補が固まってから、必要な時だけ LLM 補完再解析を使います。
+                                    {ocrProcessingNow
+                                      ? "OCR 完了後にだけ使います。完了したら、どの補完方針で見るかをここで選べます。"
+                                      : "基盤や候補が固まってから、必要な時だけ LLM 補完再解析を使います。"}
                                   </p>
                                   <div className="ocr-flow-branch-actions">
                                     <select
@@ -6072,7 +6088,7 @@ const loadOcrPages = async () => {
                                       <textarea
                                         id="llm-freeform-prompt"
                                         className="input ocr-llm-prompt-textarea"
-                                        rows={18}
+                                        rows={12}
                                         value={ocrPrompt}
                                         onChange={(e) => setOcrPrompt(e.target.value)}
                                         placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
@@ -6086,7 +6102,7 @@ const loadOcrPages = async () => {
                                       </p>
                                       <textarea
                                         className="input ocr-llm-prompt-textarea"
-                                        rows={14}
+                                        rows={10}
                                         value={ocrPrompt}
                                         onChange={(e) => setOcrPrompt(e.target.value)}
                                         placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
@@ -8210,18 +8226,22 @@ const loadOcrPages = async () => {
         }
 
         .ocr-flow-branch {
-          padding: 14px;
+          padding: 12px;
           border-radius: 12px;
           border: 1px solid rgba(24, 42, 40, 0.12);
           background: #ffffff;
           display: flex;
           flex-direction: column;
-          gap: 10px;
+          gap: 8px;
         }
 
         .ocr-flow-branch.is-primary {
           border-color: rgba(31, 42, 42, 0.26);
           box-shadow: inset 0 0 0 1px rgba(31, 42, 42, 0.08);
+        }
+
+        .ocr-flow-branch.is-processing {
+          background: #fcfcfa;
         }
 
         .ocr-flow-branch-label {
@@ -8242,23 +8262,24 @@ const loadOcrPages = async () => {
         .ocr-flow-branch-actions {
           display: flex;
           flex-wrap: wrap;
-          gap: 10px;
+          gap: 8px;
           align-items: center;
         }
 
         .ocr-remediation-groups {
           display: grid;
-          gap: 12px;
+          gap: 10px;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .ocr-remediation-group {
-          padding: 12px;
+          padding: 10px;
           border-radius: 12px;
           border: 1px solid rgba(24, 42, 40, 0.1);
           background: #f9faf8;
           display: flex;
           flex-direction: column;
-          gap: 10px;
+          gap: 8px;
         }
 
         .ocr-remediation-group--llm {
@@ -8286,7 +8307,7 @@ const loadOcrPages = async () => {
         }
 
         .ocr-evidence-switch-card {
-          padding: 12px;
+          padding: 10px;
           border-radius: 12px;
           border: 1px solid rgba(31, 42, 42, 0.14);
           background: #ffffff;
@@ -8317,7 +8338,7 @@ const loadOcrPages = async () => {
         .ocr-inline-prompt textarea {
           margin-top: 8px;
           width: 100%;
-          min-height: 560px;
+          min-height: 220px;
           resize: vertical;
           font-size: 14px;
           line-height: 1.6;
@@ -8341,9 +8362,44 @@ const loadOcrPages = async () => {
 
         .ocr-llm-prompt-textarea {
           width: 100%;
-          min-height: 560px;
+          min-height: 220px;
           font-size: 14px;
           line-height: 1.6;
+        }
+
+        .ocr-processing-banner {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 10px;
+          align-items: center;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          background: #f7f3eb;
+          color: #31423f;
+          font-size: 13px;
+        }
+
+        .ocr-processing-banner strong {
+          font-size: 13px;
+          color: #243431;
+        }
+
+        @media (min-width: 1120px) {
+          .ocr-flow-branches {
+            grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.4fr);
+            align-items: start;
+          }
+        }
+
+        @media (max-width: 920px) {
+          .ocr-remediation-groups {
+            grid-template-columns: minmax(0, 1fr);
+          }
+
+          .ocr-remediation-group--llm {
+            grid-column: auto;
+          }
         }
 
         .ocr-review-pill {
