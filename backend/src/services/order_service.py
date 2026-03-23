@@ -4921,10 +4921,7 @@ def _maybe_upgrade_generic_sheet_draft(
         return draft
     if not _draft_fields_look_generic(draft_sheet_json.get("fields")):
         return draft
-    sheet_payload, sheet_error = get_ocr_sheet(order_id)
-    if sheet_error:
-        return draft
-    upgraded_sheet = _build_initial_draft_from_sheet_payload(order_id, sheet_payload)
+    upgraded_sheet = _build_best_available_semantic_draft(order_id)
     if not isinstance(upgraded_sheet, dict):
         return draft
     upgraded = persist_sheet_draft(
@@ -5005,12 +5002,26 @@ def _build_initial_draft_from_sheet_payload(
     }
 
 
-def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
+def _build_best_available_semantic_draft(order_id: str) -> Optional[dict[str, Any]]:
     sheet_payload, sheet_error = get_ocr_sheet(order_id)
-    if not sheet_error:
-        draft_payload = _build_initial_draft_from_sheet_payload(order_id, sheet_payload)
-        if isinstance(draft_payload, dict):
+    candidates: list[dict[str, Any]] = []
+    if isinstance(sheet_payload, dict):
+        candidates.append(sheet_payload)
+    if sheet_error in _RECOVERABLE_OCR_SHEET_ERRORS:
+        recovered, recover_error = build_recoverable_ocr_sheet_payload(order_id, sheet_error)
+        if recover_error is None and isinstance(recovered, dict):
+            candidates.append(recovered)
+    for candidate in candidates:
+        draft_payload = _build_initial_draft_from_sheet_payload(order_id, candidate)
+        if isinstance(draft_payload, dict) and not _draft_fields_look_generic(draft_payload.get("fields")):
             return draft_payload
+    return None
+
+
+def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
+    draft_payload = _build_best_available_semantic_draft(order_id)
+    if isinstance(draft_payload, dict):
+        return draft_payload
     return draft_sheet_service.build_initial_sheet_draft(order_id)
 
 
@@ -5111,6 +5122,7 @@ _RECOVERABLE_OCR_SHEET_ERRORS = {
     "sheet_suspicious_blank_row",
     "ocr_evidence_recovery_required",
     "template_resolution_blocked",
+    "template_unresolved",
 }
 
 

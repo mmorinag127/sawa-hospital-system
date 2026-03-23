@@ -5752,7 +5752,24 @@ const loadOcrPages = async () => {
                                   {reparsePending ? "再解析中..." : "LLM補完再解析"}
                                 </button>
                               </div>
-                              {order.ocr_prompt_enabled === false ? null : (
+                              {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
+                                <div className="ocr-inline-prompt">
+                                  <label className="input-label" htmlFor="llm-freeform-prompt">
+                                    LLM追加指示
+                                  </label>
+                                  <p className="subtle">
+                                    自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
+                                  </p>
+                                  <textarea
+                                    id="llm-freeform-prompt"
+                                    className="input"
+                                    rows={4}
+                                    value={ocrPrompt}
+                                    onChange={(e) => setOcrPrompt(e.target.value)}
+                                    placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                                  />
+                                </div>
+                              ) : (
                                 <details className="ocr-inline-details">
                                   <summary>LLM追加指示（任意）</summary>
                                   <p className="subtle">
