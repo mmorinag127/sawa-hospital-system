@@ -197,14 +197,38 @@ def _wait_for_output(
         try:
             if blob.exists():
                 data = blob.download_as_bytes()
-                elapsed = time.monotonic() - start
+                payload = json.loads(data.decode("utf-8"))
+                status = str((payload or {}).get("status") or "").strip().lower()
+                stage = str((payload or {}).get("stage") or "").strip().lower()
+                if status == "done" or stage == "done":
+                    elapsed = time.monotonic() - start
+                    logger.info(
+                        "OCR pipeline output ready bucket=%s name=%s elapsed=%.1fs status=%s stage=%s",
+                        bucket,
+                        object_name,
+                        elapsed,
+                        status or "-",
+                        stage or "-",
+                    )
+                    return payload
+                if status in {"failed", "error"} or stage == "error":
+                    elapsed = time.monotonic() - start
+                    logger.warning(
+                        "OCR pipeline output terminal error bucket=%s name=%s elapsed=%.1fs status=%s stage=%s",
+                        bucket,
+                        object_name,
+                        elapsed,
+                        status or "-",
+                        stage or "-",
+                    )
+                    return payload
                 logger.info(
-                    "OCR pipeline output found bucket=%s name=%s elapsed=%.1fs",
+                    "OCR pipeline output partial bucket=%s name=%s status=%s stage=%s",
                     bucket,
                     object_name,
-                    elapsed,
+                    status or "-",
+                    stage or "-",
                 )
-                return json.loads(data.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "OCR pipeline output read failed bucket=%s name=%s error=%s",

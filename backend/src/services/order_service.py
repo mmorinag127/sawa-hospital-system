@@ -5152,6 +5152,63 @@ def rerun_ocr_evidence_only(
             logger.warning("Workflow state refresh failed after OCR rerun invalid output", order_id=order_id, error=str(refresh_exc))
         return None, "ocr_rerun_invalid_output"
 
+    output_status = str(output.get("status") or "").strip().lower()
+    output_stage = str(output.get("stage") or "").strip().lower()
+    if output_status != "done" and output_stage != "done":
+        error_token = f"evidence_rerun_incomplete_output:{output_status or '-'}:{output_stage or '-'}"
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="ocr_pipeline",
+            result_state="hard_failed",
+            error_message=error_token,
+            metrics_patch={
+                **base_metrics_patch,
+                "error": "evidence_rerun_incomplete_output",
+                "output_status": output_status or None,
+                "output_stage": output_stage or None,
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning(
+                "Workflow state refresh failed after OCR rerun incomplete output",
+                order_id=order_id,
+                error=str(refresh_exc),
+            )
+        return None, "evidence_rerun_incomplete_output"
+
+    payload_state = ocr_evidence_service.classify_evidence_payload(output)
+    if not payload_state.get("persistable"):
+        error_code = str(payload_state.get("error") or "evidence_unusable").strip() or "evidence_unusable"
+        error_detail = str(payload_state.get("message") or "").strip()
+        upstream_stage = str(payload_state.get("stage") or "").strip()
+        failure_stage = upstream_stage or "ocr_pipeline"
+        error_message = f"{error_code}:{error_detail}" if error_detail else error_code
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage=failure_stage,
+            result_state="hard_failed",
+            error_message=error_message,
+            metrics_patch={
+                **base_metrics_patch,
+                "error": error_code,
+                "upstream_status": payload_state.get("status"),
+                "upstream_stage": payload_state.get("stage"),
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning(
+                "Workflow state refresh failed after OCR rerun unusable payload",
+                order_id=order_id,
+                error=str(refresh_exc),
+            )
+        return None, error_code
+
     persisted = persist_ocr_evidence_run(
         order_id,
         output,

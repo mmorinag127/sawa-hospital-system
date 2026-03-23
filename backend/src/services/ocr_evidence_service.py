@@ -95,6 +95,40 @@ def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
     return False
 
 
+def classify_evidence_payload(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "persistable": False,
+            "error": "evidence_invalid_payload",
+            "message": "OCR output payload is not a dictionary",
+        }
+    status = str(payload.get("status") or "").strip().lower()
+    stage = str(payload.get("stage") or "").strip().lower()
+    upstream_error = str(payload.get("error") or "").strip()
+    if status in {"failed", "error"} or stage in {"failed", "error"}:
+        detail = upstream_error or stage or status or "unknown"
+        return {
+            "persistable": False,
+            "error": "ocr_pipeline_failed",
+            "message": detail,
+            "status": status or None,
+            "stage": stage or None,
+        }
+    if not _has_meaningful_evidence(payload):
+        return {
+            "persistable": False,
+            "error": "evidence_unusable",
+            "message": "OCR output does not contain reusable evidence artifacts",
+            "status": status or None,
+            "stage": stage or None,
+        }
+    return {
+        "persistable": True,
+        "status": status or None,
+        "stage": stage or None,
+    }
+
+
 def _extract_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
     extracted: dict[str, Any] = {}
     for key in _EVIDENCE_META_KEYS + _EVIDENCE_ARTIFACT_KEYS:
@@ -181,11 +215,12 @@ def build_evidence_run_record(
     source: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
-    if not normalized_order_id or not isinstance(payload, dict):
+    if not normalized_order_id:
+        return None
+    payload_state = classify_evidence_payload(payload)
+    if not payload_state.get("persistable") or not isinstance(payload, dict):
         return None
     extracted = _extract_evidence_payload(payload)
-    if not _has_meaningful_evidence(extracted):
-        return None
     manifest = extracted.get("evidence_manifest")
     if not isinstance(manifest, dict):
         manifest = evidence_manifest_service.build_evidence_manifest(extracted)

@@ -356,6 +356,55 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
         assert lines[0].quantity_original == 3
 
 
+def test_rerun_ocr_evidence_only_rejects_partial_pipeline_output(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-rerun-evidence-partial")
+    first = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v1_legacy",
+        producer_version="test",
+        source="test-evidence",
+    )
+    assert isinstance(first, dict)
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+            "row_ids": ["row-1"],
+        },
+        edited_by="tester",
+    )
+    assert isinstance(saved, dict)
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+    monkeypatch.setattr(
+        order_service,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            "status": "running",
+            "stage": "ocr",
+            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+            "output_reference": "gs://bucket/output.json",
+        },
+    )
+
+    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+
+    assert rerun is None
+    assert error == "evidence_rerun_incomplete_output"
+    current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
+    assert isinstance(current_draft, dict)
+    assert current_draft["id"] == saved["id"]
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
+    assert isinstance(latest_evidence, dict)
+    assert latest_evidence["id"] == first["id"]
+
+
 def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-switch-evidence-adopt")
