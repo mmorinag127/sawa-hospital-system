@@ -241,12 +241,16 @@ def _resolve_candidate_evidence_run(
     reparse_job: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     active_evidence_run_id = str((active_evidence_run or {}).get("id") or "").strip() or None
+    latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None
     rerun_candidate_id = _job_candidate_evidence_run_id(reparse_job)
-    if rerun_candidate_id and rerun_candidate_id != active_evidence_run_id:
+    if (
+        rerun_candidate_id
+        and rerun_candidate_id != active_evidence_run_id
+        and (not latest_evidence_run_id or rerun_candidate_id == latest_evidence_run_id)
+    ):
         rerun_candidate = ocr_evidence_service.get_evidence_run(rerun_candidate_id)
         if isinstance(rerun_candidate, dict):
             return rerun_candidate
-    latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None
     if latest_evidence_run_id and latest_evidence_run_id != active_evidence_run_id:
         return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     return None
