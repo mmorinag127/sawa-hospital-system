@@ -2678,6 +2678,33 @@ def test_resolve_sheet_week_ignores_far_ocr_month_and_old_hint():
         order_service._build_position_menu_entries = original_builder
 
 
+def test_resolve_sheet_week_extends_explicit_range_when_ocr_dates_run_longer():
+    received_at = datetime(2026, 3, 23, 9, 0, 0)
+    payload = {
+        "table_raw": """
+|日付|区分|献立|常|
+|-|-|-|-|
+|3/22|朝|A|10|
+|3/23|朝|B|10|
+|3/24|朝|C|10|
+|3/25|朝|D|10|
+|3/26|朝|E|10|
+|3/27|朝|F|10|
+|3/28|朝|G|10|
+|3/29|朝|H|10|
+""".strip()
+    }
+    resolved = order_service._resolve_sheet_week_id(
+        current_week_id="2026-03@2026-03-22~2026-03-28",
+        received_at=received_at,
+        order_lines=[],
+        ocr_payload=payload,
+        facility_id="FAC00003",
+        week_hints=[],
+    )
+    assert resolved == "2026-03@2026-03-22~2026-03-29"
+
+
 def test_collect_sheet_dates_ignores_footer_timestamp_when_table_dates_exist():
     payload = {
         "table_raw": """

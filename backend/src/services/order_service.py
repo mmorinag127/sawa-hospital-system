@@ -916,6 +916,44 @@ def _select_dominant_date_cluster(
     return set(normalized)
 
 
+def _expand_explicit_sheet_week_range(
+    explicit_week_value: str | None,
+    observed_dates: set[date] | None,
+) -> str | None:
+    month_id, start_date, end_date = _parse_sheet_week_value(explicit_week_value)
+    if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
+        return explicit_week_value
+    normalized_dates = {
+        item
+        for item in (observed_dates or set())
+        if isinstance(item, date) and item.strftime("%Y-%m") == month_id
+    }
+    if not normalized_dates:
+        return explicit_week_value
+    dominant_dates = _select_dominant_date_cluster(
+        normalized_dates,
+        max_gap_days=2,
+        min_cluster_size=2,
+        min_cluster_share=0.5,
+    )
+    if len(dominant_dates) < 2:
+        return explicit_week_value
+    observed_min = min(dominant_dates)
+    observed_max = max(dominant_dates)
+    if start_date <= observed_min and observed_max <= end_date:
+        return explicit_week_value
+    if observed_min > end_date or observed_max < start_date:
+        return explicit_week_value
+    if (start_date - observed_min).days > 7 or (observed_max - end_date).days > 7:
+        return explicit_week_value
+    widened_start = min(start_date, observed_min)
+    widened_end = max(end_date, observed_max)
+    if (widened_end - widened_start).days > 10:
+        return explicit_week_value
+    widened = _format_sheet_week_value(month_id, widened_start, widened_end)
+    return widened or explicit_week_value
+
+
 def _build_reparse_position_menu_entries(
     *,
     week_id: str | None,
@@ -10477,29 +10515,32 @@ def _resolve_sheet_week_id(
         if candidate and candidate not in target:
             target.append(candidate)
 
-    explicit_current_week = _normalize_sheet_week_value(current_week_id)
-    if explicit_current_week and "@" in explicit_current_week:
-        return explicit_current_week
-
-    base_month = received_at.strftime("%Y-%m")
-
     line_dates = [
         line.get("date")
         for line in order_lines
         if isinstance(line, dict) and isinstance(line.get("date"), date)
     ]
+    ocr_dates: list[date] = []
+    if isinstance(ocr_payload, dict):
+        ocr_dates = _collect_sheet_dates_from_payload(ocr_payload, received_at)
+
+    explicit_current_week = _normalize_sheet_week_value(current_week_id)
+    if explicit_current_week and "@" in explicit_current_week:
+        observed_dates = {item for item in [*line_dates, *ocr_dates] if isinstance(item, date)}
+        return _expand_explicit_sheet_week_range(explicit_current_week, observed_dates)
+
+    base_month = received_at.strftime("%Y-%m")
+
     if line_dates:
         _append(primary_candidates, month_id_from_dates(line_dates, received_at, policy))
 
-    if isinstance(ocr_payload, dict):
-        ocr_dates = _collect_sheet_dates_from_payload(ocr_payload, received_at)
-        if ocr_dates:
-            ocr_month = month_id_from_dates(ocr_dates, received_at, policy)
-            distance = _sheet_month_distance(ocr_month, base_month)
-            if distance is None or distance <= 1:
-                _append(primary_candidates, ocr_month)
-            else:
-                _append(stale_hint_candidates, ocr_month)
+    if ocr_dates:
+        ocr_month = month_id_from_dates(ocr_dates, received_at, policy)
+        distance = _sheet_month_distance(ocr_month, base_month)
+        if distance is None or distance <= 1:
+            _append(primary_candidates, ocr_month)
+        else:
+            _append(stale_hint_candidates, ocr_month)
 
     _append(primary_candidates, current_week_id)
     for hint in week_hints or []:

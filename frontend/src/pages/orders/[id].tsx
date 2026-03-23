@@ -373,6 +373,9 @@ type GridParams = {
 };
 
 const OCR_SHEET_ROW_INDEX_WIDTH = 28;
+const OCR_PREVIEW_ZOOM_MIN = 0.6;
+const OCR_PREVIEW_ZOOM_MAX = 2.4;
+const OCR_PREVIEW_ZOOM_STEP = 0.2;
 
 type OutputPreview = {
   type: "labels" | "delivery" | "aggregate";
@@ -1506,6 +1509,7 @@ export default function OrderDetailPage() {
     width: 0,
     height: 0,
   });
+  const [ocrPreviewZoom, setOcrPreviewZoom] = useState<number>(1);
   const [activeStep, setActiveStep] = useState<number>(0);
   const [ocrEditMode, setOcrEditMode] = useState<boolean>(false);
   const [lineEditsDirty, setLineEditsDirty] = useState<boolean>(false);
@@ -1517,6 +1521,19 @@ export default function OrderDetailPage() {
   const reparseTimerRef = useRef<number | null>(null);
   const orderRefreshTimerRef = useRef<number | null>(null);
   const workspaceRefreshPromiseRef = useRef<Promise<OrderDetail | null> | null>(null);
+
+  const updateOcrPreviewZoom = (delta: number) => {
+    setOcrPreviewZoom((current) =>
+      Math.min(
+        OCR_PREVIEW_ZOOM_MAX,
+        Math.max(OCR_PREVIEW_ZOOM_MIN, Number((current + delta).toFixed(2))),
+      ),
+    );
+  };
+
+  const resetOcrPreviewZoom = () => {
+    setOcrPreviewZoom(1);
+  };
 
   const loadOrderDetail = async (orderId: string, options: { preserveSelections?: boolean } = {}) => {
     const { preserveSelections = false } = options;
@@ -4490,6 +4507,11 @@ const loadOcrPages = async () => {
   const ocrOverlayGs = isGsUri(ocrOverlayUrl);
   const layoutOverlayGs = isGsUri(layoutOverlayUrl);
   const showOcrOverlay = Boolean(ocrOverlayUrl && !ocrOverlayGs && !ocrOverlayError);
+  const ocrPreviewZoomPercent = Math.round(ocrPreviewZoom * 100);
+  const pdfPreviewUrl = pdfUrl
+    ? `${pdfUrl}${pdfUrl.includes("#") ? "&" : "#"}zoom=${ocrPreviewZoomPercent}`
+    : "";
+  const previewAssetStyle = { width: `${ocrPreviewZoomPercent}%`, maxWidth: "none" } as const;
   const canToggleLayoutOverlay = Boolean(layoutOverlayUrl);
   const showLayoutOverlayImage = Boolean(
     showLayoutOverlay && layoutOverlayUrl && !layoutOverlayGs && !layoutOverlayError,
@@ -6295,10 +6317,33 @@ const loadOcrPages = async () => {
                     <div className="ocr-workspace-preview">
                       <div className="ocr-preview-card">
                         <div className="preview-header">
-                          <span className="subtle">{overlayPreviewModeLabel}</span>
-                          {activeOcrPageLabel != null ? (
-                            <span className="subtle">Page {activeOcrPageLabel}</span>
-                          ) : null}
+                          <div className="preview-header-copy">
+                            <span className="subtle">{overlayPreviewModeLabel}</span>
+                            {activeOcrPageLabel != null ? (
+                              <span className="subtle">Page {activeOcrPageLabel}</span>
+                            ) : null}
+                          </div>
+                          <div className="preview-zoom-controls">
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => updateOcrPreviewZoom(-OCR_PREVIEW_ZOOM_STEP)}
+                              disabled={ocrPreviewZoom <= OCR_PREVIEW_ZOOM_MIN}
+                            >
+                              -
+                            </button>
+                            <button className="btn ghost" type="button" onClick={resetOcrPreviewZoom}>
+                              {ocrPreviewZoomPercent}%
+                            </button>
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => updateOcrPreviewZoom(OCR_PREVIEW_ZOOM_STEP)}
+                              disabled={ocrPreviewZoom >= OCR_PREVIEW_ZOOM_MAX}
+                            >
+                              +
+                            </button>
+                          </div>
                         </div>
                         <div className="edit-hint active">
                           {shouldFallbackToRawPdfPreview
@@ -6309,7 +6354,7 @@ const loadOcrPages = async () => {
                           pdfUrl ? (
                             <iframe
                               title="order-pdf-fallback"
-                              src={pdfUrl}
+                              src={pdfPreviewUrl}
                               className="pdf-frame pdf-frame-compact"
                             />
                           ) : (
@@ -6322,6 +6367,7 @@ const loadOcrPages = async () => {
                               src={ocrOverlayUrl || ""}
                               alt="OCR overlay"
                               className="ocr-preview"
+                              style={previewAssetStyle}
                               onError={() => {
                                 setOcrOverlayError(true);
                                 if (!ocrOverlayRetry && !ocrPagesLoading) {
@@ -6360,6 +6406,7 @@ const loadOcrPages = async () => {
                               src={layoutOverlayUrl || ""}
                               alt="Layout overlay"
                               className="ocr-preview"
+                              style={previewAssetStyle}
                               onError={() => {
                                 setLayoutOverlayError(true);
                                 if (!layoutOverlayRetry && !ocrPagesLoading) {
@@ -7640,6 +7687,10 @@ const loadOcrPages = async () => {
         .ocr-preview-wrapper {
           position: relative;
           width: 100%;
+          overflow: auto;
+          max-height: calc(100vh - 280px);
+          border-radius: 10px;
+          background: #f5f2eb;
         }
 
         .ocr-preview-wrapper .ocr-preview {
@@ -7802,6 +7853,21 @@ const loadOcrPages = async () => {
           align-items: center;
           gap: 8px;
           font-size: 12px;
+        }
+
+        .preview-header-copy {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          min-width: 0;
+        }
+
+        .preview-zoom-controls {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 6px;
+          flex-wrap: wrap;
         }
 
         .preview-placeholder {
