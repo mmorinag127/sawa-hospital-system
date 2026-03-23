@@ -371,6 +371,11 @@ Phase 3:
 
 ## Phase 5: LLM を patch-only にする
 
+進捗:
+- 2026-03-22 時点で backend の canonical 保存先を `OrderSheetPatchCandidate + ocr_patch_candidate_service` に統一済み
+- `LLM補完再解析 -> patch candidate 保存 -> draft へ適用 API` まで実装済み
+- 未完は frontend の preset UI と prompt preset の全面導入
+
 ### 目的
 - LLM が sheet 全体や order lines を直接作らないようにする
 
@@ -400,6 +405,12 @@ Phase 3:
 ---
 
 ## Phase 6: Central Apply Gate + Confirmed Snapshot
+
+進捗:
+- 2026-03-22 時点で `apply_gate_service` / `workflow_state` / `confirmed snapshot` の backend 基盤は実装済み
+- `confirm` は latest draft から materialization candidate を作って `OrderLine` を更新する経路へ移行済み
+- `apply` も `save exact draft -> apply latest draft` に切り替え済みで、legacy の `rows -> parse -> direct OrderLine write` は撤去済み
+- 未完は frontend と downstream を `workflow_state` / confirmed snapshot 中心へさらに寄せることと、legacy blocker の削除
 
 ### 目的
 - apply/confirm 判定を 1 箇所に集約

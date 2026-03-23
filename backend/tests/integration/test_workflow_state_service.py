@@ -71,10 +71,20 @@ def _persist_evidence(
     return evidence
 
 
-def test_refresh_workflow_state_moves_from_choice_required_to_apply_ready_after_facility_choice():
+def test_refresh_workflow_state_moves_from_choice_required_to_apply_ready_after_facility_choice(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-001", facility_hint=None, week_hint="2026-03")
     _persist_evidence(order["id"], facility_choice_required=True)
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
 
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
@@ -151,7 +161,7 @@ def test_refresh_workflow_state_returns_layout_choice_required_for_column_mappin
     assert any(item.get("decision_type") == "column_mapping" for item in decisions)
 
 
-def test_refresh_workflow_state_unblocks_after_column_mapping_choice():
+def test_refresh_workflow_state_unblocks_after_column_mapping_choice(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-003bb", facility_hint="FAC00001", week_hint="2026-03")
     _persist_evidence(
@@ -161,6 +171,16 @@ def test_refresh_workflow_state_unblocks_after_column_mapping_choice():
                 {"value": "cols-a", "label": "常食 / 軟菜 / ミキサー", "score": 0.62},
                 {"value": "cols-b", "label": "常食 / 常食(袋分け) / 軟菜", "score": 0.58},
             ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
         },
     )
 
@@ -231,6 +251,49 @@ def test_refresh_workflow_state_returns_review_required_for_high_risk_quantity_s
     assert "quantity_review_required" in warnings
 
 
+def test_refresh_workflow_state_blocks_when_weekly_menu_is_missing():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-missing-menu", facility_hint="FAC00001", week_hint="2199-11")
+    _persist_evidence(order["id"])
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "draft_blocked"
+    blockers = workflow["apply_gate"]["blockers"] or []
+    assert "weekly_menu_missing" in blockers
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert workflow["apply_gate"]["can_confirm"] is False
+
+
+def test_refresh_workflow_state_uses_saved_draft_sheet_blockers():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-draft-blockers", facility_hint="FAC00001", week_hint="2026-03")
+    _persist_evidence(order["id"])
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "5"]],
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "row_ids": ["draft-row-1"],
+            "ui_mode": "sheet",
+        },
+        blockers=[],
+        warnings=["sheet_weekly_menu_missing"],
+    )
+    assert saved is not None
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    apply_gate = workflow["apply_gate"]
+    assert "weekly_menu_missing" in (apply_gate.get("apply_blockers") or [])
+    assert "weekly_menu_missing" in (apply_gate.get("confirm_blockers") or [])
+    assert apply_gate["can_apply"] is False
+    assert apply_gate["can_confirm"] is False
+
+
 def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quantity_candidates():
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-005", facility_hint="FAC00001", week_hint="2026-03")
@@ -274,7 +337,7 @@ def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quan
     assert quantity_decision["candidate_set_json"]["ambiguity_scope"] == "high_impact_quantity"
 
 
-def test_refresh_workflow_state_clears_review_required_after_quantity_choice():
+def test_refresh_workflow_state_clears_review_required_after_quantity_choice(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-005b", facility_hint="FAC00001", week_hint="2026-03")
     _persist_evidence(
@@ -287,6 +350,16 @@ def test_refresh_workflow_state_clears_review_required_after_quantity_choice():
                 {"value": "qty-a", "label": "3を採用", "score": 0.81},
                 {"value": "qty-b", "label": "8を採用", "score": 0.76},
             ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
         },
     )
 

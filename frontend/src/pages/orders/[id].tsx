@@ -1889,35 +1889,53 @@ export default function OrderDetailPage() {
   ): Partial<OcrSheetPayload> => {
     const workflow = detail?.workflow_state || draftPayload?.workflow_state || null;
     const applyGate = detail?.apply_gate || workflow?.apply_gate || draftPayload?.apply_gate || null;
+    const hasWorkflowState = Boolean(
+      workflow
+      && (
+        String(workflow.state || "").trim()
+        || String(workflow.headline || "").trim()
+        || applyGate
+      ),
+    );
     const reviewState =
-      String(draftPayload?.review_state || draftPayload?.draft_state || workflow?.state || detail?.ocr_review_state || "").trim() ||
+      String(
+        draftPayload?.review_state
+          || draftPayload?.draft_state
+          || workflow?.state
+          || (!hasWorkflowState ? detail?.ocr_review_state : "")
+          || "",
+      ).trim() ||
       "draft_ready";
     return {
       review_state: reviewState,
       can_apply:
-        applyGate?.can_apply != null ? Boolean(applyGate.can_apply) : Boolean(detail?.ocr_can_apply_draft),
+        applyGate?.can_apply != null
+          ? Boolean(applyGate.can_apply)
+          : (!hasWorkflowState && Boolean(detail?.ocr_can_apply_draft)),
       can_confirm:
-        applyGate?.can_confirm != null ? Boolean(applyGate.can_confirm) : Boolean(detail?.ocr_can_confirm),
+        applyGate?.can_confirm != null
+          ? Boolean(applyGate.can_confirm)
+          : (!hasWorkflowState && Boolean(detail?.ocr_can_confirm)),
       apply_blockers: Array.isArray(applyGate?.blockers)
         ? applyGate!.blockers!
-        : Array.isArray(detail?.ocr_apply_blockers)
+        : !hasWorkflowState && Array.isArray(detail?.ocr_apply_blockers)
           ? detail!.ocr_apply_blockers!
           : [],
       confirm_blockers: Array.isArray(applyGate?.blockers)
         ? applyGate!.blockers!
-        : Array.isArray(detail?.ocr_confirm_blockers)
+        : !hasWorkflowState && Array.isArray(detail?.ocr_confirm_blockers)
           ? detail!.ocr_confirm_blockers!
           : [],
       confirm_warnings: Array.isArray(applyGate?.warnings)
         ? applyGate!.warnings!
-        : Array.isArray(detail?.ocr_confirm_warnings)
+        : !hasWorkflowState && Array.isArray(detail?.ocr_confirm_warnings)
           ? detail!.ocr_confirm_warnings!
           : [],
-      draft_newer_than_lines: Boolean(detail?.ocr_draft_newer_than_lines),
-      auto_apply_blocked: Boolean(detail?.ocr_auto_apply_blocked),
-      processing_stage: String(detail?.ocr_processing_stage || "").trim(),
-      result_state: String(detail?.ocr_result_state || "").trim(),
-      confirmed_lines_retained: Boolean(detail?.ocr_confirmed_lines_retained),
+      draft_newer_than_lines: !hasWorkflowState && Boolean(detail?.ocr_draft_newer_than_lines),
+      auto_apply_blocked: !hasWorkflowState && Boolean(detail?.ocr_auto_apply_blocked),
+      processing_stage: !hasWorkflowState ? String(detail?.ocr_processing_stage || "").trim() : "",
+      result_state: !hasWorkflowState ? String(detail?.ocr_result_state || "").trim() : "",
+      confirmed_lines_retained: !hasWorkflowState && Boolean(detail?.ocr_confirmed_lines_retained),
     };
   };
 
@@ -4556,13 +4574,15 @@ const loadOcrPages = async () => {
     const decisionType = String(decision?.decision_type || "").trim().toLowerCase();
     return decisionType !== "facility" && decisionType !== "week";
   });
-  const effectiveSheetReviewState = ocrSheetReviewState || String(order?.ocr_review_state || "").trim();
+  const hasWorkflowState = Boolean(workflowStateCode || workflowHeadline || workflowApplyGate);
+  const effectiveSheetReviewState =
+    ocrSheetReviewState || workflowStateCode || (!hasWorkflowState ? String(order?.ocr_review_state || "").trim() : "");
   const effectiveSheetReviewLabel = describeReviewState(effectiveSheetReviewState);
   const effectiveProcessingStage =
-    ocrSheetProcessingStage || String(order?.ocr_processing_stage || "").trim();
+    ocrSheetProcessingStage || (!hasWorkflowState ? String(order?.ocr_processing_stage || "").trim() : "");
   const effectiveProcessingStageLabel = describeProcessingStage(effectiveProcessingStage);
   const effectiveConfirmedLinesRetained =
-    ocrSheetConfirmedLinesRetained || Boolean(order?.ocr_confirmed_lines_retained);
+    ocrSheetConfirmedLinesRetained || (!hasWorkflowState && Boolean(order?.ocr_confirmed_lines_retained));
   const workflowBlockers = Array.isArray(workflowApplyGate?.blockers)
     ? workflowApplyGate.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
@@ -4591,18 +4611,18 @@ const loadOcrPages = async () => {
   const effectiveConfirmBlockers = dedupeStrings([
     ...(workflowGateAvailable ? workflowBlockers : []),
     ...ocrSheetConfirmBlockers,
-    ...(Array.isArray(order?.ocr_confirm_blockers)
+    ...(!hasWorkflowState && Array.isArray(order?.ocr_confirm_blockers)
       ? order.ocr_confirm_blockers.map((item) => String(item || "").trim()).filter(Boolean)
       : []),
-    order?.ocr_draft_newer_than_lines ? "draft_newer_than_lines" : "",
+    !hasWorkflowState && order?.ocr_draft_newer_than_lines ? "draft_newer_than_lines" : "",
   ]);
   const effectiveConfirmWarnings = dedupeStrings([
     ...(workflowGateAvailable ? workflowWarnings : []),
     ...ocrSheetConfirmWarnings,
-    ...(Array.isArray(order?.ocr_confirm_warnings)
+    ...(!hasWorkflowState && Array.isArray(order?.ocr_confirm_warnings)
       ? order.ocr_confirm_warnings.map((item) => String(item || "").trim()).filter(Boolean)
       : []),
-    order?.ocr_auto_apply_blocked ? "auto_apply_blocked" : "",
+    !hasWorkflowState && order?.ocr_auto_apply_blocked ? "auto_apply_blocked" : "",
   ]);
   const effectiveCanApply = workflowGateAvailable
     ? Boolean(workflowApplyGate?.can_apply)
@@ -4649,9 +4669,11 @@ const loadOcrPages = async () => {
   const ocrReviewStripBadges = (() => {
     const labels: string[] = [];
     if (effectiveSheetReviewLabel) labels.push(effectiveSheetReviewLabel);
-    dedupedOrderReviewBadges.forEach((badge) => {
-      if (badge && !labels.includes(badge)) labels.push(badge);
-    });
+    if (!hasWorkflowState) {
+      dedupedOrderReviewBadges.forEach((badge) => {
+        if (badge && !labels.includes(badge)) labels.push(badge);
+      });
+    }
     return labels;
   })();
   const visiblePrimaryReviewLabel = ocrReviewStripBadges[0] || "";

@@ -200,6 +200,35 @@ def test_confirm_endpoint_blocks_on_workflow_apply_gate(monkeypatch) -> None:
     assert detail["workflow_state"]["state"] == "identity_choice_required"
 
 
+def test_confirm_endpoint_blocks_on_weekly_menu_missing(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-005b")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda order_id, refresh=False: {
+            "order_id": order_id,
+            "state": "draft_blocked",
+            "headline": "下書きはありますが、反映前に条件の解消が必要です",
+            "apply_gate": {
+                "can_apply": False,
+                "can_confirm": False,
+                "blockers": ["weekly_menu_missing"],
+                "warnings": [],
+            },
+        },
+    )
+
+    res = client.post(f"/orders/{order['id']}/confirm")
+
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["error"] == "weekly_menu_missing"
+    assert "weekly_menu_missing" in detail["blockers"]
+    assert detail["workflow_state"]["state"] == "draft_blocked"
+
+
 def test_apply_endpoint_blocks_on_workflow_apply_gate(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-workflow-api-006")
@@ -209,6 +238,7 @@ def test_apply_endpoint_blocks_on_workflow_apply_gate(monkeypatch) -> None:
         "get_order_workflow_state",
         lambda order_id, refresh=False: {
             "order_id": order_id,
+            "evidence_run_id": "EVDtest",
             "state": "layout_choice_required",
             "headline": "重要候補の選択が必要です",
             "apply_gate": {
@@ -235,6 +265,43 @@ def test_apply_endpoint_blocks_on_workflow_apply_gate(monkeypatch) -> None:
     assert detail["workflow_state"]["state"] == "layout_choice_required"
 
 
+def test_apply_endpoint_ignores_weekly_menu_missing_when_request_rows_exist(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-006c")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda order_id, refresh=False: {
+            "order_id": order_id,
+            "evidence_run_id": "EVDtest",
+            "state": "draft_blocked",
+            "headline": "下書きはありますが、反映前に条件の解消が必要です",
+            "apply_gate": {
+                "can_apply": False,
+                "can_confirm": False,
+                "blockers": ["weekly_menu_missing"],
+                "warnings": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "apply_submitted_ocr_sheet",
+        lambda *_args, **_kwargs: ({"id": order["id"], "status": "要確認"}, None),
+    )
+
+    res = client.post(
+        f"/orders/{order['id']}/ocr-apply",
+        json={
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+        },
+    )
+
+    assert res.status_code == 200
+
+
 def test_apply_endpoint_blocks_on_column_mapping_choice_required(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-workflow-api-006b")
@@ -244,6 +311,7 @@ def test_apply_endpoint_blocks_on_column_mapping_choice_required(monkeypatch) ->
         "get_order_workflow_state",
         lambda order_id, refresh=False: {
             "order_id": order_id,
+            "draft_id": "ODRtest",
             "state": "layout_choice_required",
             "headline": "OCR候補の選択が必要です",
             "apply_gate": {
@@ -312,6 +380,7 @@ def test_apply_endpoint_blocks_on_quantity_choice_required(monkeypatch) -> None:
         "get_order_workflow_state",
         lambda order_id, refresh=False: {
             "order_id": order_id,
+            "draft_id": "ODRtest",
             "state": "layout_choice_required",
             "headline": "OCR候補の選択が必要です",
             "apply_gate": {
@@ -358,11 +427,11 @@ def test_apply_endpoint_ignores_draft_rows_empty_when_request_rows_exist(monkeyp
         },
     )
 
-    def _fake_apply_ocr_table(*_args, **_kwargs):
+    def _fake_apply_submitted_ocr_sheet(*_args, **_kwargs):
         apply_called["value"] = True
         return {"id": order["id"]}, None
 
-    monkeypatch.setattr(orders_api.order_service, "apply_ocr_table", _fake_apply_ocr_table)
+    monkeypatch.setattr(orders_api.order_service, "apply_submitted_ocr_sheet", _fake_apply_submitted_ocr_sheet)
 
     res = client.post(
         f"/orders/{order['id']}/ocr-apply",

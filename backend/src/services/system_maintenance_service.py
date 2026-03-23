@@ -19,6 +19,7 @@ from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_ocr_revision import OrderOcrRevision
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.order_critical_decision import OrderCriticalDecision
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
@@ -44,6 +45,7 @@ _OPERATIONAL_MODELS: list[tuple[str, Any]] = [
     ("order_ocr_cache", OrderOcrCache),
     ("order_ocr_evidence_runs", OrderOcrEvidenceRun),
     ("order_sheet_drafts", OrderSheetDraft),
+    ("order_sheet_patch_candidates", OrderSheetPatchCandidate),
     ("order_workflow_states", OrderWorkflowState),
     ("order_critical_decisions", OrderCriticalDecision),
     ("order_confirmed_snapshots", OrderConfirmedSnapshot),

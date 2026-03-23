@@ -958,8 +958,19 @@ def apply_ocr_markdown(order_id: str, body: dict):
         raise HTTPException(status_code=400, detail="markdown or rows is required")
     workflow = order_service.get_order_workflow_state(order_id, refresh=True)
     apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
+    enforce_choice_gate = bool(
+        isinstance(workflow, dict)
+        and (
+            str(workflow.get("evidence_run_id") or "").strip()
+            or str(workflow.get("draft_id") or "").strip()
+        )
+    )
     raw_gate_blockers = (
-        [str(item or "").strip() for item in (apply_gate.get("blockers") or []) if str(item or "").strip()]
+        [
+            str(item or "").strip()
+            for item in (apply_gate.get("apply_blockers") or apply_gate.get("blockers") or [])
+            if str(item or "").strip()
+        ]
         if isinstance(apply_gate, dict)
         else []
     )
@@ -979,7 +990,7 @@ def apply_ocr_markdown(order_id: str, body: dict):
             "week_unresolved",
         }
     ]
-    if apply_gate_blockers:
+    if enforce_choice_gate and apply_gate_blockers:
         primary = apply_gate_blockers[0]
         messages = {
             "facility_missing": "facility is missing",
@@ -1001,7 +1012,7 @@ def apply_ocr_markdown(order_id: str, body: dict):
                 "workflow_state": workflow,
             },
         )
-    order, error = order_service.apply_ocr_table(
+    order, error = order_service.apply_submitted_ocr_sheet(
         order_id,
         markdown=markdown if has_markdown else None,
         header=header,
@@ -1018,7 +1029,15 @@ def apply_ocr_markdown(order_id: str, body: dict):
         raise HTTPException(status_code=404, detail="order not found")
     if error in {"facility_missing", "facility_not_found"}:
         raise HTTPException(status_code=400, detail="facility missing")
-    if error in {"markdown_empty", "rows_empty", "lines_empty"}:
+    if error in {
+        "markdown_empty",
+        "rows_empty",
+        "lines_empty",
+        "draft_missing",
+        "draft_rows_empty",
+        "draft_rows_unparseable",
+        "draft_lines_empty",
+    }:
         raise HTTPException(status_code=400, detail=error)
     if error in {"stale_revision_conflict", "stale_lines_conflict"}:
         raise HTTPException(
@@ -1075,6 +1094,25 @@ def save_draft_sheet(order_id: str, body: dict):
     return save_ocr_sheet(order_id, body)
 
 
+@router.post("/{order_id}/draft-sheet/apply-patch-candidate", dependencies=[Depends(require_role("operator"))])
+def apply_patch_candidate(order_id: str, body: dict | None = None):
+    candidate_id = str((body or {}).get("candidate_id") or "").strip() or None
+    result, error = order_service.apply_patch_candidate_to_draft(
+        order_id,
+        candidate_id=candidate_id,
+        applied_by="operator",
+    )
+    if error == "patch_candidate_not_found":
+        raise HTTPException(status_code=404, detail="patch candidate not found")
+    if error in {"stale_draft_conflict", "stale_patch_candidate"}:
+        raise HTTPException(status_code=409, detail=error)
+    if error == "patch_candidate_not_applicable":
+        raise HTTPException(status_code=400, detail=error)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return result
+
+
 @router.post("/{order_id}/ocr-review", dependencies=[Depends(require_role("operator"))])
 def review_ocr_sheet(order_id: str, body: dict | None = None):
     ocr_prompt = None
@@ -1120,6 +1158,8 @@ def review_ocr_sheet(order_id: str, body: dict | None = None):
         "fields_empty",
     }:
         raise HTTPException(status_code=400, detail=error)
+    if error == "llm_patch_candidate_persist_failed":
+        raise HTTPException(status_code=500, detail="llm patch candidate persist failed")
     if error:
         raise HTTPException(status_code=500, detail="ocr review failed")
     return order
@@ -1279,26 +1319,31 @@ def confirm_order(order_id: str, body: dict | None = None):
             )
     workflow = order_service.get_order_workflow_state(order_id, refresh=True)
     apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
-    raw_workflow_blockers = (
-        [str(item or "").strip() for item in (apply_gate.get("blockers") or []) if str(item or "").strip()]
+    gate_blockers = (
+        [
+            str(item or "").strip()
+            for item in (apply_gate.get("confirm_blockers") or apply_gate.get("blockers") or [])
+            if str(item or "").strip()
+        ]
         if isinstance(apply_gate, dict)
         else []
     )
-    workflow_blockers = [
-        item
-        for item in raw_workflow_blockers
-        if item
-        not in {
-            "evidence_view_unavailable",
-            "evidence_edit_unavailable",
-            "draft_rows_empty",
-        }
-    ]
-    if workflow_blockers:
-        primary = workflow_blockers[0]
+    gate_warnings = (
+        [
+            str(item or "").strip()
+            for item in (apply_gate.get("confirm_warnings") or apply_gate.get("warnings") or [])
+            if str(item or "").strip()
+        ]
+        if isinstance(apply_gate, dict)
+        else []
+    )
+    if gate_blockers or (isinstance(apply_gate, dict) and not apply_gate.get("can_confirm", False)):
+        primary = str((gate_blockers or gate_warnings or ["confirm_blocked"])[0] or "").strip() or "confirm_blocked"
         messages = {
             "facility_missing": "facility is missing",
             "week_missing": "week is missing",
+            "weekly_menu_missing": "weekly menu is missing",
+            "menu_entries_missing": "weekly menu entries are missing",
             "facility_choice_required": "facility choice is required",
             "week_choice_required": "week choice is required",
             "template_choice_required": "template choice is required",
@@ -1307,89 +1352,35 @@ def confirm_order(order_id: str, body: dict | None = None):
             "facility_unresolved": "facility is unresolved",
             "week_unresolved": "week is unresolved",
             "template_unresolved": "template is unresolved",
+            "evidence_view_unavailable": "ocr evidence view is unavailable",
+            "evidence_edit_unavailable": "ocr evidence edit is unavailable",
+            "draft_rows_empty": "draft rows are empty",
+            "recovery_recommended": "ocr evidence recovery is required before confirm",
+            "ocr_evidence_recovery_required": "ocr evidence recovery is required",
+            "template_resolution_blocked": "template resolution is blocked",
+            "reparse_stale": "reparse is stale",
+            "auto_apply_blocked": "auto apply is blocked",
         }
         raise HTTPException(
             status_code=409,
             detail={
                 "error": primary,
                 "message": messages.get(primary, primary),
-                "blockers": workflow_blockers,
+                "blockers": gate_blockers,
+                "warnings": gate_warnings,
                 "workflow_state": workflow,
             },
         )
-    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
-    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
-    gate_blockers = list(apply_gate.get("blockers") or []) if isinstance(apply_gate, dict) else []
-    confirm_gate_blockers = [
-        blocker
-        for blocker in gate_blockers
-        if blocker in {
-            "facility_missing",
-            "week_missing",
-            "facility_choice_required",
-            "week_choice_required",
-            "template_choice_required",
-            "column_mapping_choice_required",
-            "quantity_choice_required",
-            "facility_unresolved",
-            "week_unresolved",
-        }
-    ]
-    if confirm_gate_blockers:
-        primary = str(confirm_gate_blockers[0] or "").strip() or "confirm_blocked"
-        messages = {
-            "facility_missing": "facility is missing",
-            "week_missing": "week is missing",
-            "facility_choice_required": "facility choice is required",
-            "week_choice_required": "week choice is required",
-            "template_choice_required": "template choice is required",
-            "column_mapping_choice_required": "column mapping choice is required",
-            "quantity_choice_required": "quantity choice is required",
-            "facility_unresolved": "facility is unresolved",
-            "week_unresolved": "week is unresolved",
-        }
+    try:
+        order = order_service.confirm_order(order_id)
+    except order_service.ConfirmMaterializationError as exc:
         raise HTTPException(
             status_code=409,
             detail={
-                "error": primary,
-                "message": messages.get(primary, primary),
-                "blockers": confirm_gate_blockers,
-                "workflow_state": workflow,
+                "error": exc.code,
+                "message": exc.message,
             },
-        )
-    sheet_result = order_service.get_ocr_sheet(order_id)
-    if isinstance(sheet_result, tuple):
-        sheet = sheet_result[0]
-        error = sheet_result[1]
-        if error in RECOVERABLE_OCR_SHEET_ERRORS:
-            sheet, recover_error = order_service.build_recoverable_ocr_sheet_payload(order_id, error)
-            if recover_error is not None or not isinstance(sheet, dict):
-                raise HTTPException(status_code=409, detail={"error": error, "message": error})
-        elif error:
-            raise HTTPException(status_code=409, detail={"error": error, "message": error})
-    else:
-        sheet = sheet_result
-    confirm_blockers = sheet.get("confirm_blockers") if isinstance(sheet, dict) else []
-    confirm_blockers = confirm_blockers or []
-    if not confirm_blockers and isinstance(sheet, dict):
-        warnings = [str(item or "").strip() for item in (sheet.get("warnings") or []) if str(item or "").strip()]
-        if "sheet_weekly_menu_missing" in warnings:
-            confirm_blockers = ["weekly_menu_missing"]
-    if confirm_blockers:
-        primary = str(confirm_blockers[0] or "").strip() or "confirm_blocked"
-        messages = {
-            "weekly_menu_missing": "monthly menu is missing for the selected week",
-            "draft_newer_than_lines": "saved draft is newer than confirmed lines",
-        }
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": primary,
-                "message": messages.get(primary, primary),
-                "blockers": confirm_blockers,
-            },
-        )
-    order = order_service.confirm_order(order_id)
+        ) from exc
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
     try:

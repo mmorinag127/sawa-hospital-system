@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import apply_gate_service, candidate_resolution_service, critical_decision_service, draft_sheet_service, ocr_evidence_service
+from src.services.ocr_job_service import describe_job_state, get_job as get_ocr_job
+from src.services import (
+    apply_gate_service,
+    candidate_resolution_service,
+    critical_decision_service,
+    draft_sheet_service,
+    menu_service,
+    ocr_evidence_service,
+)
 
 
 Base.metadata.create_all(bind=engine)
@@ -72,6 +80,117 @@ def _latest_confirmed_snapshot_id(order_id: str) -> str | None:
             .first()
         )
         return str(row.id).strip() if row and str(row.id).strip() else None
+
+
+def _to_sheet_month_id(value: object) -> str | None:
+    text = str(value or "").strip()
+    if len(text) == 7 and text[4:5] == "-":
+        return text
+    if "@" in text:
+        month_id = text.split("@", 1)[0].strip()
+        if len(month_id) == 7 and month_id[4:5] == "-":
+            return month_id
+    return None
+
+
+def _parse_sheet_week_range(value: object) -> tuple[str | None, date | None, date | None]:
+    text = str(value or "").strip()
+    month_id = _to_sheet_month_id(text)
+    if not month_id or "@" not in text or "~" not in text:
+        return month_id, None, None
+    try:
+        range_part = text.split("@", 1)[1]
+        start_token, end_token = [item.strip() for item in range_part.split("~", 1)]
+        return month_id, date.fromisoformat(start_token), date.fromisoformat(end_token)
+    except Exception:
+        return month_id, None, None
+
+
+def _normalize_entry_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _build_menu_context(*, facility_code: str | None, week_code: str | None) -> dict[str, Any]:
+    facility = str(facility_code or "").strip() or None
+    week = str(week_code or "").strip()
+    month_id, week_start, week_end = _parse_sheet_week_range(week)
+    if not month_id:
+        return {
+            "month_id": None,
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 0,
+        }
+    menu = menu_service.get_menu_for_facility(month_id, facility) if facility else menu_service.get_menu(month_id)
+    if not isinstance(menu, dict):
+        return {
+            "month_id": month_id,
+            "weekly_menu_missing": True,
+            "menu_entries_missing": False,
+            "entries_count": 0,
+        }
+    raw_entries = menu.get("entries")
+    entries = [item for item in raw_entries if isinstance(item, dict)] if isinstance(raw_entries, list) else []
+    if isinstance(week_start, date) and isinstance(week_end, date):
+        entries = [
+            item
+            for item in entries
+            if (
+                isinstance(_normalize_entry_date(item.get("menu_date")), date)
+                and week_start <= _normalize_entry_date(item.get("menu_date")) <= week_end
+            )
+        ]
+    return {
+        "month_id": month_id,
+        "weekly_menu_missing": False,
+        "menu_entries_missing": len(entries) <= 0,
+        "entries_count": len(entries),
+    }
+
+
+def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, draft_sheet: dict[str, Any] | None) -> dict[str, Any]:
+    draft_payload = (
+        draft_sheet.get("draft_sheet_json")
+        if isinstance(draft_sheet, dict) and isinstance(draft_sheet.get("draft_sheet_json"), dict)
+        else (draft_sheet if isinstance(draft_sheet, dict) else {})
+    )
+    rows = draft_payload.get("rows") if isinstance(draft_payload, dict) else None
+    source = str((draft_payload or {}).get("source") or "").strip()
+    blockers = []
+    warnings = []
+    if isinstance(draft_sheet, dict):
+        blockers = [str(item or "").strip() for item in (draft_sheet.get("blockers_json") or []) if str(item or "").strip()]
+        warnings = [str(item or "").strip() for item in (draft_sheet.get("warnings_json") or []) if str(item or "").strip()]
+    draft_newer_than_lines = False
+    if isinstance(draft_sheet, dict) and str(draft_sheet.get("id") or "").strip():
+        lines_updated_at = order_payload.get("lines_updated_at") if isinstance(order_payload, dict) else None
+        draft_edited_at = draft_sheet.get("edited_at")
+        if lines_updated_at is None:
+            draft_newer_than_lines = True
+        elif isinstance(draft_edited_at, str) and draft_edited_at:
+            try:
+                draft_newer_than_lines = datetime.fromisoformat(draft_edited_at) > lines_updated_at
+            except Exception:
+                draft_newer_than_lines = True
+    reparse_job = get_ocr_job(f"OCR-{order_id}")
+    reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
+    return apply_gate_service.evaluate_sheet_gate(
+        rows=rows if isinstance(rows, list) else None,
+        source=source,
+        blockers=blockers,
+        warnings=warnings,
+        draft_newer_than_lines=draft_newer_than_lines,
+        auto_apply_blocked="auto_apply_blocked" in blockers or "auto_apply_blocked" in warnings,
+        reparse_status=reparse_state.get("status"),
+    )
 
 
 def _decision_selected_label(decision: dict[str, Any], selected_value: str) -> str:
@@ -244,6 +363,15 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
         evidence_run=evidence_run,
         draft_sheet=draft_sheet,
         candidate_resolution=candidate_resolution,
+        menu_context=_build_menu_context(
+            facility_code=str(order_payload.get("facility") or "").strip() or None,
+            week_code=str(order_payload.get("week_value") or order_payload.get("week") or "").strip() or None,
+        ),
+        sheet_gate=_build_sheet_gate(
+            order_id=normalized_order_id,
+            order_payload=order_payload,
+            draft_sheet=draft_sheet,
+        ),
     )
     state, headline, primary_action, blockers, warnings, confidence_band = _derive_state(
         order_payload=order_payload,

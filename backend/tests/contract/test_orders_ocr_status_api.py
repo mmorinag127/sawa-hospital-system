@@ -195,13 +195,15 @@ def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
         "get_order_workflow_state",
         lambda _order_id, refresh=False: {
             "state": "draft_ready",
-            "apply_gate": {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
+            "apply_gate": {
+                "can_apply": False,
+                "can_confirm": False,
+                "blockers": ["weekly_menu_missing"],
+                "confirm_blockers": ["weekly_menu_missing"],
+                "warnings": [],
+                "confirm_warnings": [],
+            },
         },
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_ocr_sheet",
-        lambda _order_id: {"warnings": ["sheet_weekly_menu_missing"]},
     )
 
     client = TestClient(app)

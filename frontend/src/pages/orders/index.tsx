@@ -295,13 +295,19 @@ export default function OrdersPage() {
 
   const visibleReviewBadges = (order: Order) => {
     const workflowBadge = workflowStateLabel(order.workflow_state?.state);
+    const hasWorkflowState = Boolean(
+      String(order.workflow_state?.state || "").trim()
+      || String(order.workflow_state?.headline || "").trim(),
+    );
     const hasWorkflowSummary = Boolean(
       String(order.workflow_state?.headline || "").trim() || workflowBadge,
     );
-    const secondaryBadges = (order.ocr_review_badges || [])
-      .map((badge) => String(badge || "").trim())
-      .filter((badge) => badge && badge !== workflowBadge)
-      .slice(0, hasWorkflowSummary ? 1 : 2);
+    const secondaryBadges = hasWorkflowState
+      ? []
+      : (order.ocr_review_badges || [])
+          .map((badge) => String(badge || "").trim())
+          .filter((badge) => badge && badge !== workflowBadge)
+          .slice(0, hasWorkflowSummary ? 1 : 2);
     return {
       workflowBadge,
       secondaryBadges,
@@ -488,12 +494,12 @@ export default function OrdersPage() {
                           {badge}
                         </span>
                       ))}
-                      {order.ocr_review_state === "processing" && processingStageLabel(order.ocr_processing_stage) ? (
+                      {!order.workflow_state && order.ocr_review_state === "processing" && processingStageLabel(order.ocr_processing_stage) ? (
                         <span className="review-badge">
                           {processingStageLabel(order.ocr_processing_stage)}
                         </span>
                       ) : null}
-                      {order.ocr_confirmed_lines_retained ? (
+                      {!order.workflow_state && order.ocr_confirmed_lines_retained ? (
                         <span className="review-badge">確定明細保持</span>
                       ) : null}
                     </div>

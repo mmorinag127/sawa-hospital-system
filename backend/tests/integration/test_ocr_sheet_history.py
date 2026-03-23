@@ -3818,7 +3818,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
     assert sheet_error is None
     assert sheet is not None
-    assert sheet["source"] == "weekly_menu"
+    assert sheet["source"] == "draft_sheet"
     qty_idx = sheet["fields"].index("qty.regular_2f")
     daypart_idx = sheet["fields"].index("daypart")
     menu_idx = sheet["fields"].index("menu")
@@ -3828,7 +3828,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
         for row in sheet["rows"]
         if row[date_idx] == "11/15" and row[daypart_idx] == "昼" and row[menu_idx] == "昼メニュー"
     )
-    assert lunch[qty_idx] == "30"
+    assert lunch[qty_idx] == "3"
 
 
 def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp():
@@ -4298,7 +4298,7 @@ def test_get_ocr_sheet_exposes_yomitoku_review_issues():
     assert issues[0]["source"] == "yomitoku_structured"
 
 
-def test_review_ocr_table_with_llm_uses_latest_revision_as_baseline_and_persists_history(monkeypatch):
+def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_draft_as_baseline(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-sheet-llm-review-loop-001")
     order_service._save_order_ocr_cache(
@@ -4444,40 +4444,48 @@ def test_review_ocr_table_with_llm_uses_latest_revision_as_baseline_and_persists
     assert updated_1["llm_review"]["summary"]["status"] == "verified"
     assert updated_1["llm_review"]["needs_more_review"] is False
     assert updated_1["llm_review"]["output_payload"]["rows"][0]["qty.regular_2f"] == "5"
+    first_candidate = updated_1["patch_candidate"]
+    assert first_candidate["candidate_state"] == "proposed"
+    assert first_candidate["proposed_draft_sheet_json"]["rows"][0][3] == "5"
 
     history_1, history_error_1 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_1 is None
     assert history_1 is not None
-    first_revision = history_1["latest"]
-    assert isinstance(first_revision, dict)
-    assert first_revision["rows"][0][3] == "5"
-    assert first_revision["llm_review"]["applied_overwrites"][0]["new_text"] == "5"
-    assert first_revision["llm_review"]["output_payload"]["rows"][0]["qty.regular_2f"] == "5"
+    assert history_1["latest"] is None
+    assert history_1["revisions"] == []
+
+    apply_result, apply_error = order_service.apply_patch_candidate_to_draft(
+        order["id"],
+        candidate_id=first_candidate["id"],
+        applied_by="test",
+    )
+    assert apply_error is None
+    assert apply_result is not None
+    applied_draft = apply_result["draft"]
+    assert applied_draft["latest_patch_candidate_id"] == first_candidate["id"]
+    assert applied_draft["draft_sheet_json"]["rows"][0][3] == "5"
 
     updated_2, error_2 = order_service.review_ocr_table_with_llm(order["id"], provider="gemini")
     assert error_2 is None
     assert updated_2 is not None
-    assert updated_2["llm_review"]["baseline_revision_id"] == first_revision["revision_id"]
-    assert updated_2["llm_review"]["baseline_source"] == "edited"
+    assert updated_2["llm_review"]["baseline_revision_id"] == applied_draft["id"]
+    assert updated_2["llm_review"]["baseline_source"] == "draft"
     assert updated_2["llm_review"]["needs_more_review"] is False
+    second_candidate = updated_2["patch_candidate"]
+    assert second_candidate["proposed_draft_sheet_json"]["rows"][0][3] == "7"
 
     history_2, history_error_2 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_2 is None
     assert history_2 is not None
-    revisions = history_2["revisions"] or []
-    assert len(revisions) == 2
-    latest_revision = revisions[-1]
-    assert latest_revision["rows"][0][3] == "7"
-    assert latest_revision["llm_review"]["baseline_revision_id"] == first_revision["revision_id"]
-    assert latest_revision["llm_review"]["applied_overwrites"][0]["old_text"] == "5"
-    assert latest_revision["llm_review"]["applied_overwrites"][0]["new_text"] == "7"
+    assert history_2["latest"] is None
+    assert history_2["revisions"] == []
 
     assert "Previous yomitoku/LLM markdown" in captured_prompts[0]["user"]
     assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
     assert "Current baseline source: yomitoku" in captured_prompts[0]["user"]
     assert '"qty.regular_2f": "2"' in captured_prompts[0]["user"]
-    assert f"Current baseline revision_id: {first_revision['revision_id']}" in captured_prompts[1]["user"]
-    assert "Current baseline source: edited" in captured_prompts[1]["user"]
+    assert f"Current baseline revision_id: {applied_draft['id']}" in captured_prompts[1]["user"]
+    assert "Current baseline source: draft" in captured_prompts[1]["user"]
     assert '"qty.regular_2f": "5"' in captured_prompts[1]["user"]
 
 
@@ -4585,14 +4593,15 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     assert updated["llm_review"]["needs_more_review"] is True
     assert updated["llm_review"]["applied_overwrites"] == []
     assert updated["llm_review"]["issues"][0]["issue_code"] == "misread_quantity"
+    patch_candidate = updated["patch_candidate"]
+    assert patch_candidate["candidate_state"] == "proposed"
+    assert patch_candidate["issues_json"][0]["issue_code"] == "misread_quantity"
 
     history, history_error = order_service.get_ocr_edit_history(order["id"])
     assert history_error is None
     assert history is not None
-    latest = history["latest"]
-    assert latest is not None
-    assert latest["rows"][0][3] == "2"
-    assert latest["llm_review"]["issues"][0]["issue_code"] == "misread_quantity"
+    assert history["latest"] is None
+    assert history["revisions"] == []
 
 
 def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(monkeypatch):
@@ -4698,6 +4707,14 @@ def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(mon
     assert updated["llm_review"]["pdf_variant_used"] == "corrected"
     assert "pdf_variant_fallback_reason" not in updated["llm_review"]
     assert captured_uris == ["gs://bucket/corrected.pdf"]
+    patch_candidate = updated["patch_candidate"]
+    apply_result, apply_error = order_service.apply_patch_candidate_to_draft(
+        order["id"],
+        candidate_id=patch_candidate["id"],
+        applied_by="test",
+    )
+    assert apply_error is None
+    assert apply_result is not None
 
     sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
     assert sheet_error is None
@@ -4705,3 +4722,4 @@ def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(mon
     assert "sheet_ocr_review_required" not in (sheet.get("warnings") or [])
     issues = sheet.get("cell_issues") or []
     assert issues == []
+    assert sheet["rows"][0][3] == "5"

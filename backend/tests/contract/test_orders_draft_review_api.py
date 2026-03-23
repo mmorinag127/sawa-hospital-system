@@ -136,9 +136,12 @@ def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_re
     assert detail["ocr_auto_apply_blocked"] is True
     assert detail["ocr_reparse_status"] == "blocked"
     assert detail["ocr_can_apply_draft"] is True
-    assert detail["ocr_can_confirm"] is False
-    assert "draft_newer_than_lines" in (detail.get("ocr_confirm_blockers") or [])
-    assert any(item.get("code") == "draft_newer_than_lines" for item in (detail.get("ocr_confirm_blocker_details") or []))
+    assert detail["ocr_can_confirm"] is True
+    assert "draft_newer_than_lines" not in (detail.get("ocr_confirm_blockers") or [])
+    assert all(
+        item.get("code") != "draft_newer_than_lines"
+        for item in (detail.get("ocr_confirm_blocker_details") or [])
+    )
     assert any(item.get("code") == "auto_apply_blocked" for item in (detail.get("ocr_confirm_warning_details") or []))
     assert detail["ocr_last_reparse_error"] == "sheet_llm_audit_failed"
     assert "sheet_llm_audit_failed" in (detail.get("ocr_reject_reasons") or [])
@@ -153,7 +156,7 @@ def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_re
     assert row["ocr_reparse_status"] == "blocked"
 
 
-def test_confirm_endpoint_blocks_when_draft_is_newer_than_lines(monkeypatch):
+def test_confirm_endpoint_uses_latest_draft_without_draft_newer_block(monkeypatch):
     order_service.clear_all()
     client = TestClient(app)
     order = _create_seed_order("msg-draft-review-confirm-block")
@@ -165,7 +168,6 @@ def test_confirm_endpoint_blocks_when_draft_is_newer_than_lines(monkeypatch):
             "apply_gate": {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
         },
     )
-
     save_res = client.post(
         f"/orders/{order['id']}/ocr-sheet-save",
         json={
@@ -177,12 +179,24 @@ def test_confirm_endpoint_blocks_when_draft_is_newer_than_lines(monkeypatch):
         },
     )
     assert save_res.status_code == 200
+    second_save_res = client.post(
+        f"/orders/{order['id']}/ocr-sheet-save",
+        json={
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [["02/15", "朝", "Menu A", "9", "latest-draft"]],
+            "ui_mode": "sheet",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "row_ids": ["row-draft-3"],
+        },
+    )
+    assert second_save_res.status_code == 200
 
     res = client.post(f"/orders/{order['id']}/confirm")
 
-    assert res.status_code == 409
-    detail = res.json().get("detail") or {}
-    assert "draft_newer_than_lines" in (detail.get("blockers") or [])
+    assert res.status_code == 202
+    confirm_detail = client.get(f"/orders/{order['id']}").json()
+    assert confirm_detail["status"] == "確定"
+    assert confirm_detail["lines"][0]["quantity_original"] == 9
 
 
 def test_ocr_sheet_save_returns_stale_revision_conflict_for_outdated_revision():

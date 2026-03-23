@@ -48,6 +48,49 @@ def upgrade() -> None:
     op.create_index("ix_order_sheet_drafts_base_evidence_run_id", "order_sheet_drafts", ["base_evidence_run_id"])
 
     op.create_table(
+        "order_sheet_patch_candidates",
+        sa.Column("id", sa.String(), primary_key=True),
+        sa.Column("order_id", sa.String(), sa.ForeignKey("orders.id"), nullable=False),
+        sa.Column("draft_id", sa.String(), sa.ForeignKey("order_sheet_drafts.id"), nullable=True),
+        sa.Column("source", sa.String(), nullable=True),
+        sa.Column("patch_scope", sa.String(), nullable=True),
+        sa.Column("status", sa.String(), nullable=True),
+        sa.Column("confidence_score", sa.Float(), nullable=True),
+        sa.Column("patch_json", sa.JSON(), nullable=True),
+        sa.Column("apply_plan_json", sa.JSON(), nullable=True),
+        sa.Column("apply_ready_metadata_json", sa.JSON(), nullable=True),
+        sa.Column("blockers_json", sa.JSON(), nullable=True),
+        sa.Column("warnings_json", sa.JSON(), nullable=True),
+        sa.Column("created_by", sa.String(), nullable=True),
+        sa.Column("reviewed_by", sa.String(), nullable=True),
+        sa.Column("reviewed_at", sa.DateTime(), nullable=True),
+        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.Column("base_draft_id", sa.String(), sa.ForeignKey("order_sheet_drafts.id"), nullable=True),
+        sa.Column("base_evidence_run_id", sa.String(), sa.ForeignKey("order_ocr_evidence_runs.id"), nullable=True),
+        sa.Column("candidate_state", sa.String(), nullable=False, server_default="ready"),
+        sa.Column("provider", sa.String(), nullable=True),
+        sa.Column("model", sa.String(), nullable=True),
+        sa.Column("prompt_preset", sa.String(), nullable=True),
+        sa.Column("baseline_source", sa.String(), nullable=True),
+        sa.Column("baseline_revision_id", sa.String(), nullable=True),
+        sa.Column("summary_json", sa.JSON(), nullable=True),
+        sa.Column("issues_json", sa.JSON(), nullable=True),
+        sa.Column("patches_json", sa.JSON(), nullable=True),
+        sa.Column("proposed_draft_sheet_json", sa.JSON(), nullable=True),
+        sa.Column("applied_by", sa.String(), nullable=True),
+        sa.Column("applied_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+    )
+    op.create_index("ix_order_sheet_patch_candidates_order_id", "order_sheet_patch_candidates", ["order_id"])
+    op.create_index("ix_order_sheet_patch_candidates_draft_id", "order_sheet_patch_candidates", ["draft_id"])
+    op.create_index("ix_order_sheet_patch_candidates_base_draft_id", "order_sheet_patch_candidates", ["base_draft_id"])
+    op.create_index(
+        "ix_order_sheet_patch_candidates_base_evidence_run_id",
+        "order_sheet_patch_candidates",
+        ["base_evidence_run_id"],
+    )
+
+    op.create_table(
         "order_confirmed_snapshots",
         sa.Column("id", sa.String(), primary_key=True),
         sa.Column("order_id", sa.String(), sa.ForeignKey("orders.id"), nullable=False),
@@ -103,6 +146,12 @@ def downgrade() -> None:
     op.drop_index("ix_order_confirmed_snapshots_draft_id", table_name="order_confirmed_snapshots")
     op.drop_index("ix_order_confirmed_snapshots_order_id", table_name="order_confirmed_snapshots")
     op.drop_table("order_confirmed_snapshots")
+
+    op.drop_index("ix_order_sheet_patch_candidates_base_evidence_run_id", table_name="order_sheet_patch_candidates")
+    op.drop_index("ix_order_sheet_patch_candidates_base_draft_id", table_name="order_sheet_patch_candidates")
+    op.drop_index("ix_order_sheet_patch_candidates_draft_id", table_name="order_sheet_patch_candidates")
+    op.drop_index("ix_order_sheet_patch_candidates_order_id", table_name="order_sheet_patch_candidates")
+    op.drop_table("order_sheet_patch_candidates")
 
     op.drop_index("ix_order_sheet_drafts_base_evidence_run_id", table_name="order_sheet_drafts")
     op.drop_index("ix_order_sheet_drafts_order_id", table_name="order_sheet_drafts")

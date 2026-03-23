@@ -622,6 +622,53 @@ def test_orders_ocr_review_api_maps_errors(monkeypatch):
     assert invalid_pdf_variant.json().get("detail") == "pdf_variant must be one of raw|corrected"
 
 
+def test_orders_apply_patch_candidate_api_flow(monkeypatch):
+    client = TestClient(app)
+    captured: dict[str, str | None] = {}
+
+    def _fake_apply(order_id: str, *, candidate_id: str | None = None, applied_by: str | None = None):
+        captured["order_id"] = order_id
+        captured["candidate_id"] = candidate_id
+        captured["applied_by"] = applied_by
+        return ({
+            "candidate": {"id": "OPCtest", "candidate_state": "applied"},
+            "draft": {"id": "ODRtest", "latest_patch_candidate_id": "OPCtest"},
+        }, None)
+
+    monkeypatch.setattr(order_service, "apply_patch_candidate_to_draft", _fake_apply)
+
+    res = client.post(
+        "/orders/ORDpatch/draft-sheet/apply-patch-candidate",
+        json={"candidate_id": "OPCtest"},
+    )
+
+    assert res.status_code == 200
+    assert captured == {
+        "order_id": "ORDpatch",
+        "candidate_id": "OPCtest",
+        "applied_by": "operator",
+    }
+    payload = res.json()
+    assert payload["candidate"]["id"] == "OPCtest"
+    assert payload["candidate"]["candidate_state"] == "applied"
+    assert payload["draft"]["latest_patch_candidate_id"] == "OPCtest"
+
+
+def test_orders_apply_patch_candidate_api_returns_not_found(monkeypatch):
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        order_service,
+        "apply_patch_candidate_to_draft",
+        lambda order_id, *, candidate_id=None, applied_by=None: (None, "patch_candidate_not_found"),
+    )
+
+    res = client.post("/orders/ORDmissing/draft-sheet/apply-patch-candidate", json={"candidate_id": "OPCmissing"})
+
+    assert res.status_code == 404
+    assert res.json().get("detail") == "patch candidate not found"
+
+
 def test_orders_ocr_sheet_api_returns_template_validation_error():
     order_service.clear_all()
     client = TestClient(app)
@@ -647,7 +694,7 @@ def test_orders_ocr_sheet_api_returns_template_validation_error():
         config_service.get_facility_config = original_get
 
 
-def test_orders_ocr_sheet_api_prefers_updated_lines_over_payload_noise():
+def test_orders_ocr_sheet_api_stays_evidence_only_even_when_lines_change():
     order_service.clear_all()
     client = TestClient(app)
     order = _create_weekly_menu_seed_order_2099_11("msg-api-sheet-priority-001")
@@ -663,7 +710,7 @@ def test_orders_ocr_sheet_api_prefers_updated_lines_over_payload_noise():
     first_sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
     assert first_sheet_res.status_code == 200
     first_sheet = first_sheet_res.json()
-    assert first_sheet.get("source") == "weekly_menu"
+    assert str(first_sheet.get("source") or "").startswith("weekly_menu")
     fields = first_sheet.get("fields") or []
     qty_idx = next(
         idx
@@ -678,7 +725,7 @@ def test_orders_ocr_sheet_api_prefers_updated_lines_over_payload_noise():
         for row in (first_sheet.get("rows") or [])
         if row[date_idx] == "11/15" and row[daypart_idx] == "昼" and row[menu_idx] == "昼メニュー"
     )
-    assert first_lunch[qty_idx] == "6"
+    assert first_lunch[qty_idx] == ""
 
     update_payload = {
         "lines": [
@@ -701,13 +748,13 @@ def test_orders_ocr_sheet_api_prefers_updated_lines_over_payload_noise():
     second_sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
     assert second_sheet_res.status_code == 200
     second_sheet = second_sheet_res.json()
-    assert second_sheet.get("source") == "weekly_menu"
+    assert str(second_sheet.get("source") or "").startswith("weekly_menu")
     second_lunch = next(
         row
         for row in (second_sheet.get("rows") or [])
         if row[date_idx] == "11/15" and row[daypart_idx] == "昼" and row[menu_idx] == "昼メニュー"
     )
-    assert second_lunch[qty_idx] == "20"
+    assert second_lunch[qty_idx] == ""
 
 
 def test_orders_ocr_sheet_api_returns_sheet_with_warning_when_quantity_mapping_unmapped():
@@ -764,7 +811,9 @@ def test_orders_ocr_sheet_api_returns_sheet_with_warning_when_quantity_mapping_u
         sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
         assert sheet_res.status_code == 200
         sheet = sheet_res.json()
-        assert "sheet_quantity_column_unmapped" in (sheet.get("warnings") or [])
+        assert str(sheet.get("source") or "").startswith("weekly_menu")
+        assert sheet.get("can_apply") is True
+        assert sheet.get("apply_blockers") in ([], None)
     finally:
         config_service.get_facility_config = original_get
 

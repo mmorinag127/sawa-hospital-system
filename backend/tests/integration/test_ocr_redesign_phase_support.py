@@ -67,15 +67,16 @@ def test_get_order_review_summary_maps_blocked_saved_draft_to_user_facing_states
     assert summary["ocr_has_saved_draft"] is True
     assert summary["ocr_auto_apply_blocked"] is True
     assert summary["ocr_draft_row_count"] == 1
-    assert "draft_newer_than_lines" in (summary.get("ocr_confirm_blockers") or [])
-    assert any(
-        item.get("code") == "draft_newer_than_lines"
+    assert "draft_newer_than_lines" not in (summary.get("ocr_confirm_blockers") or [])
+    assert all(
+        item.get("code") != "draft_newer_than_lines"
         for item in (summary.get("ocr_confirm_blocker_details") or [])
     )
     assert any(
         item.get("code") == "auto_apply_blocked"
         for item in (summary.get("ocr_confirm_warning_details") or [])
     )
+    assert summary["ocr_can_confirm"] is True
 
 
 def test_prepare_llm_review_output_payload_preserves_evidence_for_applied_and_unresolved_changes():
@@ -324,3 +325,125 @@ def test_build_recoverable_ocr_sheet_payload_never_uses_confirmed_lines_fallback
     assert isinstance(sheet, dict)
     assert sheet.get("recovery_source") != "confirmed_lines"
     assert (sheet.get("trace") or {}).get("mapped_mode") != "confirmed_lines"
+
+
+def test_build_confirm_materialization_candidate_prefers_latest_draft_rows():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-confirm-candidate-001")
+
+    saved, error = order_service.save_ocr_sheet_exact(
+        order["id"],
+        header=["日付", "区分", "メニュー", "常食2F", "備考"],
+        rows=[["03/21", "朝", "Menu A", "7", "draft"]],
+        fields=["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        row_ids=["draft-row-1"],
+        ui_mode="sheet",
+    )
+    assert saved is not None
+
+    second_saved, second_error = order_service.save_ocr_sheet_exact(
+        order["id"],
+        header=["日付", "区分", "メニュー", "常食2F", "備考"],
+        rows=[["03/21", "朝", "Menu A", "8", "latest"]],
+        fields=["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        row_ids=["draft-row-2"],
+        ui_mode="sheet",
+    )
+
+    assert second_error is None
+    assert second_saved is not None
+    assert error is None
+    latest_draft = order_service.get_latest_sheet_draft(order["id"])
+    assert isinstance(latest_draft, dict)
+
+    candidate = order_service.build_confirm_materialization_candidate(order["id"])
+
+    assert isinstance(candidate, dict)
+    assert candidate["source"] == "draft_sheet"
+    assert candidate["draft_id"] == latest_draft["id"]
+    assert candidate["line_count"] == 1
+    assert candidate["error"] is None
+    assert candidate["lines"][0]["menu_name"] == "Menu A"
+    assert candidate["lines"][0]["quantity_original"] == 8
+
+
+def test_confirmed_snapshot_includes_materialization_candidate_from_latest_draft():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-confirm-snapshot-001")
+
+    saved, error = order_service.save_ocr_sheet_exact(
+        order["id"],
+        header=["日付", "区分", "メニュー", "常食2F", "備考"],
+        rows=[["03/21", "朝", "Menu A", "9", "draft"]],
+        fields=["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        row_ids=["draft-row-1"],
+        ui_mode="sheet",
+    )
+
+    assert error is None
+    assert saved is not None
+    latest_draft = order_service.get_latest_sheet_draft(order["id"])
+    assert isinstance(latest_draft, dict)
+
+    confirmed = order_service.confirm_order(order["id"])
+    assert confirmed is not None
+
+    snapshot = order_service.get_latest_confirmed_snapshot(order["id"])
+    assert isinstance(snapshot, dict)
+    snapshot_json = snapshot["snapshot_json"]
+    materialization_candidate = snapshot_json.get("materialization_candidate")
+    assert isinstance(materialization_candidate, dict)
+    assert materialization_candidate["source"] == "draft_sheet"
+    assert materialization_candidate["draft_id"] == latest_draft["id"]
+    assert materialization_candidate["lines"][0]["quantity_original"] == 9
+    assert snapshot["draft_id"] == latest_draft["id"]
+    refreshed = order_service.get_order_by_id(order["id"])
+    assert isinstance(refreshed, dict)
+    assert refreshed["lines"][0]["quantity_original"] == 9
+    from src.services import output_builder
+
+    output_ctx = output_builder._prepare_output_context(order["id"])
+    assert output_ctx["order_lines"][0]["quantity_original"] == 9
+
+
+def test_confirm_order_fails_safely_when_latest_draft_is_unparseable():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-confirm-snapshot-unparseable")
+
+    saved, error = order_service.save_ocr_sheet_exact(
+        order["id"],
+        header=["日付", "区分", "メニュー", "常食2F", "備考"],
+        rows=[["", "", "", "", "broken"]],
+        fields=["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        row_ids=["draft-row-broken-1"],
+        ui_mode="sheet",
+    )
+
+    assert error is None
+    assert saved is not None
+
+    try:
+        order_service.confirm_order(order["id"])
+        assert False, "confirm should have raised for an unparseable latest draft"
+    except order_service.ConfirmMaterializationError as exc:
+        assert exc.code in {"draft_rows_unparseable", "draft_lines_empty"}
+
+    refreshed = order_service.get_order_by_id(order["id"])
+    assert isinstance(refreshed, dict)
+    assert refreshed["status"] == "要確認"
+    assert refreshed["lines"][0]["quantity_original"] == 2
+
+
+def test_confirm_order_fails_when_no_draft_or_evidence_exists():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-redesign-confirm-no-draft")
+
+    try:
+        order_service.confirm_order(order["id"])
+        assert False, "confirm should require a latest draft or evidence-backed initial draft"
+    except order_service.ConfirmMaterializationError as exc:
+        assert exc.code == "draft_missing"
+
+    refreshed = order_service.get_order_by_id(order["id"])
+    assert isinstance(refreshed, dict)
+    assert refreshed["status"] == "要確認"

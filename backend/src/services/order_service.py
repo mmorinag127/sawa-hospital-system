@@ -25,6 +25,7 @@ from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_revision import OrderOcrRevision  # noqa: F401
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: F401
 from src.models.order_sheet_draft import OrderSheetDraft  # noqa: F401
+from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate  # noqa: F401
 from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
 from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
@@ -37,7 +38,14 @@ from src.services import config_service, menu_service, facility_service
 from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
-from src.services import evidence_manifest_service, template_resolution_service, ocr_evidence_service, draft_sheet_service
+from src.services import (
+    apply_gate_service,
+    evidence_manifest_service,
+    template_resolution_service,
+    ocr_evidence_service,
+    draft_sheet_service,
+    ocr_patch_candidate_service as patch_candidate_service,
+)
 from src.services import workflow_state_service, candidate_resolution_service, critical_decision_service
 from src.services.fax_extractor import (
     extract_fax_data,
@@ -53,7 +61,7 @@ from src.services.storage_service import load_bytes_from_uri
 from src.services.storage_service import generate_signed_url
 from src.services.grid_detector import GridDetectionResult, detect_table_grid, detect_table_grid_image
 from src.services.pdf_render import render_pdf_to_png_bytes
-from src.services.ocr_job_service import create_job, update_job, get_job as get_ocr_job
+from src.services.ocr_job_service import create_job, update_job, get_job as get_ocr_job, describe_job_state as describe_ocr_job_state
 from src.services.ocr_pipeline_service import run_ocr_pipeline
 
 Base.metadata.create_all(bind=engine)
@@ -274,6 +282,7 @@ def clear_all():
         session.execute(delete(OrderWorkflowState))
         session.execute(delete(OrderConfirmedSnapshot))
         session.execute(delete(OrderSheetDraft))
+        session.execute(delete(OrderSheetPatchCandidate))
         session.execute(delete(OrderOcrEvidenceRun))
         session.execute(delete(OrderOcrRevision))
         session.execute(delete(OrderOcrCache))
@@ -303,6 +312,7 @@ def delete_orders_by_message_prefix(prefix: str) -> int:
             session.execute(delete(OrderWorkflowState).where(OrderWorkflowState.order_id == order.id))
             session.execute(delete(OrderConfirmedSnapshot).where(OrderConfirmedSnapshot.order_id == order.id))
             session.execute(delete(OrderSheetDraft).where(OrderSheetDraft.order_id == order.id))
+            session.execute(delete(OrderSheetPatchCandidate).where(OrderSheetPatchCandidate.order_id == order.id))
             session.execute(delete(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id == order.id))
             session.execute(delete(OrderOcrRevision).where(OrderOcrRevision.order_id == order.id))
             session.execute(delete(OrderOcrCache).where(OrderOcrCache.order_id == order.id))
@@ -3279,13 +3289,37 @@ def _is_blank_menu_value(value: object) -> bool:
 
 
 def _build_menu_snapshot(order: Order) -> dict:
-    names = sorted({line.menu_name for line in (order.lines or []) if line.menu_name})
+    return _build_menu_snapshot_from_lines(
+        facility_code=order.facility_code,
+        week_code=order.week_code,
+        lines=[
+            {
+                "menu_name": line.menu_name,
+            }
+            for line in (order.lines or [])
+        ],
+    )
+
+
+def _build_menu_snapshot_from_lines(
+    *,
+    facility_code: str | None,
+    week_code: str | None,
+    lines: list[dict[str, Any]] | None,
+) -> dict:
+    names = sorted(
+        {
+            str(line.get("menu_name") or "").strip()
+            for line in (lines or [])
+            if isinstance(line, dict) and str(line.get("menu_name") or "").strip()
+        }
+    )
     items: list[dict] = []
-    order_month_id = _to_sheet_month_id(order.week_code)
+    order_month_id = _to_sheet_month_id(week_code)
     if order_month_id:
-        items = menu_service.get_menu_items_for_facility(order_month_id, order.facility_code)
+        items = menu_service.get_menu_items_for_facility(order_month_id, facility_code)
     item_map = {item.get("name"): item for item in items if item.get("name")}
-    defaults = menu_service.resolve_menu_defaults(names, order.facility_code)
+    defaults = menu_service.resolve_menu_defaults(names, facility_code)
     snapshot_items: dict[str, dict] = {}
     for name in names:
         item = item_map.get(name, {})
@@ -3328,6 +3362,31 @@ def get_order_menu_snapshot(order_id: str) -> dict | None:
         return snapshot.snapshot_json
 
 
+def get_latest_confirmed_snapshot(order_id: str) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    with session_scope() as session:
+        snapshot = (
+            session.query(OrderConfirmedSnapshot)
+            .filter(OrderConfirmedSnapshot.order_id == normalized_order_id)
+            .order_by(OrderConfirmedSnapshot.confirmed_at.desc(), OrderConfirmedSnapshot.id.desc())
+            .first()
+        )
+        if not snapshot:
+            return None
+        return {
+            "id": snapshot.id,
+            "order_id": snapshot.order_id,
+            "draft_id": snapshot.draft_id,
+            "snapshot_digest": snapshot.snapshot_digest,
+            "snapshot_json": snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {},
+            "confirmed_by": snapshot.confirmed_by,
+            "confirmed_at": snapshot.confirmed_at.isoformat() if isinstance(snapshot.confirmed_at, datetime) else None,
+            "created_at": snapshot.created_at.isoformat() if isinstance(snapshot.created_at, datetime) else None,
+        }
+
+
 def _register_training_sample_after_confirm(order_id: str) -> None:
     try:
         from src.services import ocr_training_dataset_service
@@ -3351,32 +3410,314 @@ def _register_training_sample_after_confirm(order_id: str) -> None:
         )
 
 
-def _persist_confirmed_snapshot(order_id: str, *, confirmed_by: str | None = None) -> str | None:
+def _serialize_snapshot_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for line in lines or []:
+        if not isinstance(line, dict):
+            continue
+        line_date = line.get("date")
+        serialized.append(
+            {
+                "id": str(line.get("id") or "").strip() or None,
+                "line_id": str(line.get("line_id") or "").strip() or None,
+                "date": line_date.isoformat() if isinstance(line_date, date) else None,
+                "daypart": line.get("daypart"),
+                "menu_name": line.get("menu_name"),
+                "diet_type": line.get("diet_type"),
+                "area_id": line.get("area_id"),
+                "bag_type": line.get("bag_type"),
+                "quantity_original": line.get("quantity_original"),
+                "quantity_corrected": line.get("quantity_corrected"),
+                "change_note": line.get("change_note"),
+            }
+        )
+    return serialized
+
+
+class ConfirmMaterializationError(Exception):
+    def __init__(self, code: str, message: str | None = None):
+        super().__init__(message or code)
+        self.code = str(code or "").strip() or "confirm_materialization_failed"
+        self.message = str(message or "").strip() or self.code
+
+
+def _build_materialization_candidate_from_draft_record(
+    order_id: str,
+    *,
+    draft_record: dict[str, Any] | None,
+    facility_id: str | None,
+    existing_week_code: str | None,
+    received_at: datetime | None,
+) -> dict[str, Any] | None:
+    if not isinstance(draft_record, dict):
+        return {
+            "source": "draft_sheet",
+            "draft_id": None,
+            "error": "draft_missing",
+            "line_count": 0,
+            "lines": [],
+        }
+    draft_sheet = draft_record.get("draft_sheet_json")
+    if not isinstance(draft_sheet, dict):
+        return None
+    rows_payload = draft_sheet.get("rows")
+    if not isinstance(rows_payload, list) or not rows_payload:
+        return {
+            "source": "draft_sheet",
+            "draft_id": draft_record.get("id"),
+            "error": "draft_rows_empty",
+            "line_count": 0,
+            "lines": [],
+        }
+    master = config_service.load_facility_master()
+    base_template = master.get("fax_template_base", {})
+    facility_config = None
+    if facility_id:
+        try:
+            facility_config = config_service.get_facility_config(facility_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Facility config lookup failed during materialization candidate build",
+                facility_id=facility_id,
+                error=str(exc),
+            )
+        if not facility_config:
+            facility_config = next(
+                (
+                    fac
+                    for fac in master.get("facilities", [])
+                    if fac.get("facility_id") == facility_id
+                ),
+                None,
+            )
+    if not facility_config:
+        return {
+            "source": "draft_sheet",
+            "draft_id": draft_record.get("id"),
+            "error": "facility_not_found",
+            "line_count": 0,
+            "lines": [],
+        }
+    template = facility_config.get("fax_template") or config_service._merge_template(
+        base_template,
+        facility_config.get("fax_template_override"),
+    )
+    parsed_rows = _normalize_structured_rows(
+        header=draft_sheet.get("header"),
+        rows_payload=rows_payload,
+        template=template,
+    )
+    if not parsed_rows:
+        return {
+            "source": "draft_sheet",
+            "draft_id": draft_record.get("id"),
+            "error": "draft_rows_unparseable",
+            "line_count": 0,
+            "lines": [],
+        }
+    policy = config_service.load_ingest_policy()
+    effective_received_at = received_at or datetime.utcnow()
+    candidate_lines = parse_order_lines(
+        parsed_rows,
+        template,
+        effective_received_at,
+        policy.get("quantity_rules", {}),
+    )
+    if not candidate_lines:
+        return {
+            "source": "draft_sheet",
+            "draft_id": draft_record.get("id"),
+            "error": "draft_lines_empty",
+            "line_count": 0,
+            "lines": [],
+        }
+
+    facility_week_hint = None
+    global_week_hint = None
+    if facility_id:
+        with session_scope() as session:
+            facility_week_hint = (
+                session.execute(
+                    select(Order.week_code)
+                    .where(Order.facility_code == facility_id, Order.week_code.is_not(None))
+                    .order_by(Order.received_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            global_week_hint = (
+                session.execute(
+                    select(Order.week_code)
+                    .where(Order.week_code.is_not(None))
+                    .order_by(Order.received_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+
+    week_resolution_lines: list[dict[str, Any]] = []
+    for line in candidate_lines:
+        if not isinstance(line, dict):
+            continue
+        normalized = dict(line)
+        normalized["date"] = _parse_date_value(normalized.get("date"))
+        week_resolution_lines.append(normalized)
+    line_dates = [
+        line.get("date")
+        for line in week_resolution_lines
+        if isinstance(line.get("date"), date)
+    ]
+    derived_week_id = (
+        month_id_from_dates(line_dates, effective_received_at, policy) if line_dates else None
+    )
+    ocr_payload_for_week: dict[str, Any] | None = None
+    payload_for_week, _ = get_ocr_output(order_id, persist_cache=False)
+    if isinstance(payload_for_week, dict):
+        ocr_payload_for_week = payload_for_week
+    min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
+    week_id = _resolve_sheet_week_id(
+        current_week_id=existing_week_code,
+        received_at=effective_received_at,
+        order_lines=week_resolution_lines,
+        ocr_payload=ocr_payload_for_week,
+        facility_id=facility_id,
+        week_hints=[hint for hint in [facility_week_hint, global_week_hint] if hint],
+    )
+    if not week_id:
+        week_id = _prefer_existing_week_when_derived_missing_menu(
+            derived_week_id=derived_week_id,
+            existing_week_code=existing_week_code,
+            facility_id=facility_id,
+        )
+    payload_dates_for_position = _collect_sheet_dates_from_rows(
+        parsed_rows,
+        received_at=effective_received_at,
+    )
+    if isinstance(ocr_payload_for_week, dict):
+        payload_dates_for_position |= {
+            item
+            for item in _collect_sheet_dates_from_payload(ocr_payload_for_week, effective_received_at)
+            if isinstance(item, date)
+        }
+    position_entries_for_apply = _build_position_entries_for_lines(
+        week_id=week_id,
+        lines=week_resolution_lines,
+        payload_dates=payload_dates_for_position,
+    )
+    enable_position_mapping = bool(template.get("map_menu_by_position", True))
+    mapped_rows = 0
+    if enable_position_mapping:
+        candidate_lines, mapped_rows = _apply_menu_position_mapping_safe(
+            candidate_lines,
+            week_id,
+            facility_id=facility_id,
+            entries_override=position_entries_for_apply if position_entries_for_apply else None,
+        )
+    if mapped_rows <= 0:
+        candidate_lines = _apply_menu_matching(candidate_lines, week_id, facility_id, min_ratio)
+
+    serialized_lines = _serialize_snapshot_lines(candidate_lines)
+    return {
+        "source": "draft_sheet",
+        "draft_id": draft_record.get("id"),
+        "draft_state": draft_record.get("draft_state"),
+        "line_count": len(serialized_lines),
+        "lines": serialized_lines,
+        "derived_week_code": week_id or derived_week_id or existing_week_code,
+        "error": None if serialized_lines else "draft_lines_empty",
+    }
+
+
+def _build_confirm_materialization_candidate_from_draft(
+    order_id: str,
+    *,
+    facility_id: str | None,
+    existing_week_code: str | None,
+    received_at: datetime | None,
+) -> dict[str, Any] | None:
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    if latest_draft is None:
+        initial_draft = build_initial_sheet_draft(order_id)
+        if isinstance(initial_draft, dict):
+            latest_draft = persist_sheet_draft(
+                order_id=order_id,
+                draft_sheet_json=initial_draft,
+                draft_state="draft_ready",
+                blockers=[],
+                warnings=[],
+                edited_by="confirm-initial-draft",
+            )
+    return _build_materialization_candidate_from_draft_record(
+        order_id,
+        draft_record=latest_draft,
+        facility_id=facility_id,
+        existing_week_code=existing_week_code,
+        received_at=received_at,
+    )
+
+
+def build_confirm_materialization_candidate(order_id: str) -> dict[str, Any] | None:
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None
+        return _build_confirm_materialization_candidate_from_draft(
+            order_id,
+            facility_id=order.facility_code,
+            existing_week_code=order.week_code,
+            received_at=order.received_at or datetime.utcnow(),
+        )
+
+
+def _persist_confirmed_snapshot(
+    order_id: str,
+    *,
+    confirmed_by: str | None = None,
+    materialization_candidate: dict[str, Any] | None = None,
+    materialized_lines: list[dict[str, Any]] | None = None,
+) -> str | None:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None
+        resolved_candidate = materialization_candidate or _build_confirm_materialization_candidate_from_draft(
+            order_id,
+            facility_id=order.facility_code,
+            existing_week_code=order.week_code,
+            received_at=order.received_at or datetime.utcnow(),
+        )
+        snapshot_lines = (
+            _serialize_snapshot_lines(materialized_lines)
+            if isinstance(materialized_lines, list)
+            else _serialize_snapshot_lines(
+                [
+                    dict(
+                        id=line.id,
+                        line_id=line.line_id,
+                        date=line.date,
+                        daypart=line.daypart,
+                        menu_name=line.menu_name,
+                        diet_type=line.diet_type,
+                        area_id=line.area_id,
+                        bag_type=line.bag_type,
+                        quantity_original=line.quantity_original,
+                        quantity_corrected=line.quantity_corrected,
+                        change_note=line.change_note,
+                    )
+                    for line in (order.lines or [])
+                ]
+            )
+        )
         snapshot_json = {
             "order_id": order.id,
             "facility": order.facility_code,
             "week": order.week_code,
             "status": order.status,
             "lines_updated_at": order.lines_updated_at.isoformat() if isinstance(order.lines_updated_at, datetime) else None,
-            "lines": [
-                {
-                    "id": line.id,
-                    "date": line.date.isoformat() if isinstance(line.date, date) else None,
-                    "daypart": line.daypart,
-                    "menu_name": line.menu_name,
-                    "diet_type": line.diet_type,
-                    "area_id": line.area_id,
-                    "bag_type": line.bag_type,
-                    "quantity_original": line.quantity_original,
-                    "quantity_corrected": line.quantity_corrected,
-                    "change_note": line.change_note,
-                }
-                for line in (order.lines or [])
-            ],
+            "lines": snapshot_lines,
+            "materialization_candidate": resolved_candidate,
         }
         snapshot_digest = hashlib.sha256(json.dumps(snapshot_json, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         snapshot = OrderConfirmedSnapshot(
@@ -3392,13 +3733,277 @@ def _persist_confirmed_snapshot(order_id: str, *, confirmed_by: str | None = Non
         return snapshot.id
 
 
+def _materialize_confirmed_lines_from_candidate(
+    session,
+    order: Order,
+    candidate: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(candidate, dict):
+        raise ConfirmMaterializationError(
+            "draft_missing",
+            "latest draft is required before confirm",
+        )
+    candidate_error = str(candidate.get("error") or "").strip()
+    if candidate_error:
+        raise ConfirmMaterializationError(
+            candidate_error,
+            f"latest draft cannot be confirmed: {candidate_error}",
+        )
+    serialized_lines = candidate.get("lines")
+    if not isinstance(serialized_lines, list) or not serialized_lines:
+        raise ConfirmMaterializationError(
+            "draft_lines_empty",
+            "latest draft does not contain any materializable lines",
+        )
+
+    materialized_lines: list[dict[str, Any]] = []
+    for line in serialized_lines:
+        if not isinstance(line, dict):
+            continue
+        materialized_lines.append(
+            {
+                "id": str(line.get("id") or "").strip() or None,
+                "line_id": str(line.get("line_id") or "").strip() or None,
+                "date": _parse_date_value(line.get("date")),
+                "daypart": line.get("daypart"),
+                "menu_name": line.get("menu_name"),
+                "diet_type": line.get("diet_type"),
+                "area_id": line.get("area_id"),
+                "bag_type": line.get("bag_type"),
+                "quantity_original": line.get("quantity_original"),
+                "quantity_corrected": line.get("quantity_corrected"),
+                "change_note": line.get("change_note"),
+            }
+        )
+    if not materialized_lines:
+        raise ConfirmMaterializationError(
+            "draft_lines_empty",
+            "latest draft does not contain any materializable lines",
+        )
+
+    normalized_lines = _ensure_unique_line_ids(materialized_lines, exclude_order_id=order.id)
+    session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
+    for line in normalized_lines:
+        session.add(
+            OrderLine(
+                id=line.get("id") or _make_line_id(),
+                order_id=order.id,
+                line_id=line.get("line_id"),
+                date=_parse_date_value(line.get("date")),
+                daypart=line.get("daypart"),
+                menu_name=line.get("menu_name"),
+                diet_type=line.get("diet_type"),
+                area_id=line.get("area_id"),
+                bag_type=line.get("bag_type"),
+                quantity_original=line.get("quantity_original"),
+                quantity_corrected=line.get("quantity_corrected"),
+                change_note=line.get("change_note"),
+            )
+        )
+    derived_week_code = str(candidate.get("derived_week_code") or "").strip()
+    if derived_week_code:
+        order.week_code = derived_week_code
+    order.lines_updated_at = datetime.utcnow()
+    return True
+
+
+def _serialize_order_lines_for_digest(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "date": (
+                line.get("date").isoformat()
+                if isinstance(line.get("date"), date)
+                else line.get("date")
+            ),
+            "daypart": line.get("daypart"),
+            "menu_name": line.get("menu_name"),
+            "diet_type": line.get("diet_type"),
+            "area_id": line.get("area_id"),
+            "bag_type": line.get("bag_type"),
+            "quantity_original": line.get("quantity_original"),
+            "quantity_corrected": line.get("quantity_corrected"),
+            "change_note": line.get("change_note"),
+        }
+        for line in lines
+        if isinstance(line, dict)
+    ]
+
+
+def apply_latest_draft(
+    order_id: str,
+    *,
+    draft_record: dict[str, Any] | None = None,
+    source: str = "draft_sheet",
+    expected_lines_updated_at: str | None = None,
+    enforce_lines_guard: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    serialized_order: dict[str, Any] | None = None
+    materialization_candidate: dict[str, Any] | None = None
+    before_count = 0
+    after_count = 0
+    before_digest = ""
+    after_digest = ""
+    facility_code: str | None = None
+    week_code: str | None = None
+
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        if enforce_lines_guard:
+            lines_conflict = _lines_timestamp_conflict_detail(
+                current_lines_updated_at=order.lines_updated_at,
+                expected_lines_updated_at=expected_lines_updated_at,
+            )
+            if lines_conflict is not None:
+                return None, lines_conflict["error"]
+        existing_lines = session.execute(
+            select(OrderLine).where(OrderLine.order_id == order_id)
+        ).scalars().all()
+        before_count = len(existing_lines)
+        before_digest = _line_digest(
+            [
+                {
+                    "date": line.date.isoformat() if line.date else None,
+                    "daypart": line.daypart,
+                    "menu_name": line.menu_name,
+                    "diet_type": line.diet_type,
+                    "area_id": line.area_id,
+                    "bag_type": line.bag_type,
+                    "quantity_original": line.quantity_original,
+                    "quantity_corrected": line.quantity_corrected,
+                    "change_note": line.change_note,
+                }
+                for line in existing_lines
+            ]
+        )
+        materialization_candidate = (
+            _build_materialization_candidate_from_draft_record(
+                order_id,
+                draft_record=draft_record,
+                facility_id=order.facility_code,
+                existing_week_code=order.week_code,
+                received_at=order.received_at or datetime.utcnow(),
+            )
+            if isinstance(draft_record, dict)
+            else _build_confirm_materialization_candidate_from_draft(
+                order_id,
+                facility_id=order.facility_code,
+                existing_week_code=order.week_code,
+                received_at=order.received_at or datetime.utcnow(),
+            )
+        )
+        try:
+            _materialize_confirmed_lines_from_candidate(session, order, materialization_candidate)
+        except ConfirmMaterializationError as exc:
+            return None, exc.code
+        session.flush()
+        session.expire(order, ["lines"])
+        materialized_lines = [
+            {
+                "id": line.id,
+                "line_id": line.line_id,
+                "date": line.date,
+                "daypart": line.daypart,
+                "menu_name": line.menu_name,
+                "diet_type": line.diet_type,
+                "area_id": line.area_id,
+                "bag_type": line.bag_type,
+                "quantity_original": line.quantity_original,
+                "quantity_corrected": line.quantity_corrected,
+                "change_note": line.change_note,
+            }
+            for line in (order.lines or [])
+        ]
+        after_count = len(materialized_lines)
+        after_digest = _line_digest(_serialize_order_lines_for_digest(materialized_lines))
+        session.refresh(order)
+        facility_code = order.facility_code
+        week_code = order.week_code
+        serialized_order = serialize_order(order)
+
+    record_event(
+        "order_reparse",
+        actor="system",
+        target=order_id,
+        fac=facility_code,
+        wek=week_code,
+        metadata={"line_count": after_count, "source": source, "mode": "apply_latest_draft"},
+    )
+    update_job(
+        f"OCR-{order_id}",
+        status="done",
+        error_message=None,
+        metrics={
+            "source": source,
+            "materialized_source": "draft_sheet",
+            "draft_id": (materialization_candidate or {}).get("draft_id"),
+        },
+    )
+    if isinstance(serialized_order, dict):
+        serialized_order["reparse"] = {
+            "before_count": before_count,
+            "after_count": after_count,
+            "before_digest": before_digest,
+            "after_digest": after_digest,
+            "provider": source,
+            "materialized_source": "draft_sheet",
+            "changed": before_digest != after_digest,
+        }
+        serialized_order["ocr_job_id"] = f"OCR-{order_id}"
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after draft apply", order_id=order_id, error=str(exc))
+    return serialized_order, None
+
+
 def confirm_order(order_id: str):
     serialized_order: dict | None = None
+    materialization_candidate: dict[str, Any] | None = None
+    materialized_lines_payload: list[dict[str, Any]] | None = None
+    confirmed_facility: str | None = None
+    confirmed_week: str | None = None
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None
-        snapshot_payload = _build_menu_snapshot(order)
+        materialization_candidate = _build_confirm_materialization_candidate_from_draft(
+            order_id,
+            facility_id=order.facility_code,
+            existing_week_code=order.week_code,
+            received_at=order.received_at or datetime.utcnow(),
+        )
+        _materialize_confirmed_lines_from_candidate(session, order, materialization_candidate)
+        session.flush()
+        session.expire(order, ["lines"])
+        materialized_lines_payload = _serialize_snapshot_lines(
+            [
+                dict(
+                    id=line.id,
+                    line_id=line.line_id,
+                    date=line.date,
+                    daypart=line.daypart,
+                    menu_name=line.menu_name,
+                    diet_type=line.diet_type,
+                    area_id=line.area_id,
+                    bag_type=line.bag_type,
+                    quantity_original=line.quantity_original,
+                    quantity_corrected=line.quantity_corrected,
+                    change_note=line.change_note,
+                )
+                for line in (order.lines or [])
+            ]
+        )
+        snapshot_payload = (
+            _build_menu_snapshot_from_lines(
+                facility_code=order.facility_code,
+                week_code=order.week_code,
+                lines=materialized_lines_payload,
+            )
+            if materialized_lines_payload
+            else _build_menu_snapshot(order)
+        )
         existing_snapshot = (
             session.execute(
                 select(OrderMenuSnapshot).where(OrderMenuSnapshot.order_id == order_id)
@@ -3419,16 +4024,24 @@ def confirm_order(order_id: str):
         order.status = "確定"
         session.flush()
         session.refresh(order)
-        logger.info("Order confirmed", order_id=order_id)
-        record_event(
-            "order_confirm",
-            actor="system",
-            target=order_id,
-            fac=order.facility_code,
-            wek=order.week_code,
-        )
+        confirmed_facility = order.facility_code
+        confirmed_week = order.week_code
         serialized_order = serialize_order(order)
-    _persist_confirmed_snapshot(order_id, confirmed_by="system")
+    logger.info("Order confirmed", order_id=order_id)
+    record_event(
+        "order_confirm",
+        actor="system",
+        target=order_id,
+        fac=confirmed_facility,
+        wek=confirmed_week,
+    )
+    _persist_confirmed_snapshot(
+        order_id,
+        confirmed_by="system",
+        materialization_candidate=materialization_candidate,
+        materialized_lines=materialized_lines_payload,
+    )
+    _invalidate_orders_cache()
     try:
         workflow_state_service.refresh_workflow_state(order_id)
     except Exception as exc:  # noqa: BLE001
@@ -4323,7 +4936,29 @@ def get_order_workflow_state(order_id: str, *, refresh: bool = False) -> Optiona
     state = workflow_state_service.get_workflow_state(order_id)
     if state is not None:
         return state
-    return workflow_state_service.refresh_workflow_state(order_id)
+
+
+def get_latest_patch_candidate(order_id: str) -> Optional[dict]:
+    return patch_candidate_service.get_latest_patch_candidate(order_id)
+
+
+def apply_patch_candidate_to_draft(
+    order_id: str,
+    *,
+    candidate_id: str | None = None,
+    applied_by: str | None = None,
+) -> tuple[Optional[dict], Optional[str]]:
+    result, error = patch_candidate_service.apply_patch_candidate_to_draft(
+        order_id=order_id,
+        patch_candidate_id=candidate_id,
+        edited_by=applied_by,
+    )
+    if result is not None and error is None:
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after patch candidate apply", order_id=order_id, error=str(exc))
+    return result, error
 
 
 def get_order_candidate_resolution(order_id: str) -> Optional[dict]:
@@ -4586,8 +5221,8 @@ def _build_ocr_review_metadata(
         confirm_blockers.append(str(strict_error))
     if "sheet_weekly_menu_missing" in warnings and "sheet_weekly_menu_missing" not in confirm_blockers:
         confirm_blockers.append("sheet_weekly_menu_missing")
-    if draft_newer_than_lines and "draft_not_applied" not in confirm_blockers:
-        confirm_blockers.append("draft_not_applied")
+    if draft_newer_than_lines and "draft_not_applied" not in warnings:
+        warnings.append("draft_not_applied")
 
     review_badges: list[str] = []
     if draft_available:
@@ -5911,9 +6546,9 @@ def get_order_review_summary(
     if draft_state["has_saved_draft"] and draft_row_count <= 0:
         apply_blockers.append("draft_rows_empty")
     confirm_blockers: list[str] = []
-    if draft_state["draft_newer_than_lines"]:
-        confirm_blockers.append("draft_newer_than_lines")
     confirm_warnings: list[str] = []
+    if draft_state["draft_newer_than_lines"]:
+        confirm_warnings.append("draft_newer_than_lines")
     if draft_state["auto_apply_blocked"]:
         confirm_warnings.append("auto_apply_blocked")
     reparse_debug = payload.get("_reparse_debug") if isinstance(payload, dict) else None
@@ -6026,57 +6661,19 @@ def _augment_sheet_review_payload(
     rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
     source = str(payload.get("source") or "").strip()
     draft_state = _extract_order_draft_state(order_id, ocr_payload, lines_updated_at=lines_updated_at)
-    apply_blockers: list[str] = []
-    confirm_blockers: list[str] = []
-    confirm_warnings: list[str] = []
-    recoverable_blocking_warnings = {
-        "week_unresolved",
-        "menu_entries_missing",
-        "sheet_fields_not_found",
-        "sheet_fields_duplicate",
-        "sheet_template_field_invalid",
-        "sheet_quantity_columns_missing",
-        "sheet_quantity_column_unmapped",
-        "sheet_week_dates_incomplete",
-        "week_menu_date_mismatch",
-        "sheet_date_mismatch",
-        "sheet_canonical_mismatch",
-        "sheet_suspicious_blank_row",
-        "ocr_evidence_recovery_required",
-        "template_resolution_blocked",
-    }
-
-    if "sheet_weekly_menu_missing" in warnings:
-        apply_blockers.append("weekly_menu_missing")
-        confirm_blockers.append("weekly_menu_missing")
-    for warning in warnings:
-        if warning in recoverable_blocking_warnings:
-            apply_blockers.append(warning)
-            confirm_blockers.append(warning)
-    if draft_state["draft_newer_than_lines"]:
-        confirm_blockers.append("draft_newer_than_lines")
-    if draft_state["auto_apply_blocked"]:
-        confirm_blockers.append("auto_apply_blocked")
-    if not rows:
-        apply_blockers.append("rows_empty")
-    if "sheet_ocr_review_required" in warnings:
-        confirm_warnings.append("ocr_review_required")
-    if source.startswith("ocr_table"):
-        confirm_warnings.append("ocr_table_fallback")
-
-    def _dedupe(items: list[str]) -> list[str]:
-        seen: set[str] = set()
-        normalized: list[str] = []
-        for item in items:
-            token = str(item or "").strip()
-            if token and token not in seen:
-                seen.add(token)
-                normalized.append(token)
-        return normalized
-
-    apply_blockers = _dedupe(apply_blockers)
-    confirm_blockers = _dedupe(confirm_blockers)
-    confirm_warnings = _dedupe(confirm_warnings)
+    job = get_ocr_job(f"OCR-{order_id}")
+    sheet_gate = apply_gate_service.evaluate_sheet_gate(
+        rows=rows if isinstance(rows, list) else None,
+        source=source,
+        blockers=None,
+        warnings=warnings,
+        draft_newer_than_lines=bool(draft_state["draft_newer_than_lines"]),
+        auto_apply_blocked=bool(draft_state["auto_apply_blocked"]),
+        reparse_status=(describe_ocr_job_state(job).get("status") if isinstance(job, dict) else None),
+    )
+    apply_blockers = list(sheet_gate.get("apply_blockers") or [])
+    confirm_blockers = list(sheet_gate.get("confirm_blockers") or [])
+    confirm_warnings = list(sheet_gate.get("confirm_warnings") or [])
     can_apply = bool(rows) and not apply_blockers
     can_confirm = not confirm_blockers
     processing_stage = (
@@ -6253,7 +6850,7 @@ def apply_ocr_markdown(order_id: str, markdown: str):
     return apply_ocr_table(order_id, markdown=markdown, header=None, rows=None)
 
 
-def apply_ocr_table(
+def apply_submitted_ocr_sheet(
     order_id: str,
     *,
     markdown: str | None = None,
@@ -6284,11 +6881,8 @@ def apply_ocr_table(
         if revision_conflict is not None:
             return None, revision_conflict["error"]
 
-    before_count = 0
-    before_digest = ""
-    existing_week_code = None
-    facility_week_hint: str | None = None
-    global_week_hint: str | None = None
+    received_at = None
+    facility_id = None
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -6297,47 +6891,6 @@ def apply_ocr_table(
             return None, "facility_missing"
         received_at = order.received_at or pd.Timestamp.utcnow()
         facility_id = order.facility_code
-        existing_week_code = order.week_code
-        facility_week_hint = (
-            session.execute(
-                select(Order.week_code)
-                .where(Order.facility_code == facility_id, Order.week_code.is_not(None))
-                .order_by(Order.received_at.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        global_week_hint = (
-            session.execute(
-                select(Order.week_code)
-                .where(Order.week_code.is_not(None))
-                .order_by(Order.received_at.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        existing_lines = session.execute(
-            select(OrderLine).where(OrderLine.order_id == order_id)
-        ).scalars().all()
-        before_count = len(existing_lines)
-        before_digest = _line_digest(
-            [
-                {
-                    "date": line.date.isoformat() if line.date else None,
-                    "daypart": line.daypart,
-                    "menu_name": line.menu_name,
-                    "diet_type": line.diet_type,
-                    "area_id": line.area_id,
-                    "bag_type": line.bag_type,
-                    "quantity_original": line.quantity_original,
-                    "quantity_corrected": line.quantity_corrected,
-                    "change_note": line.change_note,
-                }
-                for line in existing_lines
-            ]
-        )
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -6409,175 +6962,66 @@ def apply_ocr_table(
     revision_ui_mode = str(ui_mode or "").strip().lower()
     if not revision_ui_mode:
         revision_ui_mode = "sheet" if source == "structured_rows" else "legacy"
-
-    policy = config_service.load_ingest_policy()
-    lines = parse_order_lines(
-        parsed_rows,
-        template,
-        received_at,
-        policy.get("quantity_rules", {}),
-    )
-    if not lines:
-        update_job(f"OCR-{order_id}", status="empty", error_message="lines_empty")
-        return None, "lines_empty"
-
-    week_resolution_lines: list[dict[str, Any]] = []
-    for line in lines:
-        if not isinstance(line, dict):
-            continue
-        normalized = dict(line)
-        normalized["date"] = _parse_date_value(normalized.get("date"))
-        week_resolution_lines.append(normalized)
-    line_dates = [
-        line.get("date")
-        for line in week_resolution_lines
-        if isinstance(line.get("date"), date)
-    ]
-    derived_week_id = (
-        month_id_from_dates(line_dates, received_at, policy) if line_dates else None
-    )
-    ocr_payload_for_week: dict[str, Any] | None = None
-    payload_for_week, _ = get_ocr_output(order_id, persist_cache=False)
-    if isinstance(payload_for_week, dict):
-        ocr_payload_for_week = payload_for_week
-    min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
-    week_id = _resolve_sheet_week_id(
-        current_week_id=existing_week_code,
-        received_at=received_at,
-        order_lines=week_resolution_lines,
-        ocr_payload=ocr_payload_for_week,
-        facility_id=facility_id,
-        week_hints=[hint for hint in [facility_week_hint, global_week_hint] if hint],
-    )
-    if not week_id:
-        week_id = _prefer_existing_week_when_derived_missing_menu(
-            derived_week_id=derived_week_id,
-            existing_week_code=existing_week_code,
-            facility_id=facility_id,
-        )
-    payload_dates_for_position = _collect_sheet_dates_from_rows(parsed_rows, received_at=received_at)
-    if isinstance(ocr_payload_for_week, dict):
-        payload_dates_for_position |= {
-            item
-            for item in _collect_sheet_dates_from_payload(ocr_payload_for_week, received_at)
-            if isinstance(item, date)
-        }
-    position_entries_for_apply = _build_position_entries_for_lines(
-        week_id=week_id,
-        lines=week_resolution_lines,
-        payload_dates=payload_dates_for_position,
-    )
-    enable_position_mapping = bool(template.get("map_menu_by_position", True))
-    mapped_rows = 0
-    if enable_position_mapping:
-        lines, mapped_rows = _apply_menu_position_mapping_safe(
-            lines,
-            week_id,
-            facility_id=facility_id,
-            entries_override=position_entries_for_apply if position_entries_for_apply else None,
-        )
-    if mapped_rows <= 0:
-        lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
-    lines = _ensure_unique_line_ids(lines, exclude_order_id=order_id)
-
-    after_digest = _line_digest(lines)
-    after_count = len(lines)
-    reparse_changed = before_digest != after_digest
-    log_payload: dict | None = None
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if not order:
-            return None, "order_not_found"
-        if enforce_lines_guard:
-            lines_conflict = _lines_timestamp_conflict_detail(
-                current_lines_updated_at=order.lines_updated_at,
-                expected_lines_updated_at=expected_lines_updated_at,
-            )
-            if lines_conflict is not None:
-                return None, lines_conflict["error"]
-        session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
-        for line in lines:
-            session.add(
-                OrderLine(
-                    id=line.get("id") or _make_line_id(),
-                    order_id=order.id,
-                    line_id=line.get("line_id"),
-                    date=_parse_date_value(line.get("date")),
-                    daypart=line.get("daypart"),
-                    menu_name=line.get("menu_name"),
-                    diet_type=line.get("diet_type"),
-                    area_id=line.get("area_id"),
-                    bag_type=line.get("bag_type"),
-                    quantity_original=line.get("quantity_original"),
-                    quantity_corrected=line.get("quantity_corrected"),
-                    change_note=line.get("change_note"),
-                )
-            )
-        order.lines_updated_at = datetime.utcnow()
-        resolved_week_has_menu = bool(week_id and _build_position_menu_entries_safe(week_id, facility_id))
-        update_week_code_to = (
-            week_id
-            if week_id and resolved_week_has_menu
-            else (
-                derived_week_id
-                if derived_week_id and week_id == derived_week_id
-                else None
-            )
-        )
-        if update_week_code_to and order.week_code != update_week_code_to:
-            order.week_code = update_week_code_to
-        elif not order.week_code and week_id:
-            order.week_code = week_id
-        session.flush()
-        session.refresh(order)
-        log_payload = {
-            "order_id": order.id,
-            "facility_code": order.facility_code,
-            "week_code": order.week_code,
-            "line_count": len(lines),
-        }
-        serialized = serialize_order(order)
-
-    if log_payload:
-        record_event(
-            "order_reparse",
-            actor="system",
-            target=log_payload["order_id"],
-            fac=log_payload["facility_code"],
-            wek=log_payload["week_code"],
-            metadata={"line_count": log_payload["line_count"], "source": source},
-        )
-    update_job(f"OCR-{order_id}", status="done", error_message=None, metrics={"source": source})
-    _append_edited_ocr_revision(
-        order_id=order_id,
-        ui_mode=revision_ui_mode,
-        fields=revision_fields,
+    save_result, save_error = save_ocr_sheet_exact(
+        order_id,
         header=revision_header,
-        rows_payload=rows if isinstance(rows, list) else parsed_rows,
+        rows=rows if isinstance(rows, list) else parsed_rows,
+        fields=revision_fields,
         row_ids=revision_row_ids,
-        before_digest=before_digest,
-        after_digest=after_digest,
-        revision_meta={
-            "sheet_save_only": False,
-            "sheet_save_mode": "applied",
-            "review_state": "applied",
-            **(revision_meta or {}),
-        },
+        ui_mode=revision_ui_mode,
+        expected_revision_id=expected_revision_id,
+        expected_lines_updated_at=expected_lines_updated_at,
+        enforce_revision_guard=enforce_revision_guard,
+        enforce_lines_guard=enforce_lines_guard,
     )
-    serialized["reparse"] = {
-        "before_count": before_count,
-        "after_count": after_count,
-        "before_digest": before_digest,
-        "after_digest": after_digest,
-        "provider": source,
-        "changed": before_digest != after_digest,
-    }
-    serialized["ocr_job_id"] = f"OCR-{order_id}"
-    try:
-        workflow_state_service.refresh_workflow_state(order_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Workflow state refresh failed after OCR apply", order_id=order_id, error=str(exc))
+    if save_error:
+        return None, save_error
+    draft_record = save_result.get("draft") if isinstance(save_result, dict) else None
+    serialized, apply_error = apply_latest_draft(
+        order_id,
+        draft_record=draft_record if isinstance(draft_record, dict) else None,
+        source=source,
+        expected_lines_updated_at=expected_lines_updated_at,
+        enforce_lines_guard=enforce_lines_guard,
+    )
+    if apply_error:
+        return None, apply_error
+    if isinstance(serialized, dict):
+        revision = save_result.get("revision") if isinstance(save_result, dict) else None
+        if isinstance(revision, dict):
+            serialized["draft_revision"] = revision
     return serialized, None
+
+
+def apply_ocr_table(
+    order_id: str,
+    *,
+    markdown: str | None = None,
+    header: object = None,
+    rows: object = None,
+    ui_mode: str | None = None,
+    fields: object = None,
+    row_ids: object = None,
+    expected_revision_id: str | None = None,
+    expected_lines_updated_at: str | None = None,
+    enforce_revision_guard: bool = False,
+    enforce_lines_guard: bool = False,
+    revision_meta: dict[str, Any] | None = None,
+):
+    return apply_submitted_ocr_sheet(
+        order_id,
+        markdown=markdown,
+        header=header,
+        rows=rows,
+        ui_mode=ui_mode,
+        fields=fields,
+        row_ids=row_ids,
+        expected_revision_id=expected_revision_id,
+        expected_lines_updated_at=expected_lines_updated_at,
+        enforce_revision_guard=enforce_revision_guard,
+        enforce_lines_guard=enforce_lines_guard,
+        revision_meta=revision_meta,
+    )
 
 
 def save_ocr_sheet_exact(
@@ -6685,7 +7129,7 @@ def save_ocr_sheet_exact(
             "review_warnings": [],
         },
     )
-    persist_sheet_draft(
+    persisted_draft = persist_sheet_draft(
         order_id=order_id,
         draft_sheet_json={
             "fields": snapshot["fields"],
@@ -6716,6 +7160,7 @@ def save_ocr_sheet_exact(
     return {
         "order_id": order_id,
         "revision": latest if isinstance(latest, dict) else None,
+        "draft": persisted_draft if isinstance(persisted_draft, dict) else None,
     }, None
 
 
@@ -6843,6 +7288,28 @@ def _resolve_llm_review_baseline(
     payload: dict[str, Any],
     template: dict[str, Any],
 ) -> dict[str, Any]:
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=False)
+    draft_payload = latest_draft.get("draft_sheet_json") if isinstance(latest_draft, dict) else None
+    if isinstance(draft_payload, dict):
+        fields = [str(field).strip() for field in (draft_payload.get("fields") or []) if str(field).strip()]
+        rows = _sanitize_revision_rows(rows_payload=draft_payload.get("rows"), fields=fields)
+        row_ids = [str(item).strip() for item in (draft_payload.get("row_ids") or []) if str(item).strip()]
+        header = [str(cell or "").strip() for cell in (draft_payload.get("header") or [])]
+        if fields and rows:
+            if len(row_ids) < len(rows):
+                row_ids.extend([f"row-{idx + 1}" for idx in range(len(row_ids), len(rows))])
+            if len(header) < len(fields):
+                header.extend([_field_label(field) for field in fields[len(header) :]])
+            return {
+                "fields": fields,
+                "header": header,
+                "rows": rows,
+                "row_ids": row_ids[: len(rows)],
+                "baseline_revision_id": str(latest_draft.get("id") or "").strip() or None,
+                "raw_output": _snapshot_raw_ocr_payload(payload),
+                "baseline_source": "draft",
+            }
+
     edited = payload.get("_edited_ocr")
     latest = edited.get("latest") if isinstance(edited, dict) else None
     if not isinstance(latest, dict):
@@ -7771,20 +8238,56 @@ def review_ocr_table_with_llm(
         review_meta["llm_review"]["pdf_variant_fallback_reason"] = str(pdf_variant_meta["fallback_reason"])
     if isinstance(prepared_payload.get("output_payload"), dict):
         review_meta["llm_review"]["output_payload"] = prepared_payload["output_payload"]
-    updated, error = apply_ocr_table(
-        order_id,
-        header=baseline_header,
-        rows=prepared_payload.get("rows") or baseline_rows,
-        ui_mode="sheet",
-        fields=baseline_fields,
-        row_ids=prepared_payload.get("row_ids") or baseline_row_ids,
-        revision_meta=review_meta,
+    latest_draft = get_latest_sheet_draft(order_id, backfill_from_revision=True)
+    candidate_rows = prepared_payload.get("rows") or baseline_rows
+    candidate_row_ids = prepared_payload.get("row_ids") or baseline_row_ids
+    candidate_sheet_json = {
+        "fields": list(baseline_fields),
+        "header": list(baseline_header),
+        "rows": [list(row) for row in candidate_rows if isinstance(row, list)],
+        "row_ids": [str(item) for item in candidate_row_ids],
+        "ui_mode": "sheet",
+        "source": "llm_patch_candidate",
+        "warnings": ["llm_patch_needs_review"] if needs_more_review else [],
+    }
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    patch_candidate = patch_candidate_service.persist_patch_candidate(
+        order_id=order_id,
+        base_draft_id=(latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
+        base_evidence_run_id=(latest_evidence or {}).get("id") if isinstance(latest_evidence, dict) else None,
+        provider=effective_provider,
+        model=model_name,
+        prompt_preset=None,
+        baseline_source=review_meta["llm_review"].get("baseline_source"),
+        baseline_revision_id=review_meta["llm_review"].get("baseline_revision_id"),
+        candidate_state="proposed",
+        summary_json={
+            "llm_review": review_meta["llm_review"],
+            "pdf_variant_requested": str(pdf_variant_meta.get("requested") or "raw"),
+            "pdf_variant_used": str(pdf_variant_meta.get("used") or "raw"),
+            "needs_more_review": needs_more_review,
+        },
+        issues_json=list(review_meta["llm_review"].get("issues") or []),
+        patches_json={
+            "applied_overwrites": prepared_payload.get("applied_overwrites") or [],
+            "rejected_overwrites": prepared_payload.get("rejected_overwrites") or [],
+        },
+        proposed_draft_sheet_json=candidate_sheet_json,
     )
-    if error:
-        return None, error
-    if isinstance(updated, dict):
-        updated["llm_review"] = review_meta["llm_review"]
-    return updated, None
+    if patch_candidate is None:
+        return None, "llm_patch_candidate_persist_failed"
+    try:
+        workflow_state_service.refresh_workflow_state(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Workflow state refresh failed after LLM review candidate persist", order_id=order_id, error=str(exc))
+    return {
+        "id": order_id,
+        "patch_candidate": patch_candidate,
+        "latest_patch_candidate_id": patch_candidate.get("id"),
+        "draft": get_latest_sheet_draft(order_id, backfill_from_revision=False),
+        "workflow_state": get_order_workflow_state(order_id, refresh=False),
+        "llm_review": review_meta["llm_review"],
+    }, None
 
 
 def _signed_url_from_uri(uri: str | None) -> str | None:
