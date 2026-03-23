@@ -107,6 +107,36 @@ def test_persist_evidence_run_dedupes_identical_payload_digest():
     assert third["artifact_digest"] != first["artifact_digest"]
 
 
+def test_classify_evidence_payload_marks_failed_partial_output_unpersistable():
+    result = ocr_evidence_service.classify_evidence_payload(
+        {
+            "status": "failed",
+            "stage": "error",
+            "error": "template resolution failed",
+            "input_reference": "gs://bucket/input.pdf",
+            "output_reference": "gs://bucket/output.json",
+        }
+    )
+
+    assert result["persistable"] is False
+    assert result["error"] == "ocr_pipeline_failed"
+    assert result["stage"] == "error"
+
+
+def test_classify_evidence_payload_marks_empty_done_output_unpersistable():
+    result = ocr_evidence_service.classify_evidence_payload(
+        {
+            "status": "done",
+            "stage": "done",
+            "input_reference": "gs://bucket/input.pdf",
+            "output_reference": "gs://bucket/output.json",
+        }
+    )
+
+    assert result["persistable"] is False
+    assert result["error"] == "evidence_unusable"
+
+
 def test_get_evidence_endpoint_backfills_from_cache_when_run_missing():
     order_service.clear_all()
     client = TestClient(app)

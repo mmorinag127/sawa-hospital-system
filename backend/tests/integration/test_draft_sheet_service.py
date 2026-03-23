@@ -356,6 +356,61 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
         assert lines[0].quantity_original == 3
 
 
+def test_rerun_ocr_evidence_only_maps_failed_partial_output_to_pipeline_failure(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-rerun-evidence-failed-partial")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+    monkeypatch.setattr(
+        order_service,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            "status": "failed",
+            "stage": "error",
+            "error": "template resolution failed",
+            "input_reference": "gs://bucket/input.pdf",
+            "output_reference": "gs://bucket/output.json",
+        },
+    )
+
+    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+
+    assert rerun is None
+    assert error == "ocr_pipeline_failed"
+    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    assert isinstance(job, dict)
+    assert job["status"] == "failed"
+    assert str(job.get("error_message") or "").startswith("ocr_pipeline_failed:")
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
+    assert latest_evidence is None
+
+
+def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-rerun-evidence-empty-output")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+    monkeypatch.setattr(
+        order_service,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            "status": "done",
+            "stage": "done",
+            "input_reference": "gs://bucket/input.pdf",
+            "output_reference": "gs://bucket/output.json",
+        },
+    )
+
+    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+
+    assert rerun is None
+    assert error == "evidence_unusable"
+    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    assert isinstance(job, dict)
+    assert job["status"] == "failed"
+    assert str(job.get("error_message") or "").startswith("evidence_unusable")
+
+
 def test_rerun_ocr_evidence_only_rejects_partial_pipeline_output(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-rerun-evidence-partial")
@@ -396,7 +451,7 @@ def test_rerun_ocr_evidence_only_rejects_partial_pipeline_output(monkeypatch) ->
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
     assert rerun is None
-    assert error == "evidence_rerun_incomplete_output"
+    assert error == "evidence_unusable"
     current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
     assert isinstance(current_draft, dict)
     assert current_draft["id"] == saved["id"]

@@ -830,6 +830,28 @@ const isReparseStaleTimeoutError = (value?: string | null) =>
     .toLowerCase()
     .startsWith("reparse_stale_timeout>");
 
+const describeOcrFailure = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  const normalized = raw.toLowerCase();
+  if (!raw) return "OCRが失敗しました。";
+  if (normalized.startsWith("reparse_stale_timeout>")) {
+    return "LLM補完再解析がタイムアウトしました。OCR結果は残っているため、必要なら再試行してください。";
+  }
+  if (normalized.startsWith("ocr_pipeline_failed:")) {
+    const detail = raw.slice(raw.indexOf(":") + 1).trim();
+    return detail
+      ? `OCRパイプラインが失敗しました: ${detail}`
+      : "OCRパイプラインが失敗しました。";
+  }
+  if (normalized === "ocr_pipeline_failed") {
+    return "OCRパイプラインが失敗しました。";
+  }
+  if (normalized.startsWith("evidence_unusable")) {
+    return "OCR結果を保存できるだけの成果物が揃いませんでした。OCRパイプラインを再実行してください。";
+  }
+  return `OCRが失敗しました: ${raw}`;
+};
+
 const describeReparseProgressMessage = (
   stage?: string | null,
   options?: { llmAssist?: boolean; providerLabel?: string | null },
@@ -4512,13 +4534,7 @@ const loadOcrPages = async () => {
       messages.push("メニュー枠はありますが、数量はまだ信用できません。先にOCRパイプラインを再実行してください。");
     }
     if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
-      if (isReparseStaleTimeoutError(order?.ocr_error)) {
-        messages.push(
-          "LLM補完再解析がタイムアウトしました。OCR結果は残っているため、必要なら再試行してください。",
-        );
-      } else {
-      messages.push(order?.ocr_error ? `OCRが失敗しました: ${order.ocr_error}` : "OCRが失敗しました。");
-      }
+      messages.push(describeOcrFailure(order?.ocr_error));
     } else if (rawOcrStatus === "empty") {
       messages.push(
         hasUsableOverlayPreview
