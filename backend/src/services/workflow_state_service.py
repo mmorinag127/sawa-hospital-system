@@ -252,6 +252,34 @@ def _resolve_candidate_evidence_run(
     return None
 
 
+def _draft_sheet_has_quantity_values(draft_sheet: dict[str, Any] | None) -> bool:
+    if not isinstance(draft_sheet, dict):
+        return False
+    payload = (
+        draft_sheet.get("draft_sheet_json")
+        if isinstance(draft_sheet.get("draft_sheet_json"), dict)
+        else draft_sheet
+    )
+    if not isinstance(payload, dict):
+        return False
+    fields = payload.get("fields")
+    rows = payload.get("rows")
+    if not isinstance(fields, list) or not isinstance(rows, list):
+        return False
+    quantity_indexes = {
+        idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("qty.")
+    }
+    if not quantity_indexes:
+        return False
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for idx in quantity_indexes:
+            if idx < len(row) and str(row[idx] or "").strip():
+                return True
+    return False
+
+
 def _decision_selected_label(decision: dict[str, Any], selected_value: str) -> str:
     candidate_set = decision.get("candidate_set_json") if isinstance(decision, dict) else {}
     candidates = candidate_set.get("candidates") if isinstance(candidate_set, dict) else []
@@ -372,6 +400,7 @@ def _derive_state(
         and capabilities.get("numeric_trust_low")
         and not quantity_selected_via_user_choice
     )
+    draft_has_quantity_values = _draft_sheet_has_quantity_values(draft_sheet)
     reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
     normalized_reparse_request_mode = str(reparse_request_mode or "").strip().lower()
     if order_status == "確定":
@@ -408,6 +437,8 @@ def _derive_state(
         for item in blockers
         if item not in {"semantic_shell_only", "evidence_edit_unavailable", "draft_rows_empty"}
     ]
+    if numeric_trust_low and draft_has_quantity_values and not semantic_only_blockers:
+        return "review_required", "数量候補はありますが信頼度が低いため、確認してから反映してください", "review_critical_cells", blockers, warnings, "medium"
     if (semantic_shell_only or numeric_trust_low) and not semantic_only_blockers:
         return "semantic_shell_only", "メニュー枠はありますが、数量はまだ信用できません", "rerun_ocr_pipeline", blockers, warnings, "low"
     if isinstance(draft_sheet, dict):

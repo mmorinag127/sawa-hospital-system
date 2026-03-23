@@ -722,9 +722,9 @@ def test_get_ocr_sheet_blocks_payload_projection_when_numeric_trust_is_low_even_
 
     assert sheet_error is None
     assert isinstance(sheet, dict)
-    assert sheet["source"] == "weekly_menu"
-    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", ""]
-    assert "sheet_payload_mapping_blocked_numeric_review_required" in (sheet.get("warnings") or [])
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert sheet["rows"][0][:4] == ["03/21", "breakfast", "Menu A", "21"]
+    assert "sheet_payload_mapping_low_confidence" in (sheet.get("warnings") or [])
 
 
 def test_build_confirm_materialization_candidate_prefers_latest_draft_rows():

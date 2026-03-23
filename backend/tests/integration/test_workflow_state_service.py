@@ -5,7 +5,7 @@ from datetime import datetime
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import order_service, template_resolution_service, workflow_state_service  # noqa: E402
+from src.services import draft_sheet_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -249,7 +249,7 @@ def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evide
             "entries_count": 21,
         },
     )
-    saved = order_service.persist_sheet_draft(
+    saved = draft_sheet_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
             "order_id": order["id"],
@@ -259,6 +259,7 @@ def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evide
             "rows": [["03/22", "朝", "Menu A", "5"]],
             "row_ids": ["row-1"],
         },
+        base_evidence_run_id=first["id"],
         edited_by="tester",
     )
     assert isinstance(saved, dict)
@@ -289,7 +290,7 @@ def test_refresh_workflow_state_uses_rerun_job_metrics_to_surface_new_candidate(
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-rerun-candidate", facility_hint="FAC00001", week_hint="2026-03")
     first = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
-    saved = order_service.persist_sheet_draft(
+    saved = draft_sheet_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
             "order_id": order["id"],
@@ -299,6 +300,7 @@ def test_refresh_workflow_state_uses_rerun_job_metrics_to_surface_new_candidate(
             "rows": [["03/22", "朝", "Menu A", "5"]],
             "row_ids": ["row-1"],
         },
+        base_evidence_run_id=first["id"],
         edited_by="tester",
     )
     assert isinstance(saved, dict)
@@ -743,6 +745,38 @@ def test_refresh_workflow_state_returns_review_required_for_high_risk_quantity_s
     warnings = workflow["apply_gate"]["warnings"] or []
     assert "column_mapping_review_required" in warnings
     assert "quantity_review_required" in warnings
+
+
+def test_refresh_workflow_state_returns_review_required_for_low_trust_populated_draft():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-low-trust-draft", facility_hint="FAC00001", week_hint="2026-03")
+    evidence = _persist_evidence(
+        order["id"],
+        extra_payload={
+            "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+        },
+    )
+    saved = draft_sheet_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食", "備考"],
+            "rows": [["03/22", "朝", "Menu A", "21", ""]],
+            "row_ids": ["draft-row-1"],
+        },
+        base_evidence_run_id=evidence["id"],
+        warnings=["sheet_payload_mapping_low_confidence"],
+    )
+    assert saved is not None
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "review_required"
+    assert workflow["primary_action"] == "review_critical_cells"
+    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
 
 
 def test_refresh_workflow_state_blocks_when_weekly_menu_is_missing():

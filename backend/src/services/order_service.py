@@ -7063,6 +7063,7 @@ _REVIEW_REASON_MESSAGES: dict[str, str] = {
     "sheet_order_lines_suppressed_reparse_failed": "失敗した再解析の明細は採用せず、OCRの下書きを表示しています。",
     "sheet_structural_projection_requires_review": "広範囲の数量投影が必要だったため、自動反映を止めています。",
     "sheet_payload_mapping_blocked_numeric_review_required": "数量OCRの信頼度が低いため、自動投影を止めています。",
+    "sheet_payload_mapping_low_confidence": "数量OCRの信頼度が低いため、候補値として表示しています。確認してから反映してください。",
     "ocr_evidence_recovery_required": "OCR成果物が不足しているため、まず復旧が必要です。",
     "template_resolution_blocked": "施設テンプレートの判定が不安定なため、先に確認が必要です。",
     "template_mismatch": "OCRが選んだテンプレートと施設設定が一致していません。",
@@ -13382,8 +13383,9 @@ def get_ocr_sheet(
         evidence_missing=evidence_missing,
         template_blockers=template_blockers,
     )
-    payload_mapping_blocked = bool(payload_mapping_block_reason)
-    if payload_mapping_blocked and sheet_lines_source == "ocr_payload":
+    payload_mapping_hard_blocked = payload_mapping_block_reason == "unresolved_template"
+    payload_mapping_low_confidence = payload_mapping_block_reason == "numeric_review_required"
+    if payload_mapping_hard_blocked and sheet_lines_source == "ocr_payload":
         sheet_lines = []
         sheet_lines_source = "suppressed"
 
@@ -13396,10 +13398,10 @@ def get_ocr_sheet(
         _append_sheet_warning("sheet_weekly_menu_missing")
     if suppress_order_lines_reason:
         _append_sheet_warning(suppress_order_lines_reason)
-    if payload_mapping_blocked and payload_rows:
-        if payload_mapping_block_reason == "numeric_review_required":
-            _append_sheet_warning("sheet_payload_mapping_blocked_numeric_review_required")
-        else:
+    if payload_rows:
+        if payload_mapping_low_confidence:
+            _append_sheet_warning("sheet_payload_mapping_low_confidence")
+        elif payload_mapping_hard_blocked:
             _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
 
     llm_allows_cluster_fill = _llm_allows_order_line_cluster_consensus_fill(ocr_payload)
@@ -13481,7 +13483,7 @@ def get_ocr_sheet(
                 quantity_index=quantity_index,
             )
 
-            if payload_rows and not payload_mapping_blocked:
+            if payload_rows and not payload_mapping_hard_blocked:
                 rows_by_payload_index = _clone_sheet_rows(base_rows)
                 payload_match_stats = _apply_payload_quantities_numeric_only(
                     rows=rows_by_payload_index,
@@ -13582,7 +13584,7 @@ def get_ocr_sheet(
                     mapped_count = payload_mapped_count
                     mapped_mode = "payload_row"
                     rows = rows_by_payload_index
-        elif payload_rows and not payload_mapping_blocked:
+        elif payload_rows and not payload_mapping_hard_blocked:
             rows_by_payload_index = _clone_sheet_rows(base_rows)
             payload_match_stats = _apply_payload_quantities_numeric_only(
                 rows=rows_by_payload_index,
