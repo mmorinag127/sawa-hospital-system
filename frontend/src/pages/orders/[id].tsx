@@ -3819,9 +3819,13 @@ const loadOcrPages = async () => {
       setFacilityConfig(nextConfig);
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
-      setFacilityTemplateMessage("施設テンプレートに保存しました。シート再読込で反映されます。");
+      setFacilityTemplateMessage(
+        res.data?.draft_refreshed
+          ? "施設テンプレートに保存し、現在のシートにも反映しました。"
+          : "施設テンプレートに保存しました。シートを再読込して確認してください。",
+      );
       if (order?.id && normalizeWeekValue(order.persisted_week_value || order.week || "")) {
-        await loadOcrSheet({ silent: true });
+        await refreshOrderWorkspace({ reloadSheet: true, preserveSelections: true });
       }
     } catch (err: any) {
       const status = err?.response?.status;

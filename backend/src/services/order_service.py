@@ -19263,7 +19263,39 @@ def save_order_facility_template_columns(
     if not updated:
         return None, "facility_not_found"
     resolved = config_service.get_facility_config(facility_id)
-    return {"updated": True, "validation": validation, "resolved_config": resolved}, None
+    refreshed_draft: dict[str, Any] | None = None
+    try:
+        rebuilt_sheet = _build_best_available_semantic_draft(
+            order_id,
+            use_saved_draft=False,
+        )
+        if isinstance(rebuilt_sheet, dict):
+            refreshed_draft = persist_sheet_draft(
+                order_id=order_id,
+                draft_sheet_json=rebuilt_sheet,
+                draft_state="draft_ready",
+                blockers=[],
+                warnings=[
+                    str(item).strip()
+                    for item in (rebuilt_sheet.get("warnings") or [])
+                    if str(item).strip()
+                ],
+                edited_by="facility-template-columns-save",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Facility template draft refresh failed",
+            order_id=order_id,
+            facility_id=facility_id,
+            error=str(exc),
+        )
+    return {
+        "updated": True,
+        "validation": validation,
+        "resolved_config": resolved,
+        "draft_refreshed": refreshed_draft is not None,
+        "draft": refreshed_draft,
+    }, None
 
 
 def set_status(order_id: str, status: str) -> bool:

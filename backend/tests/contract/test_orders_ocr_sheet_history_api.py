@@ -486,6 +486,70 @@ def test_orders_facility_template_columns_save_updates_ocr_sheet_header():
         assert facility_service.update_config(order["facility"], previous_config)
 
 
+def test_orders_facility_template_columns_save_refreshes_current_draft(monkeypatch):
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-draft-refresh-001")
+
+    seeded = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "旧常食2F", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "2", ""]],
+            "row_ids": ["row-refresh-1"],
+            "source": "draft_ready",
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+        edited_by="test-seed",
+    )
+    assert seeded is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda order_id, use_saved_draft=False, evidence_run_override=None: {
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "新常食花", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "9", "refreshed"]],
+            "row_ids": ["row-refresh-1"],
+            "source": "weekly_menu+ocr_payload",
+            "warnings": ["quantity_review_required"],
+        },
+    )
+
+    save_res = client.put(
+        f"/orders/{order['id']}/facility-template-columns",
+        json={
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {
+                    "index": 3,
+                    "role": "quantity",
+                    "header": "新常食花",
+                    "name": "qty.regular_hana",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                },
+                {"index": 4, "role": "note", "header": "備考"},
+            ]
+        },
+    )
+    assert save_res.status_code == 200
+    payload = save_res.json()
+    assert payload.get("draft_refreshed") is True
+
+    draft_res = client.get(f"/orders/{order['id']}/draft-sheet")
+    assert draft_res.status_code == 200
+    draft = draft_res.json()
+    assert draft["header"][3] == "新常食花"
+    assert draft["rows"][0][3] == "9"
+
+
 def test_orders_facility_template_columns_save_canonicalizes_invalid_quantity_tokens():
     order_service.clear_all()
     client = TestClient(app)
