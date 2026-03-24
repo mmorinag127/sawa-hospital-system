@@ -557,6 +557,90 @@ def test_orders_facility_template_columns_save_refreshes_current_draft(monkeypat
     assert payload["draft_payload"]["rows"][0][3] == "9"
 
 
+def test_orders_facility_template_columns_save_preserves_existing_quantity_values_when_adding_column(monkeypatch):
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-preserve-qty-001")
+
+    seeded = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": [
+                "date_mmdd",
+                "daypart",
+                "menu",
+                "qty.regular_2f",
+                "qty.soft_2f",
+                "qty.mixer_2f",
+                "remarks",
+            ],
+            "header": ["日付", "区分", "メニュー", "常食2F", "軟菜2F", "ミキサー2F", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "1", "2", "3", "seeded"]],
+            "row_ids": ["row-preserve-1"],
+            "source": "draft_ready",
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+        edited_by="test-seed",
+    )
+    assert seeded is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda order_id, use_saved_draft=False, evidence_run_override=None: {
+            "fields": [
+                "date_mmdd",
+                "daypart",
+                "menu",
+                "qty.regular_2f",
+                "qty.no_fish_2f",
+                "qty.soft_2f",
+                "qty.mixer_2f",
+                "remarks",
+            ],
+            "header": ["日付", "区分", "メニュー", "常食2F", "魚禁2F", "軟菜2F", "ミキサー2F", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "1", "2", "3", "", "rebuilt"]],
+            "row_ids": ["row-preserve-1"],
+            "source": "weekly_menu+ocr_payload",
+            "warnings": [],
+        },
+    )
+
+    save_res = client.put(
+        f"/orders/{order['id']}/facility-template-columns",
+        json={
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食2F", "diet_type": "regular", "area_id": "2F"},
+                {"index": 4, "role": "quantity", "header": "魚禁2F", "diet_type": "no_fish", "area_id": "2F"},
+                {"index": 5, "role": "quantity", "header": "軟菜2F", "diet_type": "soft", "area_id": "2F"},
+                {"index": 6, "role": "quantity", "header": "ミキサー2F", "diet_type": "mixer", "area_id": "2F"},
+                {"index": 7, "role": "note", "header": "備考"},
+            ]
+        },
+    )
+    assert save_res.status_code == 200
+    payload = save_res.json()
+    assert payload.get("draft_refreshed") is True
+
+    draft_res = client.get(f"/orders/{order['id']}/draft-sheet")
+    assert draft_res.status_code == 200
+    draft = draft_res.json()
+    assert draft["fields"][3:7] == [
+        "qty.regular_2f",
+        "qty.no_fish_2f",
+        "qty.soft_2f",
+        "qty.mixer_2f",
+    ]
+    assert draft["rows"][0][3:7] == ["1", "", "2", "3"]
+    assert isinstance(payload.get("draft_payload"), dict)
+    assert payload["draft_payload"]["rows"][0][3:7] == ["1", "", "2", "3"]
+
+
 def test_build_recoverable_ocr_sheet_payload_can_skip_saved_draft():
     order_service.clear_all()
     order = _create_seed_order("msg-api-facility-template-recoverable-001")

@@ -5190,6 +5190,76 @@ def _merge_saved_draft_into_semantic_sheet(
     return merged
 
 
+def _merge_current_draft_quantity_values_into_semantic_sheet(
+    current_sheet: dict[str, Any] | None,
+    fresh_sheet: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
+        return fresh_sheet if isinstance(fresh_sheet, dict) else current_sheet
+
+    current_fields = [str(field).strip() for field in (current_sheet.get("fields") or []) if str(field).strip()]
+    fresh_fields = [str(field).strip() for field in (fresh_sheet.get("fields") or []) if str(field).strip()]
+    current_rows = [list(row) for row in (current_sheet.get("rows") or []) if isinstance(row, list)]
+    fresh_rows = [list(row) for row in (fresh_sheet.get("rows") or []) if isinstance(row, list)]
+    if not current_fields or not fresh_fields or not current_rows or not fresh_rows:
+        return fresh_sheet
+
+    current_index = {field: idx for idx, field in enumerate(current_fields)}
+    fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
+    current_quantity_fields = [field for field in current_fields if field.startswith("qty.")]
+    fresh_quantity_fields = [field for field in fresh_fields if field.startswith("qty.")]
+    if current_quantity_fields == fresh_quantity_fields:
+        return fresh_sheet
+    shared_quantity_fields = [
+        field
+        for field in current_quantity_fields
+        if field.startswith("qty.") and field in fresh_index
+    ]
+    if not shared_quantity_fields:
+        return fresh_sheet
+
+    current_row_ids = [str(item).strip() for item in (current_sheet.get("row_ids") or []) if str(item).strip()]
+    fresh_row_ids = [str(item).strip() for item in (fresh_sheet.get("row_ids") or []) if str(item).strip()]
+    if len(fresh_row_ids) < len(fresh_rows):
+        fresh_row_ids.extend([f"row-{idx + 1}" for idx in range(len(fresh_row_ids), len(fresh_rows))])
+
+    current_by_key: dict[tuple[str, str, str], tuple[list[Any], str | None]] = {}
+    for idx, row in enumerate(current_rows):
+        row_key = _sheet_row_identity_key(current_fields, row)
+        if row_key is None:
+            continue
+        row_id = current_row_ids[idx] if idx < len(current_row_ids) else None
+        current_by_key[row_key] = (row, row_id)
+
+    if not current_by_key:
+        return fresh_sheet
+
+    merged_rows: list[list[Any]] = []
+    merged_row_ids: list[str] = []
+    for idx, fresh_row in enumerate(fresh_rows):
+        merged_row = list(fresh_row)
+        merged_row_id = fresh_row_ids[idx] if idx < len(fresh_row_ids) else f"row-{idx + 1}"
+        row_key = _sheet_row_identity_key(fresh_fields, fresh_row)
+        if row_key is not None and row_key in current_by_key:
+            current_row, current_row_id = current_by_key[row_key]
+            for field_name in shared_quantity_fields:
+                current_idx = current_index[field_name]
+                fresh_idx = fresh_index[field_name]
+                current_value = current_row[current_idx] if current_idx < len(current_row) else ""
+                while len(merged_row) <= fresh_idx:
+                    merged_row.append("")
+                merged_row[fresh_idx] = current_value
+            if current_row_id:
+                merged_row_id = current_row_id
+        merged_rows.append(merged_row)
+        merged_row_ids.append(merged_row_id)
+
+    merged = dict(fresh_sheet)
+    merged["rows"] = merged_rows
+    merged["row_ids"] = merged_row_ids
+    return merged
+
+
 def _maybe_refresh_semantic_sheet_draft(
     order_id: str,
     draft: dict[str, Any] | None,
@@ -19593,6 +19663,13 @@ def save_order_facility_template_columns(
     if not normalized_columns:
         return None, "columns_invalid"
 
+    current_draft_before_save = draft_sheet_service.get_latest_sheet_draft(order_id)
+    current_draft_sheet = (
+        current_draft_before_save.get("draft_sheet_json")
+        if isinstance(current_draft_before_save, dict) and isinstance(current_draft_before_save.get("draft_sheet_json"), dict)
+        else None
+    )
+
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -19624,14 +19701,20 @@ def save_order_facility_template_columns(
             use_saved_draft=False,
         )
         if isinstance(rebuilt_sheet, dict):
+            draft_sheet_to_persist = _merge_current_draft_quantity_values_into_semantic_sheet(
+                current_draft_sheet,
+                rebuilt_sheet,
+            )
+            if not isinstance(draft_sheet_to_persist, dict):
+                draft_sheet_to_persist = rebuilt_sheet
             refreshed_draft = persist_sheet_draft(
                 order_id=order_id,
-                draft_sheet_json=rebuilt_sheet,
+                draft_sheet_json=draft_sheet_to_persist,
                 draft_state="draft_ready",
                 blockers=[],
                 warnings=[
                     str(item).strip()
-                    for item in (rebuilt_sheet.get("warnings") or [])
+                    for item in (draft_sheet_to_persist.get("warnings") or [])
                     if str(item).strip()
                 ],
                 edited_by="facility-template-columns-save",

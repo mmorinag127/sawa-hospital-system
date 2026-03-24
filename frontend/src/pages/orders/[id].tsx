@@ -1465,6 +1465,8 @@ export default function OrderDetailPage() {
   const [ocrTableSaving, setOcrTableSaving] = useState<boolean>(false);
   const [ocrShiftStartRow, setOcrShiftStartRow] = useState<string>("");
   const [ocrShiftEndRow, setOcrShiftEndRow] = useState<string>("");
+  const [ocrSwapLeftColumn, setOcrSwapLeftColumn] = useState<string>("");
+  const [ocrSwapRightColumn, setOcrSwapRightColumn] = useState<string>("");
   const [showOcrEdit, setShowOcrEdit] = useState<boolean>(false);
   const [showTableBoxEditor, setShowTableBoxEditor] = useState<boolean>(false);
   const [tableBoxDraft, setTableBoxDraft] = useState<number[] | null>(null);
@@ -3270,6 +3272,41 @@ const loadOcrPages = async () => {
     );
   };
 
+  const swapOcrTableQuantityColumns = (leftIndex: number, rightIndex: number) => {
+    if (ocrHardRecoveryMode) {
+      setOcrTableMessage("現在は基盤復旧待ちのため、数量列の入替操作を止めています。");
+      return;
+    }
+    if (leftIndex === rightIndex) {
+      setOcrTableMessage("別々の数量列を選択してください。");
+      return;
+    }
+    setOcrSheetRows((prev) =>
+      prev.map((row) => {
+        const next = [...row];
+        const maxIndex = Math.max(leftIndex, rightIndex);
+        while (next.length <= maxIndex) {
+          next.push("");
+        }
+        const leftValue = next[leftIndex] ?? "";
+        next[leftIndex] = next[rightIndex] ?? "";
+        next[rightIndex] = leftValue;
+        return next;
+      }),
+    );
+    setOcrTableMessage(`数量列 ${leftIndex + 1} と ${rightIndex + 1} の数値を入れ替えました。`);
+  };
+
+  const applySelectedOcrTableQuantityColumnSwap = () => {
+    const leftIndex = Number.parseInt(ocrSwapLeftColumn, 10);
+    const rightIndex = Number.parseInt(ocrSwapRightColumn, 10);
+    if (!Number.isInteger(leftIndex) || !Number.isInteger(rightIndex)) {
+      setOcrTableMessage("入れ替える2つの数量列を選択してください。");
+      return;
+    }
+    swapOcrTableQuantityColumns(leftIndex, rightIndex);
+  };
+
   const applyOcrTable = async (): Promise<{ ok: boolean; message: string }> => {
     if (!order) {
       return { ok: false, message: "注文が見つかりません。" };
@@ -4740,6 +4777,13 @@ const loadOcrPages = async () => {
   const ocrSheetColumnSpecs = ocrSheetHeaders.map((header, idx) =>
     getOcrSheetColumnSpec(ocrSheetFields[idx] || "", header, normalizeDietTypeToken),
   );
+  const ocrSheetQuantityColumnOptions = ocrSheetColumnSpecs
+    .map((spec, idx) =>
+      spec.className === "ocr-sheet-col-qty"
+        ? { value: String(idx), label: `${idx + 1}: ${ocrSheetHeaders[idx] || `列${idx + 1}`}` }
+        : null,
+    )
+    .filter((item): item is { value: string; label: string } => Boolean(item));
   const ocrSheetStickyColumnOffsets = (() => {
     const stickyRoles = new Set(["ocr-sheet-col-date", "ocr-sheet-col-daypart", "ocr-sheet-col-menu"]);
     let left = OCR_SHEET_ROW_INDEX_WIDTH;
@@ -4773,6 +4817,15 @@ const loadOcrPages = async () => {
       return token.includes("区分") || token === "daypart" || token === "meal" || token === "time";
     });
   })();
+  useEffect(() => {
+    const indices = new Set(ocrSheetQuantityColumnOptions.map((option) => option.value));
+    if (ocrSwapLeftColumn && !indices.has(ocrSwapLeftColumn)) {
+      setOcrSwapLeftColumn("");
+    }
+    if (ocrSwapRightColumn && !indices.has(ocrSwapRightColumn)) {
+      setOcrSwapRightColumn("");
+    }
+  }, [ocrSheetQuantityColumnOptions, ocrSwapLeftColumn, ocrSwapRightColumn]);
   const ocrSheetRowDateStripeClasses = (() => {
     const stripes: string[] = [];
     let tone = 0;
@@ -6267,6 +6320,46 @@ const loadOcrPages = async () => {
                                   disabled={!ocrSheetRows.length || ocrTableSaving}
                                 >
                                   1行下へ
+                                </button>
+                                <label className="ocr-shift-field">
+                                  <span>入替元列</span>
+                                  <select
+                                    className="input"
+                                    value={ocrSwapLeftColumn}
+                                    onChange={(e) => setOcrSwapLeftColumn(e.target.value)}
+                                    disabled={!ocrSheetQuantityColumnOptions.length || ocrTableSaving}
+                                  >
+                                    <option value="">数量列</option>
+                                    {ocrSheetQuantityColumnOptions.map((option) => (
+                                      <option key={`ocr-swap-left-${option.value}`} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="ocr-shift-field">
+                                  <span>入替先列</span>
+                                  <select
+                                    className="input"
+                                    value={ocrSwapRightColumn}
+                                    onChange={(e) => setOcrSwapRightColumn(e.target.value)}
+                                    disabled={!ocrSheetQuantityColumnOptions.length || ocrTableSaving}
+                                  >
+                                    <option value="">数量列</option>
+                                    {ocrSheetQuantityColumnOptions.map((option) => (
+                                      <option key={`ocr-swap-right-${option.value}`} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <button
+                                  className="btn ghost"
+                                  type="button"
+                                  onClick={applySelectedOcrTableQuantityColumnSwap}
+                                  disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
+                                >
+                                  数量列を入替
                                 </button>
                                 <span className="subtle">日付・区分・メニューは固定し、数量列だけ動かします。</span>
                               </div>
