@@ -2722,6 +2722,12 @@ def _validate_reparse_lines_against_weekly_menu(
     }
     if invalid_lines or mismatch_source_rows:
         return "sheet_canonical_mismatch", detail
+    if _rows_look_like_quantity_only(
+        rows=[list(row) for row in (ocr_rows or []) if isinstance(row, list)],
+        template=template,
+        rows_are_body_only=rows_are_body_only,
+    ):
+        return None, None
     return "sheet_suspicious_blank_row", detail
 
 
@@ -3721,7 +3727,7 @@ def _build_materialization_candidate_from_draft_record(
         month_id_from_dates(line_dates, effective_received_at, policy) if line_dates else None
     )
     ocr_payload_for_week: dict[str, Any] | None = None
-    payload_for_week, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+    payload_for_week, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
     if isinstance(payload_for_week, dict):
         ocr_payload_for_week = payload_for_week
     min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
@@ -5119,6 +5125,13 @@ def _merge_saved_draft_into_semantic_sheet(
 
     current_index = {field: idx for idx, field in enumerate(current_fields)}
     fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
+    current_quantity_fields = [field for field in current_fields if field.startswith("qty.")]
+    fresh_quantity_fields = [field for field in fresh_fields if field.startswith("qty.")]
+    shared_quantity_fields = [
+        field
+        for field in current_quantity_fields
+        if field.startswith("qty.") and field in fresh_index
+    ]
     current_by_key: dict[tuple[str, str, str], tuple[list[Any], str | None]] = {}
     unmatched_current: list[tuple[list[Any], str | None]] = []
     for idx, row in enumerate(current_rows):
@@ -5139,12 +5152,21 @@ def _merge_saved_draft_into_semantic_sheet(
         if row_key is not None and row_key in current_by_key:
             current_row, current_row_id = current_by_key[row_key]
             matched_keys.add(row_key)
+            for field_name in fresh_quantity_fields:
+                if field_name in shared_quantity_fields:
+                    continue
+                fresh_idx = fresh_index[field_name]
+                while len(merged_row) <= fresh_idx:
+                    merged_row.append("")
+                merged_row[fresh_idx] = ""
             for field_name, current_idx in current_index.items():
                 fresh_idx = fresh_index.get(field_name)
                 if fresh_idx is None or current_idx >= len(current_row):
                     continue
                 current_value = current_row[current_idx]
-                if str(current_value or "").strip() != "":
+                if field_name.startswith("qty."):
+                    merged_row[fresh_idx] = current_value
+                elif str(current_value or "").strip() != "":
                     merged_row[fresh_idx] = current_value
             if current_row_id:
                 merged_row_id = current_row_id
@@ -5242,6 +5264,13 @@ def _merge_current_draft_quantity_values_into_semantic_sheet(
         row_key = _sheet_row_identity_key(fresh_fields, fresh_row)
         if row_key is not None and row_key in current_by_key:
             current_row, current_row_id = current_by_key[row_key]
+            for field_name in fresh_quantity_fields:
+                if field_name in shared_quantity_fields:
+                    continue
+                fresh_idx = fresh_index[field_name]
+                while len(merged_row) <= fresh_idx:
+                    merged_row.append("")
+                merged_row[fresh_idx] = ""
             for field_name in shared_quantity_fields:
                 current_idx = current_index[field_name]
                 fresh_idx = fresh_index[field_name]
@@ -5940,13 +5969,15 @@ def _sheet_payload_mapping_block_reason(
 ) -> str | None:
     if source != "weekly_menu":
         return None
-    if not isinstance(_get_template_resolution(ocr_payload), dict):
-        return "unresolved_template"
+    template_resolution = _get_template_resolution(ocr_payload)
+    strict_evidence_context = _sheet_uses_strict_evidence_context(ocr_payload)
     if any(str(item or "").strip() for item in (template_blockers or [])):
         return "unresolved_template"
     missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
-    if "template_resolution" in missing:
+    if strict_evidence_context and "template_resolution" in missing:
         return "unresolved_template"
+    if not isinstance(template_resolution, dict):
+        return None
     # Weekly-menu rescue can only be trusted when quantity-column semantics are known.
     # Full row-edge metadata is useful for overlays, but Step2 quantity mapping only needs a
     # resolved template plus stable quantity column boundaries.
@@ -5955,6 +5986,18 @@ def _sheet_payload_mapping_block_reason(
     if ocr_evidence_service.payload_has_high_risk_numeric_issues(ocr_payload):
         return "numeric_review_required"
     return None
+
+
+def _sheet_uses_strict_evidence_context(payload: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(payload, dict)
+        and (
+            "page_correction_artifacts" in payload
+            or "page_correction" in payload
+            or "template_resolution" in payload
+            or "quantity_subgrid_passes" in payload
+        )
+    )
 
 
 _RECOVERABLE_OCR_SHEET_ERRORS = {
@@ -6272,7 +6315,7 @@ def _load_pipeline_output_with_retry(
 
 
 def _load_existing_first_pass_payload_for_reparse(order_id: str) -> dict[str, Any] | None:
-    payload, error = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+    payload, error = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
     if error is None and isinstance(payload, dict) and _payload_has_first_pass_ocr_content(payload):
         return payload
     cached_payload = _load_order_ocr_cache(order_id)
@@ -9559,6 +9602,12 @@ def get_ocr_output(
     active_evidence_run = None
     active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
     job = get_ocr_job(f"OCR-{order_id}")
+    cached_payload = _load_order_ocr_cache(order_id)
+    active_evidence_payload = _merge_legacy_first_pass_payload(
+        active_evidence_payload,
+        active_evidence_run,
+        cached_payload,
+    )
     parsed = None
     parsed_source = ""
     order_job_pending = _job_is_pending(job)
@@ -9587,7 +9636,7 @@ def get_ocr_output(
             parsed = fallback_parsed
             parsed_source = "message"
     if parsed is None:
-        parsed = _load_order_ocr_cache(order_id)
+        parsed = cached_payload
         parsed_source = "cache"
     if parsed is None:
         active_job = job or fallback_job
@@ -9606,15 +9655,28 @@ def get_ocr_output(
     if persist_cache and not _output_is_pending(parsed):
         _save_order_ocr_cache(order_id, parsed)
     cached_payload = _load_order_ocr_cache(order_id)
+    if isinstance(parsed, dict) and isinstance(cached_payload, dict):
+        enriched = dict(parsed)
+        merged = False
+        for preserved_key in (
+            "cell_issues",
+            "yomitoku_cell_issues",
+            "roi_cell_issues",
+        ):
+            preserved_value = cached_payload.get(preserved_key)
+            if isinstance(preserved_value, list) and preserved_key not in enriched:
+                enriched[preserved_key] = preserved_value
+                merged = True
+        if merged:
+            parsed = enriched
     if include_legacy_edits and isinstance(cached_payload, dict):
         cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
         enriched = dict(parsed) if isinstance(parsed, dict) else {}
         merged = False
-        if parsed_source != "active_evidence":
-            edited = cached_payload.get("_edited_ocr")
-            if isinstance(edited, dict) and "_edited_ocr" not in enriched:
-                enriched["_edited_ocr"] = edited
-                merged = True
+        edited = cached_payload.get("_edited_ocr")
+        if isinstance(edited, dict) and "_edited_ocr" not in enriched:
+            enriched["_edited_ocr"] = edited
+            merged = True
         reparse_debug = cached_payload.get("_reparse_debug")
         if isinstance(reparse_debug, dict) and "_reparse_debug" not in enriched:
             enriched["_reparse_debug"] = reparse_debug
@@ -9630,6 +9692,71 @@ def get_ocr_output(
         parsed = _attach_edited_ocr_payload(parsed)
     parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     return _attach_facility_candidates(parsed), None
+
+
+def _get_ocr_output_without_legacy_edits(
+    order_id: str,
+    *,
+    persist_cache: bool = True,
+):
+    try:
+        return get_ocr_output(
+            order_id,
+            persist_cache=persist_cache,
+            include_legacy_edits=False,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument 'include_legacy_edits'" in message:
+            try:
+                return get_ocr_output(order_id, persist_cache=persist_cache)
+            except TypeError as inner_exc:
+                inner_message = str(inner_exc)
+                if "unexpected keyword argument 'persist_cache'" in inner_message:
+                    return get_ocr_output(order_id)
+                raise
+        raise
+
+
+def _merge_legacy_first_pass_payload(
+    active_payload: dict[str, Any] | None,
+    active_run: dict[str, Any] | None,
+    cached_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(active_payload, dict):
+        return active_payload
+    if not isinstance(cached_payload, dict):
+        return active_payload
+    schema_version = str((active_run or {}).get("schema_version") or "").strip()
+    if not schema_version.startswith("v1_legacy"):
+        return active_payload
+    if any(
+        isinstance(active_payload.get(key), list) and active_payload.get(key)
+        for key in ("table_rows", "rows", "tables")
+    ):
+        return active_payload
+    enriched = dict(active_payload)
+    merged = False
+    for key in (
+        "rows",
+        "table_rows",
+        "tables",
+        "_table_raw_blocks",
+        "_table_raw_non_table_lines",
+        "_table_raw_original_chars",
+        "_table_raw_unstructured_qty",
+        "table_raw_truncated",
+        "yomitoku_cell_issues",
+        "roi_cell_issues",
+    ):
+        if key in enriched:
+            continue
+        value = cached_payload.get(key)
+        if value is None:
+            continue
+        enriched[key] = value
+        merged = True
+    return enriched if merged else active_payload
 
 
 def _build_synthetic_ocr_pages(
@@ -13477,11 +13604,7 @@ def build_recoverable_ocr_sheet_payload(
         return None, error_code
     quantity_index = _build_sheet_quantity_index(fields)
     cached_payload = _load_order_ocr_cache(order_id)
-    latest_draft = (
-        get_latest_sheet_draft(order_id, backfill_from_revision=True)
-        if use_saved_draft
-        else None
-    )
+    latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id) if use_saved_draft else None
     latest_revision = (
         _select_order_sheet_revision(
             order_id=order_id,
@@ -13554,7 +13677,11 @@ def build_recoverable_ocr_sheet_payload(
         evidence_missing = _ocr_evidence_missing_artifacts(cached_payload)
         template_blockers = _template_resolution_blockers(cached_payload)
         warnings = list(payload.get("warnings") or [])
-        if evidence_missing and "ocr_evidence_recovery_required" not in warnings:
+        if (
+            evidence_missing
+            and _sheet_uses_strict_evidence_context(cached_payload)
+            and "ocr_evidence_recovery_required" not in warnings
+        ):
             warnings.append("ocr_evidence_recovery_required")
             payload["evidence_missing_artifacts"] = evidence_missing
         if template_blockers and "template_resolution_blocked" not in warnings:
@@ -13578,6 +13705,7 @@ def get_ocr_sheet(
     *,
     use_saved_draft: bool = True,
     evidence_run_override: dict[str, Any] | None = None,
+    prefer_order_lines: bool = True,
 ):
     lines_updated_at: datetime | None = None
     order_status: str | None = None
@@ -13593,6 +13721,26 @@ def get_ocr_sheet(
             return None, "facility_missing"
         week_id = order.week_code
         received_at = order.received_at or datetime.utcnow()
+        order_lines = (
+            [
+                {
+                    "id": line.id,
+                    "line_id": line.line_id,
+                    "date": line.date,
+                    "daypart": line.daypart,
+                    "menu_name": line.menu_name,
+                    "diet_type": line.diet_type,
+                    "area_id": line.area_id,
+                    "bag_type": line.bag_type,
+                    "quantity_original": line.quantity_original,
+                    "quantity_corrected": line.quantity_corrected,
+                    "change_note": line.change_note,
+                }
+                for line in (order.lines or [])
+            ]
+            if prefer_order_lines
+            else []
+        )
         facility_week_hint = (
             session.execute(
                 select(Order.week_code)
@@ -13613,7 +13761,6 @@ def get_ocr_sheet(
             .scalars()
             .first()
         )
-        order_lines: list[dict[str, Any]] = []
 
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
@@ -13649,7 +13796,7 @@ def get_ocr_sheet(
     if isinstance(override_payload, dict):
         ocr_payload = evidence_manifest_service.ensure_evidence_manifest(dict(override_payload))
     else:
-        payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+        payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
         if isinstance(payload, dict):
             ocr_payload = payload
     latest_draft = (
@@ -13699,7 +13846,7 @@ def get_ocr_sheet(
     if not isinstance(ocr_payload, dict):
         # Weekly menu master missing: build editable rows from this order's OCR table.
         if not has_weekly_menu_entries:
-            payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+            payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
             if isinstance(payload, dict):
                 ocr_payload = payload
 
@@ -14271,7 +14418,11 @@ def get_ocr_sheet(
             "mapped_mode": mapped_mode,
         },
     }
-    if evidence_missing and "ocr_evidence_recovery_required" not in payload["warnings"]:
+    if (
+        evidence_missing
+        and _sheet_uses_strict_evidence_context(ocr_payload)
+        and "ocr_evidence_recovery_required" not in payload["warnings"]
+    ):
         payload["warnings"].append("ocr_evidence_recovery_required")
         payload["evidence_missing_artifacts"] = evidence_missing
     if template_blockers and "template_resolution_blocked" not in payload["warnings"]:
@@ -14306,6 +14457,11 @@ def get_ocr_sheet(
                 rebuilt["evidence_missing_artifacts"] = evidence_missing
             if template_blockers:
                 rebuilt["template_resolution_blockers"] = template_blockers
+            base_cell_issues = list(payload.get("cell_issues") or [])
+            rebuilt_cell_issues = list(rebuilt.get("cell_issues") or [])
+            if base_cell_issues and not rebuilt_cell_issues:
+                rebuilt["cell_issues"] = base_cell_issues
+                rebuilt["issue_summary"] = dict(payload.get("issue_summary") or {})
             payload = rebuilt
     return (
         _augment_sheet_review_payload(
@@ -15800,7 +15956,7 @@ def _build_reparse_structural_baseline(
     if isinstance(fallback_payload, dict):
         ocr_payload = dict(fallback_payload)
     else:
-        payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+        payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
         if isinstance(payload, dict):
             ocr_payload = payload
 
@@ -16592,6 +16748,18 @@ def _parse_llm_reparse_audit_issues(
     if not rows or not fields:
         return []
     field_index = {field: idx for idx, field in enumerate(fields)}
+    allowed_issue_codes = {
+        "row_count_shortfall",
+        "week_scope_mismatch",
+        "date_anchor_drift",
+        "mirrored_sibling_columns",
+        "column_swap",
+        "invalid_numeric_spike",
+        "all_quantity_blank",
+        "unexpected_dense_fill",
+        "overextended_span",
+        "missing_blank_anchor_rows",
+    }
     issues: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, list):
@@ -16631,6 +16799,8 @@ def _parse_llm_reparse_audit_issues(
             if "confidence" in field_index and field_index["confidence"] < len(row)
             else None
         )
+        if issue_code and issue_code not in allowed_issue_codes and not reason and not evidence:
+            continue
         if not issue_code and not reason:
             continue
         issue: dict[str, Any] = {
@@ -17281,6 +17451,8 @@ def _augment_llm_reparse_audit_with_structural_feedback(
 ) -> dict[str, Any] | None:
     if not isinstance(llm_audit, dict) or not llm_audit:
         return llm_audit
+    if str(llm_audit.get("provider_switch_reason") or "").strip():
+        return llm_audit
     normalized_rows = [list(row) for row in (candidate_rows or []) if isinstance(row, list)]
     if not normalized_rows:
         return llm_audit
@@ -17832,7 +18004,7 @@ def reparse_order(
                 wait_seconds_override=llm_wait_seconds,
             )
         if not _payload_has_first_pass_ocr_content(pipeline_output_payload):
-            rescue_payload, rescue_error = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+            rescue_payload, rescue_error = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
             if rescue_error is None and isinstance(rescue_payload, dict) and _payload_has_first_pass_ocr_content(rescue_payload):
                 pipeline_output_payload = rescue_payload
                 logger.info(
@@ -18171,6 +18343,10 @@ def reparse_order(
             and expected_weekly_row_count > 0
             and len(rows) < expected_weekly_row_count
             and len(pipeline_rows_for_rescue) >= expected_weekly_row_count
+            and not (
+                llm_quantity_only_active
+                and bool(reparse_quantity_rules.get("allow_blank_structure_rows"))
+            )
         ):
             main_ocr_error = (
                 f"{main_provider}_row_shortfall:{len(rows)}/{expected_weekly_row_count}"
@@ -18627,7 +18803,7 @@ def reparse_order(
                     output_ref = job.get("output_reference") if job else None
                 parsed_output = _load_pipeline_output_with_retry(output_ref)
             if not isinstance(parsed_output, dict):
-                cached_payload, _ = get_ocr_output(order_id, include_legacy_edits=False)
+                cached_payload, _ = _get_ocr_output_without_legacy_edits(order_id)
                 if isinstance(cached_payload, dict):
                     parsed_output = cached_payload
             if parsed_output:
@@ -18859,7 +19035,7 @@ def reparse_order(
     derived_week_id = month_id_from_dates(line_dates, received_at, policy) if line_dates else None
     week_payload = parsed_output_for_debug if isinstance(parsed_output_for_debug, dict) else None
     if not isinstance(week_payload, dict):
-        cached_payload, _ = get_ocr_output(order_id, persist_cache=False, include_legacy_edits=False)
+        cached_payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
         if isinstance(cached_payload, dict):
             week_payload = cached_payload
     week_id = _resolve_sheet_week_id(
@@ -18895,6 +19071,16 @@ def reparse_order(
     )
     if "rows_for_quantity_quality" not in locals():
         rows_for_quantity_quality = [list(row) for row in rows if isinstance(row, list)]
+    quantity_only_validation_enabled = bool(
+        main_provider in {"openai", "gemini"}
+        and llm_quantity_only_active
+        and not llm_rows_replaced_with_pipeline
+        and _rows_look_like_quantity_only(
+            rows=[list(row) for row in rows_for_quantity_quality if isinstance(row, list)],
+            template=template_to_use,
+            rows_are_body_only=bool(reparse_quantity_rules.get("rows_are_body_only")),
+        )
+    )
     if (
         main_provider in {"openai", "gemini"}
         and llm_quantity_only_active
@@ -18914,12 +19100,13 @@ def reparse_order(
             anchor_date_count=len(quality_anchor_dates),
         )
         if quality_expected_row_count > 0:
-            reparse_quality_error, reparse_quality_detail = _evaluate_quantity_only_rows_quality(
-                rows=rows_for_quantity_quality,
-                template=template_to_use,
-                expected_row_count=quality_expected_row_count,
-                reference_rows=pipeline_rows_for_rescue,
-            )
+            if quantity_only_validation_enabled:
+                reparse_quality_error, reparse_quality_detail = _evaluate_quantity_only_rows_quality(
+                    rows=rows_for_quantity_quality,
+                    template=template_to_use,
+                    expected_row_count=quality_expected_row_count,
+                    reference_rows=pipeline_rows_for_rescue,
+                )
             llm_audit_result = _run_reparse_with_heartbeat(
                 ocr_job_id,
                 processing_stage="validation",
@@ -18991,11 +19178,8 @@ def reparse_order(
     date_anchor_detail: dict[str, Any] | None = None
     blank_anchor_error: str | None = None
     blank_anchor_detail: dict[str, Any] | None = None
-    if (
-        main_provider in {"openai", "gemini"}
-        and llm_quantity_only_active
-        and pipeline_rows_for_rescue
-    ):
+    blank_anchor_validation_enabled = bool(quantity_only_validation_enabled and pipeline_rows_for_rescue)
+    if blank_anchor_validation_enabled:
         baseline_fields, baseline_structure_rows, _, _ = _resolve_reparse_baseline_rows_for_structure(
             llm_reparse_baseline
         )
@@ -19043,14 +19227,10 @@ def reparse_order(
         validation_error = line_count_error
         validation_detail = line_count_detail or {}
     if (
-        not validation_error
-        and isinstance(llm_audit_result, dict)
+        isinstance(llm_audit_result, dict)
         and str(llm_audit_result.get("status") or "").lower() == "fail"
     ):
-        if (
-            main_provider in {"openai", "gemini"}
-            and feedback_retry_depth < 1
-        ):
+        if main_provider in {"openai", "gemini"} and feedback_retry_depth < 1:
             logger.info(
                 "Retrying reparse with evaluator feedback order_id={} provider={} depth={}",
                 order_id,
@@ -19068,11 +19248,12 @@ def reparse_order(
                 draft_rows_override=[list(row) for row in rows if isinstance(row, list)],
                 draft_rows_label="Previous failed LLM inference candidate rows",
             )
-        validation_error = "sheet_llm_audit_failed"
-        validation_detail = {
-            "quality_issue": "llm_audit",
-            "llm_audit": llm_audit_result,
-        }
+        if not validation_error:
+            validation_error = "sheet_llm_audit_failed"
+            validation_detail = {
+                "quality_issue": "llm_audit",
+                "llm_audit": llm_audit_result,
+            }
     if (
         not validation_error
         and isinstance(reparse_cost_info, dict)

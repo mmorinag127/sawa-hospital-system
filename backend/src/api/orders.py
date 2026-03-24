@@ -1000,7 +1000,12 @@ def get_ocr_sheet(order_id: str):
         payload["can_confirm"] = False
         return payload
 
-    data, error = order_service.get_ocr_sheet(order_id)
+    try:
+        data, error = order_service.get_ocr_sheet(order_id, prefer_order_lines=False)
+    except TypeError as exc:
+        if "prefer_order_lines" not in str(exc):
+            raise
+        data, error = order_service.get_ocr_sheet(order_id)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
     if error in {"facility_missing", "facility_not_found"}:
