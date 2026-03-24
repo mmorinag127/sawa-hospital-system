@@ -1509,6 +1509,7 @@ export default function OrderDetailPage() {
     width: 0,
     height: 0,
   });
+  const [ocrPreviewMode, setOcrPreviewMode] = useState<"overlay" | "original">("overlay");
   const [ocrPreviewZoom, setOcrPreviewZoom] = useState<number>(1);
   const [activeStep, setActiveStep] = useState<number>(0);
   const [ocrEditMode, setOcrEditMode] = useState<boolean>(false);
@@ -1838,6 +1839,10 @@ export default function OrderDetailPage() {
         URL.revokeObjectURL(objectUrl);
       }
     };
+  }, [order?.id]);
+
+  useEffect(() => {
+    setOcrPreviewMode("overlay");
   }, [order?.id]);
 
   const normalizeSheetEditorPayload = (payload: {
@@ -4595,15 +4600,29 @@ const loadOcrPages = async () => {
       !ocrPagesLoading &&
       !hasUsableOverlayPreview,
   );
+  const canShowOriginalPdfPreview = Boolean(pdfUrl);
+  const shouldShowOriginalPdfPreview = shouldFallbackToRawPdfPreview || ocrPreviewMode === "original";
   const step2FallbackSummary =
     shouldFallbackToRawPdfPreview && pdfUrl
       ? "原本PDFを表示しています。右のシートを直接修正してください。"
       : "";
-  const overlayPreviewModeLabel = shouldFallbackToRawPdfPreview
-    ? "原本PDF (fallback)"
+  const canSwitchPreviewMode = Boolean(canShowOriginalPdfPreview && hasUsableOverlayPreview && !shouldFallbackToRawPdfPreview);
+  const overlayPreviewModeLabel = shouldShowOriginalPdfPreview
+    ? shouldFallbackToRawPdfPreview
+      ? "原本PDF (fallback)"
+      : "原本PDF"
     : usingSyntheticOverlay
       ? `OCRプレビュー (${activeOcrPage?.pdf_variant_used === "corrected" ? "corrected PDF" : "raw PDF"})`
       : "OCRオーバーレイ";
+  useEffect(() => {
+    if (shouldFallbackToRawPdfPreview) {
+      setOcrPreviewMode("original");
+      return;
+    }
+    if (!canShowOriginalPdfPreview && ocrPreviewMode === "original") {
+      setOcrPreviewMode("overlay");
+    }
+  }, [canShowOriginalPdfPreview, ocrPreviewMode, shouldFallbackToRawPdfPreview]);
   const activeTableBox = showTableBoxEditor && tableBoxDraft ? tableBoxDraft : ocrTableBox;
   const overlayBox = (() => {
     if (!activeTableBox || overlayRowCount < 1 || overlayColumnCount < 1) return null;
@@ -6323,37 +6342,59 @@ const loadOcrPages = async () => {
                               <span className="subtle">Page {activeOcrPageLabel}</span>
                             ) : null}
                           </div>
-                          <div className="preview-zoom-controls">
-                            <button
-                              className="btn ghost"
-                              type="button"
-                              onClick={() => updateOcrPreviewZoom(-OCR_PREVIEW_ZOOM_STEP)}
-                              disabled={ocrPreviewZoom <= OCR_PREVIEW_ZOOM_MIN}
-                            >
-                              -
-                            </button>
-                            <button className="btn ghost" type="button" onClick={resetOcrPreviewZoom}>
-                              {ocrPreviewZoomPercent}%
-                            </button>
-                            <button
-                              className="btn ghost"
-                              type="button"
-                              onClick={() => updateOcrPreviewZoom(OCR_PREVIEW_ZOOM_STEP)}
-                              disabled={ocrPreviewZoom >= OCR_PREVIEW_ZOOM_MAX}
-                            >
-                              +
-                            </button>
+                          <div className="preview-header-tools">
+                            {canSwitchPreviewMode ? (
+                              <div className="preview-mode-toggle" role="tablist" aria-label="preview source">
+                                <button
+                                  className={`btn ghost ${ocrPreviewMode === "overlay" ? "active" : ""}`}
+                                  type="button"
+                                  onClick={() => setOcrPreviewMode("overlay")}
+                                  aria-pressed={ocrPreviewMode === "overlay"}
+                                >
+                                  OCR
+                                </button>
+                                <button
+                                  className={`btn ghost ${ocrPreviewMode === "original" ? "active" : ""}`}
+                                  type="button"
+                                  onClick={() => setOcrPreviewMode("original")}
+                                  aria-pressed={ocrPreviewMode === "original"}
+                                >
+                                  原本PDF
+                                </button>
+                              </div>
+                            ) : null}
+                            <div className="preview-zoom-controls">
+                              <button
+                                className="btn ghost"
+                                type="button"
+                                onClick={() => updateOcrPreviewZoom(-OCR_PREVIEW_ZOOM_STEP)}
+                                disabled={ocrPreviewZoom <= OCR_PREVIEW_ZOOM_MIN}
+                              >
+                                -
+                              </button>
+                              <button className="btn ghost" type="button" onClick={resetOcrPreviewZoom}>
+                                {ocrPreviewZoomPercent}%
+                              </button>
+                              <button
+                                className="btn ghost"
+                                type="button"
+                                onClick={() => updateOcrPreviewZoom(OCR_PREVIEW_ZOOM_STEP)}
+                                disabled={ocrPreviewZoom >= OCR_PREVIEW_ZOOM_MAX}
+                              >
+                                +
+                              </button>
+                            </div>
                           </div>
                         </div>
                         <div className="edit-hint active">
-                          {shouldFallbackToRawPdfPreview
+                          {shouldShowOriginalPdfPreview
                             ? step2FallbackSummary || "原本PDFを見ながら、右のシートだけを更新します。"
                             : "左は比較用です。編集は右のシートだけを更新します。"}
                         </div>
-                        {shouldFallbackToRawPdfPreview ? (
+                        {shouldShowOriginalPdfPreview ? (
                           pdfUrl ? (
                             <iframe
-                              title="order-pdf-fallback"
+                              title={shouldFallbackToRawPdfPreview ? "order-pdf-fallback" : "order-pdf-original"}
                               src={pdfPreviewUrl}
                               className="pdf-frame pdf-frame-compact"
                             />
@@ -6380,12 +6421,12 @@ const loadOcrPages = async () => {
                         ) : (
                           <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
                         )}
-                        {!shouldFallbackToRawPdfPreview && usingSyntheticOverlay ? (
+                        {!shouldShowOriginalPdfPreview && usingSyntheticOverlay ? (
                           <p className="subtle">
                             OCR overlay artifact が無いため、PDFレンダリング画像を比較表示しています。
                           </p>
                         ) : null}
-                        {!shouldFallbackToRawPdfPreview ? (
+                        {!shouldShowOriginalPdfPreview ? (
                           <div className="layout-toggle">
                             <button
                               className="btn ghost"
@@ -6400,7 +6441,7 @@ const loadOcrPages = async () => {
                             </span>
                           </div>
                         ) : null}
-                        {!shouldFallbackToRawPdfPreview && showLayoutOverlay ? (
+                        {!shouldShowOriginalPdfPreview && showLayoutOverlay ? (
                           showLayoutOverlayImage ? (
                             <img
                               src={layoutOverlayUrl || ""}
@@ -7860,6 +7901,29 @@ const loadOcrPages = async () => {
           flex-direction: column;
           gap: 2px;
           min-width: 0;
+        }
+
+        .preview-header-tools {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .preview-mode-toggle {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px;
+          border-radius: 999px;
+          background: #f1ece1;
+        }
+
+        .preview-mode-toggle :global(.btn.active) {
+          background: #1f2a2a;
+          color: #f7f2e7;
+          border-color: rgba(25, 32, 30, 0.18);
         }
 
         .preview-zoom-controls {
