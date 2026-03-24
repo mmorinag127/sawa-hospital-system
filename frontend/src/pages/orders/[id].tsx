@@ -518,6 +518,15 @@ const defaultHeaderForFacilityTemplateColumn = (column: {
 
 const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
 
+const createEmptyFacilityTemplateColumn = (index: number): FacilityTemplateColumn => ({
+  index,
+  role: "quantity",
+  header: defaultHeaderForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
+  name: "",
+  diet_type: "unknown",
+  area_id: "X",
+});
+
 const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateColumn[] => {
   if (!Array.isArray(columns)) return [];
   return columns
@@ -3803,6 +3812,16 @@ const loadOcrPages = async () => {
     applyFacilityTemplateColumnSwap(leftIndex, rightIndex);
   };
 
+  const appendFacilityTemplateColumn = () => {
+    setShowFacilityTemplateEditor(true);
+    setFacilityTemplateSwapLeft("");
+    setFacilityTemplateSwapRight("");
+    setFacilityTemplateColumnDraft((prev) =>
+      reindexFacilityTemplateColumns([...prev, createEmptyFacilityTemplateColumn(prev.length)]),
+    );
+    setFacilityTemplateMessage("施設区分列を追加しました。必要なら編集して保存してください。");
+  };
+
   const saveFacilityTemplateColumns = async () => {
     setShowFacilityTemplateEditor(true);
     if (!order?.id) {
@@ -6627,6 +6646,14 @@ const loadOcrPages = async () => {
                               disabled={!facilityTemplateColumnDraft.length}
                             >
                               列を入れ替える
+                            </button>
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={appendFacilityTemplateColumn}
+                              disabled={facilityTemplateSaving || !facility || step1Incomplete}
+                            >
+                              列を追加
                             </button>
                             <button
                               className="btn primary"
