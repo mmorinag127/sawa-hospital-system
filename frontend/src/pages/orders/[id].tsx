@@ -520,13 +520,34 @@ const defaultHeaderForFacilityTemplateColumn = (column: {
   return "";
 };
 
+const defaultNameForFacilityTemplateColumn = (column: {
+  role?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+}) => {
+  const role = String(column.role || "").trim().toLowerCase();
+  const explicitName = String(column.name || "").trim();
+  if (explicitName) return explicitName;
+  if (role === "date") return "date_mmdd";
+  if (role === "daypart") return "daypart";
+  if (role === "menu_name") return "menu";
+  if (role === "note") return "remarks";
+  if (role === "quantity") {
+    const diet = normalizeDietTypeToken(column.diet_type || "") || "unknown";
+    const area = normalizeFacilityAreaToken(column.area_id || "");
+    return `qty.${diet}_${area === "X" ? "x" : area.toLowerCase()}`;
+  }
+  return "";
+};
+
 const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
 
 const createEmptyFacilityTemplateColumn = (index: number): FacilityTemplateColumn => ({
   index,
   role: "quantity",
   header: defaultHeaderForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
-  name: "",
+  name: defaultNameForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
   diet_type: "unknown",
   area_id: "X",
 });
@@ -564,7 +585,7 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
             : idx,
         role,
         header: header || defaultHeaderForFacilityTemplateColumn({ role, header, name, diet_type: dietType, area_id: areaId }),
-        name,
+        name: name || defaultNameForFacilityTemplateColumn({ role, name, diet_type: dietType, area_id: areaId }),
         diet_type: dietType,
         area_id: areaId,
       };
@@ -620,6 +641,7 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
       payload.area_id = areaId;
       payload.diet_type_locked = true;
       payload.area_id_locked = true;
+      payload.name_locked = true;
     }
     return payload;
   });
@@ -676,6 +698,8 @@ const preferredDietOrder = [
 
 const facilityTemplateCustomDietTypeValue = "__custom_diet_type__";
 const facilityTemplateCustomAreaValue = "__custom_area_id__";
+const facilityTemplateCustomHeaderValue = "__custom_header__";
+const facilityTemplateCustomNameValue = "__custom_name__";
 const knownFacilityTemplateDietTypes = new Set(preferredDietOrder);
 const facilityTemplateDietTypeOptions = preferredDietOrder.map((value) => ({
   value,
@@ -740,6 +764,80 @@ const resolveFacilityTemplateAreaEditorValue = (
   return options.some((option) => option.value === normalized)
     ? normalized
     : facilityTemplateCustomAreaValue;
+};
+
+const buildFacilityTemplateHeaderOptions = (
+  column: FacilityTemplateColumn,
+  columns: FacilityTemplateColumn[],
+) => {
+  const options: { value: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const pushOption = (value?: string | null) => {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    options.push({ value: normalized, label: normalized });
+  };
+
+  pushOption(defaultHeaderForFacilityTemplateColumn(column));
+  columns.forEach((candidate) => {
+    if (candidate.role !== column.role) return;
+    if (
+      isQuantityRole(column.role) &&
+      (normalizeDietTypeToken(candidate.diet_type || "") !== normalizeDietTypeToken(column.diet_type || "") ||
+        normalizeFacilityAreaToken(candidate.area_id || "") !== normalizeFacilityAreaToken(column.area_id || ""))
+    ) {
+      return;
+    }
+    pushOption(candidate.header);
+  });
+  pushOption(column.header);
+  return options;
+};
+
+const buildFacilityTemplateNameOptions = (
+  column: FacilityTemplateColumn,
+  columns: FacilityTemplateColumn[],
+) => {
+  const options: { value: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const pushOption = (value?: string | null) => {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    options.push({ value: normalized, label: normalized });
+  };
+
+  pushOption(defaultNameForFacilityTemplateColumn(column));
+  columns.forEach((candidate) => {
+    if (candidate.role !== column.role) return;
+    if (
+      isQuantityRole(column.role) &&
+      (normalizeDietTypeToken(candidate.diet_type || "") !== normalizeDietTypeToken(column.diet_type || "") ||
+        normalizeFacilityAreaToken(candidate.area_id || "") !== normalizeFacilityAreaToken(column.area_id || ""))
+    ) {
+      return;
+    }
+    pushOption(candidate.name);
+  });
+  pushOption(column.name);
+  return options;
+};
+
+const resolveFacilityTemplateHeaderEditorValue = (
+  column: FacilityTemplateColumn,
+  options: { value: string; label: string }[],
+) => {
+  const value = String(column.header || "").trim();
+  return options.some((option) => option.value === value) ? value : facilityTemplateCustomHeaderValue;
+};
+
+const resolveFacilityTemplateNameEditorValue = (
+  column: FacilityTemplateColumn,
+  options: { value: string; label: string }[],
+) => {
+  const value = String(column.name || "").trim();
+  return options.some((option) => option.value === value) ? value : facilityTemplateCustomNameValue;
 };
 
 const formatTimestamp = (value?: string | null) => {
@@ -1402,6 +1500,21 @@ const inferQuantityColumnMeta = (field?: string | null, header?: string | null) 
         dietType = token;
         areaId = normalizeFacilityAreaToken(body.slice(token.length + 1));
         break;
+      }
+    }
+    if (!dietType) {
+      const parts = body.split("_");
+      if (parts.length > 1) {
+        const candidateArea = parts[parts.length - 1];
+        const normalizedArea = normalizeFacilityAreaToken(candidateArea);
+        if (normalizedArea !== "X" || candidateArea === "x") {
+          dietType = normalizeDietTypeToken(parts.slice(0, -1).join("_"));
+          areaId = normalizedArea;
+        }
+      }
+      if (!dietType) {
+        dietType = normalizeDietTypeToken(body);
+        areaId = "X";
       }
     }
   }
@@ -4085,6 +4198,29 @@ const loadOcrPages = async () => {
         if (key === "role" && value !== "quantity") {
           next.diet_type = "";
           next.area_id = "";
+        }
+        if (key === "role") {
+          if (value === "quantity") {
+            next.diet_type = normalizeDietTypeToken(next.diet_type || "") || "unknown";
+            next.area_id = normalizeFacilityAreaToken(next.area_id || "") || "X";
+          }
+          next.header = defaultHeaderForFacilityTemplateColumn(next);
+          next.name = defaultNameForFacilityTemplateColumn(next);
+          return next;
+        }
+        if (next.role === "quantity" && (key === "diet_type" || key === "area_id")) {
+          next.diet_type = normalizeDietTypeToken(next.diet_type || "") || "unknown";
+          next.area_id = normalizeFacilityAreaToken(next.area_id || "") || "X";
+          next.header = defaultHeaderForFacilityTemplateColumn(next);
+          next.name = defaultNameForFacilityTemplateColumn(next);
+          return next;
+        }
+        if (next.role === "quantity" && (key === "header" || key === "name")) {
+          const inferred = inferQuantityColumnMeta(key === "name" ? value : next.name, key === "header" ? value : next.header);
+          if (inferred) {
+            next.diet_type = inferred.diet_type;
+            next.area_id = inferred.area_id || "X";
+          }
         }
         return next;
       }),
@@ -7073,7 +7209,7 @@ const loadOcrPages = async () => {
                           </div>
                         </div>
                         <p className="subtle">
-                          区分とエリアは基本的に選択式です。既定にないものだけ「個別入力」を使ってください。
+                          表示名・内部名・区分・エリアは基本的に選択式です。既定にないものだけ「個別入力」を使ってください。
                         </p>
                         {!facility ? (
                           <p className="subtle">施設を選択すると施設区分列を編集できます。</p>
@@ -7094,6 +7230,22 @@ const loadOcrPages = async () => {
                               <tbody>
                                 {facilityTemplateColumnDraft.map((column, idx) => {
                                   const isQuantityColumn = isQuantityRole(column.role);
+                                  const headerOptions = buildFacilityTemplateHeaderOptions(
+                                    column,
+                                    facilityTemplateColumnDraft,
+                                  );
+                                  const nameOptions = buildFacilityTemplateNameOptions(
+                                    column,
+                                    facilityTemplateColumnDraft,
+                                  );
+                                  const headerEditorValue = resolveFacilityTemplateHeaderEditorValue(
+                                    column,
+                                    headerOptions,
+                                  );
+                                  const nameEditorValue = resolveFacilityTemplateNameEditorValue(
+                                    column,
+                                    nameOptions,
+                                  );
                                   const dietEditorValue = resolveFacilityTemplateDietEditorValue(column);
                                   const areaEditorValue = resolveFacilityTemplateAreaEditorValue(
                                     column,
@@ -7118,22 +7270,72 @@ const loadOcrPages = async () => {
                                         </select>
                                       </td>
                                       <td>
-                                        <input
-                                          className="input"
-                                          value={column.header || ""}
-                                          onChange={(event) =>
-                                            updateFacilityTemplateColumn(idx, "header", event.target.value)
-                                          }
-                                        />
+                                        <div className="facility-template-cell-stack">
+                                          <select
+                                            className="input"
+                                            value={headerEditorValue}
+                                            onChange={(event) =>
+                                              updateFacilityTemplateColumn(
+                                                idx,
+                                                "header",
+                                                event.target.value === facilityTemplateCustomHeaderValue
+                                                  ? ""
+                                                  : event.target.value,
+                                              )
+                                            }
+                                          >
+                                            {headerOptions.map((option) => (
+                                              <option key={option.value} value={option.value}>
+                                                {option.label}
+                                              </option>
+                                            ))}
+                                            <option value={facilityTemplateCustomHeaderValue}>個別入力</option>
+                                          </select>
+                                          {headerEditorValue === facilityTemplateCustomHeaderValue ? (
+                                            <input
+                                              className="input"
+                                              value={column.header || ""}
+                                              placeholder="個別表示名"
+                                              onChange={(event) =>
+                                                updateFacilityTemplateColumn(idx, "header", event.target.value)
+                                              }
+                                            />
+                                          ) : null}
+                                        </div>
                                       </td>
                                       <td>
-                                        <input
-                                          className="input"
-                                          value={column.name || ""}
-                                          onChange={(event) =>
-                                            updateFacilityTemplateColumn(idx, "name", event.target.value)
-                                          }
-                                        />
+                                        <div className="facility-template-cell-stack">
+                                          <select
+                                            className="input"
+                                            value={nameEditorValue}
+                                            onChange={(event) =>
+                                              updateFacilityTemplateColumn(
+                                                idx,
+                                                "name",
+                                                event.target.value === facilityTemplateCustomNameValue
+                                                  ? ""
+                                                  : event.target.value,
+                                              )
+                                            }
+                                          >
+                                            {nameOptions.map((option) => (
+                                              <option key={option.value} value={option.value}>
+                                                {option.label}
+                                              </option>
+                                            ))}
+                                            <option value={facilityTemplateCustomNameValue}>個別入力</option>
+                                          </select>
+                                          {nameEditorValue === facilityTemplateCustomNameValue ? (
+                                            <input
+                                              className="input"
+                                              value={column.name || ""}
+                                              placeholder="個別内部名"
+                                              onChange={(event) =>
+                                                updateFacilityTemplateColumn(idx, "name", event.target.value)
+                                              }
+                                            />
+                                          ) : null}
+                                        </div>
                                       </td>
                                       <td>
                                         <div className="facility-template-cell-stack">

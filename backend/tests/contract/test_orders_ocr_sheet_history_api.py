@@ -447,6 +447,41 @@ def test_orders_facility_template_columns_save_prefers_explicit_quantity_mapping
         assert facility_service.update_config(order["facility"], previous_config)
 
 
+def test_orders_facility_template_columns_save_preserves_locked_custom_quantity_name():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-explicit-002")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        columns = [
+            {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+            {
+                "index": 1,
+                "role": "quantity",
+                "header": "特食3F",
+                "name": "qty.special_diet_3f",
+                "diet_type": "special_diet",
+                "area_id": "3F",
+                "diet_type_locked": True,
+                "area_id_locked": True,
+                "name_locked": True,
+            },
+        ]
+        save_res = client.put(f"/orders/{order['id']}/facility-template-columns", json={"columns": columns})
+        assert save_res.status_code == 200
+        payload = save_res.json()
+        resolved_columns = (((payload.get("resolved_config") or {}).get("fax_template") or {}).get("columns") or [])
+        quantity_column = next(item for item in resolved_columns if item.get("index") == 1)
+        assert quantity_column.get("header") == "特食3F"
+        assert quantity_column.get("diet_type") == "special_diet"
+        assert quantity_column.get("area_id") == "3F"
+        assert quantity_column.get("name") == "qty.special_diet_3f"
+        assert quantity_column.get("name_locked") is True
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
+
+
 def test_orders_facility_template_columns_allows_operator_auth(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")

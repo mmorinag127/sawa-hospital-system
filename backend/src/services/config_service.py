@@ -380,6 +380,30 @@ def _default_header_for_quantity(diet: str, area: str) -> str:
     return f"{diet_label}{area.upper()}"
 
 
+def _parse_quantity_field_name(value: object) -> dict[str, str] | None:
+    raw = str(value or "").strip().lower()
+    if not raw.startswith("qty."):
+        return None
+    body = re.sub(r"[^a-z0-9_]+", "_", raw[4:]).strip("_")
+    if not body:
+        return None
+    raw_diet = body
+    raw_area = "x"
+    if "_" in body:
+        candidate_diet, candidate_area = body.rsplit("_", 1)
+        normalized_candidate_area = _normalize_field_area_token(candidate_area)
+        if normalized_candidate_area != "x" or candidate_area == "x":
+            raw_diet = candidate_diet
+            raw_area = candidate_area
+    diet = _normalize_field_diet_token(raw_diet)
+    area = _normalize_field_area_token(raw_area)
+    return {
+        "diet": diet,
+        "area": area,
+        "field": f"qty.{raw_diet}_{raw_area}",
+    }
+
+
 def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
     if not isinstance(columns, list):
         return []
@@ -396,12 +420,16 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
         header = str(col.get("header") or "").strip()
         name = str(col.get("name") or "").strip()
         if role == "quantity":
+            parsed_name = _parse_quantity_field_name(name)
             label_token = header or name
             explicit_diet_raw = str(col.get("diet_type") or "").strip()
             explicit_diet = _normalize_field_diet_token(explicit_diet_raw)
             diet_locked = bool(col.get("diet_type_locked", False) or col.get("diet_type_explicit", False))
+            name_locked = bool(col.get("name_locked", False) or col.get("name_explicit", False))
             if diet_locked and explicit_diet_raw:
                 diet = explicit_diet or explicit_diet_raw
+            elif parsed_name:
+                diet = parsed_name["diet"] or "unknown"
             else:
                 inferred_diet = _normalize_field_diet_token(label_token or col.get("diet_type"))
                 diet = inferred_diet if (header or name) else explicit_diet
@@ -420,6 +448,8 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
             area_locked = bool(col.get("area_id_locked", False) or col.get("area_id_explicit", False))
             if area_locked and raw_area:
                 area = _normalize_field_area_token(raw_area)
+            elif parsed_name:
+                area = parsed_name["area"] or "x"
             else:
                 area = _normalize_field_area_token(raw_area)
                 if area == "x":
@@ -428,6 +458,7 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                         area = fallback_area
             col.pop("diet_type_explicit", None)
             col.pop("area_id_explicit", None)
+            col.pop("name_explicit", None)
             if diet_locked:
                 col["diet_type_locked"] = True
             else:
@@ -436,11 +467,18 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                 col["area_id_locked"] = True
             else:
                 col.pop("area_id_locked", None)
+            if name_locked:
+                col["name_locked"] = True
+            else:
+                col.pop("name_locked", None)
             col["diet_type"] = diet
             col["area_id"] = area.upper() if area != "x" else "X"
             if not header:
                 col["header"] = _default_header_for_quantity(diet, area)
-            col["name"] = f"qty.{diet}_{area}"
+            if name_locked and parsed_name:
+                col["name"] = parsed_name["field"]
+            else:
+                col["name"] = f"qty.{diet}_{area}"
         else:
             if not header:
                 default_header = _default_header_for_role(role)
