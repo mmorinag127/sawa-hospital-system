@@ -1,5 +1,6 @@
 env        = "prod"
 project_id = "your-gcp-project-id-prod"
+project_number = "123456789012"
 region     = "asia-northeast2"
 location   = "ASIA-NORTHEAST2"
 

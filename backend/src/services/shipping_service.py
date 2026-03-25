@@ -282,6 +282,24 @@ def _normalize_tracking_number(value: object) -> str:
     return normalize_tracking_key(str(value))
 
 
+def _coerce_excel_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
 def _find_column_indexes(ws, header_row: int) -> dict[str, int]:
     col_map: dict[str, int] = {}
     for col in range(1, ws.max_column + 1):
@@ -340,6 +358,10 @@ def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
             tracking_key = _normalize_tracking_number(raw_tracking)
             if not tracking_key or not _has_tracking_number(tracking_key):
                 continue
+            ship_date = None
+            ship_date_col = col_map.get("ship_date")
+            if ship_date_col:
+                ship_date = _coerce_excel_date(ws.cell(row=row_idx, column=ship_date_col).value)
             facility_name = ""
             facility_col = col_map.get("facility")
             if facility_col:
@@ -353,6 +375,7 @@ def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
                     "arrival_col": col_map["arrival"],
                     "flag_col": col_map["delivery_flag"],
                     "facility_name": facility_name,
+                    "ship_date": ship_date,
                 }
             )
             if tracking_key not in seen_numbers:
@@ -366,11 +389,15 @@ def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
             continue
         status_map[status.tracking_key] = status
     facility_by_tracking: dict[str, str] = {}
+    ship_date_by_tracking: dict[str, date] = {}
     for ref in row_refs:
         facility_name = str(ref.get("facility_name") or "").strip()
         tracking_key = str(ref.get("tracking_key") or "").strip()
         if facility_name and tracking_key and tracking_key not in facility_by_tracking:
             facility_by_tracking[tracking_key] = facility_name
+        ship_date = ref.get("ship_date")
+        if tracking_key and isinstance(ship_date, date) and tracking_key not in ship_date_by_tracking:
+            ship_date_by_tracking[tracking_key] = ship_date
 
     delivered_rows = 0
     pending_rows = 0
@@ -420,6 +447,7 @@ def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
         "all_delivered": len(row_refs) > 0 and pending_rows == 0,
         "_status_items": [status.serialize() for status in status_records],
         "_facility_by_tracking": facility_by_tracking,
+        "_ship_date_by_tracking": ship_date_by_tracking,
     }
     logger.info("Shipping Excel enriched", path=str(output_path), **summary)
     return output_path, summary

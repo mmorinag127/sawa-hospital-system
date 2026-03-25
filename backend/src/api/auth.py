@@ -85,6 +85,9 @@ def _load_active_user_roles() -> dict[str, str]:
 
 
 def _auth_header(request: Request) -> str:
+    forwarded_auth = request.headers.get("X-App-Authorization", "")
+    if forwarded_auth:
+        return forwarded_auth
     auth = request.headers.get("Authorization", "")
     if auth:
         return auth

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -84,8 +85,27 @@ def _normalize_prefix(prefix: str) -> str:
     return prefix if prefix.endswith("/") else f"{prefix}/"
 
 
+def _unwrap_pubsub_push_payload(payload: dict) -> dict:
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return payload
+    encoded_data = message.get("data")
+    if not isinstance(encoded_data, str) or not encoded_data:
+        raise ValueError("Invalid Pub/Sub push payload: missing message.data")
+    try:
+        decoded = base64.b64decode(encoded_data)
+        decoded_payload = json.loads(decoded.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("Invalid Pub/Sub push payload: cannot decode message.data") from exc
+    if not isinstance(decoded_payload, dict):
+        raise ValueError("Invalid Pub/Sub push payload: decoded body is not an object")
+    return decoded_payload
+
+
 def parse_gcs_event(payload: dict) -> Tuple[str, str, str]:
     data = payload.get("data") or payload
+    if isinstance(data, dict) and isinstance(data.get("message"), dict):
+        data = _unwrap_pubsub_push_payload(data)
     bucket = data.get("bucket") or data.get("bucketId")
     name = data.get("name") or data.get("object") or data.get("objectId")
     generation = str(data.get("generation") or data.get("metageneration") or "")

@@ -580,7 +580,12 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_staff_daycare_other_forbidden_v1",
+        "fax_layout_regular_staff_daycare_v1"
+      ]
     },
     {
       "facility_name": "池袋病院内事業所 傑合同会社",
@@ -660,6 +665,11 @@
           }
         ]
       },
+      "fax_template_id": "fax_layout_soft_packaging_forbidden_v1",
+      "fax_template_ids": [
+        "fax_layout_soft_packaging_forbidden_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
       "label_profile_override": {
         "expiry_offset_months": 3
       }

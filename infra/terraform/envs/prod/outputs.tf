@@ -26,8 +26,12 @@ output "pubsub_subscription" {
   value = module.pubsub.subscription
 }
 
-output "scheduler_job" {
-  value = module.scheduler.job_name
+output "ingest_retry_scheduler_job" {
+  value = module.ingest_retry_scheduler.job_name
+}
+
+output "shipping_tracking_refresh_scheduler_job" {
+  value = module.shipping_tracking_refresh_scheduler.job_name
 }
 
 output "cloudsql_connection_name" {

@@ -1,4 +1,6 @@
 import importlib
+import base64
+import json
 import logging
 import pathlib
 import sys
@@ -110,6 +112,29 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def test_parse_gcs_event_accepts_direct_payload(self):
+        bucket, name, generation = pipeline_main.parse_gcs_event(
+            {"bucket": "bucket", "name": "input/sample.pdf", "generation": "12345"}
+        )
+
+        self.assertEqual((bucket, name, generation), ("bucket", "input/sample.pdf", "12345"))
+
+    def test_parse_gcs_event_accepts_pubsub_push_wrapper(self):
+        body = {"bucket": "bucket", "name": "input/sample.pdf", "generation": "12345"}
+        encoded = base64.b64encode(json.dumps(body).encode("utf-8")).decode("utf-8")
+
+        bucket, name, generation = pipeline_main.parse_gcs_event(
+            {"message": {"data": encoded}, "subscription": "projects/test/subscriptions/demo"}
+        )
+
+        self.assertEqual((bucket, name, generation), ("bucket", "input/sample.pdf", "12345"))
+
+    def test_parse_gcs_event_rejects_invalid_pubsub_wrapper(self):
+        with self.assertRaises(ValueError):
+            pipeline_main.parse_gcs_event(
+                {"message": {"data": "not-base64"}, "subscription": "projects/test/subscriptions/demo"}
+            )
+
     def test_upload_corrected_pdf_artifact_returns_uri_when_correction_applied(self):
         with mock.patch.object(
             pipeline_main,

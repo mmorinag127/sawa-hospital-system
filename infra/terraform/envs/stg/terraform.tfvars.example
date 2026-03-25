@@ -1,18 +1,50 @@
 env        = "stg"
-project_id = "your-gcp-project-id-stg"
-region     = "asia-northeast1"
-location   = "ASIA-NORTHEAST1"
+project_id = "sawahospitalsystem"
+project_number = "167795504375"
+region     = "asia-northeast2"
+location   = "ASIA-NORTHEAST2"
 
 raw_retention_days     = 60
-firestore_location_id  = "asia-northeast1"
-secret_ids = []
+firestore_location_id  = "asia-northeast2"
+firestore_enabled      = false
+project_services       = []
+secret_ids = [
+  "db-password-stg",
+]
 
-cloudrun_services = {
-  web    = "gcr.io/your-project/web:latest"
-  worker = "gcr.io/your-project/worker:latest"
+cloudrun_secret_env_vars = {
+  DB_PASSWORD    = "db-password-stg"
+  GEMINI_API_KEY = "gemini-api-key"
+  GOOGLE_API_KEY = "gemini-api-key"
 }
 
-# pubsub_topic_name        = "orders-stg"
-# pubsub_subscription_name = "orders-stg-push"
+cloudrun_services = {
+  web            = "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/frontend:stg-frontend-YYYYMMDD-HHMMSS"
+  worker         = "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-YYYYMMDD-HHMMSS"
+  "ocr-pipeline" = "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/ocr-pipeline:stg-ocr-YYYYMMDD-HHMMSS"
+}
 
-# worker_service_name  = "worker-stg"
+cloudrun_service_resources = {
+  "ocr-pipeline" = {
+    cpu    = "2"
+    memory = "8Gi"
+  }
+}
+
+cloudrun_worker_url_override = ""
+
+auth_disabled = false
+operator_user = "admin"
+operator_password = "set-stg-admin-password-here"
+google_oauth_client_id = "your-stg-login-client-id.apps.googleusercontent.com"
+allowed_emails = ["user@example.com"]
+admin_emails = ["admin@example.com"]
+
+db_instance_name = "orders-stg"
+db_name          = "orders"
+db_user          = "orders_app"
+db_tier          = "db-f1-micro"
+db_password_secret_id = "db-password-stg"
+db_deletion_protection = false
+
+notification_emails = ["alerts@example.com"]

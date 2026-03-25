@@ -63,11 +63,40 @@ resource "google_service_account" "run_exec" {
   display_name = "Cloud Run exec ${each.key} (${var.env})"
 }
 
+locals {
+  service_secret_refs = {
+    for service_name, _ in var.services :
+    service_name => merge(var.secret_env_vars, lookup(var.service_secret_env_vars, service_name, {}))
+  }
+}
+
+resource "google_project_iam_member" "secret_accessor" {
+  for_each = {
+    for service_name, secret_map in local.service_secret_refs :
+    service_name => service_name
+    if length(secret_map) > 0
+  }
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.run_exec[each.key].email}"
+}
+
+resource "google_project_iam_member" "cloudsql_client" {
+  for_each = length(var.cloudsql_instances) > 0 ? var.services : {}
+  project  = var.project_id
+  role     = "roles/cloudsql.client"
+  member   = "serviceAccount:${google_service_account.run_exec[each.key].email}"
+}
+
 resource "google_cloud_run_v2_service" "service" {
   for_each = var.services
   name     = "${each.key}-${var.env}"
   location = var.region
   project  = var.project_id
+  depends_on = [
+    google_project_iam_member.secret_accessor,
+    google_project_iam_member.cloudsql_client,
+  ]
 
   template {
     timeout         = var.request_timeout

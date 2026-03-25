@@ -88,3 +88,19 @@ def test_operator_basic_cannot_access_admin_route(monkeypatch):
     client = TestClient(app)
     res = client.get("/users", headers=_basic_header("operator", "operator-secret"))
     assert res.status_code == 403
+
+
+def test_proxy_header_can_carry_operator_auth_when_authorization_is_reserved(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    headers = {
+        "Authorization": "Bearer cloud-run-identity-token",
+        "X-App-Authorization": _basic_header("operator", "secret")["Authorization"],
+    }
+    res = client.get("/orders", headers=headers)
+    assert res.status_code == 200

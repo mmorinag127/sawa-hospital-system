@@ -1,5 +1,6 @@
 env        = "dev"
 project_id = "your-gcp-project-id"
+project_number = "123456789012"
 region     = "asia-northeast1"
 location   = "ASIA-NORTHEAST1"
 
@@ -9,8 +10,9 @@ firestore_location_id  = "asia-northeast1"
 secret_ids = ["db-password"]
 
 cloudrun_services = {
-  web    = "gcr.io/your-project/web:latest"
-  worker = "gcr.io/your-project/worker:latest"
+  web            = "gcr.io/your-project/web:latest"
+  worker         = "gcr.io/your-project/worker:latest"
+  "ocr-pipeline" = "gcr.io/your-project/ocr-pipeline:latest"
 }
 
 cloudrun_service_resources = {

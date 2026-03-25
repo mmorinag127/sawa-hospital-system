@@ -32,5 +32,5 @@ def generate_order_form(
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="注文書_自動生成.xlsx",
+        filename=output_path.name,
     )

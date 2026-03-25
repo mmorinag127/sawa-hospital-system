@@ -7,11 +7,20 @@ from pathlib import Path
 from typing import Any
 
 
-def load_template_config(db, template_id: str, collection: str = "templates") -> dict:
+def default_template_collection() -> str:
+    return (
+        os.getenv("OCR_TEMPLATE_COLLECTION", "").strip()
+        or os.getenv("TEMPLATE_COLLECTION", "").strip()
+        or "templates"
+    )
+
+
+def load_template_config(db, template_id: str, collection: str | None = None) -> dict:
+    target_collection = collection or default_template_collection()
     cfg = _load_template_config_from_registry(template_id)
     if cfg:
         return cfg
-    doc = db.collection(collection).document(template_id).get()
+    doc = db.collection(target_collection).document(template_id).get()
     if not doc.exists:
         raise RuntimeError(f"Template not found: {template_id}")
     cfg = doc.to_dict() or {}

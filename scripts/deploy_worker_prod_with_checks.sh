@@ -1,19 +1,115 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 PROJECT_ID="${PROJECT_ID:-sawahospitalsystem}"
 REGION="${REGION:-asia-northeast2}"
 SERVICE="${SERVICE:-worker-prod}"
+WEB_SERVICE="${WEB_SERVICE:-web-prod}"
 IMAGE="${1:-}"
 ORDER_ID="${2:-}"
 OPERATOR_USER="${OPERATOR_USER:-}"
 OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-}"
-WEB_URL="${WEB_URL:-https://web-prod-avlnzjjrca-dt.a.run.app}"
+WEB_URL="${WEB_URL:-}"
 RUN_LOCAL_REGRESSION="${RUN_LOCAL_REGRESSION:-1}"
 STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-1}"
+STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-1}"
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}"
+USE_CLOUD_RUN_PROXY="${USE_CLOUD_RUN_PROXY:-0}"
 OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO="${OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO:-0.99}"
 OCR_SHEET_GATE_ABS_MAX_QTY="${OCR_SHEET_GATE_ABS_MAX_QTY:-50}"
+PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
+PROXY_PIDS=()
+PROXY_LOGS=()
+
+cleanup_proxies() {
+  local pid
+  for pid in "${PROXY_PIDS[@]-}"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  local log_path
+  for log_path in "${PROXY_LOGS[@]-}"; do
+    if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+      rm -f "$log_path"
+    fi
+  done
+}
+
+trap cleanup_proxies EXIT
+
+resolve_service_url() {
+  local service_name="$1"
+  if [ -z "$service_name" ]; then
+    return 1
+  fi
+  gcloud run services describe "$service_name" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --format='value(status.url)'
+}
+
+pick_free_port() {
+  python3 - <<'PY'
+import socket
+
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+}
+
+wait_for_local_port() {
+  local port="$1"
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.settimeout(0.2)
+try:
+    ok = sock.connect_ex(("127.0.0.1", port)) == 0
+finally:
+    sock.close()
+raise SystemExit(0 if ok else 1)
+PY
+}
+
+start_cloud_run_proxy() {
+  local label="$1"
+  local service_name="$2"
+  local port
+  port="$(pick_free_port)"
+  local log_path
+  log_path="$(mktemp)"
+  gcloud run services proxy "$service_name" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --port="$port" \
+    >"$log_path" 2>&1 &
+  local pid=$!
+  PROXY_PIDS+=("$pid")
+  PROXY_LOGS+=("$log_path")
+  local attempt
+  for attempt in $(seq 1 30); do
+    if wait_for_local_port "$port"; then
+      echo "http://127.0.0.1:${port}"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  echo "failed to start ${label} proxy for ${service_name}" >&2
+  sed -n '1,80p' "$log_path" >&2 || true
+  return 1
+}
 
 if [[ -z "${IMAGE}" ]]; then
   echo "usage: $0 <image> <order_id>"
@@ -28,6 +124,15 @@ fi
 
 if [[ -z "${OPERATOR_USER}" || -z "${OPERATOR_PASSWORD}" ]]; then
   echo "OPERATOR_USER / OPERATOR_PASSWORD are required"
+  exit 1
+fi
+
+if [[ -z "${WEB_URL}" ]]; then
+  WEB_URL="$(resolve_service_url "$WEB_SERVICE" || true)"
+fi
+
+if [[ "${CHECK_WEB_PROXY}" == "1" && "${USE_CLOUD_RUN_PROXY}" != "1" && -z "${WEB_URL}" ]]; then
+  echo "WEB_URL or WEB_SERVICE is required when CHECK_WEB_PROXY=1"
   exit 1
 fi
 
@@ -62,6 +167,13 @@ if [[ "${LATEST_IMAGE}" != "${IMAGE}" && "${LATEST_IMAGE}" != "${EXPECTED_REPO}@
 fi
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')"
+
+if [[ "${USE_CLOUD_RUN_PROXY}" == "1" ]]; then
+  SERVICE_URL="$(start_cloud_run_proxy "worker" "${SERVICE}")"
+  if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
+    WEB_URL="$(start_cloud_run_proxy "web" "${WEB_SERVICE}")"
+  fi
+fi
 
 echo "[3/7] call worker ocr-sheet API"
 WORKER_JSON="$(mktemp)"
@@ -202,11 +314,16 @@ fi
 echo "[7/7] run mandatory system predeploy checks (strict ocr quality)"
 WEB_URL="${WEB_URL}" \
 WORKER_URL="${SERVICE_URL}" \
+WEB_SERVICE="${WEB_SERVICE}" \
+WORKER_SERVICE="${SERVICE}" \
+PROJECT_ID="${PROJECT_ID}" \
+REGION="${REGION}" \
 OPERATOR_USER="${OPERATOR_USER}" \
 OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" \
-STRICT_OCR_QUALITY="1" \
+STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY}" \
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY}" \
-./scripts/predeploy_prod_checks.sh
+USE_CLOUD_RUN_PROXY="${USE_CLOUD_RUN_PROXY}" \
+"${PREDEPLOY_SCRIPT}"
 
 rm -f "${WORKER_JSON}"
 if [[ -n "${WEB_JSON}" ]]; then

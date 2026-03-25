@@ -1,6 +1,6 @@
 from datetime import date
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_role
@@ -27,10 +27,16 @@ async def parse_shipping_pdf(file: UploadFile = File(...)):
                     for record in records
                     if str(record.tracking_number).strip() and str(record.facility_name).strip()
                 }
+                ship_date_by_tracking = {
+                    str(record.tracking_number).strip(): record.ship_date
+                    for record in records
+                    if str(record.tracking_number).strip() and record.ship_date
+                }
                 shipping_status_store.record_tracking_statuses(
                     tracking_records,
                     source="shipping_pdf_parse",
                     facility_by_tracking=facility_by_tracking,
+                    ship_date_by_tracking=ship_date_by_tracking,
                 )
             except Exception:
                 # Parsing the shipping PDF should still succeed even if the
@@ -83,10 +89,12 @@ async def enrich_shipping_excel(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"enrich failed: {exc}") from exc
     status_items = summary.pop("_status_items", [])
     facility_by_tracking = summary.pop("_facility_by_tracking", {})
+    ship_date_by_tracking = summary.pop("_ship_date_by_tracking", {})
     shipping_status_store.record_tracking_statuses(
         status_items,
         source="excel_enrich",
         facility_by_tracking=facility_by_tracking if isinstance(facility_by_tracking, dict) else None,
+        ship_date_by_tracking=ship_date_by_tracking if isinstance(ship_date_by_tracking, dict) else None,
     )
     headers = {
         "X-Shipping-Total-Rows": str(summary.get("total_rows", 0)),
@@ -134,6 +142,36 @@ def get_shipping_status_history(
         date_from=parsed_from,
         date_to=parsed_to,
     )
+
+
+@router.get("/shipping/status/latest", dependencies=[Depends(require_role("operator"))])
+def get_shipping_status_latest(
+    view: str = "active",
+    limit: int = 200,
+    base_date: str | None = None,
+    window_days: int = 3,
+    facility_name: list[str] | None = Query(default=None),
+    source: str | None = None,
+    attention_stale_hours: int = 24,
+    include_quota: bool = True,
+):
+    normalized_limit = max(1, min(limit, 1000))
+    normalized_window_days = max(0, min(window_days, 90))
+    normalized_stale_hours = max(1, min(attention_stale_hours, 24 * 14))
+    parsed_base_date = _parse_iso_date(base_date) if base_date else None
+    try:
+        return shipping_status_store.get_latest_status_view(
+            view=view,
+            limit=normalized_limit,
+            base_date=parsed_base_date,
+            window_days=normalized_window_days,
+            facility_names=facility_name,
+            source=source,
+            attention_stale_hours=normalized_stale_hours,
+            include_quota=include_quota,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/shipping/status/refresh-pending", dependencies=[Depends(require_role("operator"))])

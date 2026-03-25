@@ -15,7 +15,8 @@ variable "apis" {
     "firestore.googleapis.com",
     "storage.googleapis.com",
     "sqladmin.googleapis.com",
-    "eventarc.googleapis.com"
+    "eventarc.googleapis.com",
+    "eventarcpublishing.googleapis.com"
   ]
 }
 

@@ -196,24 +196,8 @@ module "iam" {
       role   = "roles/storage.objectViewer"
     },
     {
-      member = "serviceAccount:${module.cloudrun.service_accounts["web"]}"
-      role   = "roles/secretmanager.secretAccessor"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
-      role   = "roles/secretmanager.secretAccessor"
-    },
-    {
       member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
       role   = "roles/datastore.user"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["web"]}"
-      role   = "roles/cloudsql.client"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
-      role   = "roles/cloudsql.client"
     },
     {
       member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
@@ -237,15 +221,17 @@ resource "google_service_account_iam_member" "worker_token_creator" {
   member             = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
 }
 
-data "google_project" "current" {
-  project_id = var.project_id
-}
-
 # Cloud Scheduler needs this permission to mint OIDC tokens for the worker service account.
 resource "google_service_account_iam_member" "cloudscheduler_worker_token_creator" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["worker"]}"
   role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+  member             = "serviceAccount:service-${var.project_number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "pubsub_service_agent_token_creator" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountTokenCreator"
+  member  = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
 resource "google_eventarc_trigger" "ocr_pipeline_gcs" {
@@ -273,7 +259,13 @@ resource "google_eventarc_trigger" "ocr_pipeline_gcs" {
     }
   }
 
-  depends_on = [module.apis, module.cloudrun, module.storage, module.iam]
+  depends_on = [
+    module.apis,
+    module.cloudrun,
+    module.storage,
+    module.iam,
+    google_project_iam_member.pubsub_service_agent_token_creator,
+  ]
 }
 
 module "monitoring" {

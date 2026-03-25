@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
-from app.rois import _load_template_config_from_registry, _load_template_registry
+from app.rois import _load_template_config_from_registry, _load_template_registry, default_template_collection
 
 
 def _resolve_local_template_path(path: Path) -> Path:
@@ -95,10 +95,10 @@ def choose_template_and_warp(
     img_match_bgr,
     img_ocr_bgr,
     img_alt_bgr=None,
-    collection: str = "templates",
+    collection: str | None = None,
     template_ids: list[str] | None = None,
 ):
-    templates = _template_sources(db, collection, template_ids)
+    templates = _template_sources(db, collection or default_template_collection(), template_ids)
     if not templates:
         raise RuntimeError("No templates registered")
 

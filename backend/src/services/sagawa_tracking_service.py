@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from html import unescape
 import http.cookiejar
 import os
@@ -24,6 +25,13 @@ _HIDDEN_INPUT_RE = re.compile(
     r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"',
     re.IGNORECASE,
 )
+_TAG_RE = re.compile(r"<[^>]+>")
+_EVENT_TABLE_RE = re.compile(
+    r'<table[^>]+class="[^"]*table_okurijo_detail2[^"]*"[^>]*>(.*?)</table>',
+    re.IGNORECASE | re.DOTALL,
+)
+_TABLE_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_TABLE_CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 
 
 def _strip_tracking(value: str) -> str:
@@ -118,6 +126,95 @@ def _extract_tracking_number(page: str, fallback: str) -> str:
     return fallback
 
 
+def _normalize_html_text(value: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    text = _TAG_RE.sub(" ", text)
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _parse_event_datetime(value: str, *, looked_up_at: datetime | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.match(r"(\d{2})/(\d{2})\s*(\d{2}):(\d{2})", text)
+    if not match:
+        return None
+    month, day, hour, minute = (int(part) for part in match.groups())
+    reference = looked_up_at or datetime.utcnow()
+    try:
+        candidate = datetime(reference.year, month, day, hour, minute)
+    except ValueError:
+        return None
+    if looked_up_at and candidate > looked_up_at + timedelta(days=2):
+        try:
+            candidate = datetime(reference.year - 1, month, day, hour, minute)
+        except ValueError:
+            return None
+    return candidate
+
+
+@dataclass
+class TrackingEvent:
+    event_status: str
+    event_at_text: str | None
+    office_name: str | None
+    event_order: int
+    event_at: datetime | None = None
+
+    def serialize(self) -> dict:
+        occurred_at = self.event_at.isoformat() if self.event_at else self.event_at_text
+        return {
+            "status": self.event_status,
+            "event_status": self.event_status,
+            "occurred_at": occurred_at,
+            "event_at_text": self.event_at_text,
+            "time_text": self.event_at_text,
+            "facility_name": self.office_name,
+            "office_name": self.office_name,
+            "event_order": self.event_order,
+            "event_at": self.event_at.isoformat() if self.event_at else None,
+        }
+
+
+def _extract_tracking_events(page: str, *, looked_up_at: datetime | None = None) -> list[TrackingEvent]:
+    for table_html in _EVENT_TABLE_RE.findall(page):
+        rows = _TABLE_ROW_RE.findall(table_html)
+        parsed_rows: list[list[str]] = []
+        for row_html in rows:
+            cells = [_normalize_html_text(cell) for cell in _TABLE_CELL_RE.findall(row_html)]
+            cells = [cell for cell in cells if cell]
+            if cells:
+                parsed_rows.append(cells)
+        if not parsed_rows:
+            continue
+        header = parsed_rows[0][:3]
+        if header != ["荷物状況", "日時", "担当営業所"]:
+            continue
+        events: list[TrackingEvent] = []
+        for cells in parsed_rows[1:]:
+            if len(cells) < 3:
+                continue
+            event_status = cells[0]
+            event_at_text = cells[1] or None
+            office_name = cells[2] or None
+            if not event_status:
+                continue
+            events.append(
+                TrackingEvent(
+                    event_status=event_status,
+                    event_at_text=event_at_text,
+                    office_name=office_name,
+                    event_order=len(events),
+                    event_at=_parse_event_datetime(event_at_text or "", looked_up_at=looked_up_at),
+                )
+            )
+        if events:
+            return events
+    return []
+
+
 @dataclass
 class TrackingStatus:
     tracking_number: str
@@ -127,6 +224,7 @@ class TrackingStatus:
     arrival_text: str | None
     message: str | None = None
     error: str | None = None
+    events: list[TrackingEvent] = field(default_factory=list)
 
     def serialize(self) -> dict:
         return {
@@ -137,6 +235,7 @@ class TrackingStatus:
             "arrival_text": self.arrival_text,
             "message": self.message,
             "error": self.error,
+            "events": [item.serialize() for item in self.events],
         }
 
 
@@ -174,6 +273,7 @@ def lookup_tracking_status(tracking_number: str) -> TrackingStatus:
         delivered = "配達完了" in status or "お届けが完了" in response_page
         arrival_text = _extract_arrival_text(response_page) if delivered else None
         tracked_number = _extract_tracking_number(response_page, query_number)
+        events = _extract_tracking_events(response_page, looked_up_at=datetime.utcnow())
         message = None
         if "該当なし" in status:
             message = "no_match"
@@ -184,6 +284,7 @@ def lookup_tracking_status(tracking_number: str) -> TrackingStatus:
             delivered=delivered,
             arrival_text=arrival_text,
             message=message,
+            events=events,
         )
     except Exception as exc:  # noqa: BLE001
         return TrackingStatus(

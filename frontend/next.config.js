@@ -1,4 +1,10 @@
 /** @type {import('next').NextConfig} */
+const useIdentityProxy = ["1", "true", "yes"].includes(
+  String(process.env.API_PROXY_TARGET_REQUIRES_IDENTITY_TOKEN || "").toLowerCase()
+);
+const target = String(process.env.API_PROXY_TARGET || "");
+const forceServerProxy = useIdentityProxy || target.includes("worker-stg");
+
 const nextConfig = {
   experimental: {
     proxyTimeout: 900000,
@@ -25,8 +31,7 @@ const nextConfig = {
     ];
   },
   async rewrites() {
-    const target = process.env.API_PROXY_TARGET;
-    if (!target) return [];
+    if (!target || forceServerProxy) return [];
     return [
       {
         source: "/api/:path*",

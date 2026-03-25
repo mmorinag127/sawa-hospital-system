@@ -2,6 +2,12 @@ variable "project_id" {
   type = string
 }
 
+variable "project_number" {
+  description = "Numeric GCP project number used for service-agent IAM bindings."
+  type        = string
+  default     = "161384524548"
+}
+
 variable "env" {
   type    = string
   default = "dev"
@@ -33,18 +39,18 @@ variable "firestore_enabled" {
 }
 
 variable "secret_ids" {
-  type    = list(string)
+  type = list(string)
   default = [
     "db-password",
   ]
 }
 
 variable "cloudrun_services" {
-  description = "Cloud Run service images; must include web and worker."
+  description = "Cloud Run service images; must include web, worker, and ocr-pipeline."
   type        = map(string)
   validation {
-    condition = contains(keys(var.cloudrun_services), "web") && contains(keys(var.cloudrun_services), "worker")
-    error_message = "cloudrun_services must include both \"web\" and \"worker\" keys."
+    condition     = contains(keys(var.cloudrun_services), "web") && contains(keys(var.cloudrun_services), "worker") && contains(keys(var.cloudrun_services), "ocr-pipeline")
+    error_message = "cloudrun_services must include \"web\", \"worker\", and \"ocr-pipeline\" keys."
   }
 }
 

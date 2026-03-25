@@ -65,10 +65,11 @@ def test_shipping_parse_auto_registers_tracking_statuses(monkeypatch, tmp_path):
     )
     captured: dict[str, object] = {}
 
-    def _record(statuses, *, source, facility_by_tracking=None):
+    def _record(statuses, *, source, facility_by_tracking=None, ship_date_by_tracking=None):
         captured["count"] = len(list(statuses))
         captured["source"] = source
         captured["facility_by_tracking"] = dict(facility_by_tracking or {})
+        captured["ship_date_by_tracking"] = dict(ship_date_by_tracking or {})
         return 1
 
     monkeypatch.setattr(shipping_api.shipping_status_store, "record_tracking_statuses", _record)
@@ -84,6 +85,64 @@ def test_shipping_parse_auto_registers_tracking_statuses(monkeypatch, tmp_path):
     assert captured["count"] == 1
     assert captured["source"] == "shipping_pdf_parse"
     assert captured["facility_by_tracking"] == {"1234-5678-9012": "テスト施設"}
+    assert captured["ship_date_by_tracking"] == {"1234-5678-9012": datetime(2026, 3, 12).date()}
+
+
+def test_shipping_enrich_auto_registers_tracking_status_metadata(monkeypatch, tmp_path):
+    headers = _enable_operator_auth(monkeypatch)
+    output_path = tmp_path / "shipping_enriched.xlsx"
+    output_path.write_bytes(b"dummy-xlsx")
+
+    monkeypatch.setattr(
+        shipping_api.shipping_service,
+        "enrich_tracking_excel",
+        lambda _content: (
+            output_path,
+            {
+                "total_rows": 1,
+                "lookup_count": 1,
+                "delivered_rows": 0,
+                "pending_rows": 1,
+                "updated_arrival_rows": 0,
+                "error_rows": 0,
+                "all_delivered": False,
+                "_status_items": [
+                    TrackingStatus(
+                        tracking_number="1234-5678-9012",
+                        tracking_key="123456789012",
+                        status="配達中",
+                        delivered=False,
+                        arrival_text=None,
+                    ).serialize()
+                ],
+                "_facility_by_tracking": {"123456789012": "テスト施設"},
+                "_ship_date_by_tracking": {"123456789012": datetime(2026, 3, 14).date()},
+            },
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def _record(statuses, *, source, facility_by_tracking=None, ship_date_by_tracking=None):
+        captured["count"] = len(list(statuses))
+        captured["source"] = source
+        captured["facility_by_tracking"] = dict(facility_by_tracking or {})
+        captured["ship_date_by_tracking"] = dict(ship_date_by_tracking or {})
+        return 1
+
+    monkeypatch.setattr(shipping_api.shipping_status_store, "record_tracking_statuses", _record)
+
+    client = TestClient(app)
+    res = client.post(
+        "/shipping/enrich-excel",
+        files={"file": ("shipping.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+
+    assert res.status_code == 200
+    assert captured["count"] == 1
+    assert captured["source"] == "excel_enrich"
+    assert captured["facility_by_tracking"] == {"123456789012": "テスト施設"}
+    assert captured["ship_date_by_tracking"] == {"123456789012": datetime(2026, 3, 14).date()}
 
 
 def test_refresh_pending_shipping_statuses(monkeypatch):
@@ -124,6 +183,76 @@ def test_refresh_pending_shipping_statuses(monkeypatch):
     assert body["updated"] == 2
     assert body["delivered"] == 1
     assert body["pending"] == 1
+
+
+def test_get_shipping_status_latest(monkeypatch):
+    headers = _enable_operator_auth(monkeypatch)
+    monkeypatch.setattr(
+        shipping_api.shipping_status_store,
+        "get_latest_status_view",
+        lambda **kwargs: {
+            "view": kwargs.get("view"),
+            "window_days": kwargs.get("window_days"),
+            "base_date": kwargs.get("base_date").isoformat() if kwargs.get("base_date") else None,
+            "facility_names": kwargs.get("facility_names"),
+            "source": kwargs.get("source"),
+            "quota": None if not kwargs.get("include_quota") else {"alert_level": "ok"},
+            "groups": [
+                {
+                    "ship_date": "2026-03-24",
+                    "group_date": "2026-03-24",
+                    "facility_name": "テスト施設",
+                    "items": [
+                        {
+                            "tracking_number": "1234-5678-9012",
+                            "status": "配達中",
+                        }
+                    ],
+                }
+            ],
+            "summary": {"total": 1, "delivered": 0, "pending": 1, "errors": 0, "all_delivered": False},
+        },
+    )
+
+    client = TestClient(app)
+    res = client.get(
+        "/shipping/status/latest",
+        params=[
+            ("view", "recent"),
+            ("base_date", "2026-03-24"),
+            ("window_days", "5"),
+            ("facility_name", "テスト施設"),
+            ("facility_name", "春日苑 松茂"),
+            ("source", "scheduled_refresh"),
+            ("include_quota", "false"),
+        ],
+        headers=headers,
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["view"] == "recent"
+    assert body["window_days"] == 5
+    assert body["base_date"] == "2026-03-24"
+    assert body["facility_names"] == ["テスト施設", "春日苑 松茂"]
+    assert body["source"] == "scheduled_refresh"
+    assert body["quota"] is None
+    assert body["groups"][0]["items"][0]["tracking_number"] == "1234-5678-9012"
+
+
+def test_get_shipping_status_latest_rejects_invalid_view(monkeypatch):
+    headers = _enable_operator_auth(monkeypatch)
+
+    def _raise(**_kwargs):
+        raise ValueError("view must be active, all, attention, or recent")
+
+    monkeypatch.setattr(shipping_api.shipping_status_store, "get_latest_status_view", _raise)
+
+    client = TestClient(app)
+    res = client.get("/shipping/status/latest", params={"view": "bogus"}, headers=headers)
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "view must be active, all, attention, or recent"
 
 
 def test_order_shipping_statuses_endpoint(monkeypatch):
