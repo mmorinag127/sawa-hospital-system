@@ -397,26 +397,45 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
         name = str(col.get("name") or "").strip()
         if role == "quantity":
             label_token = header or name
-            inferred_diet = _normalize_field_diet_token(label_token or col.get("diet_type"))
-            explicit_diet = _normalize_field_diet_token(col.get("diet_type"))
-            diet = inferred_diet if (header or name) else explicit_diet
-            if (
-                explicit_diet not in {"", "unknown"}
-                and (
-                    not label_token
-                    or (
-                        inferred_diet in {"", "unknown"}
-                        and not _is_explicit_unknown_marker(label_token)
+            explicit_diet_raw = str(col.get("diet_type") or "").strip()
+            explicit_diet = _normalize_field_diet_token(explicit_diet_raw)
+            diet_locked = bool(col.get("diet_type_locked", False) or col.get("diet_type_explicit", False))
+            if diet_locked and explicit_diet_raw:
+                diet = explicit_diet or explicit_diet_raw
+            else:
+                inferred_diet = _normalize_field_diet_token(label_token or col.get("diet_type"))
+                diet = inferred_diet if (header or name) else explicit_diet
+                if (
+                    explicit_diet not in {"", "unknown"}
+                    and (
+                        not label_token
+                        or (
+                            inferred_diet in {"", "unknown"}
+                            and not _is_explicit_unknown_marker(label_token)
+                        )
                     )
-                )
-            ):
-                diet = explicit_diet
+                ):
+                    diet = explicit_diet
             raw_area = str(col.get("area_id") or "").strip()
-            area = _normalize_field_area_token(raw_area)
-            if area == "x":
-                fallback_area = _normalize_field_area_token(header or name)
-                if fallback_area != "x":
-                    area = fallback_area
+            area_locked = bool(col.get("area_id_locked", False) or col.get("area_id_explicit", False))
+            if area_locked and raw_area:
+                area = _normalize_field_area_token(raw_area)
+            else:
+                area = _normalize_field_area_token(raw_area)
+                if area == "x":
+                    fallback_area = _normalize_field_area_token(header or name)
+                    if fallback_area != "x":
+                        area = fallback_area
+            col.pop("diet_type_explicit", None)
+            col.pop("area_id_explicit", None)
+            if diet_locked:
+                col["diet_type_locked"] = True
+            else:
+                col.pop("diet_type_locked", None)
+            if area_locked:
+                col["area_id_locked"] = True
+            else:
+                col.pop("area_id_locked", None)
             col["diet_type"] = diet
             col["area_id"] = area.upper() if area != "x" else "X"
             if not header:

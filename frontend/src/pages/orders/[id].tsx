@@ -462,6 +462,8 @@ const normalizeFacilityAreaToken = (value?: string | null) => {
     .replace(/[\s　]+/g, "")
     .replace(/[()（）\[\]【】]/g, "");
   if (!compact) return "X";
+  if (compact === "花" || compact.includes("hana")) return "2F";
+  if (compact === "月" || compact.includes("tsuki")) return "3F";
   if (/^\d+$/.test(compact)) return `${compact}F`;
   const floorMatch = compact.match(/(\d)(?:f|階)/);
   if (floorMatch) return `${floorMatch[1]}F`;
@@ -510,7 +512,7 @@ const defaultHeaderForFacilityTemplateColumn = (column: {
   if (role === "menu_name") return "メニュー";
   if (role === "note") return "備考";
   if (role === "quantity") {
-    const diet = normalizeDietTypeToken(column.header || column.name || column.diet_type || "") || "unknown";
+    const diet = normalizeDietTypeToken(column.diet_type || column.header || column.name || "") || "unknown";
     const area = normalizeFacilityAreaToken(column.area_id || column.header || column.name || "");
     const base = formatDietType(diet);
     return area === "X" ? base : `${base}${area}`;
@@ -537,13 +539,23 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
       const role = String(item.role || "").trim().toLowerCase() || "quantity";
       const header = String(item.header || "").trim();
       const name = String(item.name || "").trim();
+      const explicitDietType = String(item.diet_type || "").trim();
+      const explicitAreaId = String(item.area_id || "").trim();
       const dietType =
         role === "quantity"
-          ? normalizeDietTypeToken(header || name || String(item.diet_type || "")) || "unknown"
+          ? (
+              explicitDietType
+                ? normalizeDietTypeToken(explicitDietType) || explicitDietType
+                : normalizeDietTypeToken(header || name) || "unknown"
+            )
           : String(item.diet_type || "");
       const areaId =
         role === "quantity"
-          ? normalizeFacilityAreaToken(String(item.area_id || "") || header || name)
+          ? (
+              explicitAreaId
+                ? normalizeFacilityAreaToken(explicitAreaId)
+                : normalizeFacilityAreaToken(header || name)
+            )
           : String(item.area_id || "");
       return {
         index:
@@ -596,10 +608,18 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
     if (header) payload.header = header;
     if (name) payload.name = name;
     if (role === "quantity") {
-      const dietType = normalizeDietTypeToken(header || name || String(column.diet_type || "").trim()) || "unknown";
-      const areaId = normalizeFacilityAreaToken(String(column.area_id || "").trim() || header || name);
+      const explicitDietType = String(column.diet_type || "").trim();
+      const explicitAreaId = String(column.area_id || "").trim();
+      const dietType = explicitDietType
+        ? normalizeDietTypeToken(explicitDietType) || explicitDietType
+        : normalizeDietTypeToken(header || name) || "unknown";
+      const areaId = explicitAreaId
+        ? normalizeFacilityAreaToken(explicitAreaId)
+        : normalizeFacilityAreaToken(header || name);
       payload.diet_type = dietType;
       payload.area_id = areaId;
+      payload.diet_type_locked = true;
+      payload.area_id_locked = true;
     }
     return payload;
   });
@@ -653,6 +673,74 @@ const preferredDietOrder = [
   "placeholder",
   "unknown",
 ];
+
+const facilityTemplateCustomDietTypeValue = "__custom_diet_type__";
+const facilityTemplateCustomAreaValue = "__custom_area_id__";
+const knownFacilityTemplateDietTypes = new Set(preferredDietOrder);
+const facilityTemplateDietTypeOptions = preferredDietOrder.map((value) => ({
+  value,
+  label: dietTypeLabels[value] || value,
+}));
+
+const buildFacilityTemplateAreaOptions = (
+  facilityConfig: Record<string, any> | null,
+  columns: FacilityTemplateColumn[],
+) => {
+  const options: { value: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const pushOption = (value: string, label?: string) => {
+    const normalized = normalizeFacilityAreaToken(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    options.push({
+      value: normalized,
+      label: label && label.trim() ? label.trim() : normalized,
+    });
+  };
+
+  pushOption("X", "共通");
+  const configAreas = Array.isArray(facilityConfig?.areas) ? facilityConfig.areas : [];
+  configAreas.forEach((area) => {
+    if (!area || typeof area !== "object") return;
+    const areaId = String((area as Record<string, unknown>).area_id || "").trim();
+    const areaName = String((area as Record<string, unknown>).name || "").trim();
+    if (!areaId && !areaName) return;
+    const normalized = normalizeFacilityAreaToken(areaId || areaName);
+    if (normalized === "X") {
+      pushOption("X", "共通");
+      return;
+    }
+    const label = areaName && areaName !== normalized ? `${normalized} (${areaName})` : normalized;
+    pushOption(normalized, label);
+  });
+  columns.forEach((column) => {
+    if (!isQuantityRole(column.role)) return;
+    const normalized = normalizeFacilityAreaToken(column.area_id || "");
+    if (normalized && normalized !== "X") {
+      pushOption(normalized, normalized);
+    }
+  });
+  return options;
+};
+
+const resolveFacilityTemplateDietEditorValue = (column: FacilityTemplateColumn) => {
+  if (!isQuantityRole(column.role)) return "";
+  const normalized = normalizeDietTypeToken(column.diet_type || "");
+  return knownFacilityTemplateDietTypes.has(normalized)
+    ? normalized
+    : facilityTemplateCustomDietTypeValue;
+};
+
+const resolveFacilityTemplateAreaEditorValue = (
+  column: FacilityTemplateColumn,
+  options: { value: string; label: string }[],
+) => {
+  if (!isQuantityRole(column.role)) return "";
+  const normalized = normalizeFacilityAreaToken(column.area_id || "");
+  return options.some((option) => option.value === normalized)
+    ? normalized
+    : facilityTemplateCustomAreaValue;
+};
 
 const formatTimestamp = (value?: string | null) => {
   if (!value) return "";
@@ -5489,6 +5577,10 @@ const loadOcrPages = async () => {
     });
     return Array.from(items);
   })();
+  const facilityTemplateAreaOptions = buildFacilityTemplateAreaOptions(
+    facilityConfig,
+    facilityTemplateColumnDraft,
+  );
   const facilityTemplateDirty =
     JSON.stringify(facilityTemplateColumns) !== JSON.stringify(facilityTemplateColumnDraft);
   useEffect(() => {
@@ -6980,6 +7072,9 @@ const loadOcrPages = async () => {
                             </button>
                           </div>
                         </div>
+                        <p className="subtle">
+                          区分とエリアは基本的に選択式です。既定にないものだけ「個別入力」を使ってください。
+                        </p>
                         {!facility ? (
                           <p className="subtle">施設を選択すると施設区分列を編集できます。</p>
                         ) : facilityTemplateColumnDraft.length ? (
@@ -6991,90 +7086,148 @@ const loadOcrPages = async () => {
                                   <th>役割</th>
                                   <th>表示名</th>
                                   <th>内部名</th>
-                                  <th>diet_type</th>
-                                  <th>area_id</th>
+                                  <th>区分</th>
+                                  <th>エリア</th>
                                   <th>操作</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                {facilityTemplateColumnDraft.map((column, idx) => (
-                                  <tr key={`facility-template-column-${column.index}-${idx}`}>
-                                    <td>{column.index + 1}</td>
-                                    <td>
-                                      <select
-                                        className="input"
-                                        value={column.role}
-                                        onChange={(event) =>
-                                          updateFacilityTemplateColumn(idx, "role", event.target.value)
-                                        }
-                                      >
-                                        {columnRoleOptions.map((option) => (
-                                          <option key={option.value} value={option.value}>
-                                            {option.label}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </td>
-                                    <td>
-                                      <input
-                                        className="input"
-                                        value={column.header || ""}
-                                        onChange={(event) =>
-                                          updateFacilityTemplateColumn(idx, "header", event.target.value)
-                                        }
-                                      />
-                                    </td>
-                                    <td>
-                                      <input
-                                        className="input"
-                                        value={column.name || ""}
-                                        onChange={(event) =>
-                                          updateFacilityTemplateColumn(idx, "name", event.target.value)
-                                        }
-                                      />
-                                    </td>
-                                    <td>
-                                      <input
-                                        className="input"
-                                        value={column.diet_type || ""}
-                                        disabled={!isQuantityRole(column.role)}
-                                        onChange={(event) =>
-                                          updateFacilityTemplateColumn(idx, "diet_type", event.target.value)
-                                        }
-                                      />
-                                    </td>
-                                    <td>
-                                      <input
-                                        className="input"
-                                        value={column.area_id || ""}
-                                        disabled={!isQuantityRole(column.role)}
-                                        onChange={(event) =>
-                                          updateFacilityTemplateColumn(idx, "area_id", event.target.value)
-                                        }
-                                      />
-                                    </td>
-                                    <td>
-                                      <div className="facility-template-row-actions">
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => applyFacilityTemplateColumnSwap(idx, idx - 1)}
-                                          disabled={idx <= 0}
+                                {facilityTemplateColumnDraft.map((column, idx) => {
+                                  const isQuantityColumn = isQuantityRole(column.role);
+                                  const dietEditorValue = resolveFacilityTemplateDietEditorValue(column);
+                                  const areaEditorValue = resolveFacilityTemplateAreaEditorValue(
+                                    column,
+                                    facilityTemplateAreaOptions,
+                                  );
+                                  return (
+                                    <tr key={`facility-template-column-${column.index}-${idx}`}>
+                                      <td>{column.index + 1}</td>
+                                      <td>
+                                        <select
+                                          className="input"
+                                          value={column.role}
+                                          onChange={(event) =>
+                                            updateFacilityTemplateColumn(idx, "role", event.target.value)
+                                          }
                                         >
-                                          前と入替
-                                        </button>
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={() => applyFacilityTemplateColumnSwap(idx, idx + 1)}
-                                          disabled={idx >= facilityTemplateColumnDraft.length - 1}
-                                        >
-                                          次と入替
-                                        </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))}
+                                          {columnRoleOptions.map((option) => (
+                                            <option key={option.value} value={option.value}>
+                                              {option.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </td>
+                                      <td>
+                                        <input
+                                          className="input"
+                                          value={column.header || ""}
+                                          onChange={(event) =>
+                                            updateFacilityTemplateColumn(idx, "header", event.target.value)
+                                          }
+                                        />
+                                      </td>
+                                      <td>
+                                        <input
+                                          className="input"
+                                          value={column.name || ""}
+                                          onChange={(event) =>
+                                            updateFacilityTemplateColumn(idx, "name", event.target.value)
+                                          }
+                                        />
+                                      </td>
+                                      <td>
+                                        <div className="facility-template-cell-stack">
+                                          <select
+                                            className="input"
+                                            value={dietEditorValue}
+                                            disabled={!isQuantityColumn}
+                                            onChange={(event) =>
+                                              updateFacilityTemplateColumn(
+                                                idx,
+                                                "diet_type",
+                                                event.target.value === facilityTemplateCustomDietTypeValue
+                                                  ? ""
+                                                  : event.target.value,
+                                              )
+                                            }
+                                          >
+                                            {facilityTemplateDietTypeOptions.map((option) => (
+                                              <option key={option.value} value={option.value}>
+                                                {option.label}
+                                              </option>
+                                            ))}
+                                            <option value={facilityTemplateCustomDietTypeValue}>個別入力</option>
+                                          </select>
+                                          {isQuantityColumn && dietEditorValue === facilityTemplateCustomDietTypeValue ? (
+                                            <input
+                                              className="input"
+                                              value={column.diet_type || ""}
+                                              placeholder="個別対応コード"
+                                              onChange={(event) =>
+                                                updateFacilityTemplateColumn(idx, "diet_type", event.target.value)
+                                              }
+                                            />
+                                          ) : null}
+                                        </div>
+                                      </td>
+                                      <td>
+                                        <div className="facility-template-cell-stack">
+                                          <select
+                                            className="input"
+                                            value={areaEditorValue}
+                                            disabled={!isQuantityColumn}
+                                            onChange={(event) =>
+                                              updateFacilityTemplateColumn(
+                                                idx,
+                                                "area_id",
+                                                event.target.value === facilityTemplateCustomAreaValue
+                                                  ? ""
+                                                  : event.target.value,
+                                              )
+                                            }
+                                          >
+                                            {facilityTemplateAreaOptions.map((option) => (
+                                              <option key={option.value} value={option.value}>
+                                                {option.label}
+                                              </option>
+                                            ))}
+                                            <option value={facilityTemplateCustomAreaValue}>個別入力</option>
+                                          </select>
+                                          {isQuantityColumn && areaEditorValue === facilityTemplateCustomAreaValue ? (
+                                            <input
+                                              className="input"
+                                              value={column.area_id || ""}
+                                              placeholder="個別エリア"
+                                              onChange={(event) =>
+                                                updateFacilityTemplateColumn(idx, "area_id", event.target.value)
+                                              }
+                                            />
+                                          ) : null}
+                                        </div>
+                                      </td>
+                                      <td>
+                                        <div className="facility-template-row-actions">
+                                          <button
+                                            className="btn ghost"
+                                            type="button"
+                                            onClick={() => applyFacilityTemplateColumnSwap(idx, idx - 1)}
+                                            disabled={idx <= 0}
+                                          >
+                                            前と入替
+                                          </button>
+                                          <button
+                                            className="btn ghost"
+                                            type="button"
+                                            onClick={() => applyFacilityTemplateColumnSwap(idx, idx + 1)}
+                                            disabled={idx >= facilityTemplateColumnDraft.length - 1}
+                                          >
+                                            次と入替
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           </div>
@@ -8458,6 +8611,12 @@ const loadOcrPages = async () => {
         .facility-template-table th,
         .facility-template-table td {
           padding: 8px;
+        }
+
+        .facility-template-cell-stack {
+          display: grid;
+          gap: 6px;
+          min-width: 140px;
         }
 
         .facility-template-row-actions {
