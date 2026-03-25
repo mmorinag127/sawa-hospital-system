@@ -383,6 +383,8 @@ type OutputPreview = {
   rows: string[][];
 };
 
+type DetailLine = OrderDetail["lines"][number];
+
 type FacilityOption = {
   id: string;
   name: string;
@@ -1242,6 +1244,150 @@ const buildCategoryColumns = (lines: OrderDetail["lines"]) => {
     .sort();
   extras.forEach((key) => columns.push({ key, label: formatCategoryLabel(key) }));
   return columns;
+};
+
+const quantityFieldDietOrder = [
+  "sesame_allergy",
+  "regular_bag",
+  "soft_mixer",
+  "no_meat",
+  "no_fish",
+  "change_1",
+  "change_2",
+  "pregnancy",
+  "diabetes",
+  "business",
+  "daycare",
+  "regular",
+  "unknown",
+  "staff",
+  "mixer",
+  "soft",
+  "tea",
+];
+
+const parseSheetQuantity = (value?: string | null) => {
+  const normalized = String(value ?? "").trim().replace(/,/g, "");
+  if (!normalized) return null;
+  const quantity = Number(normalized);
+  if (!Number.isFinite(quantity)) return null;
+  return quantity;
+};
+
+const inferAreaFromQuantityHeader = (header: string, dietType: string) => {
+  const trimmed = header.trim();
+  if (!trimmed) return "";
+  const dietLabel = formatDietType(dietType);
+  if (dietLabel && trimmed.startsWith(dietLabel)) {
+    const tail = trimmed.slice(dietLabel.length).trim();
+    if (tail) return normalizeFacilityAreaToken(tail);
+  }
+  return "";
+};
+
+const inferQuantityColumnMeta = (field?: string | null, header?: string | null) => {
+  const normalizedField = String(field || "").trim().toLowerCase();
+  const trimmedHeader = String(header || "").trim();
+  let dietType = "";
+  let areaId = "";
+  if (normalizedField.startsWith("qty.")) {
+    const body = normalizedField.slice(4);
+    for (const token of quantityFieldDietOrder) {
+      if (body === token) {
+        dietType = token;
+        areaId = "X";
+        break;
+      }
+      if (body.startsWith(`${token}_`)) {
+        dietType = token;
+        areaId = normalizeFacilityAreaToken(body.slice(token.length + 1));
+        break;
+      }
+    }
+  }
+  if (!dietType) {
+    dietType = normalizeDietTypeToken(trimmedHeader || normalizedField.replace(/^qty\./, ""));
+  }
+  if (!dietType) return null;
+  if (!areaId) {
+    areaId = inferAreaFromQuantityHeader(trimmedHeader, dietType) || "X";
+  }
+  return {
+    diet_type: dietType,
+    area_id: areaId || "X",
+  };
+};
+
+const findSheetFieldIndex = (
+  fields: string[],
+  headers: string[],
+  predicate: (field: string, header: string) => boolean,
+) => {
+  for (let idx = 0; idx < Math.max(fields.length, headers.length); idx += 1) {
+    const field = String(fields[idx] || "").trim();
+    const header = String(headers[idx] || "").trim();
+    if (predicate(field, header)) return idx;
+  }
+  return -1;
+};
+
+const buildDraftPreviewLines = (
+  fields: string[],
+  headers: string[],
+  rows: string[][],
+): DetailLine[] => {
+  if (!rows.length) return [];
+  const dateIndex = findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = field.toLowerCase();
+    if (token.startsWith("date")) return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("日付") || headerToken.startsWith("date");
+  });
+  const daypartIndex = findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = field.toLowerCase();
+    if (token === "daypart" || token === "meal" || token === "time") return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("区分") || headerToken === "daypart" || headerToken === "meal" || headerToken === "time";
+  });
+  const menuIndex = findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = field.toLowerCase();
+    if (token === "menu" || token === "menu_name") return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("メニュー") || headerToken.includes("献立") || headerToken === "menu";
+  });
+  const quantityColumns = headers
+    .map((header, idx) => {
+      const meta = inferQuantityColumnMeta(fields[idx], header);
+      if (!meta) return null;
+      return { index: idx, ...meta };
+    })
+    .filter(
+      (item): item is { index: number; diet_type: string; area_id: string } => Boolean(item),
+    );
+  if (!quantityColumns.length) return [];
+  const previewLines: DetailLine[] = [];
+  rows.forEach((row, rowIdx) => {
+    const date = dateIndex >= 0 ? String(row[dateIndex] || "").trim() : "";
+    const daypart = daypartIndex >= 0 ? String(row[daypartIndex] || "").trim() : "";
+    const menuName = menuIndex >= 0 ? String(row[menuIndex] || "").trim() : "";
+    quantityColumns.forEach((column) => {
+      const quantity = parseSheetQuantity(row[column.index]);
+      if (quantity == null || quantity === 0) return;
+      previewLines.push({
+        line_id: `draft-preview-${rowIdx}-${column.index}`,
+        date: date || "-",
+        daypart: daypart || "-",
+        menu_name: menuName || "-",
+        diet_type: column.diet_type,
+        area_id: column.area_id,
+        bag_type: null,
+        quantity_original: quantity,
+        quantity_corrected: quantity,
+        change_note: null,
+      });
+    });
+  });
+  return previewLines;
 };
 
 type PivotRow = {
@@ -4436,25 +4582,9 @@ const loadOcrPages = async () => {
     }
   };
 
-  const lines = order?.lines || [];
-  const pivotRows = buildPivotRows(lines);
-  const categoryOrder = buildCategoryColumns(lines).map((col) => col.key);
-  const pivotGroups = groupByDateAndCategory(buildPivotCategoryRows(pivotRows), categoryOrder);
-  const lineGroups = groupByDateAndCategory(
-    lines.map((line, idx) => {
-      const categoryKey = makeCategoryKey(line.diet_type, line.area_id);
-      return {
-        line,
-        idx,
-        date: line.date,
-        categoryKey,
-        categoryLabel: formatCategoryLabel(categoryKey),
-      };
-    }),
-    categoryOrder,
-  );
+  const persistedLines = order?.lines || [];
   const bagSummaryGroups = groupBagSummaryRowsByDate(buildBagSummaryRows(bagRows));
-  const bagAmountStats = buildBagAmountStats(lines);
+  const bagAmountStats = buildBagAmountStats(persistedLines);
   const bagTypeLabelMap = buildBagTypeLabelMap(facilityConfig);
   const activeOcrPage = ocrPages[activeOcrPageIndex];
   const activeOcrPageLabel = activeOcrPage
@@ -4921,12 +5051,22 @@ const loadOcrPages = async () => {
   const effectiveProcessingStageLabel = describeProcessingStage(effectiveProcessingStage);
   const effectiveConfirmedLinesRetained =
     ocrSheetConfirmedLinesRetained || (!hasWorkflowState && Boolean(order?.ocr_confirmed_lines_retained));
-  const workflowBlockers = Array.isArray(workflowApplyGate?.blockers)
-    ? workflowApplyGate.blockers.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
-  const workflowWarnings = Array.isArray(workflowApplyGate?.warnings)
-    ? workflowApplyGate.warnings.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
+  const workflowBlockers = dedupeStrings([
+    ...(Array.isArray(order?.workflow_state?.blockers_json)
+      ? order.workflow_state.blockers_json.map((item) => String(item || "").trim()).filter(Boolean)
+      : []),
+    ...(Array.isArray(workflowApplyGate?.blockers)
+      ? workflowApplyGate.blockers.map((item) => String(item || "").trim()).filter(Boolean)
+      : []),
+  ]);
+  const workflowWarnings = dedupeStrings([
+    ...(Array.isArray(order?.workflow_state?.warnings_json)
+      ? order.workflow_state.warnings_json.map((item) => String(item || "").trim()).filter(Boolean)
+      : []),
+    ...(Array.isArray(workflowApplyGate?.warnings)
+      ? workflowApplyGate.warnings.map((item) => String(item || "").trim()).filter(Boolean)
+      : []),
+  ]);
   const unresolvedCriticalDecisionCount = criticalDecisions.length;
   const semanticShellOnly = workflowStateCode === "semantic_shell_only";
   const rerunInProgressState = workflowStateCode === "rerun_in_progress";
@@ -4976,6 +5116,32 @@ const loadOcrPages = async () => {
       : []),
     !hasWorkflowState && order?.ocr_auto_apply_blocked ? "auto_apply_blocked" : "",
   ]);
+  const detailPrefersDraftPreview =
+    (ocrSheetDraftNewerThanLines ||
+      workflowWarnings.includes("draft_newer_than_lines") ||
+      effectiveConfirmBlockers.includes("draft_newer_than_lines")) &&
+    ocrSheetRows.length > 0;
+  const draftPreviewLines = detailPrefersDraftPreview
+    ? buildDraftPreviewLines(ocrSheetFields, ocrSheetHeaders, ocrSheetRows)
+    : [];
+  const detailUsesDraftPreview = detailPrefersDraftPreview && draftPreviewLines.length > 0;
+  const detailDisplayLines = detailUsesDraftPreview ? draftPreviewLines : persistedLines;
+  const pivotRows = buildPivotRows(detailDisplayLines);
+  const categoryOrder = buildCategoryColumns(detailDisplayLines).map((col) => col.key);
+  const pivotGroups = groupByDateAndCategory(buildPivotCategoryRows(pivotRows), categoryOrder);
+  const lineGroups = groupByDateAndCategory(
+    detailDisplayLines.map((line, idx) => {
+      const categoryKey = makeCategoryKey(line.diet_type, line.area_id);
+      return {
+        line,
+        idx,
+        date: line.date,
+        categoryKey,
+        categoryLabel: formatCategoryLabel(categoryKey),
+      };
+    }),
+    categoryOrder,
+  );
   const effectiveCanApply = workflowGateAvailable
     ? Boolean(workflowApplyGate?.can_apply)
     : ocrSheetCanApply || Boolean(order?.ocr_can_apply_draft);
@@ -6868,9 +7034,16 @@ const loadOcrPages = async () => {
 
           {activeStepIndex === 2 ? (
             <>
-              <section className="panel">
+          <section className="panel">
             <header className="panel-header">
-              <h2>区分別一覧</h2>
+              <div>
+                <h2>区分別一覧</h2>
+                {detailUsesDraftPreview ? (
+                  <p className="subtle">
+                    最新のシートをもとに区分一覧を表示しています。保存済み明細より新しいため、ここでは draft を優先しています。
+                  </p>
+                ) : null}
+              </div>
             </header>
             {pivotGroups.length === 0 ? (
               <p className="subtle">データなし</p>
@@ -6926,7 +7099,14 @@ const loadOcrPages = async () => {
 
           <section className="panel">
             <header className="panel-header">
-              <h2>明細 (編集)</h2>
+              <div>
+                <h2>{detailUsesDraftPreview ? "明細 (最新シートの確認)" : "明細 (編集)"}</h2>
+                {detailUsesDraftPreview ? (
+                  <p className="subtle">
+                    施設区分の最新シートを表示中です。数量修正は Step2 のシート側で行ってください。
+                  </p>
+                ) : null}
+              </div>
             </header>
             {lineGroups.length === 0 ? (
               <p className="subtle">データなし</p>
@@ -6956,10 +7136,16 @@ const loadOcrPages = async () => {
                             <th>メニュー</th>
                             <th>時間帯</th>
                             <th>袋</th>
-                            <th>OCR</th>
-                            <th>修正</th>
-                            <th>差分</th>
-                            <th>実量</th>
+                            {detailUsesDraftPreview ? (
+                              <th>数量</th>
+                            ) : (
+                              <>
+                                <th>OCR</th>
+                                <th>修正</th>
+                                <th>差分</th>
+                                <th>実量</th>
+                              </>
+                            )}
                           </tr>
                         </thead>
                         <tbody>
@@ -6968,22 +7154,28 @@ const loadOcrPages = async () => {
                               <td>{line.menu_name || "-"}</td>
                               <td>{line.daypart || "-"}</td>
                               <td>{formatBagTypeLabel(line.bag_type, bagTypeLabelMap)}</td>
-                              <td>{line.quantity_original ?? "-"}</td>
-                              <td>
-                                <input
-                                  className="input"
-                                  type="number"
-                                  value={line.quantity_corrected ?? ""}
-                                  onChange={(e) => updateLineQuantity(idx, Number(e.target.value))}
-                                />
-                              </td>
-                              <td>
-                                {line.quantity_original == null
-                                  ? "-"
-                                  : (line.quantity_corrected ?? line.quantity_original) -
-                                    (line.quantity_original ?? 0)}
-                              </td>
-                              <td>{formatActualAmount(line)}</td>
+                              {detailUsesDraftPreview ? (
+                                <td>{line.quantity_corrected ?? line.quantity_original ?? "-"}</td>
+                              ) : (
+                                <>
+                                  <td>{line.quantity_original ?? "-"}</td>
+                                  <td>
+                                    <input
+                                      className="input"
+                                      type="number"
+                                      value={line.quantity_corrected ?? ""}
+                                      onChange={(e) => updateLineQuantity(idx, Number(e.target.value))}
+                                    />
+                                  </td>
+                                  <td>
+                                    {line.quantity_original == null
+                                      ? "-"
+                                      : (line.quantity_corrected ?? line.quantity_original) -
+                                        (line.quantity_original ?? 0)}
+                                  </td>
+                                  <td>{formatActualAmount(line)}</td>
+                                </>
+                              )}
                             </tr>
                           ))}
                         </tbody>
@@ -6999,10 +7191,14 @@ const loadOcrPages = async () => {
           <section className="panel">
             <header className="panel-header">
               <h2>明細の確認・保存</h2>
-              <p className="subtle">数量や袋数を確認し、必要なら保存してから次の作業へ進みます。</p>
+              <p className="subtle">
+                {detailUsesDraftPreview
+                  ? "現在は最新シートの区分を確認中です。Step2 でシートを反映した後に明細保存を使ってください。"
+                  : "数量や袋数を確認し、必要なら保存してから次の作業へ進みます。"}
+              </p>
             </header>
             <div className="actions">
-              <button className="btn ghost" onClick={saveLines}>
+              <button className="btn ghost" onClick={saveLines} disabled={detailUsesDraftPreview}>
                 明細を保存して作業続行
               </button>
             </div>
