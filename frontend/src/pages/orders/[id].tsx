@@ -769,6 +769,7 @@ const resolveFacilityTemplateAreaEditorValue = (
 const buildFacilityTemplateHeaderOptions = (
   column: FacilityTemplateColumn,
   columns: FacilityTemplateColumn[],
+  areaOptions: { value: string; label: string }[],
 ) => {
   const options: { value: string; label: string }[] = [];
   const seen = new Set<string>();
@@ -779,18 +780,36 @@ const buildFacilityTemplateHeaderOptions = (
     options.push({ value: normalized, label: normalized });
   };
 
-  pushOption(defaultHeaderForFacilityTemplateColumn(column));
+  columnRoleOptions.forEach((option) => {
+    if (option.value === "quantity") return;
+    pushOption(defaultHeaderForFacilityTemplateColumn({ role: option.value }));
+  });
+  if (isQuantityRole(column.role)) {
+    const areas = Array.from(
+      new Set(
+        [
+          "X",
+          ...areaOptions.map((option) => normalizeFacilityAreaToken(option.value)),
+          ...columns.map((candidate) => normalizeFacilityAreaToken(candidate.area_id || "")),
+        ].filter((value) => Boolean(value)),
+      ),
+    );
+    facilityTemplateDietTypeOptions.forEach((dietOption) => {
+      areas.forEach((area) => {
+        pushOption(
+          defaultHeaderForFacilityTemplateColumn({
+            role: "quantity",
+            diet_type: dietOption.value,
+            area_id: area,
+          }),
+        );
+      });
+    });
+  }
   columns.forEach((candidate) => {
-    if (candidate.role !== column.role) return;
-    if (
-      isQuantityRole(column.role) &&
-      (normalizeDietTypeToken(candidate.diet_type || "") !== normalizeDietTypeToken(column.diet_type || "") ||
-        normalizeFacilityAreaToken(candidate.area_id || "") !== normalizeFacilityAreaToken(column.area_id || ""))
-    ) {
-      return;
-    }
     pushOption(candidate.header);
   });
+  pushOption(defaultHeaderForFacilityTemplateColumn(column));
   pushOption(column.header);
   return options;
 };
@@ -7233,6 +7252,7 @@ const loadOcrPages = async () => {
                                   const headerOptions = buildFacilityTemplateHeaderOptions(
                                     column,
                                     facilityTemplateColumnDraft,
+                                    facilityTemplateAreaOptions,
                                   );
                                   const nameOptions = buildFacilityTemplateNameOptions(
                                     column,
