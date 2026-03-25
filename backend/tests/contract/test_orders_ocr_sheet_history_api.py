@@ -482,6 +482,62 @@ def test_orders_facility_template_columns_save_preserves_locked_custom_quantity_
         assert facility_service.update_config(order["facility"], previous_config)
 
 
+def test_orders_facility_template_columns_save_repairs_qty_named_non_quantity_column():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-api-facility-template-repair-qty-note-001")
+    previous_config = config_service.get_facility_config(order["facility"]) or {}
+
+    try:
+        columns = [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "header": "常食",
+                "name": "qty.regular_x",
+                "diet_type": "regular",
+                "area_id": "X",
+                "diet_type_locked": True,
+                "area_id_locked": True,
+            },
+            {
+                "index": 4,
+                "role": "note",
+                "header": "不明",
+                "name": "qty.unknown_x",
+                "name_locked": True,
+            },
+            {"index": 5, "role": "note", "header": "備考"},
+        ]
+        save_res = client.put(f"/orders/{order['id']}/facility-template-columns", json={"columns": columns})
+        assert save_res.status_code == 200
+
+        payload = save_res.json()
+        resolved_columns = (((payload.get("resolved_config") or {}).get("fax_template") or {}).get("columns") or [])
+        repaired_column = next(item for item in resolved_columns if item.get("index") == 4)
+        assert repaired_column.get("role") == "quantity"
+        assert repaired_column.get("diet_type") == "unknown"
+        assert repaired_column.get("area_id") == "X"
+        assert repaired_column.get("name") == "qty.unknown_x"
+
+        sheet_res = client.get(f"/orders/{order['id']}/ocr-sheet")
+        assert sheet_res.status_code == 200
+        sheet = sheet_res.json()
+        assert sheet["fields"] == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.unknown_x",
+            "remarks",
+        ]
+    finally:
+        assert facility_service.update_config(order["facility"], previous_config)
+
+
 def test_orders_facility_template_columns_allows_operator_auth(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")

@@ -414,15 +414,23 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
     )
     for idx, raw_col in enumerate(ordered):
         col = deepcopy(raw_col)
-        role = str(col.get("role") or "").strip().lower()
-        col["index"] = idx
-        col["role"] = role
+        requested_role = str(col.get("role") or "").strip().lower()
         header = str(col.get("header") or "").strip()
         name = str(col.get("name") or "").strip()
+        parsed_name = _parse_quantity_field_name(name)
+        explicit_diet_raw = str(col.get("diet_type") or "").strip()
+        explicit_area_raw = str(col.get("area_id") or "").strip()
+        role = requested_role
+        if requested_role != "quantity" and (
+            parsed_name
+            or explicit_diet_raw
+            or explicit_area_raw
+        ):
+            role = "quantity"
+        col["index"] = idx
+        col["role"] = role
         if role == "quantity":
-            parsed_name = _parse_quantity_field_name(name)
             label_token = header or name
-            explicit_diet_raw = str(col.get("diet_type") or "").strip()
             explicit_diet = _normalize_field_diet_token(explicit_diet_raw)
             diet_locked = bool(col.get("diet_type_locked", False) or col.get("diet_type_explicit", False))
             name_locked = bool(col.get("name_locked", False) or col.get("name_explicit", False))
