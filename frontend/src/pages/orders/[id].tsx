@@ -742,6 +742,18 @@ const describeReparseWarningReason = (code: string) => {
 const describeReviewBlocker = (code: string) => {
   const normalized = String(code || "").trim().toLowerCase();
   if (!normalized) return "";
+  if (normalized === "semantic_shell_only") {
+    return "メニュー枠はありますが、数量はまだ信用できません";
+  }
+  if (normalized === "template_unresolved") {
+    return "テンプレート解釈が未解決です";
+  }
+  if (normalized === "sheet_quantity_column_unmapped") {
+    return "数量列の対応付けが未完了です";
+  }
+  if (normalized === "ocr_evidence_recovery_required" || normalized === "evidence_recovery_required") {
+    return "OCR基盤の復旧が必要です";
+  }
   if (normalized === "weekly_menu_missing" || normalized === "sheet_weekly_menu_missing") {
     return "対象週の月次メニューが未登録です";
   }
@@ -3476,8 +3488,10 @@ const loadOcrPages = async () => {
       setOcrTableMessage(message);
       return { ok: false, message };
     }
-    if (!effectiveCanApply && reviewBlockerText) {
-      const message = `先にシートを保存（暫定）して内容を整えてください: ${reviewBlockerText}`;
+    if (!effectiveCanApply) {
+      const message = reviewBlockerText
+        ? `まだ明細へ反映できません: ${reviewBlockerText}`
+        : "まだ明細へ反映できません。Step2 の条件を解消してから再試行してください。";
       setOcrTableMessage(message);
       return { ok: false, message };
     }
@@ -3654,6 +3668,22 @@ const loadOcrPages = async () => {
     if (!order) return;
     if (ocrHardRecoveryMode) {
       setActionMessage("現在は基盤復旧待ちのため、明細反映処理を止めています。");
+      return;
+    }
+    if (step2ChoiceRequired) {
+      setActionMessage("OCR候補の選択が未完了です。Step2 で候補を確定してから明細へ反映してください。");
+      return;
+    }
+    if (showNewEvidenceChoice) {
+      setActionMessage("新しいOCR候補があります。先に切り替えるか、現在のシートを維持するか選んでください。");
+      return;
+    }
+    if (rerunInProgressState) {
+      setActionMessage("OCRパイプラインを再実行しています。完了後に新しい候補を確認してください。");
+      return;
+    }
+    if (semanticShellOnly) {
+      setActionMessage("メニュー枠はありますが、数量はまだ信用できません。Step2 で OCR 基盤を整えてから明細へ反映してください。");
       return;
     }
     let activeRows = ocrSheetRows;
@@ -5283,6 +5313,9 @@ const loadOcrPages = async () => {
     if (index > 1 && step2ChoiceRequired) {
       return "OCR候補の選択が必要です";
     }
+    if (index > 2 && step2OutputBlockedReason) {
+      return step2OutputBlockedReason;
+    }
     return "";
   };
   const canAccessStep = (index: number) => !getStepBlockedReason(index);
@@ -5418,8 +5451,31 @@ const loadOcrPages = async () => {
     if (effectiveConfirmedLinesRetained) return "現在の確定済み明細は保持したまま確認できます。";
     return "";
   })();
+  const step2OutputBlockedReason = (() => {
+    if (step1Incomplete) return "";
+    if (step2ChoiceRequired) {
+      return "Step2でOCR候補を確定してください";
+    }
+    if (showNewEvidenceChoice) {
+      return "Step2で新しいOCR候補へ切り替えるか、現在のシートを維持してください";
+    }
+    if (rerunInProgressState) {
+      return "Step2のOCR再実行が完了するまで待ってください";
+    }
+    if (semanticShellOnly) {
+      return "Step2でOCR基盤を更新して数量を確認してください";
+    }
+    if (effectiveConfirmBlockers.includes("draft_newer_than_lines")) {
+      return "Step2でシートを整えて明細へ反映してください";
+    }
+    if (!effectiveCanApply && reviewBlockerText) {
+      return `Step2で条件を解消してください: ${reviewBlockerText}`;
+    }
+    return "";
+  })();
   const highlightApplyAction = ocrHasEditableSheet && !step1Incomplete && effectiveCanApply;
   const canSaveDraftSheet = !step1Incomplete && ocrHasEditableSheet && !ocrHardRecoveryMode && !ocrSheetAutoRetryBlocked;
+  const canAttemptApplyOcrSheet = !ocrTableSaving && !step1Incomplete;
   const saveSheetButtonClassName = canSaveDraftSheet && highlightApplyAction ? "btn ghost" : "btn";
   const applySheetButtonClassName = canApplyOcrSheet && highlightApplyAction ? "btn primary" : "btn ghost";
   const ocrTechnicalDetails = (() => {
@@ -6157,7 +6213,7 @@ const loadOcrPages = async () => {
                               <button
                                 className={applySheetButtonClassName}
                                 onClick={applyOcrAndMoveToDetails}
-                                disabled={ocrTableSaving || step1Incomplete || !canApplyOcrSheet}
+                                disabled={!canAttemptApplyOcrSheet}
                               >
                                 {ocrTableSaving ? "反映中..." : "明細に反映して次へ"}
                               </button>
