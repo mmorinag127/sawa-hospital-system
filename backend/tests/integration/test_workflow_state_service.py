@@ -10,6 +10,28 @@ from src.services.ocr_job_service import create_job, get_job as get_ocr_job, upd
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
+def _structured_cells(rows: list[list[str]]) -> list[dict[str, object]]:
+    cells: list[dict[str, object]] = []
+    row_height = 1.0 / max(len(rows), 1)
+    col_width = 1.0 / max(max((len(row) for row in rows), default=1), 1)
+    for row_index, row in enumerate(rows):
+        for col_index, value in enumerate(row):
+            cells.append(
+                {
+                    "row_index": row_index,
+                    "col_index": col_index,
+                    "text": value,
+                    "bbox": [
+                        round(col_index * col_width, 4),
+                        round(row_index * row_height, 4),
+                        round((col_index + 1) * col_width, 4),
+                        round((row_index + 1) * row_height, 4),
+                    ],
+                }
+            )
+    return cells
+
+
 def _seed_order(
     *,
     message_id: str,
@@ -233,6 +255,331 @@ def test_refresh_workflow_state_does_not_get_stuck_semantic_shell_only_when_reso
     assert workflow["state"] == "apply_ready"
     assert workflow["primary_action"] == "apply_draft"
     assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
+
+
+def test_refresh_workflow_state_uses_position_fallback_for_missing_template_grid(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-position-fallback", facility_hint="FAC00001", week_hint="2026-03")
+    rows = [
+        ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+        ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
+    ]
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_resolution": None,
+            "quantity_subgrid_passes": [],
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+            "tables": [
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table1",
+                    "row_count": len(rows),
+                    "col_count": len(rows[0]),
+                    "rows": rows,
+                    "cells": _structured_cells(rows),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "apply_ready"
+    assert workflow["primary_action"] == "apply_draft"
+    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+
+
+def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_high_risk_numeric_issues(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-position-fallback-high-risk", facility_hint="FAC00001", week_hint="2026-03")
+    rows = [
+        ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+        ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
+    ]
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_resolution": None,
+            "quantity_subgrid_passes": [],
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+            "failed_cells": [{"row_index": 1, "col_index": 3, "reason": "merged_numeric_cell"}],
+            "tables": [
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table1",
+                    "row_count": len(rows),
+                    "col_count": len(rows[0]),
+                    "rows": rows,
+                    "cells": _structured_cells(rows),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] in {"review_required", "semantic_shell_only"}
+    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+
+
+def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_conflicts_with_evidence(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-position-fallback-facility-conflict", facility_hint="FAC00001", week_hint="2026-03")
+    rows = [
+        ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+        ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
+    ]
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_resolution": None,
+            "quantity_subgrid_passes": [],
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+            "facility_candidates": [
+                {"facility_id": "FAC99999", "facility_name": "別施設", "score": 0.96},
+                {"facility_id": "FAC88888", "facility_name": "次点施設", "score": 0.52},
+            ],
+            "tables": [
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table1",
+                    "row_count": len(rows),
+                    "col_count": len(rows[0]),
+                    "rows": rows,
+                    "cells": _structured_cells(rows),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] != "apply_ready"
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"].get("decision_source") != "position_fallback"
+
+
+def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fallback(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-position-fallback-stale-ambiguous", facility_hint="FAC00001", week_hint="2026-03")
+    rows_a = [
+        ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+        ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
+    ]
+    rows_b = [
+        ["日付", "区分", "メニュー", "補助", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+        ["03/22", "朝", "献立A", "", "5", "4", "3", "2", "1", "1", ""],
+    ]
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_resolution": {
+                "resolved_template_id": "fax_layout_floor_2f3f_v1",
+                "confidence": 0.99,
+                "blocked": False,
+                "blocked_reasons": [],
+                "decision_source": "position_fallback",
+            },
+            "column_mapping_resolution": {
+                "resolved_value": "3:qty.regular_2f|4:qty.regular_3f|5:qty.soft_2f|6:qty.soft_3f|7:qty.mixer_2f|8:qty.mixer_3f",
+                "resolved_column_mapping_id": "3:qty.regular_2f|4:qty.regular_3f|5:qty.soft_2f|6:qty.soft_3f|7:qty.mixer_2f|8:qty.mixer_3f",
+                "confidence": 0.99,
+                "blocked": False,
+                "blocked_reasons": [],
+                "decision_source": "position_fallback",
+            },
+            "column_mapping_candidates": [
+                {
+                    "value": "3:qty.regular_2f|4:qty.regular_3f|5:qty.soft_2f|6:qty.soft_3f|7:qty.mixer_2f|8:qty.mixer_3f",
+                    "label": "常食2F / 常食3F",
+                    "score": 0.99,
+                    "decision_source": "position_fallback",
+                },
+                {
+                    "value": "4:qty.regular_2f|5:qty.regular_3f|6:qty.soft_2f|7:qty.soft_3f|8:qty.mixer_2f|9:qty.mixer_3f",
+                    "label": "常食2F / 常食3F",
+                    "score": 0.99,
+                    "decision_source": "position_fallback",
+                },
+            ],
+            "table_box": [0.0, 0.0, 1.0, 1.0],
+            "grid_column_edges": [0.0, 0.1, 0.2, 0.3, 0.4],
+            "grid_row_edges": [0.0, 0.5, 1.0],
+            "tables": [
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table1",
+                    "row_count": len(rows_a),
+                    "col_count": len(rows_a[0]),
+                    "rows": rows_a,
+                    "cells": _structured_cells(rows_a),
+                },
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table2",
+                    "row_count": len(rows_b),
+                    "col_count": len(rows_b[0]),
+                    "rows": rows_b,
+                    "cells": _structured_cells(rows_b),
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] != "apply_ready"
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["requires_user_choice"] is True
+    assert "column_mapping_choice_required" in (
+        workflow["candidate_resolution"]["resolutions"]["column_mapping"]["blocked_reasons"] or []
+    )
+
+
+def test_refresh_workflow_state_suppresses_stale_draft_layout_blockers_when_position_fallback_is_ready(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(
+        message_id="msg-workflow-state-position-fallback-stale-draft-blockers",
+        facility_hint="FAC00002",
+        week_hint="2026-03",
+    )
+    rows = [
+        ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
+        ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
+        ["3/22", "\"", "VF", "Menu A", "23", "", "", "", "", "", ""],
+        ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
+    ]
+    evidence = order_service.persist_ocr_evidence_run(
+        order["id"],
+        {
+            "input_reference": "gs://bucket/orders/order.pdf",
+            "tables": [
+                {
+                    "page_index": 1,
+                    "table_id": "page1_table1",
+                    "row_count": len(rows),
+                    "col_count": len(rows[0]),
+                    "rows": rows,
+                    "cells": _structured_cells(rows),
+                }
+            ],
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
+                }
+            ],
+        },
+    )
+    assert isinstance(evidence, dict)
+    saved = draft_sheet_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "draft_sheet",
+            "fields": [
+                "date_mmdd",
+                "daypart",
+                "menu",
+                "qty.regular_x",
+                "qty.no_meat_x",
+                "qty.no_fish_x",
+                "qty.change_1_x",
+                "qty.change_2_x",
+                "remarks",
+            ],
+            "header": ["日付", "区分", "メニュー", "常食", "肉禁", "魚禁", "変更1", "変更2", "備考"],
+            "rows": [
+                ["03/22", "breakfast", "Menu A", "23", "", "", "", "", ""],
+                ["03/22", "lunch", "Menu B", "27", "", "", "", "", ""],
+            ],
+            "row_ids": ["draft-row-1", "draft-row-2"],
+        },
+        draft_state="draft_ready",
+        blockers=["template_unresolved"],
+        warnings=[
+            "template_unresolved",
+            "sheet_quantity_column_unmapped",
+            "ocr_evidence_recovery_required",
+            "sheet_ocr_review_required",
+        ],
+    )
+    assert saved is not None
+    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+    assert workflow["state"] == "apply_ready"
+    assert workflow["apply_gate"]["can_apply"] is True
+    assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
+    assert "sheet_quantity_column_unmapped" not in (workflow["apply_gate"]["blockers"] or [])
+    assert "ocr_evidence_recovery_required" not in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evidence_differs_from_draft(monkeypatch):
@@ -976,6 +1323,66 @@ def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_bloc
     assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
     assert "numeric_trust_low" not in (workflow["apply_gate"]["warnings"] or [])
     assert "draft_newer_than_lines" in (workflow["apply_gate"]["warnings"] or [])
+
+
+def test_refresh_workflow_state_does_not_keep_stale_sheet_blockers_after_semantic_refresh(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-refresh-clears-stale-blockers", facility_hint="FAC00001", week_hint="2026-03")
+    _persist_evidence(order["id"])
+    saved = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "draft_sheet",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食", "備考"],
+            "rows": [
+                ["03/22", "朝", "Menu A", "5", ""],
+                ["01/01", "\"", "Ghost Menu", "23", ""],
+            ],
+            "row_ids": ["draft-2", "draft-1"],
+            "warnings": ["stale-current-warning-should-drop"],
+        },
+        draft_state="auto_apply_blocked",
+        blockers=["sheet_canonical_mismatch"],
+        warnings=["sheet_ocr_review_required"],
+    )
+    assert saved is not None
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda _order_id, use_saved_draft=False: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食", "備考"],
+            "rows": [["03/22", "朝", "Menu A", "", ""]],
+            "row_ids": ["fresh-1"],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    refreshed_draft = draft_sheet_service.get_latest_sheet_draft(order["id"])
+
+    assert refreshed_draft is not None
+    assert refreshed_draft["blockers_json"] == []
+    assert refreshed_draft["warnings_json"] == []
+    assert refreshed_draft["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "5", ""]]
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "apply_ready"
+    assert workflow["apply_gate"]["can_apply"] is True
+    assert "sheet_canonical_mismatch" not in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quantity_candidates():

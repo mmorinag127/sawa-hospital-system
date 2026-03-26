@@ -23,6 +23,69 @@ _RECOVERABLE_BLOCKING_WARNINGS = {
 }
 
 _LAYOUT_RESOLUTION_TYPES = {"template", "column_mapping", "quantity"}
+_POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES = {
+    "template_unresolved",
+    "template_resolution_blocked",
+    "sheet_quantity_column_unmapped",
+    "sheet_payload_mapping_blocked_unresolved_template",
+}
+_POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES = {
+    "ocr_evidence_recovery_required",
+}
+
+
+def _dedupe_tokens(items: list[str] | None) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        token = str(item or "").strip()
+        if token and token not in seen:
+            seen.add(token)
+            deduped.append(token)
+    return deduped
+
+
+def source_uses_saved_sheet(source: str | None) -> bool:
+    normalized = str(source or "").strip()
+    return normalized.startswith("draft_sheet") or normalized.startswith("edited_sheet")
+
+
+def _stale_issue_suppressions(
+    *,
+    source: str | None,
+    clean_saved_draft: bool = False,
+    position_fallback_semantics_ready: bool = False,
+) -> set[str]:
+    suppressed: set[str] = set()
+    if clean_saved_draft:
+        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
+        suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
+    if position_fallback_semantics_ready:
+        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
+        if source_uses_saved_sheet(source):
+            suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
+    return suppressed
+
+
+def filter_stale_issue_tokens(
+    tokens: list[str] | None,
+    *,
+    source: str | None,
+    clean_saved_draft: bool = False,
+    position_fallback_semantics_ready: bool = False,
+) -> list[str]:
+    suppressed = _stale_issue_suppressions(
+        source=source,
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
+    filtered: list[str] = []
+    for item in tokens or []:
+        token = str(item or "").strip()
+        if not token or token in suppressed:
+            continue
+        filtered.append(token)
+    return _dedupe_tokens(filtered)
 
 
 def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
@@ -60,14 +123,26 @@ def evaluate_sheet_gate(
     draft_newer_than_lines: bool = False,
     auto_apply_blocked: bool = False,
     reparse_status: str | None = None,
+    clean_saved_draft: bool = False,
+    position_fallback_semantics_ready: bool = False,
 ) -> dict[str, list[str]]:
     apply_blockers: list[str] = []
     confirm_blockers: list[str] = []
     confirm_warnings: list[str] = []
 
-    normalized_blockers = [str(item or "").strip() for item in (blockers or []) if str(item or "").strip()]
-    normalized_warnings = [str(item or "").strip() for item in (warnings or []) if str(item or "").strip()]
     normalized_source = str(source or "").strip()
+    normalized_blockers = filter_stale_issue_tokens(
+        blockers,
+        source=normalized_source,
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
+    normalized_warnings = filter_stale_issue_tokens(
+        warnings,
+        source=normalized_source,
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
     normalized_reparse_status = str(reparse_status or "").strip().lower()
 
     if "sheet_weekly_menu_missing" in normalized_warnings:
@@ -94,20 +169,10 @@ def evaluate_sheet_gate(
         apply_blockers.append("reparse_stale")
         confirm_blockers.append("reparse_stale")
 
-    def _dedupe(items: list[str]) -> list[str]:
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            token = str(item or "").strip()
-            if token and token not in seen:
-                seen.add(token)
-                deduped.append(token)
-        return deduped
-
     return {
-        "apply_blockers": _dedupe(apply_blockers),
-        "confirm_blockers": _dedupe(confirm_blockers),
-        "confirm_warnings": _dedupe(confirm_warnings),
+        "apply_blockers": _dedupe_tokens(apply_blockers),
+        "confirm_blockers": _dedupe_tokens(confirm_blockers),
+        "confirm_warnings": _dedupe_tokens(confirm_warnings),
     }
 
 
@@ -223,26 +288,37 @@ def evaluate_apply_gate(
         confirm_warnings.append("ocr_table_fallback")
 
     if isinstance(sheet_gate, dict):
-        apply_blockers.extend([str(item or "").strip() for item in (sheet_gate.get("apply_blockers") or []) if str(item or "").strip()])
-        confirm_blockers.extend([str(item or "").strip() for item in (sheet_gate.get("confirm_blockers") or []) if str(item or "").strip()])
-        confirm_warnings.extend([str(item or "").strip() for item in (sheet_gate.get("confirm_warnings") or []) if str(item or "").strip()])
+        apply_blockers.extend(
+            filter_stale_issue_tokens(
+                sheet_gate.get("apply_blockers") or [],
+                source=source,
+                clean_saved_draft=clean_saved_draft,
+                position_fallback_semantics_ready=position_fallback_semantics_ready,
+            )
+        )
+        confirm_blockers.extend(
+            filter_stale_issue_tokens(
+                sheet_gate.get("confirm_blockers") or [],
+                source=source,
+                clean_saved_draft=clean_saved_draft,
+                position_fallback_semantics_ready=position_fallback_semantics_ready,
+            )
+        )
+        confirm_warnings.extend(
+            filter_stale_issue_tokens(
+                sheet_gate.get("confirm_warnings") or [],
+                source=source,
+                clean_saved_draft=clean_saved_draft,
+                position_fallback_semantics_ready=position_fallback_semantics_ready,
+            )
+        )
 
-    def _dedupe(items: list[str]) -> list[str]:
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            token = str(item or "").strip()
-            if token and token not in seen:
-                seen.add(token)
-                deduped.append(token)
-        return deduped
-
-    deduped_apply_blockers = _dedupe(apply_blockers)
-    deduped_confirm_blockers = _dedupe(confirm_blockers)
-    deduped_apply_warnings = _dedupe(apply_warnings)
-    deduped_confirm_warnings = _dedupe(confirm_warnings)
-    deduped_blockers = _dedupe(deduped_apply_blockers + deduped_confirm_blockers)
-    deduped_warnings = _dedupe(deduped_apply_warnings + deduped_confirm_warnings)
+    deduped_apply_blockers = _dedupe_tokens(apply_blockers)
+    deduped_confirm_blockers = _dedupe_tokens(confirm_blockers)
+    deduped_apply_warnings = _dedupe_tokens(apply_warnings)
+    deduped_confirm_warnings = _dedupe_tokens(confirm_warnings)
+    deduped_blockers = _dedupe_tokens(deduped_apply_blockers + deduped_confirm_blockers)
+    deduped_warnings = _dedupe_tokens(deduped_apply_warnings + deduped_confirm_warnings)
 
     can_apply = not deduped_apply_blockers
     can_confirm = not deduped_confirm_blockers and "recovery_recommended" not in deduped_confirm_warnings

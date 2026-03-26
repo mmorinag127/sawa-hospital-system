@@ -791,5 +791,23 @@ def candidate_resolution_uses_position_fallback(candidate_resolution: dict[str, 
     return True
 
 
+def payload_uses_ready_position_fallback(payload: dict[str, Any] | None) -> bool:
+    if not _position_fallback_already_ready(payload):
+        return False
+    resolution = payload.get("template_resolution") if isinstance(payload, dict) else None
+    if not isinstance(resolution, dict):
+        return True
+    resolved_template_id = str(
+        resolution.get("resolved_template_id") or resolution.get("template_id") or ""
+    ).strip()
+    blocked = bool(
+        resolution.get("blocked")
+        or any(str(item or "").strip() for item in (resolution.get("blocked_reasons") or []))
+    )
+    if blocked and not resolved_template_id:
+        return False
+    return True
+
+
 def stable_mapping_signature(value: object) -> str:
     return hashlib.sha1(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()

@@ -158,7 +158,13 @@ def _build_menu_context(*, facility_code: str | None, week_code: str | None) -> 
     }
 
 
-def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, draft_sheet: dict[str, Any] | None) -> dict[str, Any]:
+def _build_sheet_gate(
+    *,
+    order_id: str,
+    order_payload: dict[str, Any] | None,
+    draft_sheet: dict[str, Any] | None,
+    candidate_resolution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     draft_payload = (
         draft_sheet.get("draft_sheet_json")
         if isinstance(draft_sheet, dict) and isinstance(draft_sheet.get("draft_sheet_json"), dict)
@@ -182,6 +188,10 @@ def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, dr
                 draft_newer_than_lines = datetime.fromisoformat(draft_edited_at) > lines_updated_at
             except Exception:
                 draft_newer_than_lines = True
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
+    position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
+        candidate_resolution
+    )
     reparse_job = get_ocr_job(f"OCR-{order_id}")
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
     return apply_gate_service.evaluate_sheet_gate(
@@ -192,6 +202,8 @@ def _build_sheet_gate(*, order_id: str, order_payload: dict[str, Any] | None, dr
         draft_newer_than_lines=draft_newer_than_lines,
         auto_apply_blocked="auto_apply_blocked" in blockers or "auto_apply_blocked" in warnings,
         reparse_status=reparse_state.get("status"),
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
     )
 
 
@@ -637,6 +649,7 @@ def refresh_workflow_state(
             order_id=normalized_order_id,
             order_payload=order_payload,
             draft_sheet=draft_sheet,
+            candidate_resolution=candidate_resolution,
         ),
     )
     state, headline, primary_action, blockers, warnings, confidence_band = _derive_state(

@@ -821,6 +821,112 @@ def test_get_ocr_sheet_projects_payload_quantities_for_noisy_regular_forbidden_h
     assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
 
 
+def test_get_ocr_sheet_suppresses_stale_saved_draft_layout_warnings_when_position_fallback_is_ready(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order_for_facility(
+        message_id="msg-ocr-redesign-position-fallback-stale-draft-warnings",
+        facility_id="FAC00002",
+    )
+    rows = [
+        ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
+        ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
+        ["3/22", "\"", "VF", "Menu A", "23", "", "", "", "", "", ""],
+        ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
+    ]
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        },
+        {
+            "menu_name": "Menu B",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 0,
+            "order": 1,
+        },
+    ]
+    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "tables": [
+                    {
+                        "page_index": 1,
+                        "table_id": "page1_table1",
+                        "row_count": len(rows),
+                        "col_count": len(rows[0]),
+                        "rows": rows,
+                        "cells": _structured_cells(rows),
+                    }
+                ],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+            },
+        )
+        saved = order_service.persist_sheet_draft(
+            order_id=order["id"],
+            draft_sheet_json={
+                "order_id": order["id"],
+                "source": "draft_sheet",
+                "fields": [
+                    "date_mmdd",
+                    "daypart",
+                    "menu",
+                    "qty.regular_x",
+                    "qty.no_meat_x",
+                    "qty.no_fish_x",
+                    "qty.change_1_x",
+                    "qty.change_2_x",
+                    "remarks",
+                ],
+                "header": ["日付", "区分", "メニュー", "常食", "肉禁", "魚禁", "変更1", "変更2", "備考"],
+                "rows": [
+                    ["03/22", "breakfast", "Menu A", "23", "", "", "", "", ""],
+                    ["03/22", "lunch", "Menu B", "27", "", "", "", "", ""],
+                ],
+                "row_ids": ["draft-row-1", "draft-row-2"],
+            },
+            draft_state="draft_ready",
+            blockers=["template_unresolved"],
+            warnings=[
+                "template_unresolved",
+                "sheet_quantity_column_unmapped",
+                "ocr_evidence_recovery_required",
+                "sheet_ocr_review_required",
+            ],
+        )
+        assert saved is not None
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "draft_sheet"
+    assert "template_unresolved" not in (sheet.get("warnings") or [])
+    assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
+    assert "ocr_evidence_recovery_required" not in (sheet.get("warnings") or [])
+    assert "sheet_ocr_review_required" in (sheet.get("warnings") or [])
+    assert sheet["apply_blockers"] == []
+    assert sheet["can_apply"] is True
+
+
 def test_get_ocr_sheet_does_not_project_position_fallback_when_facility_conflicts_with_evidence():
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-position-fallback-facility-conflict")

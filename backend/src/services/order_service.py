@@ -7869,6 +7869,8 @@ def _augment_sheet_review_payload(
     lines_updated_at: datetime | None = None,
     ocr_payload: dict[str, Any] | None = None,
     ocr_metrics: dict[str, Any] | None = None,
+    draft_sheet: dict[str, Any] | None = None,
+    position_fallback_semantics_ready: bool = False,
 ) -> dict[str, Any]:
     enriched = dict(payload)
     warnings = [
@@ -7878,6 +7880,14 @@ def _augment_sheet_review_payload(
     ]
     rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
     source = str(payload.get("source") or "").strip()
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
+    warnings = apply_gate_service.filter_stale_issue_tokens(
+        warnings,
+        source=source,
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
+    enriched["warnings"] = list(warnings)
     draft_state = _extract_order_draft_state(order_id, ocr_payload, lines_updated_at=lines_updated_at)
     job = get_ocr_job(f"OCR-{order_id}")
     sheet_gate = apply_gate_service.evaluate_sheet_gate(
@@ -7888,6 +7898,8 @@ def _augment_sheet_review_payload(
         draft_newer_than_lines=bool(draft_state["draft_newer_than_lines"]),
         auto_apply_blocked=bool(draft_state["auto_apply_blocked"]),
         reparse_status=(describe_ocr_job_state(job).get("status") if isinstance(job, dict) else None),
+        clean_saved_draft=clean_saved_draft,
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
     )
     apply_blockers = list(sheet_gate.get("apply_blockers") or [])
     confirm_blockers = list(sheet_gate.get("confirm_blockers") or [])
@@ -13900,12 +13912,24 @@ def build_recoverable_ocr_sheet_payload(
         base_template,
         facility_config.get("fax_template_override"),
     )
+    cached_payload = _load_order_ocr_cache(order_id)
+    if (
+        isinstance(cached_payload, dict)
+        and candidate_resolution_service.position_fallback_allowed_for_facility(
+            current_facility=facility_id,
+            payload=cached_payload,
+        )
+    ):
+        cached_payload = position_column_mapping_service.augment_payload_with_position_fallback(
+            cached_payload,
+            template,
+            template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
+        )
     fields, field_index = _build_sheet_fields_and_indexes(template)
     field_error = _validate_sheet_template_fields(fields)
     if field_error:
         return None, error_code
     quantity_index = _build_sheet_quantity_index(fields)
-    cached_payload = _load_order_ocr_cache(order_id)
     latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id) if use_saved_draft else None
     latest_revision = (
         _select_order_sheet_revision(
@@ -13915,6 +13939,10 @@ def build_recoverable_ocr_sheet_payload(
         )
         if use_saved_draft
         else None
+    )
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(latest_draft)
+    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
+        cached_payload
     )
     fallback_payload: dict[str, Any] = {
         "order_id": order_id,
@@ -13989,7 +14017,12 @@ def build_recoverable_ocr_sheet_payload(
         if template_blockers and "template_resolution_blocked" not in warnings:
             warnings.append("template_resolution_blocked")
             payload["template_resolution_blockers"] = template_blockers
-        payload["warnings"] = warnings
+        payload["warnings"] = apply_gate_service.filter_stale_issue_tokens(
+            warnings,
+            source=str(payload.get("source") or "").strip(),
+            clean_saved_draft=clean_saved_draft,
+            position_fallback_semantics_ready=position_fallback_semantics_ready,
+        )
     return (
         _augment_sheet_review_payload(
             order_id=order_id,
@@ -13997,6 +14030,8 @@ def build_recoverable_ocr_sheet_payload(
             lines_updated_at=lines_updated_at,
             ocr_payload=cached_payload,
             ocr_metrics=cached_payload.get("metrics") if isinstance(cached_payload, dict) else None,
+            draft_sheet=latest_draft if isinstance(latest_draft, dict) else None,
+            position_fallback_semantics_ready=position_fallback_semantics_ready,
         ),
         None,
     )
@@ -14113,8 +14148,12 @@ def get_ocr_sheet(
             template,
             template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
         )
+    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
+        ocr_payload
+    )
     raw_latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id) if use_saved_draft else None
-    if use_saved_draft and apply_gate_service.has_clean_saved_draft(raw_latest_draft):
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(raw_latest_draft)
+    if use_saved_draft and clean_saved_draft:
         latest_draft = raw_latest_draft
     else:
         latest_draft = (
@@ -14773,7 +14812,12 @@ def get_ocr_sheet(
             for warning in merged_warnings:
                 if warning not in deduped_warnings:
                     deduped_warnings.append(warning)
-            rebuilt["warnings"] = deduped_warnings
+            rebuilt["warnings"] = apply_gate_service.filter_stale_issue_tokens(
+                deduped_warnings,
+                source=str(rebuilt.get("source") or payload.get("source") or "").strip(),
+                clean_saved_draft=clean_saved_draft,
+                position_fallback_semantics_ready=position_fallback_semantics_ready,
+            )
             if evidence_missing:
                 rebuilt["evidence_missing_artifacts"] = evidence_missing
             if template_blockers:
@@ -14784,6 +14828,12 @@ def get_ocr_sheet(
                 rebuilt["cell_issues"] = base_cell_issues
                 rebuilt["issue_summary"] = dict(payload.get("issue_summary") or {})
             payload = rebuilt
+    payload["warnings"] = apply_gate_service.filter_stale_issue_tokens(
+        list(payload.get("warnings") or []),
+        source=str(payload.get("source") or "").strip(),
+        clean_saved_draft=isinstance(latest_draft, dict) and apply_gate_service.has_clean_saved_draft(latest_draft),
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
     return (
         _augment_sheet_review_payload(
             order_id=order_id,
@@ -14791,6 +14841,8 @@ def get_ocr_sheet(
             lines_updated_at=lines_updated_at,
             ocr_payload=ocr_payload,
             ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
+            draft_sheet=latest_draft if isinstance(latest_draft, dict) else None,
+            position_fallback_semantics_ready=position_fallback_semantics_ready,
         ),
         None,
     )
