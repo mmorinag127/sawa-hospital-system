@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from src.db import Base, engine
-from src.services import config_service, menu_service
+from src.services import config_service, menu_service, position_column_mapping_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -24,6 +24,30 @@ def _dedupe_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(value)
         normalized.append(item)
     return normalized
+
+
+def _normalize_facility_candidates(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    raw_candidates = payload.get("facility_candidates") if isinstance(payload, dict) else None
+    normalized_candidates: list[dict[str, Any]] = []
+    if not isinstance(raw_candidates, list):
+        return normalized_candidates
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            continue
+        facility_id = str(item.get("facility_id") or "").strip()
+        if not facility_id:
+            continue
+        normalized_candidates.append(
+            {
+                "value": facility_id,
+                "label": str(item.get("facility_name") or facility_id).strip() or facility_id,
+                "score": float(item.get("score") or 0.0),
+                "reason": str(item.get("reason") or "").strip() or None,
+                "auto": bool(item.get("auto")),
+            }
+        )
+    normalized_candidates.sort(key=lambda item: (item.get("score") or 0.0, item.get("value") or ""), reverse=True)
+    return _dedupe_candidates(normalized_candidates)
 
 
 def _confidence_band(score: float | None) -> str:
@@ -132,26 +156,7 @@ def build_facility_resolution(
     current_facility: str | None,
     payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    raw_candidates = []
-    if isinstance(payload, dict):
-        raw_candidates = payload.get("facility_candidates") or []
-    normalized_candidates: list[dict[str, Any]] = []
-    for item in raw_candidates:
-        if not isinstance(item, dict):
-            continue
-        facility_id = str(item.get("facility_id") or "").strip()
-        if not facility_id:
-            continue
-        normalized_candidates.append(
-            {
-                "value": facility_id,
-                "label": str(item.get("facility_name") or facility_id).strip() or facility_id,
-                "score": float(item.get("score") or 0.0),
-                "reason": str(item.get("reason") or "").strip() or None,
-                "auto": bool(item.get("auto")),
-            }
-        )
-    normalized_candidates = _dedupe_candidates(normalized_candidates)
+    normalized_candidates = _normalize_facility_candidates(payload)
     current_value = str(current_facility or "").strip() or None
     if current_value and not any(item["value"] == current_value for item in normalized_candidates):
         normalized_candidates.insert(
@@ -187,6 +192,30 @@ def build_facility_resolution(
         "requires_user_choice": requires_user_choice,
         "candidates": normalized_candidates,
     }
+
+
+def position_fallback_allowed_for_facility(
+    *,
+    current_facility: str | None,
+    payload: dict[str, Any] | None,
+) -> bool:
+    current_value = str(current_facility or "").strip()
+    if not current_value:
+        return False
+    normalized_candidates = _normalize_facility_candidates(payload)
+    if not normalized_candidates:
+        return True
+    top_candidate = normalized_candidates[0]
+    top_value = str(top_candidate.get("value") or "").strip()
+    if not top_value or top_value == current_value:
+        return True
+    top_score = float(top_candidate.get("score") or 0.0)
+    second_score = float(normalized_candidates[1].get("score") or 0.0) if len(normalized_candidates) > 1 else None
+    if top_score < 0.85:
+        return True
+    if second_score is not None and (top_score - second_score) < 0.15:
+        return True
+    return False
 
 
 def build_week_resolution(
@@ -465,9 +494,10 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
     ]
     resolution = payload.get("column_mapping_resolution") if isinstance(payload, dict) else None
     resolution = resolution if isinstance(resolution, dict) else {}
-    candidates = _normalize_generic_candidates(
-        resolution.get("candidates") if resolution else (payload.get("column_mapping_candidates") if isinstance(payload, dict) else None)
-    )
+    candidates_raw = resolution.get("candidates") if resolution else None
+    if not isinstance(candidates_raw, list) and isinstance(payload, dict):
+        candidates_raw = payload.get("column_mapping_candidates")
+    candidates = _normalize_generic_candidates(candidates_raw)
     resolved_value = str(
         resolution.get("resolved_value")
         or resolution.get("resolved_column_mapping_id")
@@ -480,10 +510,31 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         for item in (resolution.get("blocked_reasons") or [])
         if str(item).strip()
     ]
+    explicit_requires_user_choice = bool(resolution.get("requires_user_choice")) or (
+        "column_mapping_choice_required" in blocked_reasons
+    )
+    decision_source = str(
+        resolution.get("decision_source")
+        or _first_candidate_metadata(candidates, "decision_source")
+        or "ocr_evidence"
+    ).strip() or "ocr_evidence"
+    if (
+        decision_source == "position_fallback"
+        and len(candidates) >= 2
+        and _should_require_choice(
+            resolved_value=None,
+            candidates=candidates,
+            score=score,
+            explicit=explicit_requires_user_choice,
+        )
+    ):
+        explicit_requires_user_choice = True
+        resolved_value = None
     requires_user_choice = _should_require_choice(
         resolved_value=resolved_value,
         candidates=candidates,
         score=score,
+        explicit=explicit_requires_user_choice,
     )
     if requires_user_choice and "column_mapping_choice_required" not in blocked_reasons:
         blocked_reasons.append("column_mapping_choice_required")
@@ -502,12 +553,7 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         "candidates": candidates,
         "attention_required": bool(attention_reasons),
         "attention_reasons": attention_reasons,
-        "decision_source": str(
-            resolution.get("decision_source")
-            or _first_candidate_metadata(candidates, "decision_source")
-            or "ocr_evidence"
-        ).strip()
-        or "ocr_evidence",
+        "decision_source": decision_source,
         "ambiguity_scope": "column_mapping" if requires_user_choice else None,
         "evidence_ref": (
             resolution.get("evidence_ref")
@@ -612,16 +658,34 @@ def resolve_order_candidates(
     received_at: datetime | None,
     evidence_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    augmented_payload = evidence_payload
+    effective_facility_code = str(facility_code or "").strip() or None
+    if (
+        isinstance(evidence_payload, dict)
+        and effective_facility_code
+        and position_fallback_allowed_for_facility(
+            current_facility=effective_facility_code,
+            payload=evidence_payload,
+        )
+    ):
+        facility_config = config_service.get_facility_config(effective_facility_code) or {}
+        fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+        if isinstance(fax_template, dict):
+            augmented_payload = position_column_mapping_service.augment_payload_with_position_fallback(
+                evidence_payload,
+                fax_template,
+                template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
+            )
     facility = build_facility_resolution(current_facility=facility_code, payload=evidence_payload)
     week = build_week_resolution(
         current_week=week_code,
         received_at=received_at,
-        payload=evidence_payload,
+        payload=augmented_payload,
         facility_id=facility.get("resolved_value") or facility_code,
     )
-    template = build_template_resolution_snapshot(evidence_payload)
-    column_mapping = build_column_mapping_resolution(evidence_payload)
-    quantity = build_quantity_resolution(evidence_payload)
+    template = build_template_resolution_snapshot(augmented_payload)
+    column_mapping = build_column_mapping_resolution(augmented_payload)
+    quantity = build_quantity_resolution(augmented_payload)
     resolutions = {
         "facility": facility,
         "week": week,

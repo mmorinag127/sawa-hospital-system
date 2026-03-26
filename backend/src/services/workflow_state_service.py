@@ -11,10 +11,12 @@ from src.services.ocr_job_service import describe_job_state, get_job as get_ocr_
 from src.services import (
     apply_gate_service,
     candidate_resolution_service,
+    config_service,
     critical_decision_service,
     draft_sheet_service,
     menu_service,
     ocr_evidence_service,
+    position_column_mapping_service,
 )
 
 
@@ -256,15 +258,76 @@ def _resolve_candidate_evidence_run(
     return None
 
 
-def _load_workflow_draft_sheet(order_id: str) -> dict[str, Any] | None:
+def _augment_workflow_evidence_run(
+    evidence_run: dict[str, Any] | None,
+    *,
+    facility_code: str | None,
+) -> dict[str, Any] | None:
+    if not isinstance(evidence_run, dict):
+        return evidence_run
+    normalized_facility_code = str(facility_code or "").strip()
+    if not normalized_facility_code:
+        return evidence_run
+    payload = evidence_run.get("payload_json")
+    if not isinstance(payload, dict):
+        return evidence_run
+    if not candidate_resolution_service.position_fallback_allowed_for_facility(
+        current_facility=normalized_facility_code,
+        payload=payload,
+    ):
+        return evidence_run
+    facility_config = config_service.get_facility_config(normalized_facility_code) or {}
+    template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+    if not isinstance(template, dict):
+        return evidence_run
+    augmented_payload = position_column_mapping_service.augment_payload_with_position_fallback(
+        payload,
+        template,
+        template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
+    )
+    if not isinstance(augmented_payload, dict) or augmented_payload is payload:
+        return evidence_run
+    capabilities = ocr_evidence_service._build_capabilities(augmented_payload)
+    capabilities["legacy_editable"] = bool(
+        str(evidence_run.get("schema_version") or "").startswith("v1_legacy")
+    )
+    return {
+        **evidence_run,
+        "payload_json": augmented_payload,
+        "capabilities_json": capabilities,
+    }
+
+
+def _load_workflow_draft_sheet(
+    order_id: str,
+    *,
+    refresh_draft_from_semantic: bool = True,
+) -> dict[str, Any] | None:
     latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
+    if refresh_draft_from_semantic is False:
+        if isinstance(latest_draft, dict):
+            return latest_draft
+    if apply_gate_service.has_clean_saved_draft(latest_draft):
+        return latest_draft
+    if refresh_draft_from_semantic:
+        try:
+            from src.services import order_service as _order_service
+
+            refreshed_draft = _order_service.get_latest_sheet_draft(order_id, backfill_from_revision=False)
+            if isinstance(refreshed_draft, dict):
+                return refreshed_draft
+        except Exception:
+            pass
     if isinstance(latest_draft, dict):
         return latest_draft
-    semantic_initial: dict[str, Any] | None = None
     try:
         from src.services import order_service as _order_service
 
-        semantic_initial = _order_service.build_initial_sheet_draft(order_id)
+    except Exception:
+        _order_service = None
+    semantic_initial: dict[str, Any] | None = None
+    try:
+        semantic_initial = _order_service.build_initial_sheet_draft(order_id) if _order_service is not None else None
     except Exception:
         semantic_initial = None
     if isinstance(semantic_initial, dict):
@@ -434,15 +497,27 @@ def _derive_state(
     quantity_selected_via_user_choice = bool(
         isinstance(quantity_resolution, dict) and quantity_resolution.get("selected_via_user_choice")
     )
+    position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
+        candidate_resolution
+    )
     capabilities = evidence_run.get("capabilities_json") if isinstance(evidence_run, dict) else {}
+    evidence_payload = evidence_run.get("payload_json") if isinstance(evidence_run, dict) else None
+    position_fallback_clears_numeric_warning = bool(
+        position_fallback_semantics_ready
+        and not ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence_payload)
+    )
     semantic_shell_only = bool(
-        isinstance(capabilities, dict) and capabilities.get("semantic_shell_only") and not clean_saved_draft
+        isinstance(capabilities, dict)
+        and capabilities.get("semantic_shell_only")
+        and not clean_saved_draft
+        and not position_fallback_semantics_ready
     )
     numeric_trust_low = bool(
         isinstance(capabilities, dict)
         and capabilities.get("numeric_trust_low")
         and not quantity_selected_via_user_choice
         and not clean_saved_draft
+        and not position_fallback_clears_numeric_warning
     )
     draft_has_quantity_values = _draft_sheet_has_quantity_values(draft_sheet)
     reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
@@ -497,7 +572,11 @@ def _derive_state(
     return "evidence_ready", "OCR証拠を確認できます", "open_draft", blockers, warnings, "medium"
 
 
-def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
+def refresh_workflow_state(
+    order_id: str,
+    *,
+    refresh_draft_from_semantic: bool = True,
+) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
@@ -505,9 +584,16 @@ def refresh_workflow_state(order_id: str) -> dict[str, Any] | None:
     if not isinstance(order_payload, dict):
         return None
     evidence_run = ocr_evidence_service.get_latest_evidence_run(normalized_order_id)
-    draft_sheet = _load_workflow_draft_sheet(normalized_order_id)
+    draft_sheet = _load_workflow_draft_sheet(
+        normalized_order_id,
+        refresh_draft_from_semantic=refresh_draft_from_semantic,
+    )
     reparse_job = get_ocr_job(f"OCR-{normalized_order_id}")
     active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
+    active_evidence_run = _augment_workflow_evidence_run(
+        active_evidence_run,
+        facility_code=str(order_payload.get("facility") or "").strip() or None,
+    )
     candidate_evidence_run = _resolve_candidate_evidence_run(
         evidence_run,
         active_evidence_run,

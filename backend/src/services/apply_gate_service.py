@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.services import ocr_evidence_service, position_column_mapping_service
+
 
 _RECOVERABLE_BLOCKING_WARNINGS = {
     "week_unresolved",
@@ -126,6 +128,14 @@ def evaluate_apply_gate(
     facility = str((order_payload or {}).get("facility") or "").strip()
     week = str((order_payload or {}).get("week_value") or (order_payload or {}).get("week") or "").strip()
     clean_saved_draft = has_clean_saved_draft(draft_sheet)
+    evidence_payload = (evidence_run or {}).get("payload_json") if isinstance(evidence_run, dict) else None
+    position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
+        candidate_resolution
+    )
+    position_fallback_clears_numeric_warning = bool(
+        position_fallback_semantics_ready
+        and not ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence_payload)
+    )
 
     if not facility:
         apply_blockers.append("facility_missing")
@@ -151,7 +161,7 @@ def evaluate_apply_gate(
         if not capabilities.get("step2_edit_ready"):
             apply_blockers.append("evidence_edit_unavailable")
             confirm_blockers.append("evidence_edit_unavailable")
-        if capabilities.get("semantic_shell_only") and not clean_saved_draft:
+        if capabilities.get("semantic_shell_only") and not clean_saved_draft and not position_fallback_semantics_ready:
             apply_blockers.append("semantic_shell_only")
             confirm_blockers.append("semantic_shell_only")
         if capabilities.get("recovery_required") and not clean_saved_draft:
@@ -194,6 +204,7 @@ def evaluate_apply_gate(
         and capabilities.get("numeric_trust_low")
         and not quantity_selected_via_user_choice
         and not clean_saved_draft
+        and not position_fallback_clears_numeric_warning
     ):
         apply_warnings.append("numeric_trust_low")
         confirm_warnings.append("numeric_trust_low")

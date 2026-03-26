@@ -34,7 +34,7 @@ from src.models.ingest_job import IngestJob  # noqa: F401
 from src.models.user import AuditLog
 from src.models.facility import FacilityConfig
 from src.services.notification_service import record_event
-from src.services import config_service, menu_service, facility_service
+from src.services import config_service, menu_service, facility_service, fax_extractor
 from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
@@ -43,6 +43,7 @@ from src.services import (
     evidence_manifest_service,
     template_resolution_service,
     ocr_evidence_service,
+    position_column_mapping_service,
     draft_sheet_service,
     ocr_patch_candidate_service as patch_candidate_service,
 )
@@ -5070,7 +5071,10 @@ def persist_sheet_draft(
     )
     if persisted is not None:
         try:
-            workflow_state_service.refresh_workflow_state(order_id)
+            workflow_state_service.refresh_workflow_state(
+                order_id,
+                refresh_draft_from_semantic=False,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Workflow state refresh failed after draft persist", order_id=order_id, error=str(exc))
     return persisted
@@ -5108,6 +5112,9 @@ def _sheet_row_identity_key(fields: list[str], row: list[Any]) -> tuple[str, str
 def _merge_saved_draft_into_semantic_sheet(
     current_sheet: dict[str, Any] | None,
     fresh_sheet: dict[str, Any] | None,
+    *,
+    append_unmatched_current_rows: bool = True,
+    merge_current_warnings: bool = True,
 ) -> dict[str, Any] | None:
     if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
         return fresh_sheet if isinstance(fresh_sheet, dict) else current_sheet
@@ -5173,31 +5180,36 @@ def _merge_saved_draft_into_semantic_sheet(
         merged_rows.append(merged_row)
         merged_row_ids.append(merged_row_id)
 
-    for row_key, (current_row, current_row_id) in current_by_key.items():
-        if row_key in matched_keys:
-            continue
-        appended = [""] * len(fresh_fields)
-        for field_name, current_idx in current_index.items():
-            fresh_idx = fresh_index.get(field_name)
-            if fresh_idx is None or current_idx >= len(current_row):
+    if append_unmatched_current_rows:
+        for row_key, (current_row, current_row_id) in current_by_key.items():
+            if row_key in matched_keys:
                 continue
-            appended[fresh_idx] = current_row[current_idx]
-        merged_rows.append(appended)
-        merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
-
-    for current_row, current_row_id in unmatched_current:
-        appended = [""] * len(fresh_fields)
-        for field_name, current_idx in current_index.items():
-            fresh_idx = fresh_index.get(field_name)
-            if fresh_idx is None or current_idx >= len(current_row):
-                continue
-            appended[fresh_idx] = current_row[current_idx]
-        if any(str(cell or "").strip() for cell in appended):
+            appended = [""] * len(fresh_fields)
+            for field_name, current_idx in current_index.items():
+                fresh_idx = fresh_index.get(field_name)
+                if fresh_idx is None or current_idx >= len(current_row):
+                    continue
+                appended[fresh_idx] = current_row[current_idx]
             merged_rows.append(appended)
             merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
 
+        for current_row, current_row_id in unmatched_current:
+            appended = [""] * len(fresh_fields)
+            for field_name, current_idx in current_index.items():
+                fresh_idx = fresh_index.get(field_name)
+                if fresh_idx is None or current_idx >= len(current_row):
+                    continue
+                appended[fresh_idx] = current_row[current_idx]
+            if any(str(cell or "").strip() for cell in appended):
+                merged_rows.append(appended)
+                merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
+
     merged_warnings: list[str] = []
-    for warning in list(current_sheet.get("warnings") or []) + list(fresh_sheet.get("warnings") or []):
+    warning_sources: list[Any] = []
+    if merge_current_warnings:
+        warning_sources.extend(list(current_sheet.get("warnings") or []))
+    warning_sources.extend(list(fresh_sheet.get("warnings") or []))
+    for warning in warning_sources:
         token = str(warning or "").strip()
         if token and token not in merged_warnings:
             merged_warnings.append(token)
@@ -5210,6 +5222,52 @@ def _merge_saved_draft_into_semantic_sheet(
     if ui_mode:
         merged["ui_mode"] = ui_mode
     return merged
+
+
+_SEMANTIC_REFRESH_PRUNE_BLOCKERS = {
+    "week_unresolved",
+    "menu_entries_missing",
+    "sheet_fields_not_found",
+    "sheet_fields_duplicate",
+    "sheet_template_field_invalid",
+    "sheet_quantity_columns_missing",
+    "sheet_quantity_column_unmapped",
+    "sheet_week_dates_incomplete",
+    "week_menu_date_mismatch",
+    "sheet_date_mismatch",
+    "sheet_canonical_mismatch",
+    "sheet_suspicious_blank_row",
+    "ocr_evidence_recovery_required",
+    "template_resolution_blocked",
+    "template_unresolved",
+    "auto_apply_blocked",
+}
+
+
+def _should_prune_unmatched_rows_on_semantic_refresh(draft: dict[str, Any] | None) -> bool:
+    if not isinstance(draft, dict):
+        return False
+    draft_state = str(draft.get("draft_state") or "").strip().lower()
+    if draft_state == "auto_apply_blocked":
+        return True
+    blockers = {
+        str(item).strip()
+        for item in (draft.get("blockers_json") or [])
+        if str(item).strip()
+    }
+    return bool(blockers & _SEMANTIC_REFRESH_PRUNE_BLOCKERS)
+
+
+def _filter_blockers_for_semantic_refresh(blockers: list[str] | None) -> list[str]:
+    preserved: list[str] = []
+    seen: set[str] = set()
+    for item in blockers or []:
+        token = str(item or "").strip()
+        if not token or token in _SEMANTIC_REFRESH_PRUNE_BLOCKERS or token in seen:
+            continue
+        seen.add(token)
+        preserved.append(token)
+    return preserved
 
 
 def _merge_current_draft_quantity_values_into_semantic_sheet(
@@ -5301,21 +5359,43 @@ def _maybe_refresh_semantic_sheet_draft(
     fresh_sheet = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
     if not isinstance(fresh_sheet, dict) or _draft_fields_look_generic(fresh_sheet.get("fields")):
         return draft
-    merged_sheet = _merge_saved_draft_into_semantic_sheet(draft_sheet_json, fresh_sheet)
+    prune_unmatched_rows = _should_prune_unmatched_rows_on_semantic_refresh(draft)
+    merged_sheet = _merge_saved_draft_into_semantic_sheet(
+        draft_sheet_json,
+        fresh_sheet,
+        append_unmatched_current_rows=not prune_unmatched_rows,
+        merge_current_warnings=False,
+    )
     if not isinstance(merged_sheet, dict):
         return draft
+    current_blockers = [str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()]
+    current_warning_rows = [str(item).strip() for item in (draft.get("warnings_json") or []) if str(item).strip()]
+    next_blockers = _filter_blockers_for_semantic_refresh(
+        current_blockers
+    )
+    if prune_unmatched_rows:
+        next_warnings = [str(item).strip() for item in (merged_sheet.get("warnings") or []) if str(item).strip()]
+    else:
+        next_warnings = list(current_warning_rows)
+        merged_sheet["warnings"] = list(next_warnings)
     if (
         draft_sheet_json.get("fields") == merged_sheet.get("fields")
         and draft_sheet_json.get("header") == merged_sheet.get("header")
         and draft_sheet_json.get("rows") == merged_sheet.get("rows")
+        and (
+            prune_unmatched_rows is False
+            or [str(item).strip() for item in (draft_sheet_json.get("warnings") or []) if str(item).strip()] == next_warnings
+        )
+        and current_blockers == next_blockers
+        and current_warning_rows == next_warnings
     ):
         return draft
     refreshed = persist_sheet_draft(
         order_id=order_id,
         draft_sheet_json=merged_sheet,
         draft_state=str(draft.get("draft_state") or "draft_ready").strip() or "draft_ready",
-        blockers=[str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()],
-        warnings=[str(item).strip() for item in (merged_sheet.get("warnings") or []) if str(item).strip()],
+        blockers=next_blockers,
+        warnings=next_warnings,
         edited_by="semantic-sheet-refresh",
     )
     return refreshed if isinstance(refreshed, dict) else draft
@@ -5964,6 +6044,7 @@ def _sheet_payload_mapping_block_reason(
     *,
     source: str,
     ocr_payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
     evidence_missing: list[str] | None,
     template_blockers: list[str] | None,
 ) -> str | None:
@@ -5976,7 +6057,21 @@ def _sheet_payload_mapping_block_reason(
     missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
     if strict_evidence_context and "template_resolution" in missing:
         return "unresolved_template"
+    has_structured_table_rows = bool(
+        isinstance(ocr_payload, dict)
+        and (
+            (isinstance(ocr_payload.get("table_rows"), list) and bool(ocr_payload.get("table_rows")))
+            or (isinstance(ocr_payload.get("tables"), list) and bool(ocr_payload.get("tables")))
+        )
+    )
     if not isinstance(template_resolution, dict):
+        if (
+            isinstance(ocr_payload, dict)
+            and str(ocr_payload.get("table_raw") or "").strip()
+            and not has_structured_table_rows
+            and not _raw_table_has_strong_template_quantity_semantics(ocr_payload, template)
+        ):
+            return "unresolved_template"
         return None
     # Weekly-menu rescue can only be trusted when quantity-column semantics are known.
     # Full row-edge metadata is useful for overlays, but Step2 quantity mapping only needs a
@@ -5986,6 +6081,72 @@ def _sheet_payload_mapping_block_reason(
     if ocr_evidence_service.payload_has_high_risk_numeric_issues(ocr_payload):
         return "numeric_review_required"
     return None
+
+
+def _is_markdown_separator_cells(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    for cell in cells:
+        token = str(cell or "").strip()
+        if not token:
+            continue
+        if not re.fullmatch(r":?-{3,}:?", token):
+            return False
+    return True
+
+
+def _extract_markdown_header_cells(markdown: str) -> list[str]:
+    normalized = _normalize_table_raw_text(markdown)
+    for raw_line in normalized.splitlines():
+        line = str(raw_line or "").strip()
+        if not line.startswith("|") or "|" not in line[1:]:
+            continue
+        cells = [str(cell or "").strip() for cell in line.strip("|").split("|")]
+        if _is_markdown_separator_cells(cells):
+            continue
+        return cells
+    return []
+
+
+def _raw_table_has_strong_template_quantity_semantics(
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(payload, dict) or not isinstance(template, dict):
+        return False
+    table_raw = str(payload.get("table_raw") or "").strip()
+    if not table_raw:
+        return False
+    parsed_rows = rows_from_markdown(table_raw, template) or []
+    if not parsed_rows:
+        return False
+    fields = _get_row_fields(template)
+    if not fields:
+        return False
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    if not quantity_fields:
+        return False
+    header_cells = _extract_markdown_header_cells(table_raw)
+    if not header_cells:
+        return False
+    mapped_fields = {
+        mapped
+        for mapped in (_field_from_header(cell, set(fields)) for cell in header_cells)
+        if isinstance(mapped, str) and mapped.strip()
+    }
+    structural_fields = {
+        field for field in mapped_fields if field in {"date_mmdd", "date", "daypart", "menu", "menu_name"}
+    }
+    quantity_indexes = [idx for idx, field in enumerate(fields) if field.startswith("qty.")]
+    populated_quantity_indexes = {
+        idx
+        for row in parsed_rows
+        if isinstance(row, list)
+        for idx in quantity_indexes
+        if idx < len(row) and _parse_strict_numeric_cell(row[idx]) is not None
+    }
+    required_quantity_columns = 1 if len(quantity_fields) == 1 else 2
+    return len(structural_fields) >= 3 and len(populated_quantity_indexes) >= required_quantity_columns
 
 
 def _sheet_uses_strict_evidence_context(payload: dict[str, Any] | None) -> bool:
@@ -10575,10 +10736,120 @@ def _sanitize_payload_table_raw(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _extract_sheet_rows_from_payload(payload: dict[str, Any], template: dict[str, Any]) -> list[list[str]]:
     payload = _sanitize_payload_table_raw(payload)
+    resolved_rows = _extract_sheet_rows_from_resolved_column_mapping(payload, template)
+    if resolved_rows:
+        return resolved_rows
     rows = rows_from_pipeline_payload(payload, template)
     if not rows:
         return []
     return [[_field_value_to_str(cell) for cell in row] for row in rows]
+
+
+def _parse_resolved_column_mapping_pairs(
+    payload: dict[str, Any],
+    fields: list[str],
+) -> list[tuple[int, str]]:
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return []
+    raw_value = str(
+        resolution.get("resolved_value")
+        or resolution.get("resolved_column_mapping_id")
+        or ""
+    ).strip()
+    if not raw_value:
+        return []
+    pairs: list[tuple[int, str]] = []
+    seen_fields: set[str] = set()
+    for chunk in raw_value.split("|"):
+        token = str(chunk or "").strip()
+        if ":" not in token:
+            continue
+        source_raw, field = token.split(":", 1)
+        try:
+            source_col_index = int(source_raw)
+        except Exception:
+            continue
+        field = str(field or "").strip()
+        if not field or field in seen_fields or field not in fields or not field.startswith("qty."):
+            continue
+        seen_fields.add(field)
+        pairs.append((source_col_index, field))
+    return pairs
+
+
+def _extract_sheet_rows_from_resolved_column_mapping(
+    payload: dict[str, Any],
+    template: dict[str, Any],
+) -> list[list[str]]:
+    fields = _get_row_fields(template)
+    if not fields:
+        return []
+    quantity_pairs = _parse_resolved_column_mapping_pairs(payload, fields)
+    if not quantity_pairs:
+        return []
+    structured_tables = fax_extractor._collect_structured_tables(payload)
+    if not structured_tables:
+        return []
+
+    quantity_dest_indexes = {
+        idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("qty.")
+    }
+    rebuilt_rows: list[list[str]] = []
+    for table_payload in structured_tables:
+        if not isinstance(table_payload, dict):
+            continue
+        matrix = None
+        raw_rows = table_payload.get("rows")
+        if isinstance(raw_rows, list) and raw_rows:
+            matrix = fax_extractor._normalize_table_matrix_rows(raw_rows)
+        if matrix is None:
+            raw_cells = table_payload.get("cells")
+            if isinstance(raw_cells, list) and raw_cells:
+                matrix = fax_extractor._matrix_from_structured_cells(
+                    raw_cells,
+                    row_count_hint=table_payload.get("row_count")
+                    if isinstance(table_payload.get("row_count"), int)
+                    else table_payload.get("n_row"),
+                    col_count_hint=table_payload.get("col_count")
+                    if isinstance(table_payload.get("col_count"), int)
+                    else table_payload.get("n_col"),
+                )
+        if not matrix:
+            continue
+        resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
+        if not isinstance(resolved, tuple) or len(resolved) != 2:
+            continue
+        mapping_meta, _output_rows = resolved
+        if not isinstance(mapping_meta, dict):
+            continue
+        mapped_indexes = mapping_meta.get("mapped_indexes")
+        row_map = mapping_meta.get("row_map")
+        if not isinstance(mapped_indexes, dict) or not isinstance(row_map, dict):
+            continue
+        final_mapped_indexes = {
+            int(source_col_index): int(dest_idx)
+            for source_col_index, dest_idx in mapped_indexes.items()
+            if isinstance(dest_idx, int) and 0 <= dest_idx < len(fields) and dest_idx not in quantity_dest_indexes
+        }
+        for source_col_index, field in quantity_pairs:
+            try:
+                dest_idx = fields.index(field)
+            except ValueError:
+                continue
+            final_mapped_indexes[source_col_index] = dest_idx
+        normalized_matrix = fax_extractor._normalize_table_matrix_rows(matrix)
+        for raw_row_index in sorted(int(idx) for idx in row_map.keys()):
+            if raw_row_index < 0 or raw_row_index >= len(normalized_matrix):
+                continue
+            row = normalized_matrix[raw_row_index]
+            output_row = [""] * len(fields)
+            for source_col_index, dest_idx in final_mapped_indexes.items():
+                if source_col_index < len(row):
+                    output_row[dest_idx] = row[source_col_index]
+            if any(str(cell or "").strip() for cell in output_row):
+                rebuilt_rows.append([_field_value_to_str(cell) for cell in output_row])
+    return rebuilt_rows
 
 
 def _extract_first_pass_rows_from_payload(
@@ -10586,23 +10857,52 @@ def _extract_first_pass_rows_from_payload(
     template: dict[str, Any],
 ) -> list[list[str]]:
     payload = _sanitize_payload_table_raw(payload)
+    raw_rows = payload.get("rows")
+    normalized_raw_rows: list[list[str]] = []
+    if isinstance(raw_rows, list):
+        for row in raw_rows:
+            if not isinstance(row, list):
+                continue
+            normalized_raw_rows.append([_field_value_to_str(cell) for cell in row])
     rows = rows_from_structured_payload(payload, template)
     if not rows:
         table_raw = payload.get("table_raw")
         if isinstance(table_raw, str) and table_raw.strip():
             rows = rows_from_markdown(table_raw, template) or []
-    if not rows:
-        raw_rows = payload.get("rows")
-        if isinstance(raw_rows, list):
-            normalized: list[list[str]] = []
-            for row in raw_rows:
-                if not isinstance(row, list):
-                    continue
-                normalized.append([_field_value_to_str(cell) for cell in row])
-            rows = normalized
+    if rows and normalized_raw_rows and _first_pass_payload_header_is_generic(payload, template):
+        return normalized_raw_rows
+    if not rows and normalized_raw_rows:
+        rows = normalized_raw_rows
     if not rows:
         return []
     return [[_field_value_to_str(cell) for cell in row] for row in rows]
+
+
+def _first_pass_payload_header_is_generic(
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(payload, dict) or not isinstance(template, dict):
+        return False
+    table_raw = str(payload.get("table_raw") or "").strip()
+    if not table_raw:
+        return False
+    header_cells = _extract_markdown_header_cells(table_raw)
+    if not header_cells:
+        return False
+    fields = set(_get_row_fields(template))
+    if not fields:
+        return False
+    meaningful_cells = [str(cell or "").strip() for cell in header_cells if str(cell or "").strip()]
+    if not meaningful_cells:
+        return False
+    generic_like = 0
+    for cell in meaningful_cells:
+        normalized = _normalize_header_token(cell)
+        mapped = _field_from_header(cell, fields)
+        if re.fullmatch(r"col\d+", normalized) or mapped is None:
+            generic_like += 1
+    return generic_like == len(meaningful_cells)
 
 
 def _resolve_payload_sheet_template(payload: dict[str, Any], template: dict[str, Any] | None) -> dict[str, Any]:
@@ -13801,11 +14101,27 @@ def get_ocr_sheet(
         payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
         if isinstance(payload, dict):
             ocr_payload = payload
-    latest_draft = (
-        get_latest_sheet_draft(order_id, backfill_from_revision=True)
-        if use_saved_draft
-        else None
-    )
+    if (
+        isinstance(ocr_payload, dict)
+        and candidate_resolution_service.position_fallback_allowed_for_facility(
+            current_facility=facility_id,
+            payload=ocr_payload,
+        )
+    ):
+        ocr_payload = position_column_mapping_service.augment_payload_with_position_fallback(
+            ocr_payload,
+            template,
+            template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
+        )
+    raw_latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id) if use_saved_draft else None
+    if use_saved_draft and apply_gate_service.has_clean_saved_draft(raw_latest_draft):
+        latest_draft = raw_latest_draft
+    else:
+        latest_draft = (
+            get_latest_sheet_draft(order_id, backfill_from_revision=True)
+            if use_saved_draft
+            else None
+        )
     latest_revision = (
         _select_order_sheet_revision(
             order_id=order_id,
@@ -13953,6 +14269,7 @@ def get_ocr_sheet(
     payload_mapping_block_reason = _sheet_payload_mapping_block_reason(
         source=source,
         ocr_payload=ocr_payload,
+        template=template,
         evidence_missing=evidence_missing,
         template_blockers=template_blockers,
     )
