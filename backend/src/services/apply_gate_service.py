@@ -20,6 +20,34 @@ _RECOVERABLE_BLOCKING_WARNINGS = {
     "template_resolution_blocked",
 }
 
+_LAYOUT_RESOLUTION_TYPES = {"template", "column_mapping", "quantity"}
+
+
+def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
+    if not isinstance(draft_sheet, dict):
+        return False
+    if not str(draft_sheet.get("id") or "").strip():
+        return False
+    draft_payload = (
+        draft_sheet.get("draft_sheet_json")
+        if isinstance(draft_sheet.get("draft_sheet_json"), dict)
+        else draft_sheet
+    )
+    rows = draft_payload.get("rows") if isinstance(draft_payload, dict) else None
+    if not isinstance(rows, list) or len(rows) <= 0:
+        return False
+    blockers = [
+        str(item or "").strip()
+        for item in (draft_sheet.get("blockers_json") or [])
+        if str(item or "").strip()
+    ]
+    warnings = [
+        str(item or "").strip()
+        for item in list(draft_sheet.get("warnings_json") or []) + list((draft_payload or {}).get("warnings") or [])
+        if str(item or "").strip()
+    ]
+    return len(blockers) == 0 and len(warnings) == 0
+
 
 def evaluate_sheet_gate(
     *,
@@ -97,6 +125,7 @@ def evaluate_apply_gate(
 
     facility = str((order_payload or {}).get("facility") or "").strip()
     week = str((order_payload or {}).get("week_value") or (order_payload or {}).get("week") or "").strip()
+    clean_saved_draft = has_clean_saved_draft(draft_sheet)
 
     if not facility:
         apply_blockers.append("facility_missing")
@@ -122,10 +151,10 @@ def evaluate_apply_gate(
         if not capabilities.get("step2_edit_ready"):
             apply_blockers.append("evidence_edit_unavailable")
             confirm_blockers.append("evidence_edit_unavailable")
-        if capabilities.get("semantic_shell_only"):
+        if capabilities.get("semantic_shell_only") and not clean_saved_draft:
             apply_blockers.append("semantic_shell_only")
             confirm_blockers.append("semantic_shell_only")
-        if capabilities.get("recovery_required"):
+        if capabilities.get("recovery_required") and not clean_saved_draft:
             apply_warnings.append("recovery_recommended")
             confirm_warnings.append("recovery_recommended")
 
@@ -134,10 +163,11 @@ def evaluate_apply_gate(
         for decision_type, resolution in resolutions.items():
             if not isinstance(resolution, dict):
                 continue
-            if resolution.get("requires_user_choice"):
+            suppress_layout_resolution = clean_saved_draft and decision_type in _LAYOUT_RESOLUTION_TYPES
+            if resolution.get("requires_user_choice") and not suppress_layout_resolution:
                 apply_blockers.append(f"{decision_type}_choice_required")
                 confirm_blockers.append(f"{decision_type}_choice_required")
-            if resolution.get("blocked") and not resolution.get("resolved_value"):
+            if resolution.get("blocked") and not resolution.get("resolved_value") and not suppress_layout_resolution:
                 apply_blockers.append(f"{decision_type}_unresolved")
                 confirm_blockers.append(f"{decision_type}_unresolved")
         column_mapping = resolutions.get("column_mapping") if isinstance(resolutions.get("column_mapping"), dict) else None
@@ -147,6 +177,7 @@ def evaluate_apply_gate(
             isinstance(column_mapping, dict)
             and column_mapping.get("attention_required")
             and not column_mapping.get("selected_via_user_choice")
+            and not clean_saved_draft
         ):
             apply_warnings.append("column_mapping_review_required")
             confirm_warnings.append("column_mapping_review_required")
@@ -154,10 +185,16 @@ def evaluate_apply_gate(
             isinstance(quantity, dict)
             and quantity.get("attention_required")
             and not quantity.get("selected_via_user_choice")
+            and not clean_saved_draft
         ):
             apply_warnings.append("quantity_review_required")
             confirm_warnings.append("quantity_review_required")
-    if isinstance(capabilities, dict) and capabilities.get("numeric_trust_low") and not quantity_selected_via_user_choice:
+    if (
+        isinstance(capabilities, dict)
+        and capabilities.get("numeric_trust_low")
+        and not quantity_selected_via_user_choice
+        and not clean_saved_draft
+    ):
         apply_warnings.append("numeric_trust_low")
         confirm_warnings.append("numeric_trust_low")
 
