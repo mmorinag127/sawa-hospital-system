@@ -920,6 +920,64 @@ def test_refresh_workflow_state_uses_saved_draft_sheet_blockers():
     assert apply_gate["can_confirm"] is False
 
 
+def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-state-clean-draft-override", facility_hint="FAC00001", week_hint="2026-03")
+    _persist_evidence(
+        order["id"],
+        extra_payload={
+            "template_resolution": {
+                "resolved_template_id": None,
+                "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+                "confidence": 0.42,
+                "blocked": True,
+                "blocked_reasons": ["template_resolution_missing"],
+            },
+            "quantity_subgrid_passes": [],
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+        },
+    )
+    order_service.set_status(order["id"], "確定")
+    saved = draft_sheet_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "order_id": order["id"],
+            "source": "draft_sheet",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食", "備考"],
+            "rows": [["03/22", "朝", "Menu A", "5", ""]],
+            "row_ids": ["row-1"],
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+    )
+    assert saved is not None
+    monkeypatch.setattr(
+        workflow_state_service,
+        "_build_menu_context",
+        lambda **_kwargs: {
+            "month_id": "2026-03",
+            "weekly_menu_missing": False,
+            "menu_entries_missing": False,
+            "entries_count": 21,
+        },
+    )
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert isinstance(workflow, dict)
+    assert workflow["state"] == "apply_ready"
+    assert workflow["primary_action"] == "apply_draft"
+    assert workflow["apply_gate"]["can_apply"] is True
+    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
+    assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
+    assert "numeric_trust_low" not in (workflow["apply_gate"]["warnings"] or [])
+    assert "draft_newer_than_lines" in (workflow["apply_gate"]["warnings"] or [])
+
+
 def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quantity_candidates():
     order_service.clear_all()
     order = _seed_order(message_id="msg-workflow-state-005", facility_hint="FAC00001", week_hint="2026-03")

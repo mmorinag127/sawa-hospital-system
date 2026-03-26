@@ -211,6 +211,68 @@ def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted():
     assert rows_by_menu["Menu B"][qty_idx] == "22"
 
 
+def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_saved_draft(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-clean-draft-override-001")
+    order_service.persist_ocr_evidence_run(
+        order["id"],
+        {
+            "input_reference": "gs://bucket/orders/order.pdf",
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
+                }
+            ],
+            "table_raw": "\n".join(
+                [
+                    "|日付|区分|メニュー|常食|",
+                    "|---|---|---|---|",
+                    "|01/08|昼|Menu A|5|",
+                ]
+            ),
+            "template_resolution": {
+                "resolved_template_id": None,
+                "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+                "confidence": 0.41,
+                "blocked": True,
+                "blocked_reasons": ["template_resolution_missing"],
+            },
+            "quantity_subgrid_passes": [],
+            "table_box": None,
+            "grid_column_edges": [],
+            "grid_row_edges": [],
+        },
+    )
+    persisted = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [["01/08", "昼", "Menu A", "8", ""]],
+            "row_ids": ["draft-row-1"],
+            "ui_mode": "sheet",
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+    )
+    assert persisted is not None
+    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
+
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+
+    assert error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "draft_sheet"
+    assert sheet["warnings"] == []
+    assert sheet["apply_blockers"] == []
+    assert sheet["confirm_blockers"] == []
+    assert sheet["can_apply"] is True
+    assert sheet["can_confirm"] is True
+
+
 def test_should_prefer_source_row_candidate_when_duplicate_rows_are_clean():
     quantity_index = {("regular", "2F"): 3}
     duplicate_identity = order_service._sheet_row_identity("2026-01-08", "昼", "Menu A")

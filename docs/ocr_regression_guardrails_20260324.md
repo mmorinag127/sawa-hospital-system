@@ -42,6 +42,21 @@ These are the rules that should prevent the same class of mistakes from recurrin
 - `candidate fixed -> current still stale`
   These are not completions.
 
+8. Separate commit history from deploy source
+- Commit groups may be separated for review and rollback clarity.
+- Deploy source must still include every change already running in production.
+- If production was deployed from a local dirty tree or clean deploy copy, do not redeploy from clean branch HEAD until those changes are integrated into git.
+
+9. Do not redeploy clean git when prod is ahead of branch
+- If live `worker` or `web` revision/image is newer than the branch tip, treat production as ahead of git.
+- First sync the prod-applied local changes into a branch or integration tree.
+- Then stack the new fix on top of that tree.
+
+10. Minimize service blast radius
+- If only `worker` changed, do not redeploy `web`.
+- If only `web` changed, do not redeploy `worker`.
+- Do not refresh both services from an older tree just because one side needs a fix.
+
 ## Recurrent failure classes
 
 ### 1. Duplicated extraction logic
@@ -83,6 +98,14 @@ Examples:
 
 Step2 edited one source while apply/confirm wrote from another.
 
+### 7. Deploy-source divergence
+
+Git branch and live production came from different trees.
+
+Examples:
+- prod worker was deployed from a local clean-copy image while branch still pointed to an older commit
+- a later OCR fix from clean HEAD would have rolled back shipping/order-form changes already live in prod
+
 ## Skills created from these mistakes
 
 ### 1. `sawa-ocr-implementation-guardrails`
@@ -120,3 +143,9 @@ For most future OCR/order changes, use both skills together:
 
 The first prevents path-confusion during implementation.  
 The second prevents false closure during production verification.
+
+For deploy work where prod may be ahead of git, also enforce this rule explicitly:
+
+1. identify the actual deploy source currently in prod
+2. integrate that source into branch history or a dedicated integration tree
+3. only then stack the next fix

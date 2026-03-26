@@ -6988,8 +6988,10 @@ def _build_sheet_payload_from_draft(
             },
         }
     )
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft)
     merged_warnings: list[str] = []
-    for warning in list(base.get("warnings") or []) + list(draft.get("warnings_json") or []):
+    base_warnings = [] if clean_saved_draft else list(base.get("warnings") or [])
+    for warning in base_warnings + list(draft.get("warnings_json") or []):
         token = str(warning or "").strip()
         if token and token not in merged_warnings:
             merged_warnings.append(token)
@@ -14443,9 +14445,11 @@ def get_ocr_sheet(
             )
         )
         if isinstance(rebuilt, dict):
+            clean_saved_draft = isinstance(latest_draft, dict) and apply_gate_service.has_clean_saved_draft(latest_draft)
+            base_warnings = [] if clean_saved_draft else list(payload.get("warnings") or [])
             merged_warnings = [
                 str(item).strip()
-                for item in list(payload.get("warnings") or []) + list(rebuilt.get("warnings") or [])
+                for item in base_warnings + list(rebuilt.get("warnings") or [])
                 if str(item).strip()
             ]
             deduped_warnings: list[str] = []

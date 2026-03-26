@@ -405,12 +405,19 @@ def _derive_state(
     blockers = list((apply_gate or {}).get("blockers") or [])
     warnings = list((apply_gate or {}).get("warnings") or [])
     order_status = str((order_payload or {}).get("status") or "").strip()
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
     resolutions = (candidate_resolution or {}).get("resolutions") if isinstance(candidate_resolution, dict) else {}
     unresolved_choice_types = {
         str(key).strip()
         for key, value in (resolutions or {}).items()
         if isinstance(value, dict) and value.get("requires_user_choice")
     }
+    if clean_saved_draft:
+        unresolved_choice_types = {
+            decision_type
+            for decision_type in unresolved_choice_types
+            if decision_type in {"facility", "week"}
+        }
     identity_choice_required = bool(unresolved_choice_types & {"facility", "week"})
     layout_choice_required = bool(unresolved_choice_types & {"template", "column_mapping", "quantity"})
     attention_required = bool(
@@ -421,21 +428,27 @@ def _derive_state(
             or "quantity_review_required" in warnings
         )
     )
+    if clean_saved_draft:
+        attention_required = False
     quantity_resolution = resolutions.get("quantity") if isinstance(resolutions, dict) else None
     quantity_selected_via_user_choice = bool(
         isinstance(quantity_resolution, dict) and quantity_resolution.get("selected_via_user_choice")
     )
     capabilities = evidence_run.get("capabilities_json") if isinstance(evidence_run, dict) else {}
-    semantic_shell_only = bool(isinstance(capabilities, dict) and capabilities.get("semantic_shell_only"))
+    semantic_shell_only = bool(
+        isinstance(capabilities, dict) and capabilities.get("semantic_shell_only") and not clean_saved_draft
+    )
     numeric_trust_low = bool(
         isinstance(capabilities, dict)
         and capabilities.get("numeric_trust_low")
         and not quantity_selected_via_user_choice
+        and not clean_saved_draft
     )
     draft_has_quantity_values = _draft_sheet_has_quantity_values(draft_sheet)
     reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
     normalized_reparse_request_mode = str(reparse_request_mode or "").strip().lower()
-    if order_status == "確定":
+    draft_waiting_apply = "draft_newer_than_lines" in warnings
+    if order_status == "確定" and not draft_waiting_apply:
         return "confirmed", "確定済み", "none", blockers, warnings, "high"
     if normalized_reparse_request_mode == "ocr_rerun" and reparse_status in {"running", "pending"}:
         return "rerun_in_progress", "OCRパイプラインを再取得しています", "wait_for_rerun", blockers, warnings, "low"
