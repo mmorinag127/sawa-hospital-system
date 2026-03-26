@@ -38,4 +38,8 @@ tests/
 - Before touching Cloud Run settings, enumerate and verify all required env vars; do not proceed if any are missing.
 - For GCP Console guidance, always specify exact navigation paths (menu names) and precise click targets; avoid vague directions.
 - Always read this `workspace/AGENTS.md` before starting any task. Do not simplify or reinterpret user requirements; confirm them explicitly if anything is ambiguous, and implement exactly what was requested.
+- Separate commit history from deploy source. It is acceptable to keep fixes in separate commits, but never deploy from a clean branch tree if production already contains newer local or out-of-band changes that are not present in that tree.
+- Before any deploy, verify deploy-source parity: identify the exact prod revision/image currently serving traffic and confirm the deploy source includes those changes. If prod is ahead of the branch, first sync those changes into an integration tree or clean deploy copy, then stack the new fix on top.
+- When only one service needs a fix, do not redeploy the other service from an older tree. Minimize blast radius and avoid rolling back unrelated live behavior.
+- If a clean saved draft or explicit user correction exists, do not let stale OCR evidence warnings or legacy fallback paths override that newer source of truth without an explicit blocker that still applies after the correction.
 <!-- MANUAL ADDITIONS END -->
