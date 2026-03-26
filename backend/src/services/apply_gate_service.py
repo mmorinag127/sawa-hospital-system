@@ -50,6 +50,17 @@ def source_uses_saved_sheet(source: str | None) -> bool:
     return normalized.startswith("draft_sheet") or normalized.startswith("edited_sheet")
 
 
+def canonical_sheet_source(
+    source: str | None,
+    *,
+    has_persisted_draft: bool = False,
+) -> str:
+    normalized = str(source or "").strip()
+    if has_persisted_draft and not source_uses_saved_sheet(normalized):
+        return "draft_sheet"
+    return normalized
+
+
 def _stale_issue_suppressions(
     *,
     source: str | None,
@@ -282,7 +293,10 @@ def evaluate_apply_gate(
         apply_blockers.append("draft_rows_empty")
         confirm_blockers.append("draft_rows_empty")
 
-    source = str((draft_payload or {}).get("source") or "").strip()
+    source = canonical_sheet_source(
+        (draft_payload or {}).get("source"),
+        has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
+    )
     if source.startswith("ocr_table"):
         apply_warnings.append("ocr_table_fallback")
         confirm_warnings.append("ocr_table_fallback")

@@ -530,7 +530,7 @@ def test_refresh_workflow_state_suppresses_stale_draft_layout_blockers_when_posi
         order_id=order["id"],
         draft_sheet_json={
             "order_id": order["id"],
-            "source": "draft_sheet",
+            "source": "weekly_menu",
             "fields": [
                 "date_mmdd",
                 "daypart",

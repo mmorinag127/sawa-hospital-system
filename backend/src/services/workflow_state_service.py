@@ -171,7 +171,10 @@ def _build_sheet_gate(
         else (draft_sheet if isinstance(draft_sheet, dict) else {})
     )
     rows = draft_payload.get("rows") if isinstance(draft_payload, dict) else None
-    source = str((draft_payload or {}).get("source") or "").strip()
+    source = apply_gate_service.canonical_sheet_source(
+        (draft_payload or {}).get("source"),
+        has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
+    )
     blockers = []
     warnings = []
     if isinstance(draft_sheet, dict):
