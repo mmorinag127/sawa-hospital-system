@@ -5109,12 +5109,21 @@ def _sheet_row_identity_key(fields: list[str], row: list[Any]) -> tuple[str, str
     return tuple(parts)
 
 
+def _sheet_cell_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    return True
+
+
 def _merge_saved_draft_into_semantic_sheet(
     current_sheet: dict[str, Any] | None,
     fresh_sheet: dict[str, Any] | None,
     *,
     append_unmatched_current_rows: bool = True,
     merge_current_warnings: bool = True,
+    preserve_blank_quantity_values: bool = True,
 ) -> dict[str, Any] | None:
     if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
         return fresh_sheet if isinstance(fresh_sheet, dict) else current_sheet
@@ -5172,7 +5181,8 @@ def _merge_saved_draft_into_semantic_sheet(
                     continue
                 current_value = current_row[current_idx]
                 if field_name.startswith("qty."):
-                    merged_row[fresh_idx] = current_value
+                    if preserve_blank_quantity_values or _sheet_cell_has_value(current_value):
+                        merged_row[fresh_idx] = current_value
                 elif str(current_value or "").strip() != "":
                     merged_row[fresh_idx] = current_value
             if current_row_id:
@@ -5335,7 +5345,8 @@ def _merge_current_draft_quantity_values_into_semantic_sheet(
                 current_value = current_row[current_idx] if current_idx < len(current_row) else ""
                 while len(merged_row) <= fresh_idx:
                     merged_row.append("")
-                merged_row[fresh_idx] = current_value
+                if _sheet_cell_has_value(current_value):
+                    merged_row[fresh_idx] = current_value
             if current_row_id:
                 merged_row_id = current_row_id
         merged_rows.append(merged_row)
@@ -5359,12 +5370,14 @@ def _maybe_refresh_semantic_sheet_draft(
     fresh_sheet = _build_best_available_semantic_draft(order_id, use_saved_draft=False)
     if not isinstance(fresh_sheet, dict) or _draft_fields_look_generic(fresh_sheet.get("fields")):
         return draft
+    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft)
     prune_unmatched_rows = _should_prune_unmatched_rows_on_semantic_refresh(draft)
     merged_sheet = _merge_saved_draft_into_semantic_sheet(
         draft_sheet_json,
         fresh_sheet,
         append_unmatched_current_rows=not prune_unmatched_rows,
         merge_current_warnings=False,
+        preserve_blank_quantity_values=clean_saved_draft,
     )
     if not isinstance(merged_sheet, dict):
         return draft
@@ -6052,10 +6065,13 @@ def _sheet_payload_mapping_block_reason(
         return None
     template_resolution = _get_template_resolution(ocr_payload)
     strict_evidence_context = _sheet_uses_strict_evidence_context(ocr_payload)
+    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
+        ocr_payload
+    )
     if any(str(item or "").strip() for item in (template_blockers or [])):
         return "unresolved_template"
     missing = {str(item or "").strip() for item in (evidence_missing or []) if str(item or "").strip()}
-    if strict_evidence_context and "template_resolution" in missing:
+    if strict_evidence_context and "template_resolution" in missing and not position_fallback_semantics_ready:
         return "unresolved_template"
     has_structured_table_rows = bool(
         isinstance(ocr_payload, dict)
@@ -6065,6 +6081,10 @@ def _sheet_payload_mapping_block_reason(
         )
     )
     if not isinstance(template_resolution, dict):
+        if position_fallback_semantics_ready:
+            if ocr_evidence_service.payload_has_high_risk_numeric_issues(ocr_payload):
+                return "numeric_review_required"
+            return None
         if (
             isinstance(ocr_payload, dict)
             and str(ocr_payload.get("table_raw") or "").strip()
@@ -6076,7 +6096,7 @@ def _sheet_payload_mapping_block_reason(
     # Weekly-menu rescue can only be trusted when quantity-column semantics are known.
     # Full row-edge metadata is useful for overlays, but Step2 quantity mapping only needs a
     # resolved template plus stable quantity column boundaries.
-    if not ocr_evidence_service.payload_has_quantity_column_semantics(ocr_payload):
+    if not ocr_evidence_service.payload_has_quantity_column_semantics(ocr_payload) and not position_fallback_semantics_ready:
         return "unresolved_template"
     if ocr_evidence_service.payload_has_high_risk_numeric_issues(ocr_payload):
         return "numeric_review_required"
@@ -14514,9 +14534,9 @@ def get_ocr_sheet(
                     mapped_mode = "payload_row"
                     rows = rows_by_payload_index
         elif payload_rows and not payload_mapping_hard_blocked:
-            rows_by_payload_index = _clone_sheet_rows(base_rows)
-            payload_match_stats = _apply_payload_quantities_numeric_only(
-                rows=rows_by_payload_index,
+            rows_by_payload_numeric = _clone_sheet_rows(base_rows)
+            payload_numeric_stats = _apply_payload_quantities_numeric_only(
+                rows=rows_by_payload_numeric,
                 fields=fields,
                 quantity_index=quantity_index,
                 payload_rows=payload_rows,
@@ -14526,26 +14546,82 @@ def get_ocr_sheet(
                     not payload_has_structured_table_rows and llm_allows_cluster_fill
                 ),
             )
-            mapped_count = _count_non_empty_quantity_cells(
-                rows=rows_by_payload_index,
+            payload_numeric_count = _count_non_empty_quantity_cells(
+                rows=rows_by_payload_numeric,
                 quantity_index=quantity_index,
             )
+            payload_numeric_row_count = _count_non_empty_quantity_rows(
+                rows=rows_by_payload_numeric,
+                quantity_index=quantity_index,
+            )
+            payload_numeric_column_count = _count_non_empty_quantity_columns(
+                rows=rows_by_payload_numeric,
+                quantity_index=quantity_index,
+            )
+            selected_payload_rows = rows_by_payload_numeric
+            selected_payload_stats = payload_numeric_stats
+            selected_payload_count = payload_numeric_count
+            selected_payload_sort_key = _sheet_candidate_sort_key(
+                mapped_count=payload_numeric_count,
+                mapped_row_count=payload_numeric_row_count,
+                mapped_column_count=payload_numeric_column_count,
+                priority=1,
+                payload_match_stats=payload_numeric_stats,
+            )
+            selected_payload_variant = "numeric_only"
+            if position_fallback_semantics_ready:
+                rows_by_payload_menu = _clone_sheet_rows(base_rows)
+                payload_menu_stats = _apply_payload_cells_by_menu_priority(
+                    rows=rows_by_payload_menu,
+                    fields=fields,
+                    quantity_index=quantity_index,
+                    payload_rows=payload_rows,
+                    payload_unstructured_qty=payload_unstructured_qty,
+                    allow_heuristics=False,
+                )
+                payload_menu_count = _count_non_empty_quantity_cells(
+                    rows=rows_by_payload_menu,
+                    quantity_index=quantity_index,
+                )
+                payload_menu_row_count = _count_non_empty_quantity_rows(
+                    rows=rows_by_payload_menu,
+                    quantity_index=quantity_index,
+                )
+                payload_menu_column_count = _count_non_empty_quantity_columns(
+                    rows=rows_by_payload_menu,
+                    quantity_index=quantity_index,
+                )
+                payload_menu_sort_key = _sheet_candidate_sort_key(
+                    mapped_count=payload_menu_count,
+                    mapped_row_count=payload_menu_row_count,
+                    mapped_column_count=payload_menu_column_count,
+                    priority=2,
+                    payload_match_stats=payload_menu_stats,
+                )
+                if payload_menu_sort_key > selected_payload_sort_key:
+                    selected_payload_rows = rows_by_payload_menu
+                    selected_payload_stats = payload_menu_stats
+                    selected_payload_count = payload_menu_count
+                    selected_payload_sort_key = payload_menu_sort_key
+                    selected_payload_variant = "menu_priority"
+            mapped_count = selected_payload_count
             logger.info(
-                "Applied OCR payload numeric-only rescue",
+                "Applied OCR payload rescue",
                 order_id=order_id,
                 facility_id=facility_id,
                 week_id=resolved_week_id,
                 source=source,
-                match_exact=payload_match_stats.get("exact", 0),
-                match_partial=payload_match_stats.get("partial", 0),
-                match_neighbor=payload_match_stats.get("neighbor", 0),
-                match_row_index=payload_match_stats.get("row_index", 0),
-                match_loose_cell=payload_match_stats.get("loose_cell", 0),
-                match_gap_fill=payload_match_stats.get("gap_fill", 0),
-                match_unstructured=payload_match_stats.get("unstructured", 0),
+                rescue_variant=selected_payload_variant,
+                match_exact=selected_payload_stats.get("exact", 0),
+                match_partial=selected_payload_stats.get("partial", 0),
+                match_neighbor=selected_payload_stats.get("neighbor", 0),
+                match_row_index=selected_payload_stats.get("row_index", 0),
+                match_loose_cell=selected_payload_stats.get("loose_cell", 0),
+                match_gap_fill=selected_payload_stats.get("gap_fill", 0),
+                match_unstructured=selected_payload_stats.get("unstructured", 0),
             )
             mapped_mode = "payload_row"
-            rows = rows_by_payload_index
+            rows = selected_payload_rows
         else:
             rows_by_identity = _clone_sheet_rows(base_rows)
             _apply_order_line_quantities_to_sheet_rows(

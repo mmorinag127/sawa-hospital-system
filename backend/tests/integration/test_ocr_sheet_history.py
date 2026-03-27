@@ -273,6 +273,228 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
     assert sheet["can_confirm"] is True
 
 
+def test_get_latest_sheet_draft_refresh_prunes_unmatched_stale_rows(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-refresh-prune-stale-rows-001")
+    persisted = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "17", ""],
+                ["01/01", "\"", "Ghost Menu", "23", ""],
+            ],
+            "row_ids": ["draft-2", "draft-1"],
+            "ui_mode": "sheet",
+        },
+        draft_state="draft_ready",
+        blockers=["sheet_canonical_mismatch"],
+        warnings=["sheet_ocr_review_required"],
+    )
+    assert persisted is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda _order_id, use_saved_draft=False: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "", ""],
+                ["03/23", "昼", "Menu B", "", ""],
+            ],
+            "row_ids": ["fresh-1", "fresh-2"],
+            "warnings": ["sheet_payload_mapping_low_confidence"],
+            "ui_mode": "sheet",
+        },
+    )
+
+    latest = order_service.get_latest_sheet_draft(order["id"])
+
+    assert latest is not None
+    assert latest["edited_by"] == "semantic-sheet-refresh"
+    sheet = latest["draft_sheet_json"]
+    assert sheet["row_ids"] == ["draft-2", "fresh-2"]
+    assert sheet["rows"] == [
+        ["03/22", "昼", "Menu A", "17", ""],
+        ["03/23", "昼", "Menu B", "", ""],
+    ]
+    assert latest["blockers_json"] == []
+    assert latest["warnings_json"] == ["sheet_payload_mapping_low_confidence"]
+    assert all(row[0] != "01/01" for row in sheet["rows"])
+
+
+def test_get_latest_sheet_draft_refresh_preserves_manual_unmatched_rows_for_clean_draft(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-refresh-preserve-manual-rows-001")
+    persisted = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "17", ""],
+                ["03/24", "昼", "Manual Extra", "4", "manual"],
+            ],
+            "row_ids": ["draft-1", "draft-extra"],
+            "ui_mode": "sheet",
+            "warnings": ["stale-current-warning-should-drop"],
+        },
+        draft_state="draft_ready",
+        blockers=[],
+        warnings=[],
+    )
+    assert persisted is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda _order_id, use_saved_draft=False: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "", ""],
+                ["03/23", "昼", "Menu B", "", ""],
+            ],
+            "row_ids": ["fresh-1", "fresh-2"],
+            "warnings": ["sheet_payload_mapping_low_confidence"],
+            "ui_mode": "sheet",
+        },
+    )
+
+    latest = order_service.get_latest_sheet_draft(order["id"])
+
+    assert latest is not None
+    assert latest["edited_by"] == "semantic-sheet-refresh"
+    sheet = latest["draft_sheet_json"]
+    assert sheet["row_ids"] == ["draft-1", "fresh-2", "draft-extra"]
+    assert sheet["rows"] == [
+        ["03/22", "昼", "Menu A", "17", ""],
+        ["03/23", "昼", "Menu B", "", ""],
+        ["03/24", "昼", "Manual Extra", "4", "manual"],
+    ]
+    assert latest["warnings_json"] == []
+    assert sheet["warnings"] == []
+
+
+def test_get_latest_sheet_draft_refresh_keeps_fresh_quantities_when_stale_current_rows_are_blank(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-refresh-blank-current-qty-001")
+    persisted = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "", ""],
+                ["03/23", "昼", "Menu B", "", ""],
+            ],
+            "row_ids": ["draft-1", "draft-2"],
+            "ui_mode": "sheet",
+        },
+        draft_state="auto_apply_blocked",
+        blockers=["sheet_quantity_column_unmapped"],
+        warnings=["sheet_ocr_review_required"],
+    )
+    assert persisted is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda _order_id, use_saved_draft=False: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [
+                ["03/22", "昼", "Menu A", "23", ""],
+                ["03/23", "昼", "Menu B", "18", ""],
+            ],
+            "row_ids": ["fresh-1", "fresh-2"],
+            "warnings": [],
+            "ui_mode": "sheet",
+        },
+    )
+
+    latest = order_service.get_latest_sheet_draft(order["id"])
+
+    assert latest is not None
+    assert latest["edited_by"] == "semantic-sheet-refresh"
+    sheet = latest["draft_sheet_json"]
+    assert sheet["rows"] == [
+        ["03/22", "昼", "Menu A", "23", ""],
+        ["03/23", "昼", "Menu B", "18", ""],
+    ]
+    assert latest["blockers_json"] == []
+    assert latest["warnings_json"] == []
+
+
+def test_merge_current_draft_quantity_values_into_semantic_sheet_does_not_blank_fresh_values():
+    merged = order_service._merge_current_draft_quantity_values_into_semantic_sheet(
+        {
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "rows": [["03/22", "昼", "Menu A", "", ""]],
+            "row_ids": ["draft-1"],
+        },
+        {
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.no_meat_x", "remarks"],
+            "rows": [["03/22", "昼", "Menu A", "23", "4", ""]],
+            "row_ids": ["fresh-1"],
+        },
+    )
+
+    assert merged is not None
+    assert merged["rows"] == [["03/22", "昼", "Menu A", "23", "", ""]]
+
+
+def test_get_latest_sheet_draft_refresh_rewrites_stale_blockers_even_when_rows_are_unchanged(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-sheet-refresh-clear-stale-blockers-001")
+    persisted = order_service.persist_sheet_draft(
+        order_id=order["id"],
+        draft_sheet_json={
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [["03/22", "昼", "Menu A", "17", ""]],
+            "row_ids": ["draft-1"],
+            "ui_mode": "sheet",
+            "warnings": [],
+        },
+        draft_state="auto_apply_blocked",
+        blockers=["sheet_canonical_mismatch"],
+        warnings=[],
+    )
+    assert persisted is not None
+
+    monkeypatch.setattr(
+        order_service,
+        "_build_best_available_semantic_draft",
+        lambda _order_id, use_saved_draft=False: {
+            "order_id": order["id"],
+            "source": "weekly_menu+ocr_payload",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+            "rows": [["03/22", "昼", "Menu A", "17", ""]],
+            "row_ids": ["fresh-1"],
+            "warnings": [],
+            "ui_mode": "sheet",
+        },
+    )
+
+    latest = order_service.get_latest_sheet_draft(order["id"])
+
+    assert latest is not None
+    assert latest["edited_by"] == "semantic-sheet-refresh"
+    assert latest["blockers_json"] == []
+    assert latest["warnings_json"] == []
+    assert latest["draft_sheet_json"]["rows"] == [["03/22", "昼", "Menu A", "17", ""]]
+
+
 def test_should_prefer_source_row_candidate_when_duplicate_rows_are_clean():
     quantity_index = {("regular", "2F"): 3}
     duplicate_identity = order_service._sheet_row_identity("2026-01-08", "昼", "Menu A")

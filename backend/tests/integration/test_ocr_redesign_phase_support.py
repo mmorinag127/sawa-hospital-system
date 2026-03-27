@@ -821,6 +821,192 @@ def test_get_ocr_sheet_projects_payload_quantities_for_noisy_regular_forbidden_h
     assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
 
 
+def test_get_ocr_sheet_projects_payload_quantities_for_strict_evidence_context_with_ready_position_fallback():
+    order_service.clear_all()
+    order = _seed_order_for_facility(
+        message_id="msg-ocr-redesign-position-fallback-strict-evidence-context",
+        facility_id="FAC00002",
+    )
+    rows = [
+        ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
+        ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
+        ["3/22\n(日)", "IN", "HKD", "Menu A", "", "", "", "", "", "", ""],
+        ["", "\"", "VF", "Menu B", "23", "", "", "", "", "", ""],
+        ["", "", "48", "Menu C", "27", "", "", "", "", "", ""],
+    ]
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        },
+        {
+            "menu_name": "Menu B",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 0,
+            "order": 1,
+        },
+        {
+            "menu_name": "Menu C",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 1,
+            "order": 2,
+        },
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "tables": [
+                    {
+                        "page_index": 1,
+                        "table_id": "page1_table1",
+                        "row_count": len(rows),
+                        "col_count": len(rows[0]),
+                        "rows": rows,
+                        "cells": _structured_cells(rows),
+                    }
+                ],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+                "page_correction": {
+                    "applied": True,
+                    "document_rotation_deg": 90,
+                },
+                "page_correction_artifacts": {
+                    "template_warp_page_indexes": [1],
+                    "position_normalized": True,
+                },
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert sheet["rows"][0][:9] == ["03/22", "breakfast", "Menu A", "", "", "", "", "", ""]
+    assert sheet["rows"][1][:9] == ["03/22", "lunch", "Menu B", "23", "", "", "", "", ""]
+    assert sheet["rows"][2][:9] == ["03/22", "lunch", "Menu C", "27", "", "", "", "", ""]
+    assert "sheet_payload_mapping_blocked_unresolved_template" not in (sheet.get("warnings") or [])
+    assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
+
+
+def test_get_ocr_sheet_prefers_menu_priority_projection_for_weekly_menu_rows():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-ocr-redesign-position-fallback-menu-priority",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 3, 21, 9, 0, 0),
+        facility_hint="FAC00002",
+        week_hint=None,
+    )
+    order = order_service.create_order_from_ingest(payload, lines=None)
+    rows = [
+        ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
+        ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
+        ["3/22", "ロ", "VF", "Menu A", "23", "", "", "", "", "", ""],
+        ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
+        ["", "", "PX", "Menu C", "23", "", "", "", "", "", ""],
+    ]
+
+    original_build_position_menu_entries_safe = order_service._build_position_menu_entries_safe
+    order_service._build_position_menu_entries_safe = lambda *_args, **_kwargs: [
+        {
+            "menu_name": "Breakfast 1",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "breakfast",
+            "slot_index": 0,
+            "order": 0,
+        },
+        {
+            "menu_name": "Breakfast 2",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "breakfast",
+            "slot_index": 1,
+            "order": 1,
+        },
+        {
+            "menu_name": "Menu A",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 0,
+            "order": 2,
+        },
+        {
+            "menu_name": "Menu B",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 1,
+            "order": 3,
+        },
+        {
+            "menu_name": "Menu C",
+            "menu_date": date(2026, 3, 22),
+            "daypart_key": "lunch",
+            "slot_index": 2,
+            "order": 4,
+        },
+    ]
+
+    try:
+        order_service._save_order_ocr_cache(
+            order["id"],
+            {
+                "tables": [
+                    {
+                        "page_index": 1,
+                        "table_id": "page1_table1",
+                        "row_count": len(rows),
+                        "col_count": len(rows[0]),
+                        "rows": rows,
+                        "cells": _structured_cells(rows),
+                    }
+                ],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "markdown_uri": None,
+                        "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                        "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                        "figure_uris": [],
+                    }
+                ],
+            },
+        )
+
+        sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    finally:
+        order_service._build_position_menu_entries_safe = original_build_position_menu_entries_safe
+
+    assert sheet_error is None
+    assert isinstance(sheet, dict)
+    assert sheet["source"] == "weekly_menu+ocr_payload"
+    assert sheet["rows"][0][:4] == ["03/22", "breakfast", "Breakfast 1", ""]
+    assert sheet["rows"][1][:4] == ["03/22", "breakfast", "Breakfast 2", ""]
+    assert sheet["rows"][2][:4] == ["03/22", "lunch", "Menu A", "23"]
+    assert sheet["rows"][3][:4] == ["03/22", "lunch", "Menu B", "27"]
+    assert sheet["rows"][4][:4] == ["03/22", "lunch", "Menu C", "23"]
+    assert (sheet.get("trace") or {}).get("mapped_mode") == "payload_row"
+    assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
+
+
 def test_get_ocr_sheet_suppresses_stale_saved_draft_layout_warnings_when_position_fallback_is_ready(monkeypatch):
     order_service.clear_all()
     order = _seed_order_for_facility(
