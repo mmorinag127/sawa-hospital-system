@@ -23,7 +23,9 @@ def _looks_like_menu_text(value: object) -> bool:
         return False
     if _DATE_RE.search(text):
         return False
-    return bool(re.search(r"[一-龥ぁ-んァ-ヶ]", text))
+    if fax_extractor._looks_like_daypart(text):
+        return False
+    return bool(re.search(r"[A-Za-z一-龥ぁ-んァ-ヶ]", text))
 
 
 def _looks_like_numeric_text(value: object) -> bool:
@@ -175,6 +177,8 @@ def _position_fallback_already_ready(payload: dict[str, Any] | None) -> bool:
         return False
     resolution = payload.get("column_mapping_resolution")
     if not isinstance(resolution, dict):
+        return False
+    if bool(resolution.get("partial_quantity_mapping")):
         return False
     return bool(
         str(resolution.get("resolved_value") or resolution.get("resolved_column_mapping_id") or "").strip()
@@ -377,6 +381,57 @@ def _merged_header_for_matrix(matrix: list[list[str]], fields: list[str]) -> lis
     return [str(cell or "").strip() for cell in header]
 
 
+def _header_quantity_pairs_from_range(
+    *,
+    matrix: list[list[str]],
+    fields: list[str],
+    lower_bound: int,
+    upper_bound: int,
+) -> list[tuple[int, str]]:
+    header = _merged_header_for_matrix(matrix, fields)
+    if not header:
+        return []
+    upper_bound = min(upper_bound, len(header))
+    if upper_bound <= lower_bound:
+        return []
+
+    mapped_by_field: dict[str, int] = {}
+    change_candidate_cols: list[int] = []
+    for source_col_index in range(lower_bound, upper_bound):
+        header_text = str(header[source_col_index] or "").strip()
+        if not header_text:
+            continue
+        normalized = fax_extractor._normalize_header_token(header_text)
+        field = _select_header_quantity_field(header_text, fields)
+        if field and field not in mapped_by_field:
+            mapped_by_field[field] = source_col_index
+            continue
+        if "変更" in header_text or "change" in normalized:
+            change_candidate_cols.append(source_col_index)
+
+    unresolved_change_fields = [
+        field
+        for field in fields
+        if _is_quantity_field(field)
+        and "change_" in str(field or "")
+        and field not in mapped_by_field
+    ]
+    for source_col_index, field in zip(sorted(change_candidate_cols), unresolved_change_fields):
+        mapped_by_field[field] = source_col_index
+
+    pairs: list[tuple[int, str]] = []
+    seen_sources: set[int] = set()
+    for field in fields:
+        if not _is_quantity_field(field):
+            continue
+        source_col_index = mapped_by_field.get(field)
+        if source_col_index is None or source_col_index in seen_sources:
+            continue
+        pairs.append((source_col_index, field))
+        seen_sources.add(source_col_index)
+    return pairs
+
+
 def _augment_quantity_pairs_from_header(
     *,
     matrix: list[list[str]],
@@ -447,6 +502,26 @@ def _augment_quantity_pairs_from_header(
     return augmented_pairs
 
 
+def _source_column_has_numeric_signal(
+    *,
+    matrix: list[list[str]],
+    body_start_row: int,
+    source_col_index: int,
+) -> bool:
+    start_row = max(0, int(body_start_row))
+    for row in matrix[start_row:]:
+        if not isinstance(row, list) or source_col_index >= len(row):
+            continue
+        value = _clean_cell_text(row[source_col_index])
+        if not value:
+            continue
+        if _looks_like_numeric_text(value):
+            return True
+        if re.fullmatch(r"\d+\s*(切|枚|個)", value):
+            return True
+    return False
+
+
 def _table_grid_metadata(table_payload: dict[str, Any]) -> dict[str, Any] | None:
     raw_cells = table_payload.get("cells")
     if not isinstance(raw_cells, list) or not raw_cells:
@@ -514,19 +589,61 @@ def _position_candidate_for_table(
         elif field in {"date_mmdd", "date", "daypart", "menu", "menu_name"}:
             mapped_structural_fields.add(field)
 
-    if not quantity_pairs:
-        return None
+    subgrid = _infer_quantity_subgrid(table_payload)
+    quantity_fields = [fields[idx] for idx in sorted(quantity_dest_indexes)]
     quantity_pairs = _augment_quantity_pairs_from_header(
         matrix=matrix,
         fields=fields,
         mapped_indexes=mapped_indexes,
         quantity_pairs=quantity_pairs,
     )
+    semantic_quantity_pairs = list(quantity_pairs)
+    if subgrid:
+        lower_bound = int(subgrid["quantity_start_col_index"])
+        upper_bound = len(matrix[0]) if matrix else lower_bound
+        header_quantity_pairs = _header_quantity_pairs_from_range(
+            matrix=matrix,
+            fields=fields,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+        )
+        if header_quantity_pairs:
+            semantic_quantity_pairs = header_quantity_pairs
+        sequential_source_indexes = [
+            source_col_index
+            for source_col_index in range(lower_bound, upper_bound)
+            if _source_column_has_numeric_signal(
+                matrix=matrix,
+                body_start_row=int(subgrid.get("body_start_row") or 0),
+                source_col_index=source_col_index,
+            )
+        ]
+        sequential_quantity_pairs = [
+            (source_col_index, field)
+            for source_col_index, field in zip(sequential_source_indexes, quantity_fields)
+        ]
+        semantic_quantity_fields = {field for _, field in semantic_quantity_pairs}
+        semantic_quantity_confident = len(semantic_quantity_fields) >= min(3, len(quantity_fields))
+        if semantic_quantity_confident:
+            quantity_pairs = semantic_quantity_pairs
+        else:
+            quantity_pairs = sequential_quantity_pairs
+    if not quantity_pairs:
+        return None
     quantity_pairs.sort(key=lambda item: item[0])
     mapped_quantity_fields = {field for _, field in quantity_pairs}
     quantity_coverage = len(mapped_quantity_fields) / max(len(quantity_dest_indexes), 1)
     structural_coverage = len(mapped_structural_fields)
-    if quantity_coverage < 1.0 or structural_coverage < 2:
+    partial_quantity_mapping = quantity_coverage < 1.0
+    if subgrid:
+        semantic_quantity_fields = {field for _, field in semantic_quantity_pairs}
+        if len(semantic_quantity_fields) < min(3, len(quantity_fields)):
+            partial_quantity_mapping = True
+    if structural_coverage < 2:
+        return None
+    if partial_quantity_mapping and len(mapped_quantity_fields) <= 0:
+        return None
+    if partial_quantity_mapping and structural_coverage < 3:
         return None
 
     grid_metadata = _table_grid_metadata(table_payload)
@@ -538,8 +655,7 @@ def _position_candidate_for_table(
         _column_header_text(matrix, source_col_index) or _field_label(field)
         for source_col_index, field in quantity_pairs
     ]
-    subgrid = _infer_quantity_subgrid(table_payload)
-    score = 0.8
+    score = 0.8 if not partial_quantity_mapping else 0.66
     if grid_metadata:
         score += 0.08
     if subgrid:
@@ -565,6 +681,9 @@ def _position_candidate_for_table(
             "evidence_ref": evidence_ref,
             "decision_source": _POSITION_FALLBACK_SOURCE,
             "auto_selectable": True,
+            "partial_quantity_mapping": partial_quantity_mapping,
+            "mapped_quantity_fields": [field for _, field in quantity_pairs],
+            "expected_quantity_fields": [fields[idx] for idx in sorted(quantity_dest_indexes)],
         },
         "grid_metadata": grid_metadata,
         "quantity_subgrid": subgrid,
@@ -672,6 +791,9 @@ def build_position_fallback_artifacts(
         "decision_source": _POSITION_FALLBACK_SOURCE,
         "evidence_ref": top_candidate.get("evidence_ref"),
         "requires_user_choice": requires_user_choice,
+        "partial_quantity_mapping": bool(top_candidate.get("partial_quantity_mapping")),
+        "mapped_quantity_fields": list(top_candidate.get("mapped_quantity_fields") or []),
+        "expected_quantity_fields": list(top_candidate.get("expected_quantity_fields") or []),
     }
     top_grid_metadata = (
         top_candidate_row.get("grid_metadata")
@@ -771,6 +893,8 @@ def candidate_resolution_uses_position_fallback(candidate_resolution: dict[str, 
         return False
     if str(column_mapping.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
         return False
+    if bool(column_mapping.get("partial_quantity_mapping")):
+        return False
     blocked_reasons = {
         str(item or "").strip()
         for item in (column_mapping.get("blocked_reasons") or [])
@@ -807,6 +931,51 @@ def payload_uses_ready_position_fallback(payload: dict[str, Any] | None) -> bool
     if blocked and not resolved_template_id:
         return False
     return True
+
+
+def payload_uses_partial_position_fallback(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return False
+    if str(resolution.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
+        return False
+    if not bool(resolution.get("partial_quantity_mapping")):
+        return False
+    return bool(
+        str(resolution.get("resolved_value") or resolution.get("resolved_column_mapping_id") or "").strip()
+    )
+
+
+def payload_position_fallback_requires_choice(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return False
+    if str(resolution.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
+        return False
+    blocked_reasons = {
+        str(item or "").strip()
+        for item in (resolution.get("blocked_reasons") or [])
+        if str(item or "").strip()
+    }
+    resolved_value = str(
+        resolution.get("resolved_value")
+        or resolution.get("resolved_column_mapping_id")
+        or ""
+    ).strip() or None
+    candidates = _normalize_position_candidates(
+        resolution.get("candidates")
+        if isinstance(resolution.get("candidates"), list)
+        else payload.get("column_mapping_candidates")
+    )
+    return _position_fallback_choice_required(
+        resolved_value=resolved_value,
+        candidates=candidates,
+        explicit=bool(resolution.get("requires_user_choice")) or "column_mapping_choice_required" in blocked_reasons,
+    )
 
 
 def stable_mapping_signature(value: object) -> str:
