@@ -6578,6 +6578,8 @@ def _merge_saved_draft_into_semantic_sheet(
 
     current_index = {field: idx for idx, field in enumerate(current_fields)}
     fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
+    authoritative_shell = _fresh_sheet_has_authoritative_weekly_shell(fresh_sheet) and current_fields == fresh_fields
+    shell_fields = {"date_mmdd", "daypart", "menu"} if authoritative_shell else set()
     current_quantity_fields = [field for field in current_fields if field.startswith("qty.")]
     fresh_quantity_fields = [field for field in fresh_fields if field.startswith("qty.")]
     shared_quantity_fields = [
@@ -6620,6 +6622,8 @@ def _merge_saved_draft_into_semantic_sheet(
                 if field_name.startswith("qty."):
                     if preserve_blank_quantity_values or _sheet_cell_has_value(current_value):
                         merged_row[fresh_idx] = current_value
+                elif field_name in shell_fields:
+                    continue
                 elif str(current_value or "").strip() != "":
                     merged_row[fresh_idx] = current_value
             if current_row_id:
@@ -6627,9 +6631,28 @@ def _merge_saved_draft_into_semantic_sheet(
         merged_rows.append(merged_row)
         merged_row_ids.append(merged_row_id)
 
+    non_shell_fields = [
+        field
+        for field in current_fields
+        if field not in shell_fields and not field.startswith("qty.")
+    ]
+
+    def _should_append_unmatched_current_row(row: list[Any]) -> bool:
+        if not authoritative_shell:
+            return True
+        for field_name in non_shell_fields:
+            field_idx = current_index.get(field_name)
+            if field_idx is None or field_idx >= len(row):
+                continue
+            if str(row[field_idx] or "").strip():
+                return True
+        return False
+
     if append_unmatched_current_rows:
         for row_key, (current_row, current_row_id) in current_by_key.items():
             if row_key in matched_keys:
+                continue
+            if not _should_append_unmatched_current_row(current_row):
                 continue
             appended = [""] * len(fresh_fields)
             for field_name, current_idx in current_index.items():
@@ -6641,6 +6664,8 @@ def _merge_saved_draft_into_semantic_sheet(
             merged_row_ids.append(current_row_id or f"row-{len(merged_row_ids) + 1}")
 
         for current_row, current_row_id in unmatched_current:
+            if not _should_append_unmatched_current_row(current_row):
+                continue
             appended = [""] * len(fresh_fields)
             for field_name, current_idx in current_index.items():
                 fresh_idx = fresh_index.get(field_name)
@@ -6689,6 +6714,71 @@ _SEMANTIC_REFRESH_PRUNE_BLOCKERS = {
     "template_unresolved",
     "auto_apply_blocked",
 }
+
+
+def _fresh_sheet_has_authoritative_weekly_shell(sheet: dict[str, Any] | None) -> bool:
+    if not isinstance(sheet, dict):
+        return False
+    if not _source_uses_weekly_menu_shell(sheet.get("source")):
+        return False
+    fields = [str(field).strip() for field in (sheet.get("fields") or []) if str(field).strip()]
+    rows = _sanitize_semantic_sheet_rows(
+        rows_payload=sheet.get("rows"),
+        fields=fields,
+    )
+    required = ["date_mmdd", "daypart", "menu"]
+    index = {field: idx for idx, field in enumerate(fields)}
+    if any(field not in index for field in required):
+        return False
+    if not rows:
+        return False
+    last_required_idx = max(index[field] for field in required)
+    for row in rows:
+        if len(row) <= last_required_idx:
+            return False
+        if any(str(row[index[field]] or "").strip() == "" for field in required):
+            return False
+    return True
+
+
+def _draft_requires_authoritative_weekly_shell_rebase(
+    current_sheet: dict[str, Any] | None,
+    fresh_sheet: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
+        return False
+    if not _fresh_sheet_has_authoritative_weekly_shell(fresh_sheet):
+        return False
+    current_fields = [str(field).strip() for field in (current_sheet.get("fields") or []) if str(field).strip()]
+    fresh_fields = [str(field).strip() for field in (fresh_sheet.get("fields") or []) if str(field).strip()]
+    current_rows = _sanitize_semantic_sheet_rows(
+        rows_payload=current_sheet.get("rows"),
+        fields=current_fields,
+    )
+    fresh_rows = _sanitize_semantic_sheet_rows(
+        rows_payload=fresh_sheet.get("rows"),
+        fields=fresh_fields,
+    )
+    if current_fields != fresh_fields:
+        return False
+    if not current_fields or not fresh_fields or not current_rows or not fresh_rows:
+        return False
+    current_index = {field: idx for idx, field in enumerate(current_fields)}
+    fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
+    shell_fields = ["date_mmdd", "daypart", "menu"]
+    if any(field not in current_index or field not in fresh_index for field in shell_fields):
+        return False
+    current_shell = [
+        tuple(str(row[current_index[field]] or "").strip() for field in shell_fields)
+        for row in current_rows
+        if len(row) > max(current_index[field] for field in shell_fields)
+    ]
+    fresh_shell = [
+        tuple(str(row[fresh_index[field]] or "").strip() for field in shell_fields)
+        for row in fresh_rows
+        if len(row) > max(fresh_index[field] for field in shell_fields)
+    ]
+    return current_shell != fresh_shell
 
 
 def _should_prune_unmatched_rows_on_semantic_refresh(draft: dict[str, Any] | None) -> bool:
@@ -6813,10 +6903,14 @@ def _maybe_refresh_semantic_sheet_draft(
         return draft
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft)
     prune_unmatched_rows = _should_prune_unmatched_rows_on_semantic_refresh(draft)
+    authoritative_shell_rebase = _draft_requires_authoritative_weekly_shell_rebase(
+        draft_sheet_json,
+        fresh_sheet,
+    )
     merged_sheet = _merge_saved_draft_into_semantic_sheet(
         draft_sheet_json,
         fresh_sheet,
-        append_unmatched_current_rows=not prune_unmatched_rows,
+        append_unmatched_current_rows=not prune_unmatched_rows and not authoritative_shell_rebase,
         merge_current_warnings=False,
         preserve_blank_quantity_values=clean_saved_draft,
     )
@@ -7357,10 +7451,17 @@ def _rebase_draft_record_to_facility_schema(
     if not isinstance(rebuilt_sheet, dict):
         return draft_record
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_record)
+    authoritative_shell_rebase = _draft_requires_authoritative_weekly_shell_rebase(
+        draft_sheet_json,
+        rebuilt_sheet,
+    )
     rebased_sheet = _merge_saved_draft_into_semantic_sheet(
         draft_sheet_json,
         rebuilt_sheet,
-        append_unmatched_current_rows=not _should_prune_unmatched_rows_on_semantic_refresh(draft_record),
+        append_unmatched_current_rows=(
+            not _should_prune_unmatched_rows_on_semantic_refresh(draft_record)
+            and not authoritative_shell_rebase
+        ),
         merge_current_warnings=not clean_saved_draft,
         preserve_blank_quantity_values=clean_saved_draft,
     )
@@ -13406,9 +13507,12 @@ def _extract_sheet_rows_from_resolved_column_mapping(
         if not matrix:
             continue
         resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
-        if not isinstance(resolved, tuple) or len(resolved) != 2:
-            continue
-        mapping_meta, _output_rows = resolved
+        mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
+        if not isinstance(mapping_meta, dict) and uses_position_fallback:
+            mapping_meta = position_column_mapping_service._fallback_structured_table_mapping(
+                matrix,
+                template,
+            )
         if not isinstance(mapping_meta, dict):
             continue
         mapped_indexes = mapping_meta.get("mapped_indexes")

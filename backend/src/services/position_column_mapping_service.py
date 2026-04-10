@@ -548,6 +548,90 @@ def _table_grid_metadata(table_payload: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def _fallback_structured_table_mapping(
+    matrix: list[list[str]],
+    template: dict[str, Any],
+) -> dict[str, Any] | None:
+    fields = _row_fields(template)
+    if not fields:
+        return None
+    normalized_rows = fax_extractor._normalize_table_matrix_rows(matrix)
+    if not normalized_rows:
+        return None
+    fields_set = set(fields)
+    header_height: int | None = None
+    for idx, row in enumerate(normalized_rows[:6]):
+        if fax_extractor._looks_like_data_row(row, fields_set):
+            header_height = idx
+            break
+    if header_height is None:
+        header_height = 1 if len(normalized_rows) > 1 else 0
+
+    header_rows = normalized_rows[:header_height]
+    data = normalized_rows[header_height:]
+    if not data and normalized_rows:
+        header_rows = normalized_rows[:1]
+        data = normalized_rows[1:]
+        header_height = min(header_height, 1)
+    header = fax_extractor._merge_header_group(header_rows)
+    while header and data and fax_extractor._is_subheader_row(data[0]):
+        header = fax_extractor._merge_header_rows(header, data[0])
+        data = data[1:]
+        header_height += 1
+
+    mapped_indexes: dict[int, int] = {}
+    used_dest_indexes: set[int] = set()
+    for idx, cell in enumerate(header):
+        field = fax_extractor._field_from_header(cell, fields_set)
+        if not field:
+            continue
+        dest_idx = fields.index(field)
+        if dest_idx in used_dest_indexes:
+            continue
+        mapped_indexes[idx] = dest_idx
+        used_dest_indexes.add(dest_idx)
+    if not mapped_indexes:
+        if header and len(header) == len(fields):
+            mapped_indexes = {idx: idx for idx in range(len(header))}
+        elif data and len(data[0]) == len(fields):
+            mapped_indexes = {idx: idx for idx in range(len(fields))}
+
+    mapped_indexes = fax_extractor._infer_mapped_indexes(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = fax_extractor._prefer_positional_quantity_mapping_when_width_matches(
+        header=header,
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = fax_extractor._realign_structural_mapping_by_observed_content(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    if not mapped_indexes:
+        return None
+
+    row_map: dict[int, int] = {}
+    for raw_row_index, row in enumerate(data, start=header_height):
+        if not isinstance(row, list):
+            continue
+        if not any(_clean_cell_text(cell) for cell in row):
+            continue
+        row_map[raw_row_index] = len(row_map)
+    if not row_map:
+        return None
+    return {
+        "fields": fields,
+        "mapped_indexes": mapped_indexes,
+        "row_map": row_map,
+        "projection_variant": "position_fallback_observed",
+    }
+
+
 def _position_candidate_for_table(
     *,
     table_payload: dict[str, Any],
@@ -555,9 +639,9 @@ def _position_candidate_for_table(
     template: dict[str, Any],
 ) -> dict[str, Any] | None:
     resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
-    if not isinstance(resolved, tuple) or len(resolved) != 2:
-        return None
-    mapping_meta, _output_rows = resolved
+    mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
+    if not isinstance(mapping_meta, dict):
+        mapping_meta = _fallback_structured_table_mapping(matrix, template)
     if not isinstance(mapping_meta, dict):
         return None
     fields = mapping_meta.get("fields")
@@ -625,7 +709,33 @@ def _position_candidate_for_table(
         semantic_quantity_fields = {field for _, field in semantic_quantity_pairs}
         semantic_quantity_confident = len(semantic_quantity_fields) >= min(3, len(quantity_fields))
         if semantic_quantity_confident:
-            quantity_pairs = semantic_quantity_pairs
+            semantic_sources = {source_col_index for source_col_index, _field in semantic_quantity_pairs}
+            mapped_by_field = {field: source_col_index for source_col_index, field in semantic_quantity_pairs}
+            missing_fields = [field for field in quantity_fields if field not in mapped_by_field]
+            numeric_unmapped_sources = [
+                source_col_index
+                for source_col_index in sequential_source_indexes
+                if source_col_index not in semantic_sources
+            ]
+            quantity_pairs = list(semantic_quantity_pairs)
+            for source_col_index, field in zip(numeric_unmapped_sources, missing_fields):
+                quantity_pairs.append((source_col_index, field))
+                mapped_by_field[field] = source_col_index
+            mapped_sources = {source_col_index for source_col_index, _field in quantity_pairs}
+            remaining_fields = [field for field in quantity_fields if field not in mapped_by_field]
+            if remaining_fields:
+                header = _merged_header_for_matrix(matrix, fields)
+                header_fill_start = max(semantic_sources) + 1 if semantic_sources else lower_bound
+                header_fill_sources = [
+                    source_col_index
+                    for source_col_index in range(header_fill_start, min(upper_bound, len(header)))
+                    if source_col_index not in mapped_sources
+                    and bool(str(header[source_col_index] or "").strip())
+                ]
+                for source_col_index, field in zip(header_fill_sources, remaining_fields):
+                    quantity_pairs.append((source_col_index, field))
+                    mapped_by_field[field] = source_col_index
+                    mapped_sources.add(source_col_index)
         else:
             quantity_pairs = sequential_quantity_pairs
     if not quantity_pairs:
