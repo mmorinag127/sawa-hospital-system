@@ -24,6 +24,7 @@ from src.api import (
     users,
 )
 from src.services import menu_service
+from src.workers.ingest_worker import start_uploaded_pdf_recovery_loop
 
 app = FastAPI(title="Hospital Order System API")
 cors_origins = [
@@ -62,3 +63,4 @@ app.include_router(users.router, prefix="")
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
     menu_service.ensure_menu_schema()
+    start_uploaded_pdf_recovery_loop()

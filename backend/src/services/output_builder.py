@@ -18,7 +18,13 @@ from openpyxl.cell.cell import MergedCell
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
-from src.services import config_service, menu_service, menu_rule_service, order_service
+from src.services import (
+    config_service,
+    menu_service,
+    menu_rule_service,
+    order_service,
+    daily_output_override_service,
+)
 from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
@@ -51,6 +57,8 @@ LEGACY_LABEL_FIELDS = {
     "maker_info",
     "notice",
 }
+
+_GARNISH_SPLIT_RE = re.compile(r"\s*(?:添え|添[)）:：])\s*")
 
 
 def _ensure_date(value):
@@ -162,14 +170,15 @@ def _normalize_temp_label(temp: str | None) -> str:
 def _normalize_unit_type(unit_type: str | None) -> str | None:
     if not unit_type:
         return None
-    lowered = str(unit_type).lower()
-    if "g" in lowered or "グラム" in lowered:
+    raw = str(unit_type).strip()
+    lowered = raw.lower()
+    if "g" in lowered or "グラム" in raw:
         return "g"
-    if "切" in lowered or lowered in {"cut", "slice"}:
+    if "切" in raw or "枚" in raw or lowered in {"cut", "slice", "slices"}:
         return "切"
-    if "個" in lowered or lowered in {"count", "piece", "pieces"}:
+    if "個" in raw or lowered in {"count", "piece", "pieces"}:
         return "個"
-    return str(unit_type)
+    return raw
 
 
 _AREA_TRANSLATION = str.maketrans("０１２３４５６７８９ｆＦ", "0123456789fF")
@@ -193,9 +202,17 @@ def _normalize_diet_key(value: str | None) -> str | None:
     if "ミキサ" in raw or "ﾐｷｻ" in raw or lowered in {"mixer"}:
         return "mixer"
     if "通所" in raw or lowered in {"daycare"}:
-        return "daycare"
+        return "regular"
     if "職員" in raw or lowered in {"staff"}:
-        return "staff"
+        return "regular"
+    if "揚げ物禁" in raw or "揚物禁" in raw or lowered in {"no_fried", "nofried"}:
+        return "no_fried"
+    if (
+        ("肉" in raw or "meat" in lowered)
+        and ("卵" in raw or "玉子" in raw or "egg" in lowered)
+        and ("魚" in raw or "鯖" in raw or "さば" in raw or "fish" in lowered)
+    ) or "肉卵魚禁" in raw:
+        return "forbidden_other"
     if "禁" in raw and "肉" in raw:
         return "no_meat"
     if "禁" in raw and "魚" in raw:
@@ -272,7 +289,7 @@ def _extract_qty_and_unit(value: Any, unit_type: str | None) -> tuple[float | No
     inferred_unit = None
     if "g" in text or "ｇ" in text or "グラム" in text:
         inferred_unit = "g"
-    elif "切" in text:
+    elif "切" in text or "枚" in text:
         inferred_unit = "切"
     elif "個" in text:
         inferred_unit = "個"
@@ -348,32 +365,48 @@ def _build_label_details(bag: dict) -> str:
     return " / ".join(parts)
 
 
+def _build_menu_name_aliases(value: object) -> list[str]:
+    text = str(value or "").strip().strip("　")
+    if not text:
+        return []
+    aliases = [text]
+    match = _GARNISH_SPLIT_RE.search(text)
+    if match:
+        base = text[:match.start()].strip().strip("　")
+        if base and base not in aliases:
+            aliases.append(base)
+    return aliases
+
+
 def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dict]:
     if not menu_items:
         return lines
     index: dict[str, dict] = {}
     for item in menu_items:
-        name = (item.get("name") or "").strip()
-        if name:
-            index[name] = item
+        for alias in _build_menu_name_aliases(item.get("name")):
+            key = _normalize_menu_key(alias)
+            if key and key not in index:
+                index[key] = item
     if not index:
         return lines
     enriched: list[dict] = []
     for line in lines:
-        name = (line.get("menu_name") or "").strip()
-        item = index.get(name)
+        name_key = _normalize_menu_key(line.get("menu_name"))
+        item = index.get(name_key)
         if not item:
             enriched.append(line)
             continue
         updated = dict(line)
-        if item.get("daypart"):
+        if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
-        if item.get("category"):
+        if item.get("category") and not updated.get("menu_category"):
             updated["menu_category"] = item.get("category")
         if item.get("unit_type"):
             updated["menu_unit_type"] = item.get("unit_type")
         if item.get("qty_per_serving") is not None:
             updated["menu_qty_per_serving"] = item.get("qty_per_serving")
+            updated["_menu_qty_source_daypart"] = item.get("daypart")
+            updated["_menu_qty_source_category"] = item.get("category")
         if item.get("bag_max_qty") is not None:
             updated["menu_bag_max_qty"] = item.get("bag_max_qty")
         if item.get("bag_max_unit"):
@@ -389,22 +422,30 @@ def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dic
 def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
     if not snapshot_items:
         return lines
+    index: dict[str, dict] = {}
+    for name, item in snapshot_items.items():
+        for alias in _build_menu_name_aliases(name):
+            key = _normalize_menu_key(alias)
+            if key and key not in index:
+                index[key] = item
     enriched: list[dict] = []
     for line in lines:
-        name = (line.get("menu_name") or "").strip()
-        item = snapshot_items.get(name)
+        name_key = _normalize_menu_key(line.get("menu_name"))
+        item = index.get(name_key)
         if not item:
             enriched.append(line)
             continue
         updated = dict(line)
-        if item.get("daypart"):
+        if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
-        if item.get("category"):
+        if item.get("category") and not updated.get("menu_category"):
             updated["menu_category"] = item.get("category")
         if item.get("unit_type"):
             updated["menu_unit_type"] = item.get("unit_type")
         if item.get("qty_per_serving") is not None:
             updated["menu_qty_per_serving"] = item.get("qty_per_serving")
+            updated["_menu_qty_source_daypart"] = item.get("daypart")
+            updated["_menu_qty_source_category"] = item.get("category")
         if item.get("bag_max_qty") is not None:
             updated["menu_bag_max_qty"] = item.get("bag_max_qty")
         if item.get("bag_max_unit"):
@@ -413,6 +454,179 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
             updated["menu_temp_type"] = item.get("temp_type")
         if item.get("condiments") is not None:
             updated["condiments"] = item.get("condiments")
+        enriched.append(updated)
+    return enriched
+
+
+def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str, str, str], dict], dict[tuple[str, str], list[dict]]]:
+    exact: dict[tuple[str, str, str], dict] = {}
+    by_date_name: dict[tuple[str, str], list[dict]] = {}
+    for entry in menu_entries:
+        line_date = _ensure_date(entry.get("menu_date"))
+        if not line_date:
+            continue
+        name_key = _normalize_menu_key(entry.get("name"))
+        if not name_key:
+            continue
+        date_key = line_date.isoformat()
+        by_date_name.setdefault((date_key, name_key), []).append(entry)
+        daypart_key = _normalize_delivery_daypart(entry.get("daypart"))
+        if daypart_key:
+            exact[(date_key, daypart_key, name_key)] = entry
+    return exact, by_date_name
+
+
+def _resolve_menu_entry_override(
+    line: dict,
+    exact_index: dict[tuple[str, str, str], dict],
+    date_name_index: dict[tuple[str, str], list[dict]],
+) -> dict | None:
+    line_date = _ensure_date(line.get("date"))
+    if not line_date:
+        return None
+    name_key = _normalize_menu_key(line.get("menu_name"))
+    if not name_key:
+        return None
+    date_key = line_date.isoformat()
+    daypart_key = _normalize_delivery_daypart(line.get("daypart"))
+    if daypart_key:
+        matched = exact_index.get((date_key, daypart_key, name_key))
+        if matched:
+            return matched
+    candidates = date_name_index.get((date_key, name_key)) or []
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> list[dict]:
+    if not menu_entries:
+        return lines
+    exact_index, date_name_index = _build_menu_entry_indexes(menu_entries)
+    if not exact_index and not date_name_index:
+        return lines
+    enriched: list[dict] = []
+    for line in lines:
+        entry = _resolve_menu_entry_override(line, exact_index, date_name_index)
+        if not entry:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        entry_daypart = _normalize_delivery_daypart(entry.get("daypart"))
+        if entry_daypart:
+            updated["daypart"] = entry_daypart
+        if entry.get("category"):
+            updated["menu_category"] = entry.get("category")
+        enriched.append(updated)
+    return enriched
+
+
+def _normalize_output_daypart(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("朝"):
+        return "朝"
+    if text.startswith("昼"):
+        return "昼"
+    if text.startswith("夕"):
+        return "夕"
+    return text
+
+
+def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str, str, str], dict], dict[tuple[str, str], dict]]:
+    by_exact: dict[tuple[str, str, str], dict] = {}
+    by_date_name: dict[tuple[str, str], dict | None] = {}
+    for entry in menu_entries:
+        menu_date = str(entry.get("menu_date") or "").strip()
+        menu_name = str(entry.get("name") or "").strip()
+        daypart = _normalize_output_daypart(entry.get("daypart"))
+        if not menu_date or not menu_name:
+            continue
+        for alias in _build_menu_name_aliases(menu_name):
+            alias_key = _normalize_menu_key(alias)
+            if not alias_key:
+                continue
+            if daypart:
+                by_exact[(menu_date, daypart, alias_key)] = entry
+            date_name_key = (menu_date, alias_key)
+            existing = by_date_name.get(date_name_key)
+            if existing is None:
+                by_date_name[date_name_key] = entry
+            elif existing != entry:
+                by_date_name[date_name_key] = {}
+    resolved_by_date_name = {
+        key: value
+        for key, value in by_date_name.items()
+        if isinstance(value, dict) and value
+    }
+    return by_exact, resolved_by_date_name
+
+
+def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> list[dict]:
+    if not menu_entries:
+        return lines
+    by_exact, by_date_name = _build_menu_entry_indexes(menu_entries)
+    if not by_exact and not by_date_name:
+        return lines
+    enriched: list[dict] = []
+    for line in lines:
+        menu_name_key = _normalize_menu_key(line.get("menu_name"))
+        line_date = _ensure_date(line.get("date"))
+        date_key = line_date.isoformat() if line_date else ""
+        daypart = _normalize_output_daypart(line.get("daypart"))
+        entry = None
+        if date_key and daypart and menu_name_key:
+            entry = by_exact.get((date_key, daypart, menu_name_key))
+        if entry is None and date_key and menu_name_key:
+            entry = by_date_name.get((date_key, menu_name_key))
+        if not entry:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        if entry.get("daypart"):
+            updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
+        if entry.get("category"):
+            updated["menu_category"] = entry.get("category")
+        updated["_monthly_entry_override_applied"] = True
+        enriched.append(updated)
+    return enriched
+
+
+def _normalize_category_key(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _clear_stale_menu_qty_from_monthly_entry(lines: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for line in lines:
+        if not line.get("_monthly_entry_override_applied") or line.get("menu_qty_per_serving") is None:
+            enriched.append(line)
+            continue
+        source_daypart = _normalize_output_daypart(line.get("_menu_qty_source_daypart"))
+        current_daypart = _normalize_output_daypart(line.get("daypart"))
+        source_category = _normalize_category_key(line.get("_menu_qty_source_category"))
+        current_category = _normalize_category_key(line.get("menu_category"))
+        daypart_conflict = bool(source_daypart and current_daypart and source_daypart != current_daypart)
+        category_conflict = bool(source_category and current_category and source_category != current_category)
+        if not daypart_conflict and not category_conflict:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        updated["menu_qty_per_serving"] = None
+        enriched.append(updated)
+    return enriched
+
+
+def _apply_garnish_defaults(lines: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for line in lines:
+        if _normalize_category_key(line.get("menu_category")) != "添え" or line.get("menu_qty_per_serving") is not None:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        updated["menu_unit_type"] = _normalize_unit_type(updated.get("menu_unit_type")) or "g"
+        updated["menu_qty_per_serving"] = 30
         enriched.append(updated)
     return enriched
 
@@ -618,19 +832,38 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
 
 def build_order_lines_for_outputs(order: dict) -> list[dict]:
     facility_id = order.get("facility")
-    month_id = order.get("week")
+    month_id = (
+        order_service._to_sheet_month_id(order.get("week_value"))  # noqa: SLF001
+        or order_service._to_sheet_month_id(order.get("persisted_week_value"))  # noqa: SLF001
+        or order_service._to_sheet_month_id(order.get("week"))  # noqa: SLF001
+        or order_service._to_sheet_month_id(order.get("week_code"))  # noqa: SLF001
+    )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = _apply_garnish_lines(order.get("lines", []))
+    menu_entries = (
+        menu_service.get_menu_entries_for_facility(month_id, facility_id) if month_id else []
+    )
+    raw_lines = _apply_menu_entry_overrides(raw_lines, menu_entries)
     menu_items = (
         menu_service.get_menu_items_for_facility(month_id, facility_id) if month_id else []
+    )
+    menu_entries = (
+        menu_service.get_menu_entries_for_facility(month_id, facility_id) if month_id else []
     )
     snapshot = get_order_menu_snapshot(order.get("id"))
     snapshot_items = snapshot.get("menu_items") if isinstance(snapshot, dict) else None
     if snapshot_items:
         order_lines = _apply_menu_snapshot(raw_lines, snapshot_items)
     else:
-        order_lines = _apply_menu_overrides(raw_lines, menu_items)
+        order_lines = raw_lines
+    # Current monthly/menu-master settings must win over stale confirmed snapshots.
+    order_lines = _apply_menu_overrides(order_lines, menu_items)
+    order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
+    order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id)
+    order_lines = _apply_garnish_defaults(order_lines)
+    order_lines = _apply_builtin_menu_defaults(order_lines)
+    order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     bag_types = _resolve_bag_types(facility_config)
@@ -647,16 +880,16 @@ def _normalize_rule_text(value: str | None) -> str:
 def _split_garnish_name(value: str | None) -> tuple[str | None, str | None]:
     if not value:
         return None, None
-    text = str(value)
-    if "添え" not in text:
-        return text.strip(), None
-    parts = re.split(r"添え", text, maxsplit=1)
-    if len(parts) < 2:
-        return text.strip(), None
-    base = parts[0].strip().strip("　")
-    garnish = parts[1].strip().strip("　")
+    text = str(value).strip()
+    if not text:
+        return None, None
+    match = _GARNISH_SPLIT_RE.search(text)
+    if not match:
+        return text, None
+    base = text[: match.start()].strip().strip("　")
+    garnish = text[match.end() :].strip().strip("　")
     if not base:
-        return text.strip(), None
+        return text, None
     if not garnish:
         return base, None
     return base, garnish
@@ -681,6 +914,18 @@ def _apply_garnish_lines(lines: list[dict]) -> list[dict]:
         garnish_line = dict(line)
         garnish_line["menu_name"] = garnish
         garnish_line["menu_category"] = "添え"
+        for field in (
+            "menu_qty_per_serving",
+            "menu_unit_type",
+            "actual_amount",
+            "actual_unit_type",
+            "menu_bag_max_qty",
+            "menu_bag_max_unit",
+            "_menu_qty_source_daypart",
+            "_menu_qty_source_category",
+            "_monthly_entry_override_applied",
+        ):
+            garnish_line.pop(field, None)
         enriched.append(garnish_line)
     return enriched
 
@@ -714,8 +959,11 @@ def _rule_applies(rule: dict, line: dict, facility_id: str | None) -> bool:
             rule.get("match_type"),
         ):
             return False
-    if rule.get("daypart") and rule.get("daypart") != line.get("daypart"):
-        return False
+    if rule.get("daypart"):
+        rule_daypart = _normalize_output_daypart(rule.get("daypart"))
+        line_daypart = _normalize_output_daypart(line.get("daypart"))
+        if rule_daypart != line_daypart:
+            return False
     if rule.get("category") and rule.get("category") != line.get("menu_category"):
         return False
     if rule.get("diet_type") and rule.get("diet_type") != line.get("diet_type"):
@@ -747,6 +995,36 @@ def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
             updated["menu_unit_type"] = selected.get("unit_type")
         if selected.get("qty_per_serving") is not None:
             updated["menu_qty_per_serving"] = selected.get("qty_per_serving")
+        enriched.append(updated)
+    return enriched
+
+
+def _apply_builtin_menu_defaults(lines: list[dict]) -> list[dict]:
+    defaults = menu_rule_service.DEFAULT_GLOBAL_RULES
+    if not defaults:
+        return lines
+    enriched: list[dict] = []
+    for line in lines:
+        if line.get("menu_qty_per_serving") is not None:
+            enriched.append(line)
+            continue
+        line_daypart = _normalize_output_daypart(line.get("daypart"))
+        line_category = _normalize_category_key(line.get("menu_category"))
+        matched = next(
+            (
+                rule
+                for rule in defaults
+                if _normalize_output_daypart(rule.get("daypart")) == line_daypart
+                and _normalize_category_key(rule.get("category")) == line_category
+            ),
+            None,
+        )
+        if not matched:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        updated["menu_unit_type"] = matched.get("unit_type")
+        updated["menu_qty_per_serving"] = matched.get("qty_per_serving")
         enriched.append(updated)
     return enriched
 
@@ -1269,9 +1547,11 @@ def _sum_quantity_map(quantity_map: dict[str, Any], keys: tuple[str, ...]) -> fl
 def _generic_quantity_total(quantity_map: dict[str, Any], diet_key: str | None) -> float | None:
     normalized_diet = _normalize_diet_key(diet_key)
     if normalized_diet == "regular":
-        return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x"))
+        return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x", "staff_x", "daycare_x"))
     if normalized_diet == "regular_bag":
         return _sum_quantity_map(quantity_map, ("regular_bag_x",))
+    if normalized_diet == "no_fried":
+        return _sum_quantity_map(quantity_map, ("no_fried_x",))
     if normalized_diet == "soft":
         return _sum_quantity_map(quantity_map, ("soft_x",))
     if normalized_diet == "mixer":

@@ -1,11 +1,14 @@
 import json
 import os
 from datetime import datetime, timedelta, date as dt_date
+from urllib.error import HTTPError
+from urllib.request import urlopen
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from fastapi.responses import Response, JSONResponse
 from loguru import logger
+from pydantic import BaseModel
 
-from src.services import order_service, config_service
+from src.services import order_service, config_service, candidate_resolution_service, workflow_state_service, uploaded_pdf_service
 from src.services import shipping_status_store
 from src.services.output_builder import rebuild_bags
 from src.services.ocr_job_service import (
@@ -42,15 +45,57 @@ RECOVERABLE_OCR_SHEET_ERRORS = {
 }
 
 
+class DailyOutputOverrideUpsertBody(BaseModel):
+    date: str
+    facility_id: str
+    menu_name: str
+    diet_type: str | None = None
+    daypart: str | None = None
+    menu_category: str | None = None
+    unit_type: str
+    qty_per_serving: float
+    note: str | None = None
+    acknowledge_ambiguous: bool = False
+
+
+class DailyOutputOverrideBulkUpsertBody(BaseModel):
+    date: str
+    menu_name: str
+    daypart: str | None = None
+    menu_category: str | None = None
+    unit_type: str
+    qty_per_serving: float
+    note: str | None = None
+
+
+class WeekArchiveBody(BaseModel):
+    week_value: str
+    order_ids: list[str] | None = None
+
+
 def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
+    current_sheet_context = draft_payload if isinstance(draft_payload.get("draft_record"), dict) else None
+    draft_record = (
+        current_sheet_context.get("draft_record")
+        if isinstance(current_sheet_context, dict)
+        else draft_payload
+    )
     workflow = order_service.get_order_workflow_state(order_id, refresh=True)
     evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
-    draft_json = draft_payload.get("draft_sheet_json") if isinstance(draft_payload.get("draft_sheet_json"), dict) else {}
+    if not isinstance(evidence, dict):
+        evidence_run_id = str((draft_record or {}).get("base_evidence_run_id") or "").strip()
+        if evidence_run_id:
+            evidence = order_service.get_ocr_evidence_run(evidence_run_id)
+    draft_json = (
+        current_sheet_context.get("draft_payload")
+        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("draft_payload"), dict)
+        else (draft_record.get("draft_sheet_json") if isinstance(draft_record.get("draft_sheet_json"), dict) else {})
+    )
     warnings = [
         str(item).strip()
         for item in (
             list(draft_json.get("warnings") or [])
-            + list(draft_payload.get("warnings_json") or [])
+            + list(draft_record.get("warnings_json") or [])
         )
         if str(item).strip()
     ]
@@ -60,16 +105,23 @@ def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
             deduped_warnings.append(item)
     apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else None
     return {
-        **draft_payload,
+        **draft_record,
         "fields": list(draft_json.get("fields") or []),
         "header": list(draft_json.get("header") or []),
         "rows": list(draft_json.get("rows") or []),
         "row_ids": list(draft_json.get("row_ids") or []),
-        "source": str(draft_json.get("source") or draft_payload.get("draft_state") or "draft").strip() or "draft",
+        "source": str(draft_json.get("source") or draft_record.get("draft_state") or "draft").strip() or "draft",
+        "resolved_week_id": str(draft_json.get("resolved_week_id") or draft_json.get("week_id") or "").strip() or None,
+        "menu_diagnostics": dict(draft_json.get("menu_diagnostics") or {}) if isinstance(draft_json.get("menu_diagnostics"), dict) else {},
+        "row_diagnostics": list(draft_json.get("row_diagnostics") or []) if isinstance(draft_json.get("row_diagnostics"), list) else [],
+        "repair_mode": str(draft_json.get("repair_mode") or "").strip() or None,
+        "repair_metadata": dict(draft_json.get("repair_metadata") or {}) if isinstance(draft_json.get("repair_metadata"), dict) else {},
+        "seed_source": str(draft_json.get("seed_source") or "").strip() or None,
+        "enrichment_source": str(draft_json.get("enrichment_source") or "").strip() or None,
         "warnings": deduped_warnings,
         "review_state": (
-            str((workflow or {}).get("state") or draft_payload.get("draft_state") or "draft_ready").strip()
-            if isinstance(workflow, dict) or draft_payload.get("draft_state")
+            str((workflow or {}).get("state") or draft_record.get("draft_state") or "draft_ready").strip()
+            if isinstance(workflow, dict) or draft_record.get("draft_state")
             else "draft_ready"
         ),
         "workflow_state": workflow,
@@ -77,7 +129,11 @@ def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
         "critical_decisions": list((workflow or {}).get("critical_decisions") or []) if isinstance(workflow, dict) else [],
         "candidate_resolution": (workflow or {}).get("candidate_resolution") if isinstance(workflow, dict) else None,
         "evidence_run_id": (evidence or {}).get("id") if isinstance(evidence, dict) else None,
-        "evidence_capabilities": (evidence or {}).get("capabilities_json") if isinstance(evidence, dict) else None,
+        "evidence_capabilities": (
+            (evidence or {}).get("capabilities_json")
+            if isinstance(evidence, dict)
+            else {}
+        ),
         "evidence_degraded_reasons": list((evidence or {}).get("degraded_reasons_json") or []) if isinstance(evidence, dict) else [],
     }
 
@@ -296,8 +352,9 @@ def _attach_order_review_summary(
         return
     effective_ocr_status = order.get("ocr_status")
     effective_ocr_metrics = order.get("ocr_metrics")
-    if not effective_ocr_status and isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job.get("id"), order_id):
-        effective_ocr_status = ocr_job.get("status")
+    if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job.get("id"), order_id):
+        if not effective_ocr_status:
+            effective_ocr_status = ocr_job.get("status")
         if not effective_ocr_metrics:
             effective_ocr_metrics = ocr_job.get("metrics")
     review = order_service.get_order_review_summary(
@@ -344,6 +401,53 @@ def _attach_order_workflow_context(order: dict, *, refresh: bool = False) -> Non
         order["critical_decisions"] = workflow["critical_decisions"]
     if isinstance(workflow.get("apply_gate"), dict):
         order["apply_gate"] = workflow["apply_gate"]
+
+
+def _needs_list_candidate_summary(order: dict) -> bool:
+    if not isinstance(order, dict):
+        return False
+    facility_missing = not str(order.get("facility") or "").strip()
+    week_value = str(order.get("week_value") or order.get("week") or "").strip()
+    week_range_missing = bool(week_value) and "@" not in week_value
+    return facility_missing or week_range_missing
+
+
+def _attach_order_list_candidate_summary(
+    order: dict,
+    *,
+    cached_payload: dict | None,
+) -> None:
+    if not _needs_list_candidate_summary(order):
+        return
+    effective_facility = str(order.get("facility") or "").strip() or None
+    effective_week = str(order.get("week_value") or order.get("week") or "").strip() or None
+    if not isinstance(cached_payload, dict):
+        cached_payload = None
+    message_id = str(order.get("message_id") or "").strip()
+    if message_id and (not cached_payload or not effective_facility or not effective_week):
+        uploaded_pdf = uploaded_pdf_service.get_uploaded_pdf_by_message_id(message_id)
+        if isinstance(uploaded_pdf, dict):
+            ingest_payload = uploaded_pdf_service.build_ingest_payload(uploaded_pdf)
+            if not effective_facility:
+                effective_facility = str(ingest_payload.get("facility_hint") or "").strip() or None
+            if not effective_week:
+                effective_week = str(ingest_payload.get("week_hint") or "").strip() or None
+    if cached_payload is None and not effective_facility and not effective_week:
+        return
+    summary = candidate_resolution_service.resolve_order_list_candidates(
+        facility_code=effective_facility,
+        week_code=effective_week,
+        received_at=order.get("received_at"),
+        evidence_payload=cached_payload,
+    )
+    resolutions = summary.get("resolutions") if isinstance(summary, dict) else None
+    if not isinstance(resolutions, dict):
+        return
+    week = resolutions.get("week")
+    facility = resolutions.get("facility")
+    if not isinstance(week, dict) and not isinstance(facility, dict):
+        return
+    order["candidate_resolution"] = summary
 
 
 def _is_active_order_reparse_job(job: dict | None, order_id: str) -> bool:
@@ -611,9 +715,36 @@ def _enqueue_order_evidence_rerun(
 
 
 @router.get("", dependencies=[Depends(require_role("operator"))])
-def list_orders(status: str | None = None, include_ocr: bool = False):
-    orders = order_service.list_orders(status=status)
-    if include_ocr:
+def list_orders(
+    status: str | None = None,
+    include_ocr: bool | None = None,
+    include_archived: bool | None = None,
+):
+    include_archived_flag = True if include_archived is None else include_archived
+    orders = order_service.list_orders(status=status, include_archived=include_archived_flag)
+    order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
+    cache_map = order_service._load_order_ocr_cache_map(order_ids)
+    lightweight_mode = include_ocr is False
+    if lightweight_mode:
+        workflow_map = workflow_state_service.list_workflow_states(order_ids)
+        for order in orders:
+            order_id = str(order.get("id") or "").strip()
+            cached_payload = cache_map.get(order_id)
+            workflow = workflow_map.get(order_id)
+            if isinstance(workflow, dict):
+                order["workflow_state"] = workflow
+            cached_status = _derive_status_from_payload(cached_payload)
+            if cached_status and not order.get("ocr_status"):
+                order["ocr_status"] = cached_status
+            if isinstance(cached_payload, dict):
+                pages = cached_payload.get("pages")
+                if isinstance(pages, list) and pages:
+                    order["ocr_pages_count"] = len(pages)
+            _attach_order_list_candidate_summary(
+                order,
+                cached_payload=cached_payload,
+            )
+    else:
         job_ids = [order.get("ocr_job_id") for order in orders if order.get("ocr_job_id")]
         jobs = get_ocr_jobs(job_ids)
         fallback_ids: list[str] = []
@@ -649,9 +780,6 @@ def list_orders(status: str | None = None, include_ocr: bool = False):
                 order["ocr_updated_at"] = job.get("updated_at")
             job = _apply_cached_status_override(order, str(order.get("id") or ""), job)
             job = _apply_stale_ocr_status(order, job)
-    cache_map = order_service._load_order_ocr_cache_map(
-        [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
-    )
     reparse_jobs = get_ocr_jobs(
         list(
             {
@@ -673,18 +801,20 @@ def list_orders(status: str | None = None, include_ocr: bool = False):
         )
         if review_job:
             review_job = _mark_stale_order_reparse_job(order, review_job)
-        _attach_order_review_summary(
-            order,
-            cached_payload=cache_map.get(order_id),
-            ocr_job=review_job,
-        )
-        _attach_order_workflow_context(order, refresh=False)
+        if not lightweight_mode:
+            _attach_order_review_summary(
+                order,
+                cached_payload=cache_map.get(order_id),
+                ocr_job=review_job,
+            )
+            _attach_order_workflow_context(order, refresh=False)
     return {"orders": orders}
 
 
 @router.post("/cache-refresh", dependencies=[Depends(require_role("admin"))])
-def refresh_orders_cache(status: str | None = None):
-    count = order_service.refresh_orders_cache(status=status)
+def refresh_orders_cache(status: str | None = None, include_archived: bool | None = None):
+    include_archived_flag = True if include_archived is None else include_archived
+    count = order_service.refresh_orders_cache(status=status, include_archived=include_archived_flag)
     return {"refreshed": count}
 
 
@@ -706,6 +836,115 @@ def list_orders_by_line_date(date: str, facility: str | None = None, status: str
 def get_daily_bags(date: str, facility: str | None = None, status: str | None = None):
     target_date = _parse_iso_date(date)
     return order_service.get_daily_bag_summary(target_date, facility_id=facility, status=status)
+
+
+@router.get("/daily-output-overrides", dependencies=[Depends(require_role("operator"))])
+def get_daily_output_overrides(
+    date: str,
+    daypart: str,
+    menu_name: str,
+    menu_category: str | None = None,
+):
+    target_date = _parse_iso_date(date)
+    try:
+        return order_service.list_daily_output_override_editor_rows(
+            target_date,
+            daypart=daypart,
+            menu_name=menu_name,
+            menu_category=menu_category,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/daily-output-overrides/upsert", dependencies=[Depends(require_role("operator"))])
+def upsert_daily_output_override(payload: DailyOutputOverrideUpsertBody):
+    target_date = _parse_iso_date(payload.date)
+    try:
+        return order_service.upsert_daily_output_portion_override(
+            output_date=target_date,
+            facility_id=str(payload.facility_id or "").strip(),
+            menu_name=str(payload.menu_name or "").strip(),
+            diet_type=payload.diet_type,
+            daypart=payload.daypart,
+            menu_category=payload.menu_category,
+            unit_type=str(payload.unit_type or "").strip(),
+            qty_per_serving=payload.qty_per_serving,
+            note=payload.note,
+            updated_by="operator",
+            acknowledge_ambiguous=bool(payload.acknowledge_ambiguous),
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        try:
+            parsed = json.loads(detail)
+        except Exception:
+            parsed = detail
+        status_code = 409 if isinstance(parsed, dict) else 400
+        raise HTTPException(status_code=status_code, detail=parsed) from exc
+
+
+@router.post("/daily-output-overrides/upsert-bulk", dependencies=[Depends(require_role("operator"))])
+def upsert_daily_output_override_bulk(payload: DailyOutputOverrideBulkUpsertBody):
+    target_date = _parse_iso_date(payload.date)
+    try:
+        return order_service.upsert_daily_output_portion_override_bulk(
+            output_date=target_date,
+            menu_name=str(payload.menu_name or "").strip(),
+            daypart=payload.daypart,
+            menu_category=payload.menu_category,
+            unit_type=str(payload.unit_type or "").strip(),
+            qty_per_serving=payload.qty_per_serving,
+            note=payload.note,
+            updated_by="operator",
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        try:
+            parsed = json.loads(detail)
+        except Exception:
+            parsed = detail
+        status_code = 409 if isinstance(parsed, dict) else 400
+        raise HTTPException(status_code=status_code, detail=parsed) from exc
+
+
+@router.delete("/daily-output-overrides/{override_id}", dependencies=[Depends(require_role("operator"))])
+def delete_daily_output_override(override_id: str):
+    deleted = order_service.delete_daily_output_portion_override(override_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="override not found")
+    return deleted
+
+
+@router.post("/archive-week", dependencies=[Depends(require_role("operator"))])
+def archive_orders_for_week(payload: WeekArchiveBody):
+    result, error = order_service.archive_orders_for_week(
+        str(payload.week_value or "").strip(),
+        order_ids=[str(item or "").strip() for item in (payload.order_ids or []) if str(item or "").strip()],
+        archived_by="operator",
+    )
+    if error == "invalid_week":
+        raise HTTPException(status_code=400, detail={"error": error})
+    if error == "week_not_found":
+        raise HTTPException(status_code=404, detail={"error": error})
+    if error:
+        raise HTTPException(status_code=400, detail={"error": error})
+    return result
+
+
+@router.post("/unarchive-week", dependencies=[Depends(require_role("operator"))])
+def unarchive_orders_for_week(payload: WeekArchiveBody):
+    result, error = order_service.unarchive_orders_for_week(
+        str(payload.week_value or "").strip(),
+        order_ids=[str(item or "").strip() for item in (payload.order_ids or []) if str(item or "").strip()],
+    )
+    if error == "invalid_week":
+        raise HTTPException(status_code=400, detail={"error": error})
+    if error == "week_not_found":
+        raise HTTPException(status_code=404, detail={"error": error})
+    if error:
+        raise HTTPException(status_code=400, detail={"error": error})
+    return result
 
 
 @router.get("/{order_id}", dependencies=[Depends(require_role("operator"))])
@@ -782,6 +1021,47 @@ def _shipping_facility_names(order: dict) -> list[str]:
     return names
 
 
+def _load_document_bytes(uri: str) -> tuple[bytes, str, str]:
+    try:
+        return load_bytes_from_uri(uri), "original", "source_uri"
+    except Exception as exc:  # noqa: BLE001
+        signed_url = order_service._signed_url_from_uri(uri) if isinstance(uri, str) else None
+        if signed_url and isinstance(signed_url, str) and signed_url.strip():
+            try:
+                logger.warning("Falling back to signed URL for order document", uri=uri, error=str(exc))
+                with urlopen(signed_url, timeout=30) as response:  # noqa: S310
+                    return response.read(), "original", "signed_url"
+            except HTTPError as http_exc:
+                if http_exc.code not in {403, 404}:
+                    raise
+            except Exception:
+                pass
+        if isinstance(exc, FileNotFoundError):
+            raise
+        logger.warning("Falling back to signed URL for order document", uri=uri, error=str(exc))
+        raise FileNotFoundError(str(uri)) from exc
+
+
+def _load_archived_original_document_bytes(order_id: str, current_uri: str | None) -> tuple[bytes, str, str] | None:
+    payload, error = order_service.get_ocr_output(order_id)
+    if error or not isinstance(payload, dict):
+        return None
+    input_reference = str(payload.get("input_reference") or "").strip()
+    if not input_reference or input_reference == str(current_uri or "").strip():
+        return None
+    try:
+        data = load_bytes_from_uri(input_reference)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to load archived original document from OCR input reference",
+            order_id=order_id,
+            input_reference=input_reference,
+            error=str(exc),
+        )
+        return None
+    return data, "original_archive", "ocr_input_reference"
+
+
 @router.get("/{order_id}/shipping-statuses", dependencies=[Depends(require_role("operator"))])
 def get_order_shipping_statuses(order_id: str, limit: int = 10, max_age_days: int = 30):
     order = order_service.get_order_by_id(order_id)
@@ -803,8 +1083,21 @@ def download_document(order_id: str):
     uri = order.get("document")
     if not uri:
         raise HTTPException(status_code=404, detail="document not found")
-    data = load_bytes_from_uri(uri)
-    return Response(content=data, media_type="application/pdf")
+    try:
+        data, source_kind, source_variant = _load_document_bytes(uri)
+    except FileNotFoundError:
+        archived = _load_archived_original_document_bytes(order_id, str(uri or ""))
+        if not archived:
+            raise HTTPException(status_code=404, detail="document not found")
+        data, source_kind, source_variant = archived
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={
+            "X-Sawa-Document-Source": source_kind,
+            "X-Sawa-Document-Variant": source_variant,
+        },
+    )
 
 
 @router.get("/{order_id}/ocr-raw", dependencies=[Depends(require_role("operator"))])
@@ -865,31 +1158,15 @@ def get_draft_sheet(order_id: str):
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    draft = order_service.get_latest_sheet_draft(
+    current_sheet_context = order_service.get_current_sheet_context(
         order_id,
-        backfill_from_revision=False,
+        refresh_draft_from_semantic=True,
         upgrade_generic_from_sheet=True,
+        backfill_from_revision=False,
     )
-    if isinstance(draft, dict):
-        return _flatten_draft_sheet_payload(order_id, draft)
-    initial = order_service.build_initial_sheet_draft(order_id)
-    if not isinstance(initial, dict):
+    if not isinstance(current_sheet_context, dict):
         raise HTTPException(status_code=404, detail="draft sheet not found")
-    return _flatten_draft_sheet_payload(order_id, {
-        "id": None,
-        "order_id": order_id,
-        "base_evidence_run_id": initial.get("base_evidence_run_id"),
-        "base_template_resolution_id": None,
-        "base_menu_snapshot_id": None,
-        "draft_sheet_json": initial,
-        "draft_state": "draft_ready",
-        "blockers_json": [],
-        "warnings_json": [],
-        "latest_patch_candidate_id": None,
-        "edited_by": None,
-        "edited_at": None,
-        "created_at": None,
-    })
+    return _flatten_draft_sheet_payload(order_id, current_sheet_context)
 
 
 @router.get("/{order_id}/workflow-state", dependencies=[Depends(require_role("operator"))])
@@ -1000,12 +1277,7 @@ def get_ocr_sheet(order_id: str):
         payload["can_confirm"] = False
         return payload
 
-    try:
-        data, error = order_service.get_ocr_sheet(order_id, prefer_order_lines=False)
-    except TypeError as exc:
-        if "prefer_order_lines" not in str(exc):
-            raise
-        data, error = order_service.get_ocr_sheet(order_id)
+    data, error = order_service.get_ocr_sheet(order_id)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
     if error in {"facility_missing", "facility_not_found"}:
@@ -1169,6 +1441,14 @@ def apply_ocr_markdown(order_id: str, body: dict):
         "draft_lines_empty",
     }:
         raise HTTPException(status_code=400, detail=error)
+    if error in {"draft_semantic_materialization_failed", "draft_materialization_mismatch"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": error,
+                "message": "下書きの数量と明細化結果が一致しません。再解析または確認が必要です。",
+            },
+        )
     if error in {"stale_revision_conflict", "stale_lines_conflict"}:
         raise HTTPException(
             status_code=409,
@@ -1248,6 +1528,52 @@ def switch_draft_sheet_evidence(order_id: str):
     if not isinstance(draft, dict):
         raise HTTPException(status_code=500, detail="failed to switch draft evidence")
     return _flatten_draft_sheet_payload(order_id, draft)
+
+
+@router.post("/{order_id}/draft-sheet/force-weekly-menu", dependencies=[Depends(require_role("operator"))])
+def force_draft_sheet_weekly_menu(order_id: str):
+    draft, error = order_service.force_overwrite_current_sheet_with_weekly_menu(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error == "facility_missing":
+        raise HTTPException(status_code=400, detail="facility missing")
+    if error == "week_missing":
+        raise HTTPException(status_code=400, detail="week missing")
+    if error == "weekly_menu_missing":
+        raise HTTPException(status_code=400, detail="weekly_menu_missing")
+    if error:
+        raise HTTPException(status_code=500, detail="failed to force weekly menu overwrite")
+    if not isinstance(draft, dict):
+        raise HTTPException(status_code=500, detail="failed to force weekly menu overwrite")
+    return {
+        "updated": True,
+        "draft_payload": _flatten_draft_sheet_payload(order_id, draft),
+    }
+
+
+@router.post("/{order_id}/draft-sheet/force-facility-schema", dependencies=[Depends(require_role("operator"))])
+def force_draft_sheet_facility_schema(order_id: str, body: dict | None = None):
+    blank_quantities = True
+    if isinstance(body, dict) and "blank_quantities" in body:
+        blank_quantities = bool(body.get("blank_quantities"))
+    draft, error = order_service.force_overwrite_current_sheet_with_facility_schema(
+        order_id,
+        blank_quantities=blank_quantities,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error == "facility_missing":
+        raise HTTPException(status_code=400, detail="facility missing")
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error:
+        raise HTTPException(status_code=500, detail="failed to force facility schema overwrite")
+    if not isinstance(draft, dict):
+        raise HTTPException(status_code=500, detail="failed to force facility schema overwrite")
+    return {
+        "updated": True,
+        "draft_payload": _flatten_draft_sheet_payload(order_id, draft),
+    }
 
 
 @router.post("/{order_id}/draft-sheet/apply-patch-candidate", dependencies=[Depends(require_role("operator"))])
@@ -1446,8 +1772,18 @@ def update_lines(order_id: str, body: dict):
     return {"updated": True}
 
 
+def _enqueue_outputs_after_confirm(order_id: str) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        enqueue_outputs(order_id)
+    except OutputBuildError as exc:
+        order_service.set_status(order_id, "エラー")
+        logger.exception("Output enqueue failed after confirm", order_id=order_id, error=str(exc))
+
+
 @router.post("/{order_id}/confirm", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
-def confirm_order(order_id: str, body: dict | None = None):
+def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
     expected_revision_id = str((body or {}).get("expected_revision_id") or "").strip() or None
     expected_lines_updated_at = str((body or {}).get("expected_lines_updated_at") or "").strip() or None
     has_expected_revision = isinstance(body, dict) and "expected_revision_id" in body
@@ -1502,7 +1838,10 @@ def confirm_order(order_id: str, body: dict | None = None):
             "facility_missing": "facility is missing",
             "week_missing": "week is missing",
             "weekly_menu_missing": "weekly menu is missing",
+            "monthly_menu_object_missing": "monthly menu object is missing",
             "menu_entries_missing": "weekly menu entries are missing",
+            "monthly_menu_facility_scope_missing": "facility-specific weekly menu entries are missing",
+            "monthly_menu_lookup_failed": "monthly menu lookup failed",
             "facility_choice_required": "facility choice is required",
             "week_choice_required": "week choice is required",
             "template_choice_required": "template choice is required",
@@ -1542,14 +1881,7 @@ def confirm_order(order_id: str, body: dict | None = None):
         ) from exc
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    try:
-        enqueue_outputs(order_id)
-    except OutputBuildError as exc:
-        order_service.set_status(order_id, "エラー")
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "output_failed", "message": str(exc)},
-        )
+    background_tasks.add_task(_enqueue_outputs_after_confirm, order_id)
     return {"accepted": True}
 
 
@@ -1584,13 +1916,14 @@ def reparse_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
                 "column_missing",
                 "row_alignment",
                 "special_diet_semantics",
+                "merged_cell_quantity_spans",
                 "freeform",
             }:
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         "prompt_preset must be one of "
-                        "numeric_verification|column_missing|row_alignment|special_diet_semantics|freeform"
+                        "numeric_verification|column_missing|row_alignment|special_diet_semantics|merged_cell_quantity_spans|freeform"
                     ),
                 )
             prompt_preset = normalized_prompt_preset

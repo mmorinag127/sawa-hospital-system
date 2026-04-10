@@ -119,8 +119,15 @@ def _coerce_row_cell(value: object) -> str:
     return str(value)
 
 
-def _resolve_payload_template(payload: object, template: dict | None) -> dict:
+def _resolve_payload_template(
+    payload: object,
+    template: dict | None,
+    *,
+    allow_payload_template_override: bool = True,
+) -> dict:
     resolved = template if isinstance(template, dict) else {}
+    if not allow_payload_template_override:
+        return resolved
     if not isinstance(payload, dict):
         return resolved
     template_id = payload.get("template_id")
@@ -203,8 +210,17 @@ def _rows_from_payload(payload: object, template: dict) -> list[list[str]] | Non
     return normalized
 
 
-def _rows_from_pipeline_payload(payload: object, template: dict) -> list[list[str]] | None:
-    template = _resolve_payload_template(payload, template)
+def _rows_from_pipeline_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[list[str]] | None:
+    template = _resolve_payload_template(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
     if not isinstance(payload, dict):
         return None
     base_rows: list[list[str]] | None = None
@@ -221,7 +237,11 @@ def _rows_from_pipeline_payload(payload: object, template: dict) -> list[list[st
     if rows:
         base_rows = rows
     if base_rows is None:
-        rows = rows_from_structured_payload(payload, template)
+        rows = rows_from_structured_payload(
+            payload,
+            template,
+            allow_payload_template_override=allow_payload_template_override,
+        )
         if rows:
             base_rows = rows
     if base_rows is None:
@@ -237,7 +257,11 @@ def _rows_from_pipeline_payload(payload: object, template: dict) -> list[list[st
             if rows:
                 base_rows = rows
             if base_rows is None:
-                rows = rows_from_structured_payload(nested, template)
+                rows = rows_from_structured_payload(
+                    nested,
+                    template,
+                    allow_payload_template_override=allow_payload_template_override,
+                )
                 if rows:
                     base_rows = rows
     if base_rows is None:
@@ -265,7 +289,15 @@ def _rows_from_pipeline_payload(payload: object, template: dict) -> list[list[st
                     )
                 if normalized:
                     base_rows = normalized
-    overlay_rows = _rows_from_overlay_payload(payload, template) if _overlay_merge_enabled(payload) else None
+    overlay_rows = (
+        _rows_from_overlay_payload(
+            payload,
+            template,
+            allow_payload_template_override=allow_payload_template_override,
+        )
+        if _overlay_merge_enabled(payload)
+        else None
+    )
     return _merge_overlay_rows(base_rows, overlay_rows, template)
 
 
@@ -364,8 +396,17 @@ def _is_overlay_replaceable_field(field: str) -> bool:
     return normalized in {"remarks", "note", "notes"}
 
 
-def _rows_from_overlay_payload(payload: object, template: dict) -> list[list[str]] | None:
-    template = _resolve_payload_template(payload, template)
+def _rows_from_overlay_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[list[str]] | None:
+    template = _resolve_payload_template(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
     if not isinstance(payload, dict):
         return None
     overlay_rows = payload.get("roi_overlay_rows")
@@ -588,6 +629,8 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
         return _select_field(["qty.business_x", "business_x"], fields)
     if "通所" in token or "daycare" in token:
         return _select_field(["qty.daycare_x", "daycare_x"], fields)
+    if "揚げ物禁" in header or "揚物禁" in header or "nofried" in token:
+        return _select_field(["qty.no_fried_x", "no_fried_x"], fields)
     if "糖尿" in token or "diabetes" in token:
         return _select_field(["qty.糖尿_x", "糖尿_x", "qty.diabetes_x", "diabetes_x"], fields)
     if "妊娠" in token or "pregnancy" in token:
@@ -596,6 +639,12 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
         "アレル" in header or "allergy" in token
     ):
         return _select_field(["qty.sesame_allergy_x", "sesame_allergy_x"], fields)
+    if (
+        ("肉" in token or "meat" in token)
+        and ("卵" in token or "玉子" in token or "egg" in token)
+        and ("魚" in token or "鯖" in token or "さば" in token or "fish" in token)
+    ) or "肉卵魚禁" in header:
+        return _select_field(["qty.forbidden_other_x", "forbidden_other_x"], fields)
     if ("禁" in token and "肉" in token) or "nomeat" in token:
         return _select_field(
             ["qty.no_meat_x", "no_meat_x", "qty.no_meat_2f", "no_meat_2f", "qty.no_meat_3f", "no_meat_3f"],
@@ -615,6 +664,91 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
     if token in {"-", "placeholder"}:
         return _select_field(["qty.placeholder_x", "placeholder_x"], fields)
     return None
+
+
+def _template_explicit_quantity_column_count(template: dict | None) -> int:
+    if not isinstance(template, dict):
+        return 0
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return 0
+    return sum(
+        1
+        for col in columns
+        if isinstance(col, dict) and str(col.get("role") or "").strip().lower() == "quantity"
+    )
+
+
+def _explicit_field_from_template_column(column: dict[str, Any], fields: list[str]) -> str | None:
+    role = str(column.get("role") or "").strip().lower()
+    if role == "date":
+        return "date_mmdd" if "date_mmdd" in fields else ("date" if "date" in fields else None)
+    if role == "daypart":
+        return "daypart" if "daypart" in fields else None
+    if role == "menu_name":
+        return "menu" if "menu" in fields else ("menu_name" if "menu_name" in fields else None)
+    if role == "note":
+        return "remarks" if "remarks" in fields else ("note" if "note" in fields else None)
+    if role == "quantity":
+        name = str(column.get("name") or "").strip()
+        if name and name in fields:
+            return name
+        diet_type = str(column.get("diet_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        area_id = str(column.get("area_id") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if diet_type and area_id:
+            derived_name = f"qty.{diet_type}_{area_id}"
+            if derived_name in fields:
+                return derived_name
+    return None
+
+
+def _mapped_indexes_from_template_columns(
+    *,
+    template: dict | None,
+    fields: list[str],
+    observed_width: int,
+) -> dict[int, int]:
+    if not isinstance(template, dict) or observed_width <= 0:
+        return {}
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return {}
+    explicit: dict[int, int] = {}
+    used_dest_indexes: set[int] = set()
+    for raw_col in columns:
+        if not isinstance(raw_col, dict):
+            continue
+        try:
+            source_col_index = int(raw_col.get("index"))
+        except Exception:
+            continue
+        if source_col_index < 0 or source_col_index >= observed_width:
+            continue
+        field = _explicit_field_from_template_column(raw_col, fields)
+        if not field:
+            continue
+        dest_idx = fields.index(field)
+        if dest_idx in used_dest_indexes:
+            continue
+        explicit[source_col_index] = dest_idx
+        used_dest_indexes.add(dest_idx)
+    return explicit
+
+
+def _overlay_explicit_mapped_indexes(
+    mapped_indexes: dict[int, int],
+    explicit_mapped_indexes: dict[int, int],
+) -> dict[int, int]:
+    if not explicit_mapped_indexes:
+        return mapped_indexes
+    explicit_dest_indexes = set(explicit_mapped_indexes.values())
+    normalized = {
+        src_idx: dest_idx
+        for src_idx, dest_idx in mapped_indexes.items()
+        if src_idx not in explicit_mapped_indexes and dest_idx not in explicit_dest_indexes
+    }
+    normalized.update(explicit_mapped_indexes)
+    return normalized
 
 
 def _fill_remaining_quantity_mapping_by_order(
@@ -753,6 +887,11 @@ def _realign_quantity_mapping_by_numeric_block(
         for src_idx, dest_idx in mapped_indexes.items()
         if dest_idx in quantity_dest_indexes
     }
+    if (
+        preserve_sparse_full_header_mapping
+        and len(current_quantity_mapping) >= len(quantity_dest_indexes)
+    ):
+        return mapped_indexes
     if (
         preserve_sparse_full_header_mapping
         and len(current_quantity_mapping) >= len(quantity_dest_indexes)
@@ -960,6 +1099,611 @@ def _merge_header_group(rows: list[list[str]]) -> list[str]:
     return merged
 
 
+def _date_field_index(fields: list[str]) -> int | None:
+    return next(
+        (
+            idx
+            for idx, field in enumerate(fields)
+            if _normalize_header_token(field) in {"date", "datemmdd", "date_mmdd"}
+        ),
+        None,
+    )
+
+
+def _daypart_field_index(fields: list[str]) -> int | None:
+    return next(
+        (
+            idx
+            for idx, field in enumerate(fields)
+            if _normalize_header_token(field) in {"daypart", "meal", "time"}
+        ),
+        None,
+    )
+
+
+def _menu_field_index(fields: list[str]) -> int | None:
+    return next(
+        (
+            idx
+            for idx, field in enumerate(fields)
+            if _normalize_header_token(field) in {"menu", "menuname", "menu_name"}
+        ),
+        None,
+    )
+
+
+def _looks_like_menu_projection_value(value: str, fields: list[str]) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized_daypart = re.sub(r"[\s\u3000()（）【】「」『』/／_-]+", "", text)
+    if _looks_like_date(text) or _looks_like_quantity(text):
+        return False
+    if normalized_daypart in {"朝", "昼", "夕", "夜"}:
+        return False
+    normalized = _normalize_header_token(text)
+    normalized_field_tokens = {
+        _normalize_header_token(field)
+        for field in fields
+        if str(field or "").strip()
+    }
+    if normalized in normalized_field_tokens:
+        return False
+    if normalized in {
+        "menu",
+        "メニュー",
+        "献立",
+        "date",
+        "日付",
+        "daypart",
+        "区分",
+        "時間帯",
+        "remarks",
+        "備考",
+        "note",
+    }:
+        return False
+    if _contains_japanese_text(text):
+        compact = re.sub(r"[\s\u3000・,，.。()（）<>＜＞【】「」『』\\/_-]+", "", text)
+        return len(compact) >= 2
+    alpha_chars = re.sub(r"[^A-Za-z]", "", text)
+    if alpha_chars:
+        return len(alpha_chars) >= 1
+    return False
+
+
+def _best_menu_source_index(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    max_source_index: int | None,
+) -> int | None:
+    observed_width = max((len(row) for row in data if isinstance(row, list)), default=0)
+    if observed_width <= 0:
+        return None
+    upper_bound = observed_width if max_source_index is None else max(0, min(observed_width, max_source_index))
+    best_index: int | None = None
+    best_key: tuple[float, ...] | None = None
+    for source_idx in range(upper_bound):
+        values = [
+            str(row[source_idx] or "").strip()
+            for row in data
+            if isinstance(row, list) and source_idx < len(row) and str(row[source_idx] or "").strip()
+        ]
+        if len(values) < 2:
+            continue
+        menu_like_count = sum(1 for value in values if _looks_like_menu_projection_value(value, fields))
+        if menu_like_count <= 0:
+            continue
+        quantity_like_count = sum(1 for value in values if _looks_like_quantity(value))
+        date_like_count = sum(1 for value in values if _looks_like_date(value))
+        daypart_like_count = sum(1 for value in values if _looks_like_daypart(value))
+        current_key = (
+            float(menu_like_count) / float(len(values)),
+            float(menu_like_count),
+            -float(quantity_like_count),
+            -float(date_like_count),
+            -float(daypart_like_count),
+            float(source_idx),
+        )
+        if best_key is not None and current_key <= best_key:
+            continue
+        best_key = current_key
+        best_index = source_idx
+    return best_index
+
+
+def _best_date_source_index(
+    *,
+    data: list[list[str]],
+) -> int | None:
+    observed_width = max((len(row) for row in data if isinstance(row, list)), default=0)
+    if observed_width <= 0:
+        return None
+    best_index: int | None = None
+    best_key: tuple[float, ...] | None = None
+    for source_idx in range(observed_width):
+        values = [
+            str(row[source_idx] or "").strip()
+            for row in data
+            if isinstance(row, list) and source_idx < len(row) and str(row[source_idx] or "").strip()
+        ]
+        if not values:
+            continue
+        date_like_count = sum(1 for value in values if _looks_like_date(value))
+        if date_like_count <= 0:
+            continue
+        quantity_like_count = sum(1 for value in values if _looks_like_quantity(value))
+        current_key = (
+            float(date_like_count) / float(len(values)),
+            float(date_like_count),
+            -float(quantity_like_count),
+            -float(source_idx),
+        )
+        if best_key is not None and current_key <= best_key:
+            continue
+        best_key = current_key
+        best_index = source_idx
+    return best_index
+
+
+def _realign_structural_mapping_by_observed_content(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+) -> dict[int, int]:
+    normalized = dict(mapped_indexes)
+
+    menu_dest_idx = _menu_field_index(fields)
+    if menu_dest_idx is not None:
+        best_menu_source = _best_menu_source_index(
+            data=data,
+            fields=fields,
+            max_source_index=None,
+        )
+        if best_menu_source is not None:
+            normalized = {
+                src_idx: dest_idx
+                for src_idx, dest_idx in normalized.items()
+                if dest_idx != menu_dest_idx
+            }
+            normalized[int(best_menu_source)] = int(menu_dest_idx)
+
+    date_dest_idx = _date_field_index(fields)
+    if date_dest_idx is not None:
+        best_date_source = _best_date_source_index(data=data)
+        if best_date_source is not None:
+            normalized = {
+                src_idx: dest_idx
+                for src_idx, dest_idx in normalized.items()
+                if dest_idx != date_dest_idx
+            }
+            normalized[int(best_date_source)] = int(date_dest_idx)
+    return normalized
+
+
+def _evaluate_structured_projection_rows(
+    *,
+    rows: list[list[str]] | None,
+    fields: list[str],
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "row_count": 0,
+        "menu_non_empty_count": 0,
+        "menu_like_count": 0,
+        "menu_noise_count": 0,
+        "date_non_empty_count": 0,
+        "date_valid_count": 0,
+        "daypart_non_empty_count": 0,
+        "daypart_valid_count": 0,
+        "quantity_non_empty_count": 0,
+        "quantity_numeric_count": 0,
+        "quantity_non_numeric_count": 0,
+        "leading_quantity_non_empty_count": 0,
+        "leading_quantity_numeric_count": 0,
+        "menu_like_ratio": 0.0,
+        "date_valid_ratio": 0.0,
+        "daypart_valid_ratio": 0.0,
+        "quantity_numeric_ratio": 0.0,
+        "projection_corrupted": False,
+    }
+    if not isinstance(rows, list) or not rows or not fields:
+        return metrics
+
+    date_idx = _date_field_index(fields)
+    daypart_idx = _daypart_field_index(fields)
+    menu_idx = _menu_field_index(fields)
+    quantity_indexes = [
+        idx for idx, field in enumerate(fields) if _is_quantity_field_name(field)
+    ]
+    leading_quantity_idx = min(quantity_indexes) if quantity_indexes else None
+
+    metrics["row_count"] = len(rows)
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        if date_idx is not None and date_idx < len(row):
+            value = str(row[date_idx] or "").strip()
+            if value:
+                metrics["date_non_empty_count"] += 1
+                if _looks_like_date(value):
+                    metrics["date_valid_count"] += 1
+        if daypart_idx is not None and daypart_idx < len(row):
+            value = str(row[daypart_idx] or "").strip()
+            if value:
+                metrics["daypart_non_empty_count"] += 1
+                if _looks_like_daypart(value):
+                    metrics["daypart_valid_count"] += 1
+        if menu_idx is not None and menu_idx < len(row):
+            value = str(row[menu_idx] or "").strip()
+            if value:
+                metrics["menu_non_empty_count"] += 1
+                if _looks_like_menu_projection_value(value, fields):
+                    metrics["menu_like_count"] += 1
+                else:
+                    metrics["menu_noise_count"] += 1
+        for idx in quantity_indexes:
+            if idx >= len(row):
+                continue
+            value = str(row[idx] or "").strip()
+            if not value:
+                continue
+            metrics["quantity_non_empty_count"] += 1
+            if leading_quantity_idx is not None and idx == leading_quantity_idx:
+                metrics["leading_quantity_non_empty_count"] += 1
+            if _looks_like_quantity(value):
+                metrics["quantity_numeric_count"] += 1
+                if leading_quantity_idx is not None and idx == leading_quantity_idx:
+                    metrics["leading_quantity_numeric_count"] += 1
+            else:
+                metrics["quantity_non_numeric_count"] += 1
+
+    menu_non_empty = int(metrics["menu_non_empty_count"] or 0)
+    date_non_empty = int(metrics["date_non_empty_count"] or 0)
+    daypart_non_empty = int(metrics["daypart_non_empty_count"] or 0)
+    quantity_non_empty = int(metrics["quantity_non_empty_count"] or 0)
+    metrics["menu_like_ratio"] = (
+        float(metrics["menu_like_count"]) / float(menu_non_empty)
+        if menu_non_empty > 0
+        else 0.0
+    )
+    metrics["date_valid_ratio"] = (
+        float(metrics["date_valid_count"]) / float(date_non_empty)
+        if date_non_empty > 0
+        else 0.0
+    )
+    metrics["daypart_valid_ratio"] = (
+        float(metrics["daypart_valid_count"]) / float(daypart_non_empty)
+        if daypart_non_empty > 0
+        else 0.0
+    )
+    metrics["quantity_numeric_ratio"] = (
+        float(metrics["quantity_numeric_count"]) / float(quantity_non_empty)
+        if quantity_non_empty > 0
+        else 0.0
+    )
+    corrupted = False
+    if menu_non_empty >= 4 and float(metrics["menu_like_ratio"]) < 0.6:
+        corrupted = True
+    if date_non_empty >= 2 and float(metrics["date_valid_ratio"]) < 0.5:
+        corrupted = True
+    if quantity_non_empty >= 4 and (
+        float(metrics["quantity_numeric_ratio"]) < 0.65
+        or int(metrics["quantity_non_numeric_count"]) >= 4
+    ):
+        corrupted = True
+    metrics["projection_corrupted"] = corrupted
+    return metrics
+
+
+def _normalize_projection_identity_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", "", text)
+
+
+def classify_structured_projection_rows(
+    *,
+    rows: list[list[str]] | None,
+    fields: list[str],
+) -> dict[str, Any]:
+    metrics = _evaluate_structured_projection_rows(rows=rows, fields=fields)
+    classification: dict[str, Any] = {
+        "accepted": False,
+        "row_kinds": [],
+        "menu_row_count": 0,
+        "quantity_only_row_count": 0,
+        "structural_row_count": 0,
+        "blank_row_count": 0,
+        "duplicate_identity_row_count": 0,
+        "classification_corrupted": False,
+        "projection_metrics": metrics,
+    }
+    if not isinstance(rows, list) or not rows or not fields:
+        return classification
+
+    date_idx = _date_field_index(fields)
+    daypart_idx = _daypart_field_index(fields)
+    menu_idx = _menu_field_index(fields)
+    quantity_indexes = [
+        idx for idx, field in enumerate(fields) if _is_quantity_field_name(field)
+    ]
+
+    prev_menu_identity: tuple[str, str, str] | None = None
+    row_kinds: list[str] = []
+    for row in rows:
+        normalized_row = [str(cell or "").strip() for cell in (row or [])]
+        date_value = normalized_row[date_idx] if date_idx is not None and date_idx < len(normalized_row) else ""
+        daypart_value = normalized_row[daypart_idx] if daypart_idx is not None and daypart_idx < len(normalized_row) else ""
+        menu_value = normalized_row[menu_idx] if menu_idx is not None and menu_idx < len(normalized_row) else ""
+        quantity_values = [
+            normalized_row[idx]
+            for idx in quantity_indexes
+            if idx < len(normalized_row) and str(normalized_row[idx] or "").strip()
+        ]
+        non_empty_values = [value for value in normalized_row if value]
+        if not non_empty_values:
+            kind = "blank_row"
+            prev_menu_identity = None
+        elif menu_value and _looks_like_menu_projection_value(menu_value, fields):
+            kind = "menu_row"
+            menu_identity = (
+                _normalize_projection_identity_token(date_value),
+                _normalize_projection_identity_token(daypart_value),
+                _normalize_projection_identity_token(menu_value),
+            )
+            if prev_menu_identity is not None and menu_identity == prev_menu_identity:
+                classification["duplicate_identity_row_count"] = int(
+                    classification.get("duplicate_identity_row_count") or 0
+                ) + 1
+            prev_menu_identity = menu_identity
+        elif not menu_value and quantity_values:
+            kind = "quantity_only_row"
+        else:
+            kind = "structural_row"
+            prev_menu_identity = None
+        row_kinds.append(kind)
+        counter_key = {
+            "menu_row": "menu_row_count",
+            "quantity_only_row": "quantity_only_row_count",
+            "structural_row": "structural_row_count",
+            "blank_row": "blank_row_count",
+        }[kind]
+        classification[counter_key] = int(classification.get(counter_key) or 0) + 1
+
+    classification["row_kinds"] = row_kinds
+    menu_row_count = int(classification.get("menu_row_count") or 0)
+    row_count = len(row_kinds)
+    duplicate_identity_row_count = int(classification.get("duplicate_identity_row_count") or 0)
+    structural_row_count = int(classification.get("structural_row_count") or 0)
+    blank_row_count = int(classification.get("blank_row_count") or 0)
+    quantity_only_row_count = int(classification.get("quantity_only_row_count") or 0)
+
+    classification_corrupted = False
+    if menu_row_count <= 0:
+        classification_corrupted = True
+    if duplicate_identity_row_count > max(0, menu_row_count // 6):
+        classification_corrupted = True
+    if structural_row_count >= max(3, row_count // 4):
+        classification_corrupted = True
+    if blank_row_count >= max(6, row_count // 3):
+        classification_corrupted = True
+    if quantity_only_row_count > max(menu_row_count * 2, 12):
+        classification_corrupted = True
+    if bool(metrics.get("projection_corrupted")):
+        classification_corrupted = True
+
+    classification["classification_corrupted"] = classification_corrupted
+    classification["accepted"] = not classification_corrupted
+    return classification
+
+
+def _projection_sort_key(
+    *,
+    metrics: dict[str, Any],
+    prefer_explicit: bool,
+) -> tuple[float, ...]:
+    return (
+        1.0 if not metrics.get("projection_corrupted") else 0.0,
+        float(metrics.get("menu_like_ratio") or 0.0),
+        float(metrics.get("date_valid_ratio") or 0.0),
+        float(metrics.get("leading_quantity_numeric_count") or 0.0),
+        float(metrics.get("leading_quantity_non_empty_count") or 0.0),
+        float(metrics.get("quantity_numeric_ratio") or 0.0),
+        float(metrics.get("daypart_valid_ratio") or 0.0),
+        -float(metrics.get("menu_noise_count") or 0.0),
+        -float(metrics.get("quantity_non_numeric_count") or 0.0),
+        float(metrics.get("menu_like_count") or 0.0),
+        float(metrics.get("quantity_numeric_count") or 0.0),
+        1.0 if prefer_explicit else 0.0,
+    )
+
+
+def _materialize_projected_rows(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+    header_height: int = 0,
+) -> tuple[dict[int, int], list[list[str]]]:
+    output_rows: list[list[str]] = []
+    row_map: dict[int, int] = {}
+    for raw_row_index, row in enumerate(data, start=header_height):
+        output_row = [""] * len(fields)
+        for src_idx, dest_idx in mapped_indexes.items():
+            if src_idx < len(row):
+                output_row[dest_idx] = row[src_idx]
+        if any(cell.strip() for cell in output_row):
+            row_map[raw_row_index] = len(output_rows)
+            output_rows.append([_coerce_row_cell(cell) for cell in output_row])
+    return row_map, output_rows
+
+
+def _finalize_projected_mapped_indexes(
+    *,
+    data: list[list[str]],
+    fields: list[str],
+    mapped_indexes: dict[int, int],
+    template: dict,
+) -> dict[int, int]:
+    explicit_quantity_column_count = _template_explicit_quantity_column_count(template)
+    current_mapped_quantity_count = sum(
+        1
+        for dest_idx in mapped_indexes.values()
+        if 0 <= dest_idx < len(fields) and _is_quantity_field_name(fields[dest_idx])
+    )
+    finalized = _realign_quantity_mapping_by_numeric_block(
+        data=data,
+        fields=fields,
+        mapped_indexes=dict(mapped_indexes),
+        preserve_sparse_full_header_mapping=(
+            explicit_quantity_column_count > 0
+            and current_mapped_quantity_count >= explicit_quantity_column_count
+        ),
+    )
+    finalized = _fill_remaining_quantity_mapping_by_order(
+        data=data,
+        fields=fields,
+        mapped_indexes=finalized,
+    )
+    return finalized
+
+
+def _project_rows_from_header_and_data_internal(
+    *,
+    header: list[str],
+    data: list[list[str]],
+    template: dict,
+    allow_explicit_template_columns: bool,
+    header_height: int = 0,
+) -> tuple[dict[str, Any], list[list[str]]] | None:
+    fields = _get_row_fields(template)
+    if not fields:
+        return None
+    header = [str(cell or "").strip() for cell in header]
+    data = [
+        [str(cell or "").strip() for cell in row]
+        for row in data
+        if isinstance(row, list)
+    ]
+    fields_set = set(fields)
+    header_score = _count_mapped_header_cells(header, fields_set) if header else 0
+    if data and header_score < 2:
+        for idx, candidate in enumerate(data[:3]):
+            if _count_mapped_header_cells(candidate, fields_set) >= 2:
+                header = candidate
+                data = data[idx + 1 :]
+                header_height += idx + 1
+                break
+    while header and data and _is_subheader_row(data[0]):
+        header = _merge_header_rows(header, data[0])
+        data = data[1:]
+        header_height += 1
+    mapped_indexes: dict[int, int] = {}
+    used_dest_indexes: set[int] = set()
+    if header:
+        for idx, cell in enumerate(header):
+            field = _field_from_header(cell, fields_set)
+            if field:
+                dest_idx = fields.index(field)
+                if dest_idx in used_dest_indexes:
+                    continue
+                mapped_indexes[idx] = dest_idx
+                used_dest_indexes.add(dest_idx)
+    if not mapped_indexes:
+        if header and len(header) == len(fields):
+            mapped_indexes = {idx: idx for idx in range(len(header))}
+        elif data and len(data[0]) == len(fields):
+            mapped_indexes = {idx: idx for idx in range(len(fields))}
+    mapped_indexes = _infer_mapped_indexes(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
+        header=header,
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    mapped_indexes = _realign_structural_mapping_by_observed_content(
+        data=data,
+        fields=fields,
+        mapped_indexes=mapped_indexes,
+    )
+    observed_width = max(
+        [len(header)] + [len(row) for row in data if isinstance(row, list)],
+        default=0,
+    )
+    candidate_specs: list[tuple[str, dict[int, int], bool]] = [
+        ("observed", dict(mapped_indexes), False),
+    ]
+    explicit_mapped_indexes = _mapped_indexes_from_template_columns(
+        template=template,
+        fields=fields,
+        observed_width=observed_width,
+    )
+    if allow_explicit_template_columns and explicit_mapped_indexes:
+        candidate_specs.append(
+            (
+                "template_explicit",
+                _overlay_explicit_mapped_indexes(dict(mapped_indexes), explicit_mapped_indexes),
+                True,
+            )
+        )
+
+    best_meta: dict[str, Any] | None = None
+    best_rows: list[list[str]] | None = None
+    best_key: tuple[float, ...] | None = None
+    for projection_variant, seed_indexes, used_explicit in candidate_specs:
+        finalized_indexes = _finalize_projected_mapped_indexes(
+            data=data,
+            fields=fields,
+            mapped_indexes=seed_indexes,
+            template=template,
+        )
+        if not finalized_indexes:
+            continue
+        row_map, output_rows = _materialize_projected_rows(
+            data=data,
+            fields=fields,
+            mapped_indexes=finalized_indexes,
+            header_height=header_height,
+        )
+        if not output_rows:
+            continue
+        metrics = _evaluate_structured_projection_rows(rows=output_rows, fields=fields)
+        row_classification = classify_structured_projection_rows(
+            rows=output_rows,
+            fields=fields,
+        )
+        if not bool(row_classification.get("accepted")):
+            continue
+        current_key = _projection_sort_key(
+            metrics=metrics,
+            prefer_explicit=used_explicit,
+        )
+        if best_key is not None and current_key <= best_key:
+            continue
+        best_key = current_key
+        best_rows = output_rows
+        best_meta = {
+            "fields": fields,
+            "mapped_indexes": finalized_indexes,
+            "row_map": row_map,
+            "projection_variant": projection_variant,
+            "projection_used_explicit_template_columns": used_explicit,
+            "projection_metrics": metrics,
+            "projection_row_classification": row_classification,
+        }
+
+    if best_meta is None or best_rows is None:
+        return None
+    return best_meta, best_rows
+
+
 def _looks_like_data_row(row: list[str], fields: set[str]) -> bool:
     values = [str(cell or "").strip() for cell in row if str(cell or "").strip()]
     if not values:
@@ -1011,84 +1755,19 @@ def _rows_from_header_and_data(
     header: list[str],
     data: list[list[str]],
     template: dict,
+    *,
+    allow_explicit_template_columns: bool = False,
 ) -> list[list[str]] | None:
-    fields = _get_row_fields(template)
-    if not fields:
-        return None
-    header = [str(cell or "").strip() for cell in header]
-    data = [
-        [str(cell or "").strip() for cell in row]
-        for row in data
-        if isinstance(row, list)
-    ]
-    fields_set = set(fields)
-    header_score = _count_mapped_header_cells(header, fields_set) if header else 0
-    if data and header_score < 2:
-        for idx, candidate in enumerate(data[:3]):
-            if _count_mapped_header_cells(candidate, fields_set) >= 2:
-                header = candidate
-                data = data[idx + 1 :]
-                break
-    while header and data and _is_subheader_row(data[0]):
-        header = _merge_header_rows(header, data[0])
-        data = data[1:]
-    mapped_indexes: dict[int, int] = {}
-    used_dest_indexes: set[int] = set()
-    if header:
-        for idx, cell in enumerate(header):
-            field = _field_from_header(cell, fields_set)
-            if field:
-                dest_idx = fields.index(field)
-                if dest_idx in used_dest_indexes:
-                    continue
-                mapped_indexes[idx] = dest_idx
-                used_dest_indexes.add(dest_idx)
-    header_mapped_quantity_count = sum(
-        1
-        for dest_idx in mapped_indexes.values()
-        if 0 <= dest_idx < len(fields) and _is_quantity_field_name(fields[dest_idx])
-    )
-    if not mapped_indexes:
-        if header and len(header) == len(fields):
-            mapped_indexes = {idx: idx for idx in range(len(header))}
-        elif data and len(data[0]) == len(fields):
-            mapped_indexes = {idx: idx for idx in range(len(fields))}
-    mapped_indexes = _infer_mapped_indexes(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-    )
-    mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
+    projected = _project_rows_from_header_and_data_internal(
         header=header,
         data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
+        template=template,
+        allow_explicit_template_columns=allow_explicit_template_columns,
     )
-    mapped_indexes = _realign_quantity_mapping_by_numeric_block(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-        preserve_sparse_full_header_mapping=(
-            header_mapped_quantity_count
-            >= sum(1 for field in fields if _is_quantity_field_name(field))
-        ),
-    )
-    mapped_indexes = _fill_remaining_quantity_mapping_by_order(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-    )
-    if not mapped_indexes:
+    if not isinstance(projected, tuple) or len(projected) != 2:
         return None
-    normalized: list[list[str]] = []
-    for row in data:
-        output_row = [""] * len(fields)
-        for src_idx, dest_idx in mapped_indexes.items():
-            if src_idx < len(row):
-                output_row[dest_idx] = row[src_idx]
-        if any(cell.strip() for cell in output_row):
-            normalized.append([_coerce_row_cell(cell) for cell in output_row])
-    return normalized or None
+    _meta, rows = projected
+    return rows or None
 
 
 def _rows_from_table_matrix(table_rows: list[list[object]], template: dict) -> list[list[str]] | None:
@@ -1112,7 +1791,12 @@ def _rows_from_table_matrix(table_rows: list[list[object]], template: dict) -> l
         header_rows = normalized_rows[:1]
         data = normalized_rows[1:]
     header = _merge_header_group(header_rows)
-    return _rows_from_header_and_data(header, data, template)
+    return _rows_from_header_and_data(
+        header,
+        data,
+        template,
+        allow_explicit_template_columns=True,
+    )
 
 
 def _rows_from_markdown_blocks(markdown: str, template: dict) -> list[list[str]] | None:
@@ -1238,76 +1922,29 @@ def _resolve_structured_table_mapping(
         data = normalized_rows[1:]
         header_height = min(header_height, 1)
     header = _merge_header_group(header_rows)
-    header_score = _count_mapped_header_cells(header, fields_set) if header else 0
-    if data and header_score < 2:
-        for idx, candidate in enumerate(data[:3]):
-            if _count_mapped_header_cells(candidate, fields_set) >= 2:
-                header = candidate
-                header_height += idx + 1
-                data = data[idx + 1 :]
-                break
-    while header and data and _is_subheader_row(data[0]):
-        header = _merge_header_rows(header, data[0])
-        header_height += 1
-        data = data[1:]
-    mapped_indexes: dict[int, int] = {}
-    used_dest_indexes: set[int] = set()
-    if header:
-        for idx, cell in enumerate(header):
-            field = _field_from_header(cell, fields_set)
-            if field:
-                dest_idx = fields.index(field)
-                if dest_idx in used_dest_indexes:
-                    continue
-                mapped_indexes[idx] = dest_idx
-                used_dest_indexes.add(dest_idx)
-    if not mapped_indexes:
-        if header and len(header) == len(fields):
-            mapped_indexes = {idx: idx for idx in range(len(header))}
-        elif data and len(data[0]) == len(fields):
-            mapped_indexes = {idx: idx for idx in range(len(fields))}
-    mapped_indexes = _infer_mapped_indexes(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-    )
-    mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
+    projected = _project_rows_from_header_and_data_internal(
         header=header,
         data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
+        template=template,
+        allow_explicit_template_columns=True,
+        header_height=header_height,
     )
-    mapped_indexes = _realign_quantity_mapping_by_numeric_block(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-    )
-    mapped_indexes = _fill_remaining_quantity_mapping_by_order(
-        data=data,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-    )
-    if not mapped_indexes:
+    if not isinstance(projected, tuple) or len(projected) != 2:
         return None
-    output_rows: list[list[str]] = []
-    row_map: dict[int, int] = {}
-    for raw_row_index, row in enumerate(data, start=header_height):
-        output_row = [""] * len(fields)
-        for src_idx, dest_idx in mapped_indexes.items():
-            if src_idx < len(row):
-                output_row[dest_idx] = row[src_idx]
-        if any(cell.strip() for cell in output_row):
-            row_map[raw_row_index] = len(output_rows)
-            output_rows.append([_coerce_row_cell(cell) for cell in output_row])
-    return {
-        "fields": fields,
-        "mapped_indexes": mapped_indexes,
-        "row_map": row_map,
-    }, output_rows
+    return projected
 
 
-def rows_from_structured_payload(payload: object, template: dict) -> list[list[str]] | None:
-    template = _resolve_payload_template(payload, template)
+def rows_from_structured_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[list[str]] | None:
+    template = _resolve_payload_template(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
     structured_tables = _collect_structured_tables(payload)
     if not structured_tables:
         return None
@@ -1353,8 +1990,17 @@ def _structured_issue_is_multiline_numeric(value: str) -> bool:
     return len(digit_lines) >= 2
 
 
-def structured_cell_issues_from_payload(payload: object, template: dict) -> list[dict[str, Any]]:
-    template = _resolve_payload_template(payload, template)
+def structured_cell_issues_from_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[dict[str, Any]]:
+    template = _resolve_payload_template(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
     structured_tables = _collect_structured_tables(payload)
     if not structured_tables:
         return []
@@ -1531,8 +2177,17 @@ def rows_from_markdown(markdown: str, template: dict) -> list[list[str]] | None:
     return _rows_from_markdown(markdown, template)
 
 
-def rows_from_pipeline_payload(payload: object, template: dict) -> list[list[str]] | None:
-    return _rows_from_pipeline_payload(payload, template)
+def rows_from_pipeline_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[list[str]] | None:
+    return _rows_from_pipeline_payload(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
 
 
 def _extract_facility_and_dates_tesseract(image, template: dict) -> tuple[str | None, list[str]]:

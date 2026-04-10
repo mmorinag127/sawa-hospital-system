@@ -21,7 +21,9 @@ export const DIET_TYPE_OPTIONS = [
   { value: "diabetes", label: "糖尿" },
   { value: "pregnancy", label: "妊娠" },
   { value: "sesame_allergy", label: "ゴマアレルギー" },
+  { value: "no_fried", label: "禁食(揚げ物禁)" },
   { value: "no_meat", label: "禁食(肉禁)" },
+  { value: "forbidden_other", label: "禁食(肉卵魚禁)" },
   { value: "no_fish", label: "禁食(魚禁)" },
   { value: "change_1", label: "変更1" },
   { value: "change_2", label: "変更2" },
@@ -52,6 +54,14 @@ export const normalizeDietTypeValue = (value?: string | null) => {
   if (compact.includes("pregnancy") || compact.includes("妊娠")) return "pregnancy";
   if ((compact.includes("ごま") || compact.includes("sesame")) && (raw.includes("アレル") || compact.includes("allergy"))) {
     return "sesame_allergy";
+  }
+  if (compact.includes("揚げ物禁") || compact.includes("揚物禁") || compact.includes("nofried") || compact.includes("friedfree")) return "no_fried";
+  if (
+    (compact.includes("肉") || compact.includes("meat")) &&
+    (compact.includes("卵") || compact.includes("玉子") || compact.includes("egg")) &&
+    (compact.includes("魚") || compact.includes("鯖") || compact.includes("さば") || compact.includes("fish"))
+  ) {
+    return "forbidden_other";
   }
   if (compact.includes("nomeat") || compact.includes("nobeef") || compact.includes("禁食肉禁") || compact.includes("肉禁")) return "no_meat";
   if (compact.includes("nofish") || compact.includes("禁食魚禁") || compact.includes("魚禁")) return "no_fish";

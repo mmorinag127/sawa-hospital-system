@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
 from src.db import Base, engine
-from src.services import config_service, menu_service, position_column_mapping_service
+from src.services import config_service, position_column_mapping_service, week_candidate_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -97,6 +97,15 @@ def _extract_payload_text(payload: dict[str, Any] | None) -> str:
     for row in payload.get("rows") or []:
         if isinstance(row, list):
             texts.append(" ".join(str(cell or "").strip() for cell in row if str(cell or "").strip()))
+    for row in payload.get("table_rows") or []:
+        if isinstance(row, list):
+            texts.append(" ".join(str(cell or "").strip() for cell in row if str(cell or "").strip()))
+    for table in payload.get("tables") or []:
+        if not isinstance(table, dict):
+            continue
+        for row in table.get("rows") or []:
+            if isinstance(row, list):
+                texts.append(" ".join(str(cell or "").strip() for cell in row if str(cell or "").strip()))
     return "\n".join(texts)
 
 
@@ -118,37 +127,6 @@ def _collect_payload_dates(payload: dict[str, Any] | None, received_at: datetime
         if parsed not in dates:
             dates.append(parsed)
     return dates
-
-
-def _calendar_week_ranges_for_month(month_id: str) -> list[tuple[date, date]]:
-    try:
-        month_start = date.fromisoformat(f"{month_id}-01")
-    except Exception:
-        return []
-    ranges: list[tuple[date, date]] = []
-    current = month_start
-    while current.month == month_start.month:
-        week_start = current
-        week_end = min(week_start + timedelta(days=6), _month_end(month_start))
-        ranges.append((week_start, week_end))
-        current = week_end + timedelta(days=1)
-    return ranges
-
-
-def _month_end(month_start: date) -> date:
-    if month_start.month == 12:
-        next_month = date(month_start.year + 1, 1, 1)
-    else:
-        next_month = date(month_start.year, month_start.month + 1, 1)
-    return next_month - timedelta(days=1)
-
-
-def _format_week_value(month_id: str, start_date: date, end_date: date) -> str:
-    return f"{month_id}@{start_date.isoformat()}~{end_date.isoformat()}"
-
-
-def _week_label(month_id: str, start_date: date, end_date: date) -> str:
-    return f"{month_id} ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')})"
 
 
 def build_facility_resolution(
@@ -225,11 +203,12 @@ def build_week_resolution(
     payload: dict[str, Any] | None,
     facility_id: str | None,
 ) -> dict[str, Any]:
-    current_value = str(current_week or "").strip() or None
+    raw_current_value = str(current_week or "").strip() or None
+    current_value = raw_current_value if raw_current_value and "@" in raw_current_value else None
     dates = _collect_payload_dates(payload, received_at)
     candidate_months: list[str] = []
     base_month = (received_at or datetime.utcnow()).strftime("%Y-%m")
-    for value in [current_value, base_month]:
+    for value in [raw_current_value, base_month]:
         normalized = str(value or "").strip()
         if normalized and normalized not in candidate_months:
             candidate_months.append(normalized.split("@", 1)[0])
@@ -241,39 +220,17 @@ def build_week_resolution(
         candidate_months.append(base_month)
     normalized_candidates: list[dict[str, Any]] = []
     for month_id in candidate_months[:6]:
-        menu = menu_service.get_menu_for_facility(month_id, facility_id)
-        entries = menu.get("entries") if isinstance(menu, dict) else None
-        ranges: list[tuple[date, date]] = []
-        if isinstance(entries, list) and entries:
-            parsed_dates: set[date] = set()
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                raw_menu_date = str(entry.get("menu_date") or "").strip()
-                if not raw_menu_date:
-                    continue
-                try:
-                    parsed_dates.add(date.fromisoformat(raw_menu_date))
-                except Exception:
-                    continue
-            unique_dates = sorted(parsed_dates)
-            if unique_dates:
-                current_group: list[date] = []
-                previous: date | None = None
-                for item in unique_dates:
-                    if previous is None or (item - previous).days > 1 or len(current_group) >= 7:
-                        if current_group:
-                            ranges.append((min(current_group), max(current_group)))
-                        current_group = [item]
-                    else:
-                        current_group.append(item)
-                    previous = item
-                if current_group:
-                    ranges.append((min(current_group), max(current_group)))
-        if not ranges:
-            ranges = _calendar_week_ranges_for_month(month_id)
-        for start_date, end_date in ranges:
-            week_value = _format_week_value(month_id, start_date, end_date)
+        for week_option in week_candidate_service.build_week_option_entries(month_id, facility_id):
+            week_value = str(week_option.get("week_id") or "").strip()
+            raw_start_date = str(week_option.get("date_from") or "").strip()
+            raw_end_date = str(week_option.get("date_to") or "").strip()
+            if not week_value or not raw_start_date or not raw_end_date:
+                continue
+            try:
+                start_date = date.fromisoformat(raw_start_date)
+                end_date = date.fromisoformat(raw_end_date)
+            except Exception:
+                continue
             score = 0.2
             if current_value and current_value == week_value:
                 score = 1.0
@@ -284,7 +241,7 @@ def build_week_resolution(
             normalized_candidates.append(
                 {
                     "value": week_value,
-                    "label": _week_label(month_id, start_date, end_date),
+                    "label": str(week_option.get("label") or week_value),
                     "score": score,
                     "reason": "ocr_dates" if score >= 0.9 else ("current_order_value" if score >= 1.0 else "calendar"),
                 }
@@ -426,6 +383,21 @@ def _normalize_generic_candidates(raw_candidates: object) -> list[dict[str, Any]
                 "auto_selectable": bool(item.get("auto_selectable")) if item.get("auto_selectable") is not None else None,
                 "requires_user_choice": bool(item.get("requires_user_choice")) if item.get("requires_user_choice") is not None else None,
                 "critical": bool(item.get("critical") or item.get("high_impact")),
+                "partial_quantity_mapping": bool(item.get("partial_quantity_mapping")) if item.get("partial_quantity_mapping") is not None else None,
+                "mapped_quantity_fields": [
+                    str(field).strip()
+                    for field in (item.get("mapped_quantity_fields") or [])
+                    if str(field).strip()
+                ]
+                if isinstance(item.get("mapped_quantity_fields"), list)
+                else None,
+                "expected_quantity_fields": [
+                    str(field).strip()
+                    for field in (item.get("expected_quantity_fields") or [])
+                    if str(field).strip()
+                ]
+                if isinstance(item.get("expected_quantity_fields"), list)
+                else None,
             }
         )
     return _dedupe_candidates(normalized)
@@ -482,6 +454,29 @@ def _first_candidate_metadata(candidates: list[dict[str, Any]], key: str) -> Any
             return value.strip()
         if isinstance(value, dict) and value:
             return value
+    return None
+
+
+def _first_candidate_bool_metadata(candidates: list[dict[str, Any]], key: str) -> bool | None:
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _first_candidate_list_metadata(candidates: list[dict[str, Any]], key: str) -> list[str] | None:
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(key)
+        if not isinstance(value, list):
+            continue
+        normalized = [str(field).strip() for field in value if str(field).strip()]
+        if normalized:
+            return normalized
     return None
 
 
@@ -542,6 +537,27 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         (item.get("label") for item in candidates if item.get("value") == resolved_value),
         resolved_value,
     )
+    partial_quantity_mapping = bool(resolution.get("partial_quantity_mapping"))
+    if not partial_quantity_mapping:
+        partial_quantity_mapping = bool(_first_candidate_bool_metadata(candidates, "partial_quantity_mapping"))
+    mapped_quantity_fields = (
+        [
+            str(field).strip()
+            for field in (resolution.get("mapped_quantity_fields") or [])
+            if str(field).strip()
+        ]
+        if isinstance(resolution.get("mapped_quantity_fields"), list)
+        else None
+    ) or _first_candidate_list_metadata(candidates, "mapped_quantity_fields") or []
+    expected_quantity_fields = (
+        [
+            str(field).strip()
+            for field in (resolution.get("expected_quantity_fields") or [])
+            if str(field).strip()
+        ]
+        if isinstance(resolution.get("expected_quantity_fields"), list)
+        else None
+    ) or _first_candidate_list_metadata(candidates, "expected_quantity_fields") or []
     return {
         "decision_type": "column_mapping",
         "resolved_value": resolved_value,
@@ -555,6 +571,9 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         "attention_reasons": attention_reasons,
         "decision_source": decision_source,
         "ambiguity_scope": "column_mapping" if requires_user_choice else None,
+        "partial_quantity_mapping": partial_quantity_mapping,
+        "mapped_quantity_fields": mapped_quantity_fields,
+        "expected_quantity_fields": expected_quantity_fields,
         "evidence_ref": (
             resolution.get("evidence_ref")
             if isinstance(resolution.get("evidence_ref"), dict)
@@ -728,5 +747,79 @@ def resolve_order_candidates(
         "attention_required": bool(
             column_mapping.get("attention_required") or quantity.get("attention_required")
         ),
+        "confidence_band": _confidence_band(overall_confidence if overall_confidence > 0 else None),
+    }
+
+
+def _compact_resolution(resolution: dict[str, Any] | None, *, max_candidates: int = 3) -> dict[str, Any] | None:
+    if not isinstance(resolution, dict):
+        return None
+    candidates = resolution.get("candidates")
+    normalized_candidates = (
+        [item for item in candidates if isinstance(item, dict)][:max_candidates]
+        if isinstance(candidates, list)
+        else []
+    )
+    return {
+        "decision_type": resolution.get("decision_type"),
+        "resolved_value": resolution.get("resolved_value"),
+        "resolved_label": resolution.get("resolved_label"),
+        "confidence": resolution.get("confidence"),
+        "blocked": bool(resolution.get("blocked")),
+        "blocked_reasons": [str(item).strip() for item in (resolution.get("blocked_reasons") or []) if str(item).strip()],
+        "requires_user_choice": bool(resolution.get("requires_user_choice")),
+        "candidates": normalized_candidates,
+    }
+
+
+def resolve_order_list_candidates(
+    *,
+    facility_code: str | None,
+    week_code: str | None,
+    received_at: datetime | None,
+    evidence_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current_facility = str(facility_code or "").strip() or None
+    current_week = str(week_code or "").strip() or None
+    facility = build_facility_resolution(current_facility=current_facility, payload=evidence_payload)
+    # Treat bare month codes as unresolved for list grouping so OCR-derived
+    # week ranges can surface without forcing a full workflow refresh.
+    explicit_current_week = current_week if current_week and "@" in current_week else None
+    week = build_week_resolution(
+        current_week=explicit_current_week,
+        received_at=received_at,
+        payload=evidence_payload,
+        facility_id=facility.get("resolved_value") or current_facility,
+    )
+    compact_facility = _compact_resolution(facility, max_candidates=2)
+    compact_week = _compact_resolution(week, max_candidates=3)
+    overall_confidence_candidates = [
+        _confidence_value((compact_facility or {}).get("confidence")),
+        _confidence_value((compact_week or {}).get("confidence")),
+    ]
+    overall_confidence = min([item for item in overall_confidence_candidates if item > 0], default=0.0)
+    critical_choices = [
+        _build_critical_choice_payload(
+            "facility",
+            facility,
+            default_title="施設候補を選択",
+        )
+        if bool((compact_facility or {}).get("requires_user_choice"))
+        else None,
+        _build_critical_choice_payload(
+            "week",
+            week,
+            default_title="対象週を選択",
+        )
+        if bool((compact_week or {}).get("requires_user_choice"))
+        else None,
+    ]
+    return {
+        "resolutions": {
+            "facility": compact_facility,
+            "week": compact_week,
+        },
+        "requires_user_choice": any(item is not None for item in critical_choices),
+        "critical_choices": [item for item in critical_choices if isinstance(item, dict)],
         "confidence_band": _confidence_band(overall_confidence if overall_confidence > 0 else None),
     }

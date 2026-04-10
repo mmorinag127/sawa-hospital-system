@@ -22,6 +22,13 @@ const TEMP_TYPE_OPTIONS = [
   { value: "cold", label: "冷" },
 ];
 
+const UNIT_OPTIONS = [
+  { value: "", label: "未選択" },
+  { value: "g", label: "グラム(g)" },
+  { value: "cut", label: "切れ" },
+  { value: "count", label: "個" },
+];
+
 const parseCondiments = (text: string): string[] => {
   return text
     .split(",")
@@ -196,12 +203,18 @@ export default function MenuMastersPage() {
             value={newItem.name || ""}
             onChange={(event) => setNewItem((prev) => ({ ...prev, name: event.target.value }))}
           />
-          <input
+          <select
             className="input"
-            placeholder="単位 (g, 個, cut)"
+            data-testid="new-menu-master-unit-type"
             value={newItem.unit_type || ""}
             onChange={(event) => setNewItem((prev) => ({ ...prev, unit_type: event.target.value }))}
-          />
+          >
+            {UNIT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <input
             className="input"
             type="number"
@@ -226,12 +239,18 @@ export default function MenuMastersPage() {
               }))
             }
           />
-          <input
+          <select
             className="input"
-            placeholder="袋上限単位"
+            data-testid="new-menu-master-bag-max-unit"
             value={newItem.bag_max_unit || ""}
             onChange={(event) => setNewItem((prev) => ({ ...prev, bag_max_unit: event.target.value }))}
-          />
+          >
+            {UNIT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <select
             className="input"
             value={newItem.temp_type || ""}
@@ -303,11 +322,18 @@ export default function MenuMastersPage() {
                     />
                   </td>
                   <td>
-                    <input
+                    <select
                       className="input"
+                      data-testid={`menu-master-unit-type-${item.id}`}
                       value={item.unit_type || ""}
                       onChange={(event) => updateField(idx, "unit_type", event.target.value)}
-                    />
+                    >
+                      {UNIT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <input
@@ -326,11 +352,18 @@ export default function MenuMastersPage() {
                     />
                   </td>
                   <td>
-                    <input
+                    <select
                       className="input"
+                      data-testid={`menu-master-bag-max-unit-${item.id}`}
                       value={item.bag_max_unit || ""}
                       onChange={(event) => updateField(idx, "bag_max_unit", event.target.value)}
-                    />
+                    >
+                      {UNIT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <select

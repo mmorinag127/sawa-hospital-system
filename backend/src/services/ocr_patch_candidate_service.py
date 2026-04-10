@@ -360,7 +360,7 @@ def apply_patch_candidate_to_draft(
         base_menu_snapshot_id=None,
         draft_state="draft_ready",
         blockers=[],
-        warnings=["llm_patch_applied"],
+        warnings=[],
         latest_patch_candidate_id=str(candidate.get("id") or "").strip() or None,
         edited_by=str(edited_by or "").strip() or "llm_patch_candidate",
     )

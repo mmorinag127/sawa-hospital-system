@@ -27,12 +27,79 @@ from src.services.fax_parser import parse_order_lines
 from src.services.ocr_job_service import create_job, update_job, get_job, describe_job_state
 from src.services.ocr_pipeline_service import run_ocr_pipeline
 from src.services import ingest_job_service
+from src.services.uploaded_pdf_service import (
+    backfill_uploaded_pdfs_from_ingest_jobs,
+    build_ingest_payload,
+    claim_uploaded_pdf,
+    is_uploaded_pdf_completion_ready,
+    list_ready_uploaded_pdf_ids,
+    mark_uploaded_pdf_completed,
+    refresh_uploaded_pdf_links,
+    schedule_uploaded_pdf_retry,
+)
 from loguru import logger
 
 _INGEST_MAX_WORKERS = int(os.getenv("INGEST_MAX_WORKERS", "4") or 4)
 _INGEST_EXECUTOR = ThreadPoolExecutor(max_workers=_INGEST_MAX_WORKERS)
 _AUTO_REPARSE_MAX_WORKERS = int(os.getenv("OCR_AUTO_LLM_REPARSE_MAX_WORKERS", "2") or 2)
 _AUTO_REPARSE_EXECUTOR = ThreadPoolExecutor(max_workers=_AUTO_REPARSE_MAX_WORKERS)
+_UPLOADED_PDF_RECOVERY_THREAD: threading.Thread | None = None
+_UPLOADED_PDF_RECOVERY_LOCK = threading.Lock()
+_UPLOADED_PDF_RECOVERY_STOP = threading.Event()
+_UPLOADED_PDF_INFLIGHT: set[str] = set()
+
+
+def _uploaded_pdf_worker_instance() -> str:
+    revision = str(os.getenv("K_REVISION", "local") or "local").strip() or "local"
+    return f"{revision}:{os.getpid()}"
+
+
+def _uploaded_pdf_recovery_interval_seconds() -> float:
+    raw = str(os.getenv("UPLOADED_PDF_RECOVERY_INTERVAL_SECONDS", "15") or "").strip()
+    try:
+        return max(float(raw), 1.0)
+    except ValueError:
+        return 15.0
+
+
+def _uploaded_pdf_recovery_enabled() -> bool:
+    raw = str(os.getenv("UPLOADED_PDF_RECOVERY_ENABLED", "1") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+def _ingest_runs_inline() -> bool:
+    return os.getenv("INGEST_RUN_INLINE", "").lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+
+
+def _wait_for_pipeline_output_on_ingest() -> bool:
+    raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
+    if raw:
+        return raw not in {"0", "false", "no", "off"}
+    return bool(str(os.getenv("OCR_PIPELINE_URL", "") or "").strip())
+
+
+def _submit_uploaded_pdf_job(uploaded_pdf_id: str) -> bool:
+    token = str(uploaded_pdf_id or "").strip()
+    if not token:
+        return False
+    with _UPLOADED_PDF_RECOVERY_LOCK:
+        if token in _UPLOADED_PDF_INFLIGHT:
+            return False
+        _UPLOADED_PDF_INFLIGHT.add(token)
+
+    def _runner() -> None:
+        try:
+            process_uploaded_pdf_job(token)
+        finally:
+            with _UPLOADED_PDF_RECOVERY_LOCK:
+                _UPLOADED_PDF_INFLIGHT.discard(token)
+
+    _INGEST_EXECUTOR.submit(_runner)
+    return True
 
 
 def _auto_llm_reparse_enabled() -> bool:
@@ -79,6 +146,9 @@ def _enqueue_auto_llm_reparse(
     pipeline_output: dict | None,
 ) -> None:
     if not _auto_llm_reparse_enabled():
+        return
+    if os.getenv("PYTEST_CURRENT_TEST") and isinstance(_AUTO_REPARSE_EXECUTOR, ThreadPoolExecutor):
+        logger.info("Skipping auto LLM reparse background submit during pytest")
         return
     if str(ocr_status or "").strip().lower() != "success":
         return
@@ -243,7 +313,7 @@ def enqueue_ingest_async(payload: dict, force: bool = False) -> tuple[str, bool]
     """
     Run ingest on a background thread so API handlers stay responsive.
     """
-    if os.getenv("INGEST_RUN_INLINE", "").lower() == "true" or os.getenv("PYTEST_CURRENT_TEST"):
+    if _ingest_runs_inline():
         return enqueue_ingest(payload, force=force)
     job_id, should_enqueue = ingest_job_service.create_ingest_job(payload, force=force)
     if not should_enqueue:
@@ -255,6 +325,13 @@ def enqueue_ingest_async(payload: dict, force: bool = False) -> tuple[str, bool]
 
 def enqueue_ingest_job_async(job_id: str) -> None:
     _INGEST_EXECUTOR.submit(process_ingest_job, job_id=job_id)
+
+
+def enqueue_uploaded_pdf_async(uploaded_pdf_id: str) -> None:
+    if _ingest_runs_inline():
+        process_uploaded_pdf_job(uploaded_pdf_id)
+        return
+    _submit_uploaded_pdf_job(uploaded_pdf_id)
 
 
 def process_ingest_job(job_id: str) -> None:
@@ -275,6 +352,128 @@ def process_ingest_job(job_id: str) -> None:
         logger.exception("Ingest job failed", job_id=job_id)
         return
     ingest_job_service.complete_ingest_job(job_id)
+
+
+def process_uploaded_pdf_job(uploaded_pdf_id: str) -> None:
+    worker_instance = _uploaded_pdf_worker_instance()
+    claimed = claim_uploaded_pdf(uploaded_pdf_id, worker_instance=worker_instance)
+    if claimed is None:
+        logger.info("Uploaded PDF not ready or already claimed", uploaded_pdf_id=uploaded_pdf_id)
+        return
+    payload = build_ingest_payload(claimed)
+    parsed_payload = parse_ingest_payload(payload)
+    job_id = str(payload.get("message_id") or "").strip()
+    if not job_id:
+        schedule_uploaded_pdf_retry(
+            uploaded_pdf_id,
+            error_code="payload_invalid",
+            error_message="uploaded pdf payload missing message_id",
+            worker_instance=worker_instance,
+        )
+        return
+    linked_row = refresh_uploaded_pdf_links(uploaded_pdf_id) or claimed
+    current_order_id = str(linked_row.get("current_order_id") or "").strip()
+    if not current_order_id:
+        try:
+            create_order_from_ingest(
+                parsed_payload,
+                lines=None,
+                ocr_attempts=0,
+                document_status="processing",
+                error_message="ocr_pending",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Uploaded PDF placeholder order creation failed",
+                uploaded_pdf_id=uploaded_pdf_id,
+                message_id=job_id,
+                error=str(exc),
+            )
+        linked_row = refresh_uploaded_pdf_links(uploaded_pdf_id) or linked_row
+    existing_job = ingest_job_service.get_ingest_job_snapshot(job_id)
+    existing_status = str((existing_job or {}).get("status") or "").strip().lower()
+    should_force_restart = False
+    if existing_status == "done":
+        completed = mark_uploaded_pdf_completed(uploaded_pdf_id)
+        if completed and is_uploaded_pdf_completion_ready(uploaded_pdf_id):
+            return
+        should_force_restart = True
+    elif existing_status == "processing":
+        # Uploaded PDF retry/recovery explicitly chose this row for reprocessing.
+        # If the linked ingest job is still marked processing here, keep progress
+        # only when the job is clearly current; otherwise restart it from the top.
+        should_force_restart = (
+            ingest_job_service.is_processing_snapshot_stale(existing_job)
+            or int(claimed.get("attempt_count") or 0) > 1
+        )
+    ingest_job_service.create_ingest_job(payload, force=should_force_restart)
+    process_ingest_job(job_id)
+    job = ingest_job_service.get_ingest_job_snapshot(job_id)
+    if job is None:
+        schedule_uploaded_pdf_retry(
+            uploaded_pdf_id,
+            error_code="ingest_job_missing",
+            error_message=f"ingest job missing after processing: {job_id}",
+            worker_instance=worker_instance,
+        )
+        return
+    job_status = str(job.get("status") or "").strip().lower()
+    if job_status == "done":
+        completed = mark_uploaded_pdf_completed(uploaded_pdf_id)
+        if completed and is_uploaded_pdf_completion_ready(uploaded_pdf_id):
+            return
+        schedule_uploaded_pdf_retry(
+            uploaded_pdf_id,
+            error_code="order_attach_missing",
+            error_message="ingest completed without linked order/document",
+            worker_instance=worker_instance,
+        )
+        return
+    error_message = str(job.get("last_error") or f"ingest job ended with status={job.get('status')}").strip()
+    schedule_uploaded_pdf_retry(
+        uploaded_pdf_id,
+        error_code=f"ingest_{job_status or 'unknown'}",
+        error_message=error_message,
+        worker_instance=worker_instance,
+    )
+
+
+def run_uploaded_pdf_recovery_once(limit: int | None = None) -> int:
+    backfill_uploaded_pdfs_from_ingest_jobs()
+    ready_ids = list_ready_uploaded_pdf_ids(limit=limit or _INGEST_MAX_WORKERS)
+    accepted = 0
+    for uploaded_pdf_id in ready_ids:
+        if _submit_uploaded_pdf_job(uploaded_pdf_id):
+            accepted += 1
+    return accepted
+
+
+def _run_uploaded_pdf_recovery_loop() -> None:
+    interval = _uploaded_pdf_recovery_interval_seconds()
+    while not _UPLOADED_PDF_RECOVERY_STOP.is_set():
+        try:
+            run_uploaded_pdf_recovery_once(limit=_INGEST_MAX_WORKERS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Uploaded PDF recovery loop failed")
+        _UPLOADED_PDF_RECOVERY_STOP.wait(interval)
+
+
+def start_uploaded_pdf_recovery_loop() -> None:
+    global _UPLOADED_PDF_RECOVERY_THREAD
+    if not _uploaded_pdf_recovery_enabled():
+        logger.info("Uploaded PDF recovery loop disabled")
+        return
+    with _UPLOADED_PDF_RECOVERY_LOCK:
+        if _UPLOADED_PDF_RECOVERY_THREAD is not None and _UPLOADED_PDF_RECOVERY_THREAD.is_alive():
+            return
+        _UPLOADED_PDF_RECOVERY_STOP.clear()
+        _UPLOADED_PDF_RECOVERY_THREAD = threading.Thread(
+            target=_run_uploaded_pdf_recovery_loop,
+            name="uploaded-pdf-recovery",
+            daemon=True,
+        )
+        _UPLOADED_PDF_RECOVERY_THREAD.start()
+        logger.info("Uploaded PDF recovery loop started")
 
 
 def _process_ingest_inline(**kwargs):
@@ -335,8 +534,9 @@ def _process_ingest_inline(**kwargs):
                             input_reference=payload.pdf_uri,
                             preferred_template_id=preferred_template_id,
                             preferred_template_ids=preferred_template_ids,
+                            wait_for_output=_wait_for_pipeline_output_on_ingest(),
                         )
-                        pipeline_output = output
+                        pipeline_output = output if _looks_like_first_pass_ocr_payload(output) else None
                         output_ref = None
                         bucket = get_default_output_bucket()
                         if bucket:

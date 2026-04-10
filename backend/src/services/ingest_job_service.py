@@ -28,6 +28,9 @@ def create_ingest_job(payload: dict[str, Any], force: bool = False) -> tuple[str
         if job:
             if force:
                 job.status = "pending"
+                job.started_at = None
+                job.finished_at = None
+                job.last_error = None
                 should_enqueue = True
             else:
                 if job.status == "done":
@@ -52,9 +55,62 @@ def create_ingest_job(payload: dict[str, Any], force: bool = False) -> tuple[str
     return job_id, should_enqueue
 
 
+def restart_ingest_job(job_id: str) -> bool:
+    now = datetime.utcnow()
+    with session_scope() as session:
+        result = session.execute(
+            update(IngestJob)
+            .where(IngestJob.id == job_id)
+            .values(
+                status="pending",
+                started_at=None,
+                finished_at=None,
+                updated_at=now,
+                last_error=None,
+            )
+        )
+        return result.rowcount > 0
+
+
 def get_ingest_job(job_id: str) -> IngestJob | None:
     with session_scope() as session:
         return session.get(IngestJob, job_id)
+
+
+def get_ingest_job_snapshot(job_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        job = session.get(IngestJob, job_id)
+        if job is None:
+            return None
+        payload = job.payload or {}
+        return {
+            "id": job.id,
+            "status": job.status,
+            "attempts": job.attempts,
+            "last_error": job.last_error,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+            "message_id": payload.get("message_id"),
+            "pdf_uri": payload.get("pdf_uri"),
+            "received_at": payload.get("received_at"),
+        }
+
+
+def is_processing_snapshot_stale(snapshot: dict[str, Any] | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    if str(snapshot.get("status") or "").strip().lower() != "processing":
+        return False
+    started_at_raw = snapshot.get("started_at")
+    if not started_at_raw:
+        return True
+    try:
+        started_at = datetime.fromisoformat(str(started_at_raw))
+    except ValueError:
+        return True
+    return started_at < _stale_threshold()
 
 
 def get_ingest_payload(job_id: str) -> dict[str, Any] | None:
@@ -235,7 +291,10 @@ def summarize_ingest_jobs() -> dict[str, Any]:
 
 
 def summarize_backlog_metrics() -> dict[str, Any]:
+    from src.services.uploaded_pdf_service import summarize_uploaded_pdfs
+
     ingest_summary = summarize_ingest_jobs()
+    uploaded_pdf_summary = summarize_uploaded_pdfs()
     now = datetime.utcnow()
     recent_since = now - timedelta(hours=int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")))
     with session_scope() as session:
@@ -287,19 +346,22 @@ def summarize_backlog_metrics() -> dict[str, Any]:
             oldest_stale_at = min(stale_ats)
             stale_oldest_seconds = max(int((now - oldest_stale_at).total_seconds()), 0)
     ingest_queue_depth = int(ingest_summary.get("eligible_backlog_count") or 0)
+    uploaded_pdf_queue_depth = int(uploaded_pdf_summary.get("eligible_backlog_count") or 0)
     oldest_pending_seconds = ingest_summary.get("oldest_pending_seconds")
     status = "ok"
-    if ingest_queue_depth > 0 or active_count > 0:
+    if ingest_queue_depth > 0 or uploaded_pdf_queue_depth > 0 or active_count > 0:
         status = "warn"
     if recent_backlog_skipped_count > 0:
         status = "fail"
     return {
         "status": status,
         "ingest_queue_depth": ingest_queue_depth,
+        "uploaded_pdf_queue_depth": uploaded_pdf_queue_depth,
         "ocr_queue_depth": active_count,
         "exports_queue_depth": 0,
         "oldest_pending_seconds": oldest_pending_seconds or 0,
         "ingest": ingest_summary,
+        "uploaded_pdfs": uploaded_pdf_summary,
         "ocr": {
             "total": sum(counts.values()),
             "counts": counts,

@@ -14,12 +14,16 @@ import {
 } from "../../features/orders/orderDetailOcrUtils";
 import {
   buildBagSummaryRows,
+  calendarDateFromWeekValue,
+  deriveWeekValueFromCalendarDate,
   extractWeekMonthId,
   formatBagCalculationResult,
   formatBagSplitBreakdown,
   formatWeekLabel,
   groupBagSummaryRowsByDate,
+  isConcreteWeekValue,
   normalizeBagGroupToken,
+  normalizeConcreteWeekValue,
   normalizeWeekId,
   normalizeWeekValue,
   type BagRow,
@@ -170,6 +174,16 @@ type OcrOutput = {
   stage?: string;
   template_id?: string | null;
   failed_cells?: { row?: string; col?: string; reason?: string }[];
+  cell_issues?: {
+    issue_code?: string | null;
+    reason?: string | null;
+    severity?: string | null;
+    row_index?: number | null;
+    col_index?: number | null;
+    row_span?: number | null;
+    col_span?: number | null;
+    text?: string | null;
+  }[];
   warnings?: string[];
   table_raw?: string;
   facility_candidates?: FacilityCandidate[];
@@ -373,14 +387,33 @@ type GridParams = {
 };
 
 const OCR_SHEET_ROW_INDEX_WIDTH = 28;
-const OCR_PREVIEW_ZOOM_MIN = 0.6;
-const OCR_PREVIEW_ZOOM_MAX = 2.4;
-const OCR_PREVIEW_ZOOM_STEP = 0.2;
+
+type Step2WizardChoice = "" | "yes" | "no";
+type Step2RepairStage = "" | "foundation" | "candidate" | "llm" | "merged";
+type LlmPromptPreset =
+  | "numeric_verification"
+  | "column_missing"
+  | "row_alignment"
+  | "special_diet_semantics"
+  | "merged_cell_quantity_spans"
+  | "freeform";
 
 type OutputPreview = {
   type: "labels" | "delivery" | "aggregate";
   headers: string[];
   rows: string[][];
+};
+
+type AppliedPortionOverride = {
+  override_id: string;
+  date?: string | null;
+  daypart?: string | null;
+  menu_name?: string | null;
+  menu_category?: string | null;
+  diet_type?: string | null;
+  unit_type?: string | null;
+  qty_per_serving?: number | null;
+  note?: string | null;
 };
 
 type DetailLine = OrderDetail["lines"][number];
@@ -433,12 +466,20 @@ const normalizeDietTypeToken = (value?: string | null) => {
   if (compact.includes("regular") || compact.includes("常食") || compact.includes("通常")) return "regular";
   if (compact.includes("daycare") || compact.includes("通所")) return "daycare";
   if (compact.includes("staff") || compact.includes("職員")) return "staff";
+  if (compact.includes("揚げ物禁") || compact.includes("揚物禁") || compact.includes("nofried") || compact.includes("friedfree")) return "no_fried";
   if (compact.includes("tea") || compact.includes("お茶")) return "tea";
   if (compact.includes("business") || compact.includes("事業")) return "business";
   if (compact.includes("diabetes") || compact.includes("糖尿")) return "diabetes";
   if (compact.includes("pregnancy") || compact.includes("妊娠")) return "pregnancy";
   if ((compact.includes("ごま") || compact.includes("sesame")) && (raw.includes("アレル") || compact.includes("allergy"))) {
     return "sesame_allergy";
+  }
+  if (
+    (compact.includes("肉") || compact.includes("meat")) &&
+    (compact.includes("卵") || compact.includes("玉子") || compact.includes("egg")) &&
+    (compact.includes("魚") || compact.includes("鯖") || compact.includes("さば") || compact.includes("fish"))
+  ) {
+    return "forbidden_other";
   }
   if (compact.includes("nomeat") || compact.includes("nobeef") || compact.includes("禁食肉禁") || compact.includes("肉禁")) return "no_meat";
   if (compact.includes("nofish") || compact.includes("禁食魚禁") || compact.includes("魚禁")) return "no_fish";
@@ -480,11 +521,13 @@ const formatDietType = (value?: string | null) => {
   if (token === "regular_bag") return "常食(袋分け)";
   if (token === "daycare") return "通所";
   if (token === "staff") return "職員";
+  if (token === "no_fried") return "禁食(揚げ物禁)";
   if (token === "tea") return "お茶";
   if (token === "business") return "事業";
   if (token === "diabetes") return "糖尿";
   if (token === "pregnancy") return "妊娠";
   if (token === "no_meat") return "禁食(肉禁)";
+  if (token === "forbidden_other") return "禁食(肉卵魚禁)";
   if (token === "no_fish") return "禁食(魚禁)";
   if (token === "soft_mixer") return "軟菜/ミキサー";
   if (token === "soft") return "軟菜";
@@ -593,6 +636,92 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
     .sort((left, right) => left.index - right.index);
 };
 
+const defaultOcrPromptQuantityTokens = [
+  "regular_2f",
+  "regular_3f",
+  "soft_2f",
+  "soft_3f",
+  "mixer_2f",
+  "mixer_3f",
+];
+
+const ocrPromptTokenForFacilityTemplateColumn = (column: FacilityTemplateColumn): string | null => {
+  const role = String(column.role || "").trim().toLowerCase();
+  if (role === "date") return "date";
+  if (role === "menu_name") return "menu_name";
+  if (role === "note") return "note";
+  if (role !== "quantity") return null;
+  const rawName =
+    String(column.name || "").trim() ||
+    defaultNameForFacilityTemplateColumn({
+      role: column.role,
+      name: column.name,
+      diet_type: column.diet_type,
+      area_id: column.area_id,
+    });
+  const normalized = rawName.replace(/^qty\./, "").trim();
+  return normalized || null;
+};
+
+const ocrPromptTokenForSheetField = (field: string): string | null => {
+  const normalized = String(field || "").trim();
+  if (!normalized) return null;
+  if (normalized === "date_mmdd" || normalized === "date") return "date";
+  if (normalized === "menu" || normalized === "menu_name") return "menu_name";
+  if (normalized === "remarks" || normalized === "note") return "note";
+  if (normalized.startsWith("qty.")) return normalized.slice(4);
+  return null;
+};
+
+const resolveOcrPromptSchemaTokens = ({
+  fields,
+  columns,
+}: {
+  fields: string[];
+  columns: FacilityTemplateColumn[];
+}) => {
+  const quantityTokensFromFields = fields
+    .map((field) => ocrPromptTokenForSheetField(field))
+    .filter((token): token is string => Boolean(token && !["date", "menu_name", "note"].includes(token)));
+  if (quantityTokensFromFields.length) {
+    return [
+      "date",
+      "menu_name",
+      ...Array.from(new Set(quantityTokensFromFields)),
+      "note",
+    ];
+  }
+  const quantityTokensFromColumns = columns
+    .map((column) => ocrPromptTokenForFacilityTemplateColumn(column))
+    .filter((token): token is string => Boolean(token && !["date", "menu_name", "note"].includes(token)));
+  return [
+    "date",
+    "menu_name",
+    ...(quantityTokensFromColumns.length
+      ? Array.from(new Set(quantityTokensFromColumns))
+      : defaultOcrPromptQuantityTokens),
+    "note",
+  ];
+};
+
+const buildOcrPromptFromCanonicalSchema = ({
+  fields = [],
+  columns = [],
+}: {
+  fields?: string[];
+  columns?: FacilityTemplateColumn[];
+}) => {
+  const schemaTokens = resolveOcrPromptSchemaTokens({ fields, columns });
+  return (
+    "Return a JSON object only.\\n" +
+    `Schema: {"rows":[[${schemaTokens.join(", ")}], ...], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}\\n` +
+    "Do not output header rows or date-only headers. Output menu rows only.\\n" +
+    "Keep the quantity columns in exactly this order.\\n" +
+    'If no menu rows are readable, return {"rows":[], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}.\\n' +
+    "Use null when a cell is unreadable or missing. Use ASCII digits 0-9 only in numeric cells."
+  );
+};
+
 const reindexFacilityTemplateColumns = (columns: FacilityTemplateColumn[]) =>
   columns.map((column, idx) => ({ ...column, index: idx }));
 
@@ -667,7 +796,9 @@ const dietTypeLabels: Record<string, string> = {
   soft_mixer: "軟菜/ミキサー",
   mixer: "ミキサー",
   sesame_allergy: "ゴマアレルギー",
+  no_fried: "禁食(揚げ物禁)",
   no_meat: "禁食(肉禁)",
+  forbidden_other: "禁食(肉卵魚禁)",
   no_fish: "禁食(魚禁)",
   change_1: "変更1",
   change_2: "変更2",
@@ -688,7 +819,9 @@ const preferredDietOrder = [
   "soft_mixer",
   "mixer",
   "sesame_allergy",
+  "no_fried",
   "no_meat",
+  "forbidden_other",
   "no_fish",
   "change_1",
   "change_2",
@@ -1136,7 +1269,7 @@ const formatActualAmount = (line: {
   const text = Number.isInteger(numberValue)
     ? numberValue.toLocaleString("ja-JP")
     : numberValue.toLocaleString("ja-JP", { maximumFractionDigits: 2 });
-  const unit = line.actual_unit_type || line.menu_unit_type || "";
+  const unit = normalizeUnitType(line.actual_unit_type || line.menu_unit_type);
   return unit ? `${text}${unit}` : text;
 };
 
@@ -1328,12 +1461,9 @@ const formatBagAmountFromTotals = (totals: Record<string, number> | undefined) =
     .join(" + ");
 };
 
-const DEFAULT_OCR_PROMPT =
-  "Return a JSON object only.\\n" +
-  'Schema: {"rows":[[date, menu_name, regular_2f, regular_3f, soft_2f, soft_3f, mixer_2f, mixer_3f, note], ...], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}\\n' +
-  "Do not output header rows or date-only headers. Output menu rows only.\\n" +
-  'If no menu rows are readable, return {"rows":[], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}.\\n' +
-  "Use null when a cell is unreadable or missing. Use ASCII digits 0-9 only in numeric cells.";
+const DEFAULT_OCR_PROMPT = buildOcrPromptFromCanonicalSchema({});
+const DEFAULT_LLM_REPARSE_PROVIDER = "gemini";
+const DEFAULT_LLM_REPARSE_MODEL_MODE: "flash" | "pro" | "other" = "pro";
 
 const defaultGridParams: GridParams = {
   grid_dpi: 300,
@@ -1465,9 +1595,11 @@ const buildCategoryColumns = (lines: OrderDetail["lines"]) => {
 
 const quantityFieldDietOrder = [
   "sesame_allergy",
+  "no_fried",
   "regular_bag",
   "soft_mixer",
   "no_meat",
+  "forbidden_other",
   "no_fish",
   "change_1",
   "change_2",
@@ -1561,6 +1693,205 @@ const findSheetFieldIndex = (
     if (predicate(field, header)) return idx;
   }
   return -1;
+};
+
+type SheetIdentityIndices = {
+  dateIndex: number;
+  daypartIndex: number;
+  menuIndex: number;
+};
+
+type RowIdentitySnapshot = {
+  date: string;
+  daypart: string;
+  menu: string;
+  key: string;
+};
+
+type OcrPageTableInfo = {
+  pageArrayIndex: number;
+  pageIndex: number | null;
+  header: string[];
+  rows: string[][];
+  globalStart: number;
+  globalEnd: number;
+  rowIdentities: RowIdentitySnapshot[];
+};
+
+type FocusedOverlayTarget = {
+  pageArrayIndex: number;
+  pageIndex: number | null;
+  localRowIndex: number;
+  globalRowIndex: number;
+  matchReason: "global_index" | "identity_match" | "global_fallback";
+};
+
+const normalizeSheetMatchToken = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw
+    .normalize("NFKC")
+    .replace(/[　\s]+/g, "")
+    .replace(/[‐‑‒–—―ーｰ]/g, "-")
+    .toLowerCase();
+};
+
+const normalizeSheetDateToken = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalized = raw
+    .normalize("NFKC")
+    .replace(/[　\s]+/g, "")
+    .replace(/年/g, "/")
+    .replace(/月/g, "/")
+    .replace(/日/g, "")
+    .replace(/[.]/g, "/")
+    .replace(/\/+/g, "/");
+  const parts = normalized.split(/[\/-]/).filter(Boolean);
+  if (parts.length >= 2) {
+    const month = parts[parts.length - 2];
+    const day = parts[parts.length - 1];
+    if (/^\d{1,2}$/.test(month) && /^\d{1,2}$/.test(day)) {
+      return `${month.padStart(2, "0")}/${day.padStart(2, "0")}`;
+    }
+  }
+  return normalizeSheetMatchToken(normalized);
+};
+
+const normalizeSheetDaypartToken = (value?: string | null) => {
+  const token = normalizeSheetMatchToken(value);
+  if (!token) return "";
+  if (token.includes("朝")) return "朝";
+  if (token.includes("昼")) return "昼";
+  if (token.includes("夕") || token.includes("夜")) return "夕";
+  return token;
+};
+
+const normalizeSheetMenuToken = (value?: string | null) =>
+  normalizeSheetMatchToken(value).replace(/[()（）[\]【】「」『』]/g, "");
+
+const getSheetIdentityIndices = (fields: string[], headers: string[]): SheetIdentityIndices => ({
+  dateIndex: findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = String(field || "").trim().toLowerCase();
+    if (token.startsWith("date")) return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("日付") || headerToken.startsWith("date");
+  }),
+  daypartIndex: findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = String(field || "").trim().toLowerCase();
+    if (token === "daypart" || token === "meal" || token === "time") return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("区分") || headerToken === "daypart" || headerToken === "meal" || headerToken === "time";
+  }),
+  menuIndex: findSheetFieldIndex(fields, headers, (field, header) => {
+    const token = String(field || "").trim().toLowerCase();
+    if (token === "menu" || token === "menu_name") return true;
+    const headerToken = normalizeHeaderToken(header);
+    return headerToken.includes("メニュー") || headerToken.includes("献立") || headerToken === "menu";
+  }),
+});
+
+const buildRowIdentitySnapshots = (
+  rows: string[][],
+  indices: SheetIdentityIndices,
+) => {
+  let previousDate = "";
+  let previousDaypart = "";
+  return rows.map((row) => {
+    const rawDate = indices.dateIndex >= 0 ? row[indices.dateIndex] : "";
+    const rawDaypart = indices.daypartIndex >= 0 ? row[indices.daypartIndex] : "";
+    const rawMenu = indices.menuIndex >= 0 ? row[indices.menuIndex] : "";
+    const date = normalizeSheetDateToken(rawDate) || previousDate;
+    const daypart = normalizeSheetDaypartToken(rawDaypart) || previousDaypart;
+    const menu = normalizeSheetMenuToken(rawMenu);
+    if (normalizeSheetDateToken(rawDate)) previousDate = date;
+    if (normalizeSheetDaypartToken(rawDaypart)) previousDaypart = daypart;
+    return {
+      date,
+      daypart,
+      menu,
+      key: menu ? [date, daypart, menu].join("__") : "",
+    };
+  });
+};
+
+const buildOcrPageTableInfos = (pages: OcrPage[]) => {
+  let globalOffset = 0;
+  const results: OcrPageTableInfo[] = [];
+  pages.forEach((page, pageArrayIndex) => {
+    const table = extractTableFromPage(page);
+    if (!table || !table.rows.length) return;
+    const identityIndices = getSheetIdentityIndices([], table.header);
+    const rowIdentities = buildRowIdentitySnapshots(table.rows, identityIndices);
+    results.push({
+      pageArrayIndex,
+      pageIndex: page.page_index ?? pageArrayIndex + 1,
+      header: table.header,
+      rows: table.rows,
+      globalStart: globalOffset,
+      globalEnd: globalOffset + table.rows.length,
+      rowIdentities,
+    });
+    globalOffset += table.rows.length;
+  });
+  return results;
+};
+
+const resolveFocusedOverlayTarget = (
+  focusedSheetRowIndex: number | null,
+  pageTables: OcrPageTableInfo[],
+  sheetRowIdentities: RowIdentitySnapshot[],
+  sheetRowCount: number,
+): FocusedOverlayTarget | null => {
+  if (focusedSheetRowIndex == null || focusedSheetRowIndex < 0 || !pageTables.length) return null;
+  const totalOverlayRows = pageTables.reduce((sum, table) => sum + table.rows.length, 0);
+  const findByGlobalIndex = (globalRowIndex: number, matchReason: FocusedOverlayTarget["matchReason"]) => {
+    const table = pageTables.find(
+      (candidate) => globalRowIndex >= candidate.globalStart && globalRowIndex < candidate.globalEnd,
+    );
+    if (!table) return null;
+    return {
+      pageArrayIndex: table.pageArrayIndex,
+      pageIndex: table.pageIndex,
+      localRowIndex: globalRowIndex - table.globalStart,
+      globalRowIndex,
+      matchReason,
+    } satisfies FocusedOverlayTarget;
+  };
+
+  if (sheetRowCount > 0 && sheetRowCount === totalOverlayRows) {
+    return findByGlobalIndex(focusedSheetRowIndex, "global_index");
+  }
+
+  const focusedIdentity = sheetRowIdentities[focusedSheetRowIndex]?.key || "";
+  if (focusedIdentity) {
+    const matches: FocusedOverlayTarget[] = [];
+    pageTables.forEach((table) => {
+      table.rowIdentities.forEach((identity, localRowIndex) => {
+        if (identity.key !== focusedIdentity) return;
+        matches.push({
+          pageArrayIndex: table.pageArrayIndex,
+          pageIndex: table.pageIndex,
+          localRowIndex,
+          globalRowIndex: table.globalStart + localRowIndex,
+          matchReason: "identity_match",
+        });
+      });
+    });
+    if (matches.length) {
+      matches.sort((left, right) => {
+        const leftDistance = Math.abs(left.globalRowIndex - focusedSheetRowIndex);
+        const rightDistance = Math.abs(right.globalRowIndex - focusedSheetRowIndex);
+        return leftDistance - rightDistance;
+      });
+      return matches[0];
+    }
+  }
+
+  if (focusedSheetRowIndex < totalOverlayRows) {
+    return findByGlobalIndex(focusedSheetRowIndex, "global_fallback");
+  }
+  return null;
 };
 
 const buildDraftPreviewLines = (
@@ -1795,7 +2126,10 @@ export default function OrderDetailPage() {
   const [trainingSampleSaving, setTrainingSampleSaving] = useState<boolean>(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
+  const [pdfSourceKind, setPdfSourceKind] = useState<"original" | "ocr_artifact">("original");
+  const [pdfSourceVariant, setPdfSourceVariant] = useState<string>("");
   const [ocrPrompt, setOcrPrompt] = useState<string>(DEFAULT_OCR_PROMPT);
+  const lastAutoGeneratedOcrPromptRef = useRef<string>(DEFAULT_OCR_PROMPT);
   const [ocrRawText, setOcrRawText] = useState<string>("");
   const [ocrRawMessage, setOcrRawMessage] = useState<string>("");
   const [ocrRawLoading, setOcrRawLoading] = useState<boolean>(false);
@@ -1815,6 +2149,7 @@ export default function OrderDetailPage() {
   const [ocrSheetHeader, setOcrSheetHeader] = useState<string[]>([]);
   const [ocrSheetRows, setOcrSheetRows] = useState<string[][]>([]);
   const [ocrSheetRowIds, setOcrSheetRowIds] = useState<string[]>([]);
+  const [focusedSheetRowIndex, setFocusedSheetRowIndex] = useState<number | null>(null);
   const [ocrSheetSource, setOcrSheetSource] = useState<string>("");
   const [ocrSheetWarnings, setOcrSheetWarnings] = useState<string[]>([]);
   const [ocrSheetReviewState, setOcrSheetReviewState] = useState<string>("");
@@ -1860,6 +2195,7 @@ export default function OrderDetailPage() {
   const [facilityTemplateSwapRight, setFacilityTemplateSwapRight] = useState<string>("");
   const [facilityTemplateMessage, setFacilityTemplateMessage] = useState<string>("");
   const [facilityTemplateSaving, setFacilityTemplateSaving] = useState<boolean>(false);
+  const [forcedSheetRecoveryPending, setForcedSheetRecoveryPending] = useState<"" | "weekly" | "facility">("");
   const [showFacilityTemplateEditor, setShowFacilityTemplateEditor] = useState<boolean>(false);
   const [openPivotGroupKey, setOpenPivotGroupKey] = useState<string | null>(null);
   const [openLineGroupKey, setOpenLineGroupKey] = useState<string | null>(null);
@@ -1872,17 +2208,18 @@ export default function OrderDetailPage() {
   const [gridRowEdgesDraft, setGridRowEdgesDraft] = useState<number[] | null>(null);
   const [rowEdgesText, setRowEdgesText] = useState<string>("");
   const [reparsePending, setReparsePending] = useState<boolean>(false);
-  const [llmReparseProvider, setLlmReparseProvider] = useState<string>("gemini");
-  const [llmReparseModelMode, setLlmReparseModelMode] = useState<"flash" | "pro" | "other">("flash");
+  const [llmReparseProvider, setLlmReparseProvider] = useState<string>(DEFAULT_LLM_REPARSE_PROVIDER);
+  const [llmReparseModelMode, setLlmReparseModelMode] = useState<"flash" | "pro" | "other">(
+    DEFAULT_LLM_REPARSE_MODEL_MODE,
+  );
   const [llmReparseCustomModel, setLlmReparseCustomModel] = useState<string>("");
-  const [llmReparsePromptPreset, setLlmReparsePromptPreset] = useState<
-    "numeric_verification" | "column_missing" | "row_alignment" | "special_diet_semantics" | "freeform"
-  >("numeric_verification");
+  const [llmReparsePromptPreset, setLlmReparsePromptPreset] = useState<LlmPromptPreset>("numeric_verification");
   const [criticalDecisionSaving, setCriticalDecisionSaving] = useState<string>("");
   const [ocrRecoverPending, setOcrRecoverPending] = useState<boolean>(false);
   const [switchEvidencePending, setSwitchEvidencePending] = useState<boolean>(false);
   const [keptCurrentCandidateEvidenceId, setKeptCurrentCandidateEvidenceId] = useState<string>("");
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
+  const [bagAppliedOverrides, setBagAppliedOverrides] = useState<AppliedPortionOverride[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
   const [bagLoading, setBagLoading] = useState<boolean>(false);
   const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
@@ -1899,31 +2236,22 @@ export default function OrderDetailPage() {
     height: 0,
   });
   const [ocrPreviewMode, setOcrPreviewMode] = useState<"overlay" | "original">("overlay");
-  const [ocrPreviewZoom, setOcrPreviewZoom] = useState<number>(1);
+  const [step2WizardChoice, setStep2WizardChoice] = useState<Step2WizardChoice>("");
+  const [step2RepairStage, setStep2RepairStage] = useState<Step2RepairStage>("");
   const [activeStep, setActiveStep] = useState<number>(0);
   const [ocrEditMode, setOcrEditMode] = useState<boolean>(false);
   const [lineEditsDirty, setLineEditsDirty] = useState<boolean>(false);
+  const [confirmSaving, setConfirmSaving] = useState<boolean>(false);
   const [shippingStatuses, setShippingStatuses] = useState<ShippingStatusItem[]>([]);
   const [shippingSummary, setShippingSummary] = useState<ShippingStatusesPayload["summary"] | null>(null);
   const [shippingMessage, setShippingMessage] = useState<string>("");
   const [shippingLoading, setShippingLoading] = useState<boolean>(false);
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
+  const ocrPreviewWrapperRef = useRef<HTMLDivElement | null>(null);
   const reparseTimerRef = useRef<number | null>(null);
   const orderRefreshTimerRef = useRef<number | null>(null);
   const workspaceRefreshPromiseRef = useRef<Promise<OrderDetail | null> | null>(null);
-
-  const updateOcrPreviewZoom = (delta: number) => {
-    setOcrPreviewZoom((current) =>
-      Math.min(
-        OCR_PREVIEW_ZOOM_MAX,
-        Math.max(OCR_PREVIEW_ZOOM_MIN, Number((current + delta).toFixed(2))),
-      ),
-    );
-  };
-
-  const resetOcrPreviewZoom = () => {
-    setOcrPreviewZoom(1);
-  };
+  const pdfRequestSeqRef = useRef(0);
 
   const loadOrderDetail = async (orderId: string, options: { preserveSelections?: boolean } = {}) => {
     const { preserveSelections = false } = options;
@@ -1934,7 +2262,7 @@ export default function OrderDetailPage() {
       order?.persisted_week_value || order?.week_value || order?.week || "",
     );
     const selectedFacility = facility.trim();
-    const selectedWeek = normalizeWeekValue(weekDraft);
+    const selectedWeek = normalizeConcreteWeekValue(weekDraft);
     const preserveFacilitySelection =
       preserveSelections && Boolean(selectedFacility && selectedFacility !== currentPersistedFacility);
     const preserveWeekSelection =
@@ -1962,8 +2290,37 @@ export default function OrderDetailPage() {
   useEffect(() => {
     if (!id) return;
     void loadOrderDetail(String(id));
+    lastAutoGeneratedOcrPromptRef.current = DEFAULT_OCR_PROMPT;
     setOcrPrompt(DEFAULT_OCR_PROMPT);
+    setLlmReparseProvider(DEFAULT_LLM_REPARSE_PROVIDER);
+    setLlmReparseModelMode(DEFAULT_LLM_REPARSE_MODEL_MODE);
+    setLlmReparseCustomModel("");
+    setLlmReparsePromptPreset("numeric_verification");
+    setFocusedSheetRowIndex(null);
   }, [id]);
+
+  const activeEditorRows = ocrSheetRows;
+  const activeEditorFields = ocrSheetFields;
+
+  useEffect(() => {
+    const nextAutoPrompt = buildOcrPromptFromCanonicalSchema({
+      fields: activeEditorFields,
+      columns: facilityTemplateColumns,
+    });
+    const previousAutoPrompt = lastAutoGeneratedOcrPromptRef.current;
+    const shouldReplaceCurrentPrompt =
+      !ocrPrompt.trim() || ocrPrompt === previousAutoPrompt || ocrPrompt === DEFAULT_OCR_PROMPT;
+    lastAutoGeneratedOcrPromptRef.current = nextAutoPrompt;
+    if (shouldReplaceCurrentPrompt && ocrPrompt !== nextAutoPrompt) {
+      setOcrPrompt(nextAutoPrompt);
+    }
+  }, [activeEditorFields, facilityTemplateColumns, ocrPrompt]);
+
+  useEffect(() => {
+    if (focusedSheetRowIndex == null) return;
+    if (focusedSheetRowIndex < ocrSheetRows.length) return;
+    setFocusedSheetRowIndex(null);
+  }, [focusedSheetRowIndex, ocrSheetRows.length]);
 
   useEffect(() => {
     const candidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
@@ -2059,6 +2416,7 @@ export default function OrderDetailPage() {
   }, [facility]);
 
   useEffect(() => {
+    latestSavedSheetRevisionRef.current = null;
     setOcrPages([]);
     setOcrPagesMessage("");
     setOcrTableBox(null);
@@ -2117,6 +2475,10 @@ export default function OrderDetailPage() {
     setFacilityTemplateColumnDraft([]);
     setFacilityTemplateMessage("");
     setFacilityTemplateSaving(false);
+    setPdfUrl("");
+    setPdfError("");
+    setPdfSourceKind("original");
+    setPdfSourceVariant("");
   }, [id]);
 
   useEffect(() => {
@@ -2204,23 +2566,46 @@ export default function OrderDetailPage() {
 
   useEffect(() => {
     if (!order?.id) {
+      pdfRequestSeqRef.current += 1;
       setPdfUrl("");
+      setPdfError("");
+      setPdfSourceKind("original");
+      setPdfSourceVariant("");
       return;
     }
+    const requestSeq = pdfRequestSeqRef.current + 1;
+    pdfRequestSeqRef.current = requestSeq;
     let active = true;
     let objectUrl = "";
     setPdfError("");
+    setPdfUrl("");
+    setPdfSourceKind("original");
+    setPdfSourceVariant("");
     apiClient
       .get(`/orders/${order.id}/document`, { responseType: "blob" })
       .then((res) => {
-        if (!active) return;
+        if (!active || pdfRequestSeqRef.current !== requestSeq) return;
+        const sourceHeader = String(res.headers?.["x-sawa-document-source"] || "original").trim().toLowerCase();
+        const variantHeader = String(res.headers?.["x-sawa-document-variant"] || "").trim().toLowerCase();
+        if (sourceHeader === "ocr_artifact") {
+          setPdfError("原本FAX PDFを現在取得できません。");
+          setPdfUrl("");
+          setPdfSourceKind("original");
+          setPdfSourceVariant("");
+          return;
+        }
         objectUrl = URL.createObjectURL(res.data);
         setPdfUrl(objectUrl);
+        setPdfSourceKind("original");
+        setPdfSourceVariant(variantHeader);
       })
-      .catch(() => {
-        if (!active) return;
-        setPdfError("PDFの取得に失敗しました。");
+      .catch((err: any) => {
+        if (!active || pdfRequestSeqRef.current !== requestSeq) return;
+        const status = err?.response?.status;
+        setPdfError(status === 404 ? "原本FAX PDFを現在取得できません。" : "PDFの取得に失敗しました。");
         setPdfUrl("");
+        setPdfSourceKind("original");
+        setPdfSourceVariant("");
       });
     return () => {
       active = false;
@@ -2466,13 +2851,52 @@ export default function OrderDetailPage() {
     });
   };
 
+  const isStructuralSheetField = (field: string): boolean => {
+    const normalized = String(field || "").trim();
+    return normalized === "date" || normalized === "date_mmdd" || normalized === "daypart" || normalized === "menu";
+  };
+
+  const canRebaseSavedSheetRevision = (
+    basePayload: NormalizedEditorSheetPayload,
+    revisionPayload: NormalizedEditorSheetPayload,
+  ): boolean => {
+    if (basePayload.fields.length !== revisionPayload.fields.length) {
+      return false;
+    }
+    if (basePayload.rows.length !== revisionPayload.rows.length) {
+      return false;
+    }
+    for (let idx = 0; idx < basePayload.fields.length; idx += 1) {
+      if ((basePayload.fields[idx] || "") !== (revisionPayload.fields[idx] || "")) {
+        return false;
+      }
+    }
+    if (
+      basePayload.rowIds.length === basePayload.rows.length
+      && revisionPayload.rowIds.length === revisionPayload.rows.length
+    ) {
+      for (let idx = 0; idx < basePayload.rowIds.length; idx += 1) {
+        if ((basePayload.rowIds[idx] || "") !== (revisionPayload.rowIds[idx] || "")) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
   const rebaseSavedSheetRevisionOntoPayload = (
     basePayload: NormalizedEditorSheetPayload,
     revision: OcrEditRevision | null,
   ): NormalizedEditorSheetPayload | null => {
     const revisionPayload = getSheetEditorPayloadFromRevision(revision);
-    if (!revisionPayload || !basePayload.rows.length) {
+    if (!revisionPayload) {
+      return basePayload.rows.length ? basePayload : null;
+    }
+    if (!basePayload.rows.length) {
       return revisionPayload;
+    }
+    if (!canRebaseSavedSheetRevision(basePayload, revisionPayload)) {
+      return basePayload;
     }
     const revisionRowById = new Map<string, string[]>();
     revisionPayload.rowIds.forEach((rowId, idx) => {
@@ -2490,7 +2914,12 @@ export default function OrderDetailPage() {
       const mergedRow = [...baseRow];
       const limit = Math.min(mergedRow.length, revisionRow.length);
       for (let colIdx = 0; colIdx < limit; colIdx += 1) {
-        mergedRow[colIdx] = revisionRow[colIdx] ?? "";
+        const fieldKey = basePayload.fields[colIdx] || "";
+        const revisionValue = revisionRow[colIdx] ?? "";
+        if (isStructuralSheetField(fieldKey)) {
+          continue;
+        }
+        mergedRow[colIdx] = revisionValue;
       }
       return mergedRow;
     });
@@ -2555,6 +2984,7 @@ export default function OrderDetailPage() {
       setWeekDraft((current) => {
         const selectedOption = options.find((item) => item.selected);
         const normalizedCurrent = normalizeWeekValue(current);
+        const concreteCurrent = normalizeConcreteWeekValue(current);
         const persistedWeekValue = normalizeWeekValue(
           order?.persisted_week_value || order?.week_value || order?.week || "",
         );
@@ -2562,15 +2992,15 @@ export default function OrderDetailPage() {
           normalizedCurrent && normalizedCurrent !== persistedWeekValue,
         );
         if (preserveDirtyWeekSelection) {
-          return current || normalizedCurrent;
+          return concreteCurrent || normalizedCurrent || current;
         }
-        if (normalizedCurrent.includes("@")) {
-          return normalizedCurrent;
+        if (concreteCurrent) {
+          return concreteCurrent;
         }
         if (selectedOption?.week_id) {
           return selectedOption.week_id;
         }
-        return normalizedCurrent || current;
+        return "";
       });
     } catch (err: any) {
       const status = err?.response?.status;
@@ -2804,7 +3234,7 @@ export default function OrderDetailPage() {
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で施設設定を完了してください。");
       return;
     }
-    if (!normalizeWeekValue(order.persisted_week_value || order.week || "")) {
+    if (!normalizeConcreteWeekValue(order.persisted_week_value || order.week || "")) {
       setOcrSheetAutoRetryBlocked(true);
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で週を設定してください。");
       return;
@@ -3101,10 +3531,15 @@ const loadOcrPages = async () => {
     try {
       const res = await apiClient.get(`/orders/${order.id}/bags`);
       const rows = Array.isArray(res.data?.bags) ? res.data.bags : [];
+      const appliedOverrides = Array.isArray(res.data?.applied_portion_overrides)
+        ? res.data.applied_portion_overrides
+        : [];
       setBagRows(rows);
+      setBagAppliedOverrides(appliedOverrides);
       setBagMessage(rows.length ? "" : "袋分け結果がまだ生成されていません。");
     } catch (err: any) {
       setBagRows([]);
+      setBagAppliedOverrides([]);
       setBagMessage("袋分け結果の取得に失敗しました。");
     } finally {
       setBagLoading(false);
@@ -3118,11 +3553,16 @@ const loadOcrPages = async () => {
     try {
       const res = await apiClient.post(`/orders/${order.id}/bags/rebuild`);
       const rows = Array.isArray(res.data?.bags) ? res.data.bags : [];
+      const appliedOverrides = Array.isArray(res.data?.applied_portion_overrides)
+        ? res.data.applied_portion_overrides
+        : [];
       setBagRows(rows);
+      setBagAppliedOverrides(appliedOverrides);
       setBagMessage(rows.length ? "袋分けを更新しました。" : "袋分け結果がありません。");
       return true;
     } catch (err: any) {
       setBagRows([]);
+      setBagAppliedOverrides([]);
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
       const detailText = detail ? ` (${detail})` : "";
@@ -3197,6 +3637,10 @@ const loadOcrPages = async () => {
       next[rowIndex][cellIndex] = value;
       return next;
     });
+  };
+
+  const focusOcrSheetRow = (rowIndex: number) => {
+    setFocusedSheetRowIndex(rowIndex);
   };
 
   const updateOcrTableHeaderCell = (
@@ -3696,8 +4140,8 @@ const loadOcrPages = async () => {
     }
     const trimmedFacility = facility.trim();
     const persistedFacility = (order.facility || "").trim();
-    const normalizedWeek = normalizeWeekValue(weekDraft);
-    const persistedWeek = normalizeWeekValue(order.persisted_week_value || order.week || "");
+    const normalizedWeek = normalizeConcreteWeekValue(weekDraft);
+    const persistedWeek = normalizeConcreteWeekValue(order.persisted_week_value || order.week || "");
     if (!trimmedFacility && !persistedFacility) {
       const message = "施設が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で施設を設定してください。";
       setOcrTableMessage(message);
@@ -3928,6 +4372,18 @@ const loadOcrPages = async () => {
     }
   };
 
+  const completeStep2AndMoveToDetails = async () => {
+    if (ocrTableSaving) return;
+    if (ocrHasEditableSheet && canSaveDraftSheet) {
+      const saved = await saveOcrSheetExact();
+      if (!saved.ok) {
+        setActionMessage(saved.message);
+        return;
+      }
+    }
+    await applyOcrAndMoveToDetails();
+  };
+
   const saveLines = async () => {
     if (!order) return;
     try {
@@ -3952,11 +4408,12 @@ const loadOcrPages = async () => {
     }
   };
 
-  const confirm = async () => {
+  const confirm = async (options?: { successMessage?: string }) => {
     if (!order) return;
+    if (confirmSaving) return false;
     if (sheetWeeklyMenuMissing) {
       setActionMessage("この週の月次メニューが未登録のため、まだ確定できません。先に月次メニューを登録してください。");
-      return;
+      return false;
     }
     if (!ocrSheetCanConfirm && ocrSheetConfirmBlockers.length) {
       const blockerText = ocrSheetConfirmBlockers.map((item) => describeReviewBlocker(item)).filter(Boolean).join(" / ");
@@ -3965,17 +4422,20 @@ const loadOcrPages = async () => {
           ? `まだ確定できません。Step2で内容を整えてから再度お試しください: ${blockerText}`
           : "まだ確定できません。Step2で内容を整えてから再度お試しください。",
       );
-      return;
+      return false;
     }
+    setConfirmSaving(true);
     try {
+      setActionMessage("確定中...");
       await apiClient.post(`/orders/${order.id}/confirm`, {
         expected_revision_id: currentDraftRevisionId() || null,
         expected_lines_updated_at: order.lines_updated_at || null,
       });
       setLineEditsDirty(false);
       await refreshOrderWorkspace({ preserveSelections: true, reloadBags: true, reloadHistory: true });
-      setActionMessage("確定しました。");
+      setActionMessage(options?.successMessage ?? "確定しました。");
       loadBags();
+      return true;
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -3986,7 +4446,7 @@ const loadOcrPages = async () => {
             ? "明細が他の画面で更新されました。最新状態を読み込み直しました。"
             : "別の画面で下書きが更新されました。最新状態を読み込み直しました。";
         await handleRemoteUpdateConflict(message, { reloadSheet: true, reloadHistory: true, reloadBags: true });
-        return;
+        return false;
       }
       const blockers = Array.isArray(detail?.blockers)
         ? detail.blockers.map((item: unknown) => describeReviewBlocker(String(item || ""))).filter(Boolean)
@@ -3999,26 +4459,34 @@ const loadOcrPages = async () => {
       } else {
         setActionMessage("確定に失敗しました。");
       }
+      return false;
+    } finally {
+      setConfirmSaving(false);
     }
   };
 
-  const registerTrainingSample = async () => {
+  const registerTrainingSample = async (
+    options?: { source?: string; note?: string; successMessage?: string },
+  ) => {
     if (!order) return;
     setTrainingSampleSaving(true);
     try {
       const res = await apiClient.post(`/ocr/training-samples/from-order/${order.id}`, {
-        source: "manual",
-        note: "registered from order detail",
+        source: options?.source ?? "manual",
+        note: options?.note ?? "registered from order detail",
       });
       const sampleId = typeof res.data?.sample?.id === "string" ? res.data.sample.id : "";
       const lineCount =
         typeof res.data?.sample?.line_count === "number" ? res.data.sample.line_count : null;
       const lineText = lineCount == null ? "" : ` (${lineCount}行)`;
       setActionMessage(
-        sampleId
-          ? `学習データに登録しました。sample_id=${sampleId}${lineText}`
-          : `学習データに登録しました。${lineText}`,
+        options?.successMessage
+          ? options.successMessage
+          : sampleId
+            ? `学習データに登録しました。sample_id=${sampleId}${lineText}`
+            : `学習データに登録しました。${lineText}`,
       );
+      return true;
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -4036,9 +4504,18 @@ const loadOcrPages = async () => {
       } else {
         setActionMessage("学習データ登録中にエラーが発生しました。");
       }
+      return false;
     } finally {
       setTrainingSampleSaving(false);
     }
+  };
+
+  const confirmAndReturnToOrders = async () => {
+    if (!order) return;
+    if (confirmSaving || trainingSampleSaving) return;
+    const confirmed = await confirm({ successMessage: "注文一覧へ戻ります..." });
+    if (!confirmed) return;
+    await router.push("/orders");
   };
 
   const saveFacility = async (facilityId: string): Promise<boolean> => {
@@ -4072,7 +4549,7 @@ const loadOcrPages = async () => {
 
   const saveWeek = async (weekId: string): Promise<boolean> => {
     if (!order) return false;
-    const normalizedWeek = normalizeWeekValue(weekId);
+    const normalizedWeek = normalizeConcreteWeekValue(weekId);
     if (!normalizedWeek) {
       setActionMessage("週の形式が不正です。候補から選択してください。");
       return false;
@@ -4103,7 +4580,7 @@ const loadOcrPages = async () => {
   };
 
   const updateStep1 = async () => {
-    const normalizedWeek = normalizeWeekValue(weekDraft);
+    const normalizedWeek = normalizeConcreteWeekValue(weekDraft);
     if (!facility.trim()) {
       setActionMessage("施設を選択してください。");
       return;
@@ -4113,7 +4590,7 @@ const loadOcrPages = async () => {
       return;
     }
     const persistedFacility = (order?.facility || "").trim();
-    const persistedWeek = normalizeWeekValue(
+    const persistedWeek = normalizeConcreteWeekValue(
       order?.persisted_week_value || order?.week || "",
     );
     if (facility.trim() !== persistedFacility) {
@@ -4167,13 +4644,16 @@ const loadOcrPages = async () => {
   };
 
   const keepCurrentDraft = () => {
-    const candidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+    const candidateEvidenceRunId =
+      workflowCandidateEvidenceRunId || String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
     if (!candidateEvidenceRunId) {
       setActionMessage("現在は新しいOCR候補がありません。");
       return;
     }
     setKeptCurrentCandidateEvidenceId(candidateEvidenceRunId);
-    setActionMessage("現在のシートを維持します。必要ならあとで新しいOCR候補へ切り替えられます。");
+    setStep2WizardChoice("yes");
+    setStep2RepairStage("");
+    setActionMessage("現在のシートを維持して進みます。必要ならあとで新しいOCR候補へ切り替えられます。");
   };
 
   const switchDraftToLatestEvidence = async () => {
@@ -4327,7 +4807,7 @@ const loadOcrPages = async () => {
           ? "施設テンプレートに保存し、現在のシートにも反映しました。"
           : "施設テンプレートに保存しました。シートを再読込して確認してください。",
       );
-      if (order?.id && normalizeWeekValue(order.persisted_week_value || order.week || "")) {
+      if (order?.id && normalizeConcreteWeekValue(order.persisted_week_value || order.week || "")) {
         await refreshOrderWorkspace({ reloadSheet: true, preserveSelections: true });
       }
     } catch (err: any) {
@@ -4337,6 +4817,70 @@ const loadOcrPages = async () => {
       );
     } finally {
       setFacilityTemplateSaving(false);
+    }
+  };
+
+  const forceWeeklyMenuOverwrite = async () => {
+    if (!order?.id) {
+      setActionMessage("注文が見つかりません。");
+      return;
+    }
+    setForcedSheetRecoveryPending("weekly");
+    setActionMessage("週次メニューを基準に日付・区分・メニューを復元しています...");
+    try {
+      const res = await apiClient.post(`/orders/${order.id}/draft-sheet/force-weekly-menu`);
+      const refreshedDraftPayload = res.data?.draft_payload || null;
+      if (refreshedDraftPayload) {
+        const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
+        applyNormalizedSheetEditorPayload(normalizedDraftPayload);
+        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
+      }
+      setActionMessage("週次メニューを基準に日付・区分・メニューを上書きしました。数量は必要なら確認してください。");
+      await refreshOrderWorkspace({ reloadSheet: true, reloadHistory: true, preserveSelections: true });
+    } catch (err: any) {
+      const detail = String(err?.response?.data?.detail || "").trim();
+      if (detail === "weekly_menu_missing") {
+        setActionMessage("週次メニューが見つからないため、強制上書きできません。");
+      } else if (detail === "facility missing") {
+        setActionMessage("先に Step1 の施設設定を保存してください。");
+      } else if (detail === "week missing") {
+        setActionMessage("先に Step1 の週設定を保存してください。");
+      } else {
+        setActionMessage("週次メニューの強制上書きに失敗しました。");
+      }
+    } finally {
+      setForcedSheetRecoveryPending("");
+    }
+  };
+
+  const forceFacilitySchemaOverwrite = async () => {
+    if (!order?.id) {
+      setActionMessage("注文が見つかりません。");
+      return;
+    }
+    setForcedSheetRecoveryPending("facility");
+    setActionMessage("施設設定の列構成でシートを復元し、数量を空白に戻しています...");
+    try {
+      const res = await apiClient.post(`/orders/${order.id}/draft-sheet/force-facility-schema`, {
+        blank_quantities: true,
+      });
+      const refreshedDraftPayload = res.data?.draft_payload || null;
+      if (refreshedDraftPayload) {
+        const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
+        applyNormalizedSheetEditorPayload(normalizedDraftPayload);
+        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
+      }
+      setActionMessage("施設設定の列構成でシートを上書きし、数量は手入力用に空白へ戻しました。");
+      await refreshOrderWorkspace({ reloadSheet: true, reloadHistory: true, preserveSelections: true });
+    } catch (err: any) {
+      const detail = String(err?.response?.data?.detail || "").trim();
+      if (detail === "facility missing") {
+        setActionMessage("先に Step1 の施設設定を保存してください。");
+      } else {
+        setActionMessage("施設設定の列構成による強制復元に失敗しました。");
+      }
+    } finally {
+      setForcedSheetRecoveryPending("");
     }
   };
 
@@ -4971,11 +5515,7 @@ const loadOcrPages = async () => {
   const ocrOverlayGs = isGsUri(ocrOverlayUrl);
   const layoutOverlayGs = isGsUri(layoutOverlayUrl);
   const showOcrOverlay = Boolean(ocrOverlayUrl && !ocrOverlayGs && !ocrOverlayError);
-  const ocrPreviewZoomPercent = Math.round(ocrPreviewZoom * 100);
-  const pdfPreviewUrl = pdfUrl
-    ? `${pdfUrl}${pdfUrl.includes("#") ? "&" : "#"}zoom=${ocrPreviewZoomPercent}`
-    : "";
-  const previewAssetStyle = { width: `${ocrPreviewZoomPercent}%`, maxWidth: "none" } as const;
+  const usingSyntheticOverlay = Boolean(activeOcrPage?.synthetic);
   const canToggleLayoutOverlay = Boolean(layoutOverlayUrl);
   const showLayoutOverlayImage = Boolean(
     showLayoutOverlay && layoutOverlayUrl && !layoutOverlayGs && !layoutOverlayError,
@@ -4994,8 +5534,19 @@ const loadOcrPages = async () => {
   } else if (layoutOverlayError) {
     layoutOverlayPlaceholder = "レイアウトオーバーレイの読み込みに失敗しました。";
   }
-  const usingSyntheticOverlay = Boolean(activeOcrPage?.synthetic);
   const hasUsableOverlayPreview = showOcrOverlay || usingSyntheticOverlay;
+  const originalPreviewImageUrl = (() => {
+    const figureUrl =
+      Array.isArray(activeOcrPage?.figure_urls) && activeOcrPage?.figure_urls.length
+        ? String(activeOcrPage?.figure_urls[0] || "").trim()
+        : "";
+    if (figureUrl) return figureUrl;
+    if (activeOcrPage?.synthetic_source === "pdf_render" && ocrOverlayUrl) {
+      return ocrOverlayUrl;
+    }
+    return "";
+  })();
+  const canHighlightOriginalPreview = Boolean(originalPreviewImageUrl);
   const step2CriticalBannerMessages = (() => {
     const messages: string[] = [];
     const bannerWorkflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
@@ -5059,20 +5610,34 @@ const loadOcrPages = async () => {
       !ocrPagesLoading &&
       !hasUsableOverlayPreview,
   );
+  const showingArtifactPdf = pdfSourceKind === "ocr_artifact";
+  const artifactPdfLabel =
+    pdfSourceVariant === "raw_pdf"
+      ? "OCR生成PDF"
+      : pdfSourceVariant
+        ? `OCR生成PDF (${pdfSourceVariant})`
+        : "OCR生成PDF";
   const canShowOriginalPdfPreview = Boolean(pdfUrl);
   const shouldShowOriginalPdfPreview = shouldFallbackToRawPdfPreview || ocrPreviewMode === "original";
   const step2FallbackSummary =
     shouldFallbackToRawPdfPreview && pdfUrl
-      ? "原本PDFを表示しています。右のシートを直接修正してください。"
+      ? showingArtifactPdf
+        ? "原本FAX PDFが見つからないため、OCR生成PDFを表示しています。右のシートを直接修正してください。"
+        : "原本PDFを表示しています。右のシートを直接修正してください。"
       : "";
   const canSwitchPreviewMode = Boolean(canShowOriginalPdfPreview && hasUsableOverlayPreview && !shouldFallbackToRawPdfPreview);
   const overlayPreviewModeLabel = shouldShowOriginalPdfPreview
     ? shouldFallbackToRawPdfPreview
-      ? "原本PDF (fallback)"
-      : "原本PDF"
+      ? showingArtifactPdf
+        ? `${artifactPdfLabel} (fallback)`
+        : "原本PDF (fallback)"
+      : showingArtifactPdf
+        ? artifactPdfLabel
+        : "原本PDF"
     : usingSyntheticOverlay
       ? `OCRプレビュー (${activeOcrPage?.pdf_variant_used === "corrected" ? "corrected PDF" : "raw PDF"})`
       : "OCRオーバーレイ";
+  const primaryPreviewOpenUrl = shouldShowOriginalPdfPreview ? pdfUrl : showOcrOverlay ? ocrOverlayUrl : null;
   useEffect(() => {
     if (shouldFallbackToRawPdfPreview) {
       setOcrPreviewMode("original");
@@ -5152,9 +5717,55 @@ const loadOcrPages = async () => {
       ? overlayRowEdges.map((edge) => overlayBox.top + overlayBox.height * edge)
       : null;
   const overlayCellHeight = overlayBox ? overlayBox.height / overlayRowCount : 0;
-  const activeEditorRows = ocrSheetRows;
   const activeEditorRowIds = ocrSheetRowIds;
-  const activeEditorFields = ocrSheetFields;
+  const ocrPageTableInfos = buildOcrPageTableInfos(ocrPages);
+  const ocrSheetIdentityIndices = getSheetIdentityIndices(ocrSheetFields, ocrSheetHeader);
+  const ocrSheetRowIdentities = buildRowIdentitySnapshots(ocrSheetRows, ocrSheetIdentityIndices);
+  const focusedOverlayTarget = resolveFocusedOverlayTarget(
+    focusedSheetRowIndex,
+    ocrPageTableInfos,
+    ocrSheetRowIdentities,
+    ocrSheetRows.length,
+  );
+  const focusedOverlayHighlight = (() => {
+    const showHighlightOnCurrentPreview = shouldShowOriginalPdfPreview
+      ? canHighlightOriginalPreview
+      : showOcrOverlay;
+    if (
+      focusedOverlayTarget == null ||
+      focusedOverlayTarget.pageArrayIndex !== activeOcrPageIndex ||
+      !showHighlightOnCurrentPreview ||
+      !overlayBox
+    ) {
+      return null;
+    }
+    const overlayGridRowIndex = overlayHeaderRows + focusedOverlayTarget.localRowIndex;
+    if (overlayGridRowIndex < overlayHeaderRows || overlayGridRowIndex >= overlayRowCount) {
+      return null;
+    }
+    let top = overlayBox.top + overlayCellHeight * overlayGridRowIndex;
+    let height = Math.max(overlayCellHeight, 1);
+    if (
+      overlayRowEdgesPx &&
+      overlayRowEdgesPx.length === overlayRowCount + 1 &&
+      overlayRowEdgesPx[overlayGridRowIndex] != null &&
+      overlayRowEdgesPx[overlayGridRowIndex + 1] != null
+    ) {
+      top = overlayRowEdgesPx[overlayGridRowIndex];
+      height = Math.max(overlayRowEdgesPx[overlayGridRowIndex + 1] - overlayRowEdgesPx[overlayGridRowIndex], 1);
+    }
+    return {
+      top,
+      height,
+      left: overlayBox.left,
+      width: overlayBox.width,
+      pageArrayIndex: focusedOverlayTarget.pageArrayIndex,
+      pageIndex: focusedOverlayTarget.pageIndex,
+      localRowIndex: focusedOverlayTarget.localRowIndex,
+      globalRowIndex: focusedOverlayTarget.globalRowIndex,
+      matchReason: focusedOverlayTarget.matchReason,
+    };
+  })();
   const recentOcrHistory = [...ocrHistoryRows].reverse().slice(0, 5);
   const latestOcrRevisionMode =
     ocrHistoryLatest?.ui_mode === "sheet"
@@ -5187,6 +5798,26 @@ const loadOcrPages = async () => {
         : null,
     )
     .filter((item): item is { value: string; label: string } => Boolean(item));
+  useEffect(() => {
+    if (!focusedOverlayTarget) return;
+    if (focusedOverlayTarget.pageArrayIndex === activeOcrPageIndex) return;
+    if (!ocrPages[focusedOverlayTarget.pageArrayIndex]) return;
+    selectOcrPage(focusedOverlayTarget.pageArrayIndex);
+  }, [focusedOverlayTarget, activeOcrPageIndex, ocrPages]);
+
+  useEffect(() => {
+    if (!focusedOverlayHighlight) return;
+    const wrapper = ocrPreviewWrapperRef.current;
+    if (!wrapper) return;
+    const top = focusedOverlayHighlight.top;
+    const bottom = focusedOverlayHighlight.top + focusedOverlayHighlight.height;
+    const viewportTop = wrapper.scrollTop;
+    const viewportBottom = viewportTop + wrapper.clientHeight;
+    if (top >= viewportTop && bottom <= viewportBottom) return;
+    const targetTop = Math.max(top - Math.max((wrapper.clientHeight - focusedOverlayHighlight.height) / 2, 24), 0);
+    wrapper.scrollTo({ top: targetTop, behavior: "smooth" });
+  }, [focusedOverlayHighlight]);
+
   const ocrSheetStickyColumnOffsets = (() => {
     const stickyRoles = new Set(["ocr-sheet-col-date", "ocr-sheet-col-daypart", "ocr-sheet-col-menu"]);
     let left = OCR_SHEET_ROW_INDEX_WIDTH;
@@ -5301,6 +5932,9 @@ const loadOcrPages = async () => {
   const workflowHeadline = String(order?.workflow_state?.headline || "").trim();
   const workflowApplyGate = order?.apply_gate || order?.workflow_state?.apply_gate || null;
   const workflowCandidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+  const currentSheetAcceptedForCandidate =
+    Boolean(workflowCandidateEvidenceRunId) &&
+    workflowCandidateEvidenceRunId === keptCurrentCandidateEvidenceId;
   const criticalDecisions = Array.isArray(order?.critical_decisions)
     ? order.critical_decisions.filter((item) => item && !String(item.selected_value || "").trim())
     : Array.isArray(order?.workflow_state?.critical_decisions)
@@ -5315,6 +5949,27 @@ const loadOcrPages = async () => {
     const decisionType = String(decision?.decision_type || "").trim().toLowerCase();
     return decisionType !== "facility" && decisionType !== "week";
   });
+  const ocrOutputIssueCodes = Array.isArray(ocrOutput?.cell_issues)
+    ? ocrOutput.cell_issues
+        .map((item) => String(item?.issue_code || "").trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+  const mergedCellTemplateHint = new Set([
+    "fax_layout_regular_diabetes_v1",
+    "fax_layout_regular_forbidden_v1",
+  ]).has(String(ocrOutput?.template_id || "").trim());
+  const mergedCellLlmRecommended =
+    mergedCellTemplateHint ||
+    ocrOutputIssueCodes.includes("merged_numeric_cell") ||
+    Boolean(
+      Array.isArray(ocrOutput?.failed_cells) &&
+        ocrOutput.failed_cells.some((cell) =>
+          String(cell?.reason || "")
+            .trim()
+            .toLowerCase()
+            .includes("merged_numeric_cell"),
+        ),
+    );
   const hasWorkflowState = Boolean(workflowStateCode || workflowHeadline || workflowApplyGate);
   const effectiveSheetReviewState =
     ocrSheetReviewState || workflowStateCode || (!hasWorkflowState ? String(order?.ocr_review_state || "").trim() : "");
@@ -5345,16 +6000,11 @@ const loadOcrPages = async () => {
   const rerunInProgressState = workflowStateCode === "rerun_in_progress";
   const showNewEvidenceChoice =
     workflowStateCode === "new_evidence_available" &&
-    Boolean(
-      workflowCandidateEvidenceRunId &&
-      workflowCandidateEvidenceRunId !== keptCurrentCandidateEvidenceId,
-    );
+    Boolean(workflowCandidateEvidenceRunId) &&
+    !currentSheetAcceptedForCandidate;
   const keepingCurrentDraftChoice =
     workflowStateCode === "new_evidence_available" &&
-    Boolean(
-      workflowCandidateEvidenceRunId &&
-      workflowCandidateEvidenceRunId === keptCurrentCandidateEvidenceId,
-    );
+    currentSheetAcceptedForCandidate;
   const workflowSupportText = (() => {
     if (unresolvedCriticalDecisionCount > 0) {
       return `未確定の候補が ${unresolvedCriticalDecisionCount} 件あります。先に候補を選んでください。`;
@@ -5487,13 +6137,15 @@ const loadOcrPages = async () => {
       currentOrder?.persisted_week_value || currentOrder?.week || "",
     );
     const selectedWeekValue = normalizeWeekValue(currentWeekDraft);
+    const persistedConcreteWeekValue = normalizeConcreteWeekValue(persistedWeekValue);
+    const selectedConcreteWeekValue = normalizeConcreteWeekValue(selectedWeekValue);
     const facilityMissingValue = !persistedFacilityValue;
-    const weekMissingValue = !persistedWeekValue;
+    const weekMissingValue = !persistedConcreteWeekValue;
     const facilitySelectionPendingValue = Boolean(
       selectedFacilityValue && selectedFacilityValue !== persistedFacilityValue,
     );
     const weekSelectionPendingValue = Boolean(
-      selectedWeekValue && selectedWeekValue !== persistedWeekValue,
+      selectedConcreteWeekValue && selectedConcreteWeekValue !== persistedConcreteWeekValue,
     );
     const step1BlockReasonsValue = [
       facilityMissingValue ? "施設未設定" : "",
@@ -5504,15 +6156,15 @@ const loadOcrPages = async () => {
     return {
       persistedFacility: persistedFacilityValue,
       selectedFacility: selectedFacilityValue,
-      persistedWeek: persistedWeekValue,
-      selectedWeek: selectedWeekValue,
+      persistedWeek: persistedConcreteWeekValue,
+      selectedWeek: selectedConcreteWeekValue,
       facilityMissing: facilityMissingValue,
       weekMissing: weekMissingValue,
       facilitySelectionPending: facilitySelectionPendingValue,
       weekSelectionPending: weekSelectionPendingValue,
       canSaveStep1:
         Boolean(selectedFacilityValue && selectedFacilityValue !== persistedFacilityValue) ||
-        Boolean(selectedWeekValue && selectedWeekValue !== persistedWeekValue),
+        Boolean(selectedConcreteWeekValue && selectedConcreteWeekValue !== persistedConcreteWeekValue),
       step1Incomplete:
         facilityMissingValue ||
         weekMissingValue ||
@@ -5535,10 +6187,32 @@ const loadOcrPages = async () => {
     step1Incomplete,
     step1BlockReasons,
   } = step1State;
-  const monthlyMenuMonthId = extractWeekMonthId(selectedWeek || persistedWeek || "");
+  const weekCalendarDraft = calendarDateFromWeekValue(weekDraft);
+  const monthlyMenuMonthId = extractWeekMonthId(
+    weekDraft || order?.persisted_week_value || order?.week_value || order?.week || "",
+  );
   const monthlyMenuHref = monthlyMenuMonthId ? `/menus/${monthlyMenuMonthId}` : "";
   const step1ChoiceRequired = step1CriticalDecisions.length > 0;
   const step2ChoiceRequired = step2CriticalDecisions.length > 0;
+
+  useEffect(() => {
+    setStep2WizardChoice("");
+    setStep2RepairStage("");
+  }, [order?.id]);
+
+  useEffect(() => {
+    if (activeStep === 1 && !step1Incomplete) return;
+    setStep2WizardChoice("");
+    setStep2RepairStage("");
+  }, [activeStep, step1Incomplete]);
+
+  useEffect(() => {
+    if (step2WizardChoice === "no") return;
+    if (step2RepairStage) {
+      setStep2RepairStage("");
+    }
+  }, [step2WizardChoice, step2RepairStage]);
+
   const getStepBlockedReason = (
     index: number,
     state: {
@@ -5604,14 +6278,46 @@ const loadOcrPages = async () => {
     !showNewEvidenceChoice &&
     !rerunInProgressState;
   const showOcrPipelineRerunAction = !step1Incomplete;
-  const ocrApplyBranchEmphasis =
-    !step1Incomplete && !step2ChoiceRequired && ocrHasEditableSheet && effectiveCanApply && !ocrNeedsDraftSave;
-  const ocrRepairBranchEmphasis =
-    !step1Incomplete &&
-    (!ocrHasEditableSheet ||
-      ocrNeedsDraftSave ||
+  const activateStep2RepairStage = (nextStage: Exclude<Step2RepairStage, "">) => {
+    setStep2RepairStage(nextStage);
+    if (nextStage === "merged") {
+      setLlmReparseProvider("gemini");
+      setLlmReparseModelMode("pro");
+      setLlmReparseCustomModel("");
+      setLlmReparsePromptPreset("merged_cell_quantity_spans");
+      return;
+    }
+    if (nextStage === "llm" && llmReparsePromptPreset === "merged_cell_quantity_spans") {
+      setLlmReparsePromptPreset("numeric_verification");
+    }
+  };
+  const step2SuggestedRepairStage: Exclude<Step2RepairStage, ""> = (() => {
+    if (showNewEvidenceChoice || keepingCurrentDraftChoice || step2ChoiceRequired) {
+      return "candidate";
+    }
+    if (
+      mergedCellLlmRecommended &&
+      ocrHasEditableSheet &&
+      !ocrProcessingNow &&
+      !showOcrRecoveryAction &&
+      !ocrHardRecoveryMode
+    ) {
+      return "merged";
+    }
+    if (
       ocrProcessingNow ||
-      Boolean(reviewWarningText || ocrReparseBlockedHint));
+      showOcrRecoveryAction ||
+      ocrHardRecoveryMode ||
+      semanticShellOnly ||
+      !ocrHasEditableSheet ||
+      ocrNeedsDraftSave
+    ) {
+      return "foundation";
+    }
+    return "llm";
+  })();
+  const activeStep2RepairStage: Exclude<Step2RepairStage, ""> =
+    step2RepairStage || step2SuggestedRepairStage;
   const ocrPrimaryActionHint = (() => {
     if (workflowHeadline) return workflowHeadline;
     if (showNewEvidenceChoice) {
@@ -5625,6 +6331,9 @@ const loadOcrPages = async () => {
     }
     if (semanticShellOnly) {
       return "メニュー枠はありますが、数量はまだ信用できません。先にOCRパイプラインを再実行してください";
+    }
+    if (mergedCellLlmRecommended) {
+      return "結合セルの数量がまたがる票です。Gemini Pro で span を推論してからシートを整えてください";
     }
     if (sheetWeeklyMenuMissing) return "先に対象月のメニューを登録してください";
     if (step1Incomplete) return "Step1で施設と週を保存してください";
@@ -5719,6 +6428,59 @@ const loadOcrPages = async () => {
   const highlightApplyAction = ocrHasEditableSheet && !step1Incomplete && effectiveCanApply;
   const canSaveDraftSheet = !step1Incomplete && ocrHasEditableSheet && !ocrHardRecoveryMode && !ocrSheetAutoRetryBlocked;
   const canAttemptApplyOcrSheet = !ocrTableSaving && !step1Incomplete;
+  const currentDraftReadyForWork =
+    ocrHasEditableSheet &&
+    !semanticShellOnly &&
+    !step2ChoiceRequired &&
+    !ocrHardRecoveryMode &&
+    !rerunInProgressState &&
+    (effectiveCanApply || effectiveConfirmBlockers.includes("draft_newer_than_lines"));
+  const staleRawOcrFailureForCurrentDraft =
+    currentDraftReadyForWork &&
+    ["failed", "error", "empty", "stalled"].includes(normalizedOcrStatus);
+  const staleRawOcrStatusMessages = (() => {
+    const messages = new Set<string>();
+    if (rawOcrStatus === "failed" || rawOcrStatus === "error") {
+      messages.add(describeOcrFailure(order?.ocr_error));
+    } else if (rawOcrStatus === "empty") {
+      messages.add(
+        hasUsableOverlayPreview
+          ? "OCR結果の構造化行は空でした。左のPDFプレビューを見ながら右のシートを修正してください。"
+          : "OCR結果が空でした。overlay ではなく原本PDFを見ながら修正してください。",
+      );
+    } else if (rawOcrStatus === "stalled") {
+      messages.add(order?.ocr_error ? `OCRが停止しました: ${order.ocr_error}` : "OCRが停止しました。");
+    }
+    return messages;
+  })();
+  const visibleStep2CriticalBannerMessages = staleRawOcrFailureForCurrentDraft
+    ? step2CriticalBannerMessages.filter((message) => !staleRawOcrStatusMessages.has(message))
+    : step2CriticalBannerMessages;
+  if (staleRawOcrFailureForCurrentDraft) {
+    ocrStatusLabel = showNewEvidenceChoice ? "完了(候補あり)" : "完了";
+    if (showNewEvidenceChoice) {
+      ocrStatusDetail = "現在のシートは利用可能です。新しいOCR候補は別扱いで確認できます。";
+    } else if (keepingCurrentDraftChoice) {
+      ocrStatusDetail = "現在のシートを維持しています。必要ならあとで新しいOCR候補へ切り替えられます。";
+    } else {
+      ocrStatusDetail = "";
+    }
+  }
+  const step2FinishVisible = Boolean(step2WizardChoice);
+  const step2FinishActionNote = (() => {
+    if (step2WizardChoice === "yes") {
+      return workflowCandidateEvidenceRunId
+        ? "現在のシートを維持したまま、保存して明細に反映します。"
+        : "現在のシートを保存して、そのまま明細に反映します。";
+    }
+    if (ocrProcessingNow) {
+      return "再解析中は待機します。完了後にこのボタンで保存して明細へ進みます。";
+    }
+    if (showNewEvidenceChoice) {
+      return "新しいOCR候補を選ぶか、今のシートを維持してからここで明細へ進みます。";
+    }
+    return "どの手段を使っても、最後はここでシートを保存して明細へ反映します。";
+  })();
   const saveSheetButtonClassName = canSaveDraftSheet && highlightApplyAction ? "btn ghost" : "btn";
   const applySheetButtonClassName = canApplyOcrSheet && highlightApplyAction ? "btn primary" : "btn ghost";
   const ocrTechnicalDetails = (() => {
@@ -5756,7 +6518,9 @@ const loadOcrPages = async () => {
   const prevStepLabel = canStepPrev ? orderSteps[activeStepIndex - 1].label : "";
   const isLastStep = activeStepIndex >= stepCount - 1;
   const nextStepButtonLabel = isLastStep
-    ? "注文一覧へ戻る"
+    ? confirmSaving
+      ? "確定中..."
+      : "確定して注文一覧へ戻る"
     : canStepNext
       ? `次へ: ${nextStepLabel}`
       : "次へ";
@@ -5791,7 +6555,7 @@ const loadOcrPages = async () => {
   };
   const goNextStep = async () => {
     if (isLastStep) {
-      await router.push("/orders");
+      await confirmAndReturnToOrders();
       return;
     }
     if (activeStepIndex < stepCount - 1) {
@@ -5873,25 +6637,12 @@ const loadOcrPages = async () => {
               <h2>概要</h2>
               <span className="status-pill">{order.status}</span>
             </header>
-            <div className="summary-grid">
-              <div>
+            <div className="summary-grid summary-grid--compact">
+              <div className="summary-primary-card">
                 <p className="field-label">注文ID</p>
                 <p className="summary-value">{order.id}</p>
               </div>
-              <div>
-                <p className="field-label">Message ID</p>
-                <p className="summary-value">{order.message_id || "不明"}</p>
-              </div>
-              <div>
-                <p className="field-label">対象週</p>
-                <p className="summary-value">
-                  {formatWeekLabel(order.week_value || order.week || "", order.week_label) || "未確定"}{" "}
-                  {extractWeekMonthId(order.week_value || order.week || "")
-                    ? <Link href={`/menus/${extractWeekMonthId(order.week_value || order.week || "")}`}>メニュー編集</Link>
-                    : null}
-                </p>
-              </div>
-              <div>
+              <div className="summary-primary-card">
                 <p className="field-label">解析ステータス</p>
                 <p className="summary-value">
                   {ocrStatusLabel}
@@ -5900,214 +6651,234 @@ const loadOcrPages = async () => {
                 </p>
                 {ocrStatusDetail ? <p className="subtle">{ocrStatusDetail}</p> : null}
               </div>
-              <div>
-                <p className="field-label">作業状態</p>
-                <p className="summary-value">
-                  {workflowStateLabel || "未判定"}
-                </p>
-                {workflowHeadline ? <p className="subtle">{workflowHeadline}</p> : null}
-                {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
-              </div>
             </div>
-            {workflowHeadline || workflowStateLabel ? (
-              <div className="workflow-summary-card">
-                <div>
-                  <p className="field-label">作業状態</p>
-                  <p className="workflow-summary-title">
-                    {workflowHeadline || workflowStateLabel || "状態を確認してください"}
-                  </p>
-                  {workflowStateLabel && workflowHeadline && workflowStateLabel !== workflowHeadline ? (
-                    <p className="subtle">状態: {workflowStateLabel}</p>
-                  ) : null}
-                  {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+            <details className="summary-details">
+              <summary>詳細と内部情報を表示</summary>
+              <div className="summary-details-grid">
+                <div className="summary-detail-list">
+                  <div>
+                    <p className="field-label">Message ID</p>
+                    <p className="summary-value">{order.message_id || "不明"}</p>
+                  </div>
+                  <div>
+                    <p className="field-label">対象週</p>
+                    <p className="summary-value">
+                      {formatWeekLabel(order.week_value || order.week || "", order.week_label) || "未確定"}{" "}
+                      {extractWeekMonthId(order.week_value || order.week || "")
+                        ? <Link href={`/menus/${extractWeekMonthId(order.week_value || order.week || "")}`}>メニュー編集</Link>
+                        : null}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="field-label">作業状態</p>
+                    <p className="summary-value">{workflowStateLabel || "未判定"}</p>
+                    {workflowHeadline ? <p className="subtle">{workflowHeadline}</p> : null}
+                    {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+                  </div>
                 </div>
-                {order?.workflow_state?.primary_action ? (
-                  <span className="ocr-review-pill ocr-review-pill--state">
-                    {describeWorkflowPrimaryAction(order.workflow_state.primary_action)}
-                  </span>
-                ) : workflowStateLabel ? (
-                  <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
+                {workflowHeadline || workflowStateLabel ? (
+                  <div className="workflow-summary-card">
+                    <div>
+                      <p className="field-label">作業状態</p>
+                      <p className="workflow-summary-title">
+                        {workflowHeadline || workflowStateLabel || "状態を確認してください"}
+                      </p>
+                      {workflowStateLabel && workflowHeadline && workflowStateLabel !== workflowHeadline ? (
+                        <p className="subtle">状態: {workflowStateLabel}</p>
+                      ) : null}
+                      {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+                    </div>
+                    {order?.workflow_state?.primary_action ? (
+                      <span className="ocr-review-pill ocr-review-pill--state">
+                        {describeWorkflowPrimaryAction(order.workflow_state.primary_action)}
+                      </span>
+                    ) : workflowStateLabel ? (
+                      <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
-            ) : null}
-            <details className="prompt-panel">
-              <summary>生OCR（最新）</summary>
-              <div className="raw-actions">
-                <button className="btn ghost" type="button" onClick={loadOcrRaw} disabled={ocrRawLoading}>
-                  {ocrRawLoading ? "取得中..." : "生OCRを取得"}
-                </button>
-                {ocrRawMessage ? <span className="raw-message">{ocrRawMessage}</span> : null}
-              </div>
-              {ocrRawText ? <pre className="raw-output">{ocrRawText}</pre> : null}
-            </details>
-            <details className="prompt-panel">
-              <summary>OCR結果（失敗セル）</summary>
-              {ocrOutputMessage ? <p className="subtle">{ocrOutputMessage}</p> : null}
-              {ocrOutput ? (
-                <div className="raw-output">
-                  <p>
-                    ステータス: {ocrOutput.status || "不明"}
-                    {ocrOutput.stage ? ` / ステージ: ${ocrOutput.stage}` : ""}
-                    {" / "}テンプレート:{" "}
-                    {ocrOutput.template_id || "未分類"}
-                  </p>
-                  {ocrOutput.ocr_source ? <p>反映ソース: {ocrOutput.ocr_source}</p> : null}
-                  {ocrOutput.edited_table?.edited_at ? (
-                    <p>
-                      最終編集: {formatTimestamp(ocrOutput.edited_table.edited_at)} / UI:{" "}
-                      {ocrOutput.edited_table.ui_mode || "-"}
-                    </p>
-                  ) : null}
-                  {ocrOutput.warnings?.length ? (
-                    <p>警告: {ocrOutput.warnings.join(" / ")}</p>
-                  ) : null}
-                  {ocrOutput.failed_cells?.length ? (
-                    <ul className="failed-list">
-                      {ocrOutput.failed_cells.map((cell, idx) => (
-                        <li key={`${cell.row}-${cell.col}-${idx}`}>
-                          {cell.row || "-"} / {cell.col || "-"} {cell.reason ? `(${cell.reason})` : ""}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p>失敗セルなし</p>
-                  )}
-                  <div className="reparse-debug-panel">
-                    <p className="subtle">再解析デバッグ</p>
-                    {reparseDebug ? (
-                      <>
+              <div className="summary-details-stack">
+                <details className="prompt-panel">
+                  <summary>生OCR（最新）</summary>
+                  <div className="raw-actions">
+                    <button className="btn ghost" type="button" onClick={loadOcrRaw} disabled={ocrRawLoading}>
+                      {ocrRawLoading ? "取得中..." : "生OCRを取得"}
+                    </button>
+                    {ocrRawMessage ? <span className="raw-message">{ocrRawMessage}</span> : null}
+                  </div>
+                  {ocrRawText ? <pre className="raw-output">{ocrRawText}</pre> : null}
+                </details>
+                <details className="prompt-panel">
+                  <summary>OCR結果（失敗セル）</summary>
+                  {ocrOutputMessage ? <p className="subtle">{ocrOutputMessage}</p> : null}
+                  {ocrOutput ? (
+                    <div className="raw-output">
                       <p>
-                        Provider: {reparseDebug.provider || "-"}
-                        {reparseDebug.requested_provider
-                          ? ` / requested=${reparseDebug.requested_provider}`
-                          : ""}
+                        ステータス: {ocrOutput.status || "不明"}
+                        {ocrOutput.stage ? ` / ステージ: ${ocrOutput.stage}` : ""}
+                        {" / "}テンプレート:{" "}
+                        {ocrOutput.template_id || "未分類"}
                       </p>
-                      <p>
-                        行数: OCR {reparseDebug.row_count ?? "-"} / 明細 {reparseDebug.line_count ?? "-"} /{" "}
-                        変更:{" "}
-                        {typeof reparseDebug.changed === "boolean"
-                          ? reparseDebug.changed
-                            ? "あり"
-                            : "なし"
-                          : "-"}
-                      </p>
-                      <p>
-                        件数: {reparseDebug.before_count ?? "-"}→{reparseDebug.after_count ?? "-"} /{" "}
-                        LLM補完:{" "}
-                        {typeof reparseDebug.llm_assist === "boolean"
-                          ? reparseDebug.llm_assist
-                            ? "ON"
-                            : "OFF"
-                          : "-"}
-                      </p>
-                      {reparseDebug.updated_at ? (
-                        <p>更新: {formatTimestamp(reparseDebug.updated_at)}</p>
-                      ) : null}
-                      {reparseDebug.error ? <p>エラー: {reparseDebug.error}</p> : null}
-                      {Array.isArray(reparseDebug.reject_reasons) && reparseDebug.reject_reasons.length ? (
-                        <p>拒否理由: {reparseDebug.reject_reasons.join(" / ")}</p>
-                      ) : null}
-                      {Array.isArray(reparseDebug.warning_reasons) && reparseDebug.warning_reasons.length ? (
+                      {ocrOutput.ocr_source ? <p>反映ソース: {ocrOutput.ocr_source}</p> : null}
+                      {ocrOutput.edited_table?.edited_at ? (
                         <p>
-                          警告理由:{" "}
-                          {reparseDebug.warning_reasons
-                            .map((code) => describeReparseWarningReason(String(code || "")))
-                            .filter(Boolean)
-                            .join(" / ")}
+                          最終編集: {formatTimestamp(ocrOutput.edited_table.edited_at)} / UI:{" "}
+                          {ocrOutput.edited_table.ui_mode || "-"}
                         </p>
                       ) : null}
-                      {Array.isArray(reparseDebug.date_strings) && reparseDebug.date_strings.length ? (
-                        <p>日付候補: {reparseDebug.date_strings.join(", ")}</p>
+                      {ocrOutput.warnings?.length ? (
+                        <p>警告: {ocrOutput.warnings.join(" / ")}</p>
                       ) : null}
-                      {typeof reparseDebug.request_prompt === "string" && reparseDebug.request_prompt ? (
+                      {ocrOutput.failed_cells?.length ? (
+                        <ul className="failed-list">
+                          {ocrOutput.failed_cells.map((cell, idx) => (
+                            <li key={`${cell.row}-${cell.col}-${idx}`}>
+                              {cell.row || "-"} / {cell.col || "-"} {cell.reason ? `(${cell.reason})` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p>失敗セルなし</p>
+                      )}
+                      <div className="reparse-debug-panel">
+                        <p className="subtle">再解析デバッグ</p>
+                        {reparseDebug ? (
+                          <>
+                          <p>
+                            Provider: {reparseDebug.provider || "-"}
+                            {reparseDebug.requested_provider
+                              ? ` / requested=${reparseDebug.requested_provider}`
+                              : ""}
+                          </p>
+                          <p>
+                            行数: OCR {reparseDebug.row_count ?? "-"} / 明細 {reparseDebug.line_count ?? "-"} /{" "}
+                            変更:{" "}
+                            {typeof reparseDebug.changed === "boolean"
+                              ? reparseDebug.changed
+                                ? "あり"
+                                : "なし"
+                              : "-"}
+                          </p>
+                          <p>
+                            件数: {reparseDebug.before_count ?? "-"}→{reparseDebug.after_count ?? "-"} /{" "}
+                            LLM補完:{" "}
+                            {typeof reparseDebug.llm_assist === "boolean"
+                              ? reparseDebug.llm_assist
+                                ? "ON"
+                                : "OFF"
+                              : "-"}
+                          </p>
+                          {reparseDebug.updated_at ? (
+                            <p>更新: {formatTimestamp(reparseDebug.updated_at)}</p>
+                          ) : null}
+                          {reparseDebug.error ? <p>エラー: {reparseDebug.error}</p> : null}
+                          {Array.isArray(reparseDebug.reject_reasons) && reparseDebug.reject_reasons.length ? (
+                            <p>拒否理由: {reparseDebug.reject_reasons.join(" / ")}</p>
+                          ) : null}
+                          {Array.isArray(reparseDebug.warning_reasons) && reparseDebug.warning_reasons.length ? (
+                            <p>
+                              警告理由:{" "}
+                              {reparseDebug.warning_reasons
+                                .map((code) => describeReparseWarningReason(String(code || "")))
+                                .filter(Boolean)
+                                .join(" / ")}
+                            </p>
+                          ) : null}
+                          {Array.isArray(reparseDebug.date_strings) && reparseDebug.date_strings.length ? (
+                            <p>日付候補: {reparseDebug.date_strings.join(", ")}</p>
+                          ) : null}
+                          {typeof reparseDebug.request_prompt === "string" && reparseDebug.request_prompt ? (
+                            <>
+                              <p className="subtle">送信プロンプト</p>
+                              <pre className="raw-output">{reparseDebug.request_prompt}</pre>
+                            </>
+                          ) : null}
+                          {Array.isArray(reparseDebug.sample_rows) && reparseDebug.sample_rows.length ? (
+                            <>
+                              <p className="subtle">OCR行サンプル</p>
+                              <pre className="raw-output">{reparseDebug.sample_rows.map((row) => row.join(" | ")).join("\n")}</pre>
+                            </>
+                          ) : null}
+                          {reparseNormalizedLinesText ? (
+                            <>
+                              <p className="subtle">正規化後行（保存前）</p>
+                              <pre className="raw-output">{reparseNormalizedLinesText}</pre>
+                            </>
+                          ) : null}
+                          {typeof reparseDebug.raw_text === "string" && reparseDebug.raw_text ? (
+                            <>
+                              <p className="subtle">LLM生出力</p>
+                              <pre className="raw-output">{reparseDebug.raw_text}</pre>
+                            </>
+                          ) : null}
+                          {reparseValidationDetailText ? (
+                            <>
+                              <p className="subtle">検証詳細</p>
+                              <pre className="raw-output">{reparseValidationDetailText}</pre>
+                            </>
+                          ) : null}
+                          {reparseWarningDetailText ? (
+                            <>
+                              <p className="subtle">警告詳細</p>
+                              <pre className="raw-output">{reparseWarningDetailText}</pre>
+                            </>
+                          ) : null}
+                          {reparseQuantityMergeText ? (
+                            <>
+                              <p className="subtle">数量専用マージ統計</p>
+                              <pre className="raw-output">{reparseQuantityMergeText}</pre>
+                            </>
+                          ) : null}
+                          {reparseProviderDebugText ? (
+                            <>
+                              <p className="subtle">LLMメタ情報</p>
+                              <pre className="raw-output">{reparseProviderDebugText}</pre>
+                            </>
+                          ) : null}
+                          </>
+                        ) : (
+                          <p>まだ再解析デバッグ情報がありません。LLM補完再解析を実行すると表示されます。</p>
+                        )}
+                      </div>
+                      {typeof ocrOutput.table_raw === "string" && ocrOutput.table_raw ? (
                         <>
-                          <p className="subtle">送信プロンプト</p>
-                          <pre className="raw-output">{reparseDebug.request_prompt}</pre>
+                          <p className="subtle">OCR生出力</p>
+                          <pre className="raw-output">{ocrOutput.table_raw}</pre>
                         </>
                       ) : null}
-                      {Array.isArray(reparseDebug.sample_rows) && reparseDebug.sample_rows.length ? (
-                        <>
-                          <p className="subtle">OCR行サンプル</p>
-                          <pre className="raw-output">{reparseDebug.sample_rows.map((row) => row.join(" | ")).join("\n")}</pre>
-                        </>
-                      ) : null}
-                      {reparseNormalizedLinesText ? (
-                        <>
-                          <p className="subtle">正規化後行（保存前）</p>
-                          <pre className="raw-output">{reparseNormalizedLinesText}</pre>
-                        </>
-                      ) : null}
-                      {typeof reparseDebug.raw_text === "string" && reparseDebug.raw_text ? (
-                        <>
-                          <p className="subtle">LLM生出力</p>
-                          <pre className="raw-output">{reparseDebug.raw_text}</pre>
-                        </>
-                      ) : null}
-                      {reparseValidationDetailText ? (
-                        <>
-                          <p className="subtle">検証詳細</p>
-                          <pre className="raw-output">{reparseValidationDetailText}</pre>
-                        </>
-                      ) : null}
-                      {reparseWarningDetailText ? (
-                        <>
-                          <p className="subtle">警告詳細</p>
-                          <pre className="raw-output">{reparseWarningDetailText}</pre>
-                        </>
-                      ) : null}
-                      {reparseQuantityMergeText ? (
-                        <>
-                          <p className="subtle">数量専用マージ統計</p>
-                          <pre className="raw-output">{reparseQuantityMergeText}</pre>
-                        </>
-                      ) : null}
-                      {reparseProviderDebugText ? (
-                        <>
-                          <p className="subtle">LLMメタ情報</p>
-                          <pre className="raw-output">{reparseProviderDebugText}</pre>
-                        </>
-                      ) : null}
-                      </>
-                    ) : (
-                      <p>まだ再解析デバッグ情報がありません。LLM補完再解析を実行すると表示されます。</p>
-                    )}
-                  </div>
-                  {typeof ocrOutput.table_raw === "string" && ocrOutput.table_raw ? (
-                    <>
-                      <p className="subtle">OCR生出力</p>
-                      <pre className="raw-output">{ocrOutput.table_raw}</pre>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-            </details>
-            <details className="prompt-panel">
-              <summary>注文操作履歴</summary>
-              <div className="raw-actions">
-                <button
-                  className="btn ghost"
-                  type="button"
-                  onClick={() => loadOrderHistory()}
-                  disabled={orderHistoryLoading}
-                >
-                  {orderHistoryLoading ? "取得中..." : "履歴を更新"}
-                </button>
-                {orderHistoryMessage ? <span className="raw-message">{orderHistoryMessage}</span> : null}
-              </div>
-              {orderHistoryRows.length ? (
-                <div className="order-history-list">
-                  {orderHistoryRows.slice(0, 30).map((item, idx) => (
-                    <div className="order-history-row" key={`order-history-${item.id || idx}`}>
-                      <span>{formatTimestamp(item.created_at)}</span>
-                      <span>{formatOrderAction(item.action)}</span>
-                      <span>{item.actor || "-"}</span>
-                      <span>{item.target || "-"}</span>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="subtle">履歴はまだありません。</p>
-              )}
+                  ) : null}
+                </details>
+                <details className="prompt-panel">
+                  <summary>注文操作履歴</summary>
+                  <div className="raw-actions">
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() => loadOrderHistory()}
+                      disabled={orderHistoryLoading}
+                    >
+                      {orderHistoryLoading ? "取得中..." : "履歴を更新"}
+                    </button>
+                    {orderHistoryMessage ? <span className="raw-message">{orderHistoryMessage}</span> : null}
+                  </div>
+                  {orderHistoryRows.length ? (
+                    <div className="order-history-list">
+                      {orderHistoryRows.slice(0, 30).map((item, idx) => (
+                        <div className="order-history-row" key={`order-history-${item.id || idx}`}>
+                          <span>{formatTimestamp(item.created_at)}</span>
+                          <span>{formatOrderAction(item.action)}</span>
+                          <span>{item.actor || "-"}</span>
+                          <span>{item.target || "-"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="subtle">履歴はまだありません。</p>
+                  )}
+                </details>
+              </div>
             </details>
             {actionMessage && <p className="message">{actionMessage}</p>}
           </section>
@@ -6167,12 +6938,16 @@ const loadOcrPages = async () => {
             <section className="panel">
               <header className="panel-header">
                 <div>
-                  <h2>注文書 (FAX PDF)</h2>
-                  <p className="subtle">原本PDFを確認し、施設と週設定を完了してください。</p>
+                  <h2>{showingArtifactPdf ? artifactPdfLabel : "注文書 (FAX PDF)"}</h2>
+                  <p className="subtle">
+                    {showingArtifactPdf
+                      ? "原本FAX PDFが見つからないため、OCR処理由来のPDFを表示しています。施設と週設定の確認用として扱ってください。"
+                      : "原本PDFを確認し、施設と週設定を完了してください。"}
+                  </p>
                 </div>
                 {pdfUrl ? (
                   <a href={pdfUrl} target="_blank" rel="noreferrer" className="ghost-link">
-                    原本を開く
+                    {showingArtifactPdf ? `${artifactPdfLabel}を開く` : "原本を開く"}
                   </a>
                 ) : (
                   <span className="subtle">{pdfError || "PDFを読み込み中..."}</span>
@@ -6214,7 +6989,7 @@ const loadOcrPages = async () => {
                         disabled={weekOptionsLoading}
                       >
                         <option value="">週を選択</option>
-                        {weekDraft && !weekOptions.some((option) => option.week_id === weekDraft) ? (
+                        {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
                           <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
                         ) : null}
                         {weekOptions.map((option) => (
@@ -6224,12 +6999,18 @@ const loadOcrPages = async () => {
                         ))}
                       </select>
                     ) : (
-                      <input
-                        className="input"
-                        type="month"
-                        value={weekDraft}
-                        onChange={(e) => setWeekDraft(e.target.value)}
-                      />
+                      <>
+                        <input
+                          className="input"
+                          type="date"
+                          value={weekCalendarDraft}
+                          onChange={(e) => setWeekDraft(deriveWeekValueFromCalendarDate(e.target.value))}
+                        />
+                        <span className="subtle">
+                          候補週がまだ無いため、日付を選ぶとその日を含む週で設定します。
+                        </span>
+                        {weekDraft ? <span className="subtle">設定予定: {formatWeekLabel(weekDraft) || weekDraft}</span> : null}
+                      </>
                     )}
                     {weekOptionsError ? (
                       <span className="subtle">{weekOptionsError}</span>
@@ -6238,7 +7019,7 @@ const loadOcrPages = async () => {
                     ) : weekOptions.length ? (
                       <span className="subtle">メニュー期間から選択できます。</span>
                     ) : (
-                      <span className="subtle">候補がないため YYYY-MM を手入力してください。</span>
+                      <span className="subtle">候補がないため、カレンダーから週を選択できます。</span>
                     )}
                   </label>
                   <button className="btn" onClick={updateStep1} disabled={!canSaveStep1}>
@@ -6346,7 +7127,7 @@ const loadOcrPages = async () => {
                       </div>
                     </div>
                   ) : null}
-                  {step2CriticalBannerMessages.length ? (
+                  {visibleStep2CriticalBannerMessages.length ? (
                     <div className="critical-alert">
                       <p className="critical-alert-title">
                         {shouldFallbackToRawPdfPreview
@@ -6356,7 +7137,7 @@ const loadOcrPages = async () => {
                             : "OCR結果に注意が必要です。"}
                       </p>
                       <ul className="critical-alert-list">
-                        {step2CriticalBannerMessages.map((message, idx) => (
+                        {visibleStep2CriticalBannerMessages.map((message, idx) => (
                           <li key={`step2-critical-${idx}`}>{message}</li>
                         ))}
                       </ul>
@@ -6438,7 +7219,7 @@ const loadOcrPages = async () => {
                               </div>
                             </div>
                             <div className="ocr-flow-divider" />
-                            <div className={`ocr-flow-step ${ocrNeedsDraftSave || ocrApplyBranchEmphasis ? "active" : ""}`}>
+                            <div className={`ocr-flow-step ${ocrNeedsDraftSave || step2WizardChoice === "yes" || canApplyOcrSheet ? "active" : ""}`}>
                               <span className="ocr-flow-step-index">2</span>
                               <div>
                                 <p className="ocr-flow-step-title">数字は正しい？</p>
@@ -6448,262 +7229,413 @@ const loadOcrPages = async () => {
                               </div>
                             </div>
                           </div>
-                          <div className="ocr-flow-branches">
-                            <section className={`ocr-flow-branch ${ocrApplyBranchEmphasis ? "is-primary" : ""}`}>
-                              <p className="ocr-flow-branch-label">はい / 修正済み</p>
-                              <h4>明細に反映して次へ進む</h4>
-                              <p className="subtle">
-                                {ocrNeedsDraftApply
-                                  ? "保存済みの下書きがまだ明細に反映されていません。問題なければ反映します。"
-                                  : "右のシート内容が正しければ、そのまま明細へ反映します。"}
-                              </p>
-                              <button
-                                className={applySheetButtonClassName}
-                                onClick={applyOcrAndMoveToDetails}
-                                disabled={!canAttemptApplyOcrSheet}
-                              >
-                                {ocrTableSaving ? "反映中..." : "明細に反映して次へ"}
-                              </button>
-                            </section>
-                            <section
-                              className={`ocr-flow-branch ${ocrRepairBranchEmphasis ? "is-primary" : ""} ${ocrProcessingNow ? "is-processing" : ""}`}
-                            >
-                              <p className="ocr-flow-branch-label">いいえ / 迷う</p>
-                              <h4>基盤を整えてから、必要なら候補選択とLLM補完へ進む</h4>
-                              <p className="subtle">
-                                {ocrProcessingNow
-                                  ? describeReparseProgressMessage(effectiveProcessingStage, {
-                                      llmAssist: true,
-                                      providerLabel: llmReparseProvider,
-                                    }) || "いま再解析中です。完了後にもう一度シートを確認してください。"
-                                  : "先にシートを保存して下書きを残し、必要な時だけ再解析を使います。"}
-                              </p>
-                              {ocrProcessingNow ? (
-                                <div className="ocr-processing-banner">
-                                  <strong>いまは OCR パイプラインの完了待ちです。</strong>
-                                  <span>完了までは「シートを保存（暫定）」以外の操作は不要です。</span>
-                                </div>
-                              ) : null}
-                              <div className={`ocr-remediation-groups ${ocrProcessingNow ? "is-processing" : ""}`}>
-                                <section className="ocr-remediation-group">
-                                  <p className="ocr-remediation-group-label">基盤</p>
-                                  <h5>作業土台を整える</h5>
+                          <div className={`ocr-flow-branches ocr-flow-branches--wizard ${step2WizardChoice === "no" ? "has-repair-panel" : ""}`}>
+                            <div className="ocr-flow-rail">
+                              <div className="ocr-flow-question-card">
+                                <div>
+                                  <p className="ocr-flow-branch-label">選択 1</p>
+                                  <h4>数字は正しい？</h4>
                                   <p className="subtle">
-                                    {ocrProcessingNow
-                                      ? "現在のシートを残しつつ OCR 基盤を更新しています。完了後に次の候補確認へ進みます。"
-                                      : "数量が怪しい時も、まずは現在のシートを残しつつ OCR 基盤を更新します。"}
+                                    左のプレビューを見ながら、右のシートの数量が合っているかだけを決めます。
                                   </p>
+                                </div>
+                                <div className="ocr-flow-choice-grid">
+                                  <button
+                                    className={`ocr-flow-choice-button ${step2WizardChoice === "yes" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => {
+                                      if (workflowCandidateEvidenceRunId) {
+                                        setKeptCurrentCandidateEvidenceId(workflowCandidateEvidenceRunId);
+                                      }
+                                      setStep2WizardChoice("yes");
+                                      setStep2RepairStage("");
+                                      if (workflowCandidateEvidenceRunId) {
+                                        setActionMessage("現在のシートを維持して進みます。必要ならあとで新しいOCR候補へ切り替えられます。");
+                                      }
+                                    }}
+                                  >
+                                    <span className="ocr-flow-choice-title">はい / 修正済み</span>
+                                    <span className="ocr-flow-choice-note">
+                                      {workflowCandidateEvidenceRunId ? "今のシートを維持して進む" : "そのまま明細へ反映する"}
+                                    </span>
+                                  </button>
+                                  <button
+                                    className={`ocr-flow-choice-button ${step2WizardChoice === "no" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => {
+                                      setStep2WizardChoice("no");
+                                      activateStep2RepairStage(step2SuggestedRepairStage);
+                                    }}
+                                  >
+                                    <span className="ocr-flow-choice-title">いいえ / 迷う</span>
+                                    <span className="ocr-flow-choice-note">次の手段を選んで整える</span>
+                                  </button>
+                                </div>
+                              </div>
+                              {step2FinishVisible ? (
+                                <section className="ocr-flow-finish-card">
+                                  <div className="ocr-flow-finish-copy">
+                                    <p className="ocr-flow-branch-label">修正完了</p>
+                                    <h4>保存して明細に反映</h4>
+                                    <p className="subtle">{step2FinishActionNote}</p>
+                                  </div>
                                   <div className="ocr-flow-branch-actions">
                                     <button
-                                      className={saveSheetButtonClassName}
+                                      className={applySheetButtonClassName}
                                       type="button"
-                                      onClick={saveOcrSheetExact}
-                                      disabled={ocrTableSaving || !canSaveDraftSheet}
+                                      onClick={() => void completeStep2AndMoveToDetails()}
+                                      disabled={!canAttemptApplyOcrSheet || !ocrHasEditableSheet || ocrProcessingNow}
                                     >
-                                      {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
+                                      {ocrTableSaving ? "保存中..." : "修正完了 / 保存して明細に反映"}
                                     </button>
-                                    {showOcrPipelineRerunAction ? (
-                                      <button
-                                        className={semanticShellOnly || showNewEvidenceChoice ? "btn primary" : "btn ghost"}
-                                        type="button"
-                                        onClick={() => void rerunOcrPipeline()}
-                                        disabled={reparsePending || rerunInProgressState || step1Incomplete || ocrRecoverPending}
-                                      >
-                                        {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
-                                      </button>
-                                    ) : null}
-                                    {showOcrRecoveryAction || ocrHardRecoveryMode || semanticShellOnly ? (
-                                      <button
-                                        className="btn"
-                                        type="button"
-                                        onClick={() => void recoverOcrFoundation()}
-                                        disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
-                                      >
-                                        {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
-                                      </button>
-                                    ) : null}
+                                    <button
+                                      className="btn ghost"
+                                      type="button"
+                                      onClick={() => setStep2WizardChoice("")}
+                                    >
+                                      選び直す
+                                    </button>
                                   </div>
                                 </section>
-                                <section className="ocr-remediation-group">
-                                  <p className="ocr-remediation-group-label">候補</p>
-                                  <h5>OCR候補や解釈候補を決める</h5>
-                                  <p className="subtle">
-                                    {ocrProcessingNow
-                                      ? "完了後に新しい OCR 候補や解釈候補があれば、ここにまとまって表示されます。"
-                                      : "新しい OCR 候補や複数候補がある時だけ、ここで選んでから修正を続けます。"}
-                                  </p>
-                                  {showNewEvidenceChoice ? (
-                                    <div className="ocr-evidence-switch-card">
-                                      <p className="ocr-evidence-switch-title">新しいOCR候補があります</p>
-                                      <p className="subtle">
-                                        現在のシートは維持したままです。切り替えると、最新の OCR 結果から下書きを作り直します。
-                                      </p>
-                                      <div className="ocr-flow-branch-actions">
-                                        <button
-                                          className="btn primary"
-                                          type="button"
-                                          onClick={() => void switchDraftToLatestEvidence()}
-                                          disabled={switchEvidencePending || reparsePending || rerunInProgressState || ocrRecoverPending}
-                                        >
-                                          {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
-                                        </button>
-                                        <button
-                                          className="btn ghost"
-                                          type="button"
-                                          onClick={keepCurrentDraft}
-                                          disabled={switchEvidencePending}
-                                        >
-                                          今のシートを維持
-                                        </button>
-                                      </div>
-                                    </div>
-                                  ) : keepingCurrentDraftChoice ? (
-                                    <div className="ocr-evidence-switch-card ocr-evidence-switch-card--muted">
-                                      <p className="ocr-evidence-switch-title">現在のシートを維持中です</p>
-                                      <p className="subtle">
-                                        新しい OCR 候補は保持しています。必要になったら切り替えを再度選べます。
-                                      </p>
-                                    </div>
-                                  ) : null}
-                                  {renderCriticalDecisionPanel(step2CriticalDecisions, {
-                                    title: "OCR修正前に候補を確定",
-                                    note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
-                                  }) || (
-                                    <p className="subtle ocr-remediation-empty">
+                              ) : null}
+                            </div>
+                            {step2WizardChoice === "no" ? (
+                              <section className={`ocr-flow-panel ocr-flow-panel--repair ${ocrProcessingNow ? "is-processing" : ""}`}>
+                                <div className="ocr-flow-panel-header">
+                                  <div>
+                                    <p className="ocr-flow-branch-label">選択 2</p>
+                                    <h4>どう直す？</h4>
+                                    <p className="subtle">
                                       {ocrProcessingNow
-                                        ? "完了後に候補が必要なら、ここに選択肢が表示されます。"
-                                        : "現在、追加で選ぶ OCR 候補はありません。"}
+                                        ? describeReparseProgressMessage(effectiveProcessingStage, {
+                                            llmAssist: true,
+                                            providerLabel: llmReparseProvider,
+                                          }) || "いま再解析中です。完了後にもう一度シートを確認してください。"
+                                        : "必要な手段だけを1つずつ選んで進めます。"}
                                     </p>
-                                  )}
-                                </section>
-                                <section className="ocr-remediation-group ocr-remediation-group--llm">
-                                  <p className="ocr-remediation-group-label">LLM</p>
-                                  <h5>どう補完するかを選ぶ</h5>
-                                  <p className="subtle">
-                                    {ocrProcessingNow
-                                      ? "OCR 完了後にだけ使います。完了したら、どの補完方針で見るかをここで選べます。"
-                                      : "基盤や候補が固まってから、必要な時だけ LLM 補完再解析を使います。"}
-                                  </p>
-                                  <div className="ocr-flow-branch-actions">
-                                    <select
-                                      className="input llm-model-select"
-                                      value={llmReparsePromptPreset}
-                                      onChange={(event) =>
-                                        setLlmReparsePromptPreset(
-                                          event.target.value as
-                                            | "numeric_verification"
-                                            | "column_missing"
-                                            | "row_alignment"
-                                            | "special_diet_semantics"
-                                            | "freeform",
-                                        )
-                                      }
-                                      disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                  </div>
+                                  <button
+                                    className="btn ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setStep2WizardChoice("");
+                                      setStep2RepairStage("");
+                                    }}
+                                  >
+                                    戻る
+                                  </button>
+                                </div>
+                                {ocrProcessingNow ? (
+                                  <div className="ocr-processing-banner">
+                                    <strong>いまは OCR パイプラインの完了待ちです。</strong>
+                                    <span>完了までは「シートを保存（暫定）」以外の操作は不要です。</span>
+                                  </div>
+                                ) : null}
+                                <div className="ocr-flow-subchoices">
+                                  <button
+                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "foundation" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => activateStep2RepairStage("foundation")}
+                                  >
+                                    OCRを立て直す
+                                  </button>
+                                  <button
+                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "candidate" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => activateStep2RepairStage("candidate")}
+                                  >
+                                    新しい結果を選ぶ
+                                  </button>
+                                  {mergedCellLlmRecommended && ocrHasEditableSheet ? (
+                                    <button
+                                      className={`ocr-flow-subchoice ${activeStep2RepairStage === "merged" ? "active" : ""}`}
+                                      type="button"
+                                      onClick={() => activateStep2RepairStage("merged")}
                                     >
-                                      <option value="numeric_verification">数字検証優先</option>
-                                      <option value="column_missing">列欠損・見切れ補完</option>
-                                      <option value="row_alignment">行ずれ・区分ずれ補正</option>
-                                      <option value="special_diet_semantics">特殊食・禁食優先</option>
-                                      <option value="freeform">自由入力中心</option>
-                                    </select>
-                                    <select
-                                      className="input llm-provider-select"
-                                      value={llmReparseProvider}
-                                      onChange={(event) => {
-                                        const nextProvider = event.target.value;
-                                        setLlmReparseProvider(nextProvider);
-                                        if (nextProvider !== "gemini") {
-                                          setLlmReparseModelMode("flash");
-                                          setLlmReparseCustomModel("");
+                                      結合セルをAIで読む
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "llm" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => activateStep2RepairStage("llm")}
+                                  >
+                                    AIに任せる
+                                  </button>
+                                </div>
+                                {activeStep2RepairStage === "foundation" ? (
+                                  <section className="ocr-remediation-group">
+                                    <p className="ocr-remediation-group-label">基盤</p>
+                                    <h5>OCRを立て直す</h5>
+                                    <p className="subtle">
+                                      {ocrProcessingNow
+                                        ? "現在のシートを残しつつ OCR を立て直しています。完了後に次の結果確認へ進みます。"
+                                        : "数量が怪しい時は、まず現在のシートを残しつつ OCR を立て直します。"}
+                                    </p>
+                                    <div className="ocr-flow-branch-actions">
+                                      <button
+                                        className={saveSheetButtonClassName}
+                                        type="button"
+                                        onClick={saveOcrSheetExact}
+                                        disabled={ocrTableSaving || !canSaveDraftSheet}
+                                      >
+                                        {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
+                                      </button>
+                                      {showOcrPipelineRerunAction ? (
+                                        <button
+                                          className={semanticShellOnly || showNewEvidenceChoice ? "btn primary" : "btn ghost"}
+                                          type="button"
+                                          onClick={() => void rerunOcrPipeline()}
+                                          disabled={reparsePending || rerunInProgressState || step1Incomplete || ocrRecoverPending}
+                                        >
+                                          {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
+                                        </button>
+                                      ) : null}
+                                      {showOcrRecoveryAction || ocrHardRecoveryMode || semanticShellOnly ? (
+                                        <button
+                                          className="btn"
+                                          type="button"
+                                          onClick={() => void recoverOcrFoundation()}
+                                          disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
+                                        >
+                                          {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
+                                        </button>
+                                      ) : null}
+                                      <button
+                                        className="btn ghost"
+                                        type="button"
+                                        onClick={() => void forceWeeklyMenuOverwrite()}
+                                        disabled={
+                                          forcedSheetRecoveryPending !== ""
+                                          || reparsePending
+                                          || rerunInProgressState
+                                          || step1Incomplete
+                                          || ocrRecoverPending
+                                          || ocrProcessingNow
                                         }
-                                      }}
-                                      disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
-                                    >
-                                      <option value="openai">OpenAI</option>
-                                      <option value="gemini">Gemini</option>
-                                    </select>
-                                    {llmReparseProvider === "gemini" ? (
+                                      >
+                                        {forcedSheetRecoveryPending === "weekly"
+                                          ? "週次で復元中..."
+                                          : "週次メニューで日付・区分・メニューを強制復元"}
+                                      </button>
+                                      <button
+                                        className="btn ghost"
+                                        type="button"
+                                        onClick={() => void forceFacilitySchemaOverwrite()}
+                                        disabled={
+                                          forcedSheetRecoveryPending !== ""
+                                          || reparsePending
+                                          || rerunInProgressState
+                                          || step1Incomplete
+                                          || ocrRecoverPending
+                                          || ocrProcessingNow
+                                        }
+                                      >
+                                        {forcedSheetRecoveryPending === "facility"
+                                          ? "施設設定で復元中..."
+                                          : "施設設定の列構成で強制復元（数量は空白）"}
+                                      </button>
+                                    </div>
+                                  </section>
+                                ) : null}
+                                {activeStep2RepairStage === "candidate" ? (
+                                  <section className="ocr-remediation-group">
+                                    <p className="ocr-remediation-group-label">候補</p>
+                                    <h5>新しい結果を選ぶ</h5>
+                                    <p className="subtle">
+                                      {ocrProcessingNow
+                                        ? "完了後に新しい OCR 結果や解釈候補があれば、ここに表示されます。"
+                                        : "新しい OCR 結果や複数候補がある時だけ、ここで選んでから修正を続けます。"}
+                                    </p>
+                                    {showNewEvidenceChoice ? (
+                                      <div className="ocr-evidence-switch-card">
+                                        <p className="ocr-evidence-switch-title">新しいOCR候補があります</p>
+                                        <p className="subtle">
+                                          現在のシートは維持したままです。切り替えると、最新の OCR 結果から下書きを作り直します。
+                                        </p>
+                                        <div className="ocr-flow-branch-actions">
+                                          <button
+                                            className="btn primary"
+                                            type="button"
+                                            onClick={() => void switchDraftToLatestEvidence()}
+                                            disabled={switchEvidencePending || reparsePending || rerunInProgressState || ocrRecoverPending}
+                                          >
+                                            {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
+                                          </button>
+                                          <button
+                                            className="btn ghost"
+                                            type="button"
+                                            onClick={keepCurrentDraft}
+                                            disabled={switchEvidencePending}
+                                          >
+                                            今のシートを維持
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ) : keepingCurrentDraftChoice ? (
+                                      <div className="ocr-evidence-switch-card ocr-evidence-switch-card--muted">
+                                        <p className="ocr-evidence-switch-title">現在のシートを維持中です</p>
+                                        <p className="subtle">
+                                          新しい OCR 候補は保持しています。必要になったら切り替えを再度選べます。
+                                        </p>
+                                      </div>
+                                    ) : null}
+                                    {renderCriticalDecisionPanel(step2CriticalDecisions, {
+                                      title: "OCR修正前に候補を確定",
+                                      note: "列やテンプレート解釈が競合したときだけ表示されます。ここで選ぶと、下のシート確認と反映にそのまま使います。",
+                                    }) || (
+                                      <p className="subtle ocr-remediation-empty">
+                                        {ocrProcessingNow
+                                          ? "完了後に候補が必要なら、ここに選択肢が表示されます。"
+                                          : "現在、追加で選ぶ OCR 候補はありません。"}
+                                      </p>
+                                    )}
+                                  </section>
+                                ) : null}
+                                {activeStep2RepairStage === "llm" || activeStep2RepairStage === "merged" ? (
+                                  <section className="ocr-remediation-group ocr-remediation-group--llm">
+                                    <p className="ocr-remediation-group-label">
+                                      {activeStep2RepairStage === "merged" ? "結合セル" : "LLM"}
+                                    </p>
+                                    <h5>
+                                      {activeStep2RepairStage === "merged"
+                                        ? "結合セルの数量を Gemini Pro で推論する"
+                                        : "どう補完するかを選ぶ"}
+                                    </h5>
+                                    <p className="subtle">
+                                      {activeStep2RepairStage === "merged"
+                                        ? "結合セルで複数行にまたがる数量を、Gemini Pro で span ごとに推論します。日付・区分の境界は維持し、結合された数字だけを展開します。"
+                                        : ocrProcessingNow
+                                          ? "OCR 完了後にだけ使います。完了したら、どの補完方針で見るかをここで選べます。"
+                                          : "基盤や候補が固まってから、必要な時だけ LLM 補完再解析を使います。"}
+                                    </p>
+                                    <div className="ocr-flow-branch-actions">
+                                      {activeStep2RepairStage === "merged" ? (
+                                        <span className="ocr-review-pill">方針: 結合セルまたがり数量</span>
+                                      ) : (
+                                        <select
+                                          className="input llm-model-select"
+                                          value={llmReparsePromptPreset}
+                                          onChange={(event) =>
+                                            setLlmReparsePromptPreset(event.target.value as LlmPromptPreset)
+                                          }
+                                          disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                        >
+                                          <option value="numeric_verification">数字検証優先</option>
+                                          <option value="column_missing">列欠損・見切れ補完</option>
+                                          <option value="row_alignment">行ずれ・区分ずれ補正</option>
+                                          <option value="special_diet_semantics">特殊食・禁食優先</option>
+                                          <option value="merged_cell_quantity_spans">結合セルまたがり数量</option>
+                                          <option value="freeform">自由入力中心</option>
+                                        </select>
+                                      )}
                                       <select
-                                        className="input llm-model-select"
-                                        value={llmReparseModelMode}
-                                        onChange={(event) =>
-                                          setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
-                                        }
+                                        className="input llm-provider-select"
+                                        value={llmReparseProvider}
+                                        onChange={(event) => {
+                                          const nextProvider = event.target.value;
+                                          setLlmReparseProvider(nextProvider);
+                                          if (nextProvider !== "gemini") {
+                                            setLlmReparseModelMode("flash");
+                                            setLlmReparseCustomModel("");
+                                          }
+                                        }}
                                         disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
                                       >
-                                        <option value="flash">Flash</option>
-                                        <option value="pro">Pro</option>
-                                        <option value="other">Other</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="gemini">Gemini</option>
                                       </select>
-                                    ) : null}
-                                    {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
-                                      <input
-                                        className="input llm-model-input"
-                                        type="text"
-                                        placeholder="例: gemini-1.5-flash"
-                                        value={llmReparseCustomModel}
-                                        onChange={(event) => setLlmReparseCustomModel(event.target.value)}
+                                      {llmReparseProvider === "gemini" ? (
+                                        <select
+                                          className="input llm-model-select"
+                                          value={llmReparseModelMode}
+                                          onChange={(event) =>
+                                            setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
+                                          }
+                                          disabled={reparsePending || step1Incomplete || ocrRecoverPending || ocrHardRecoveryMode || !ocrHasEditableSheet}
+                                        >
+                                          <option value="flash">Flash</option>
+                                          <option value="pro">Pro</option>
+                                          <option value="other">Other</option>
+                                        </select>
+                                      ) : null}
+                                      {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
+                                        <input
+                                          className="input llm-model-input"
+                                          type="text"
+                                          placeholder="例: gemini-1.5-flash"
+                                          value={llmReparseCustomModel}
+                                          onChange={(event) => setLlmReparseCustomModel(event.target.value)}
+                                          disabled={
+                                            reparsePending ||
+                                            step1Incomplete ||
+                                            ocrRecoverPending ||
+                                            ocrHardRecoveryMode ||
+                                            !ocrHasEditableSheet
+                                          }
+                                        />
+                                      ) : null}
+                                      <button
+                                        className="btn ghost"
+                                        type="button"
+                                        onClick={() => loadOcrSheet()}
+                                        disabled={ocrSheetLoading || step1Incomplete || ocrHardRecoveryMode}
+                                      >
+                                        {ocrSheetLoading ? "再読込中..." : "シート再読込"}
+                                      </button>
+                                      <button
+                                        className="btn ghost"
+                                        onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
                                         disabled={
                                           reparsePending ||
                                           step1Incomplete ||
                                           ocrRecoverPending ||
                                           ocrHardRecoveryMode ||
-                                          !ocrHasEditableSheet
+                                          !ocrHasEditableSheet ||
+                                          (llmReparseProvider === "gemini" &&
+                                            llmReparseModelMode === "other" &&
+                                            !llmReparseCustomModel.trim())
                                         }
-                                      />
-                                    ) : null}
-                                    <button
-                                      className="btn ghost"
-                                      onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
-                                      disabled={
-                                        reparsePending ||
-                                        step1Incomplete ||
-                                        ocrRecoverPending ||
-                                        ocrHardRecoveryMode ||
-                                        !ocrHasEditableSheet ||
-                                        (llmReparseProvider === "gemini" &&
-                                          llmReparseModelMode === "other" &&
-                                          !llmReparseCustomModel.trim())
-                                      }
-                                    >
-                                      {reparsePending ? "再解析中..." : "LLM補完再解析"}
-                                    </button>
-                                  </div>
-                                  {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
-                                    <div className="ocr-inline-prompt">
-                                      <label className="input-label" htmlFor="llm-freeform-prompt">
-                                        LLM追加指示
-                                      </label>
-                                      <p className="subtle">
-                                        自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
-                                      </p>
-                                      <textarea
-                                        id="llm-freeform-prompt"
-                                        className="input ocr-llm-prompt-textarea"
-                                        rows={12}
-                                        value={ocrPrompt}
-                                        onChange={(e) => setOcrPrompt(e.target.value)}
-                                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
-                                      />
+                                      >
+                                        {reparsePending ? "再解析中..." : "LLM補完再解析"}
+                                      </button>
                                     </div>
-                                  ) : (
-                                    <details className="ocr-inline-details">
-                                      <summary>LLM追加指示（任意）</summary>
-                                      <p className="subtle">
-                                        選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
-                                      </p>
-                                      <textarea
-                                        className="input ocr-llm-prompt-textarea"
-                                        rows={10}
-                                        value={ocrPrompt}
-                                        onChange={(e) => setOcrPrompt(e.target.value)}
-                                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
-                                      />
-                                    </details>
-                                  )}
-                                </section>
-                              </div>
-                            </section>
+                                    {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
+                                      <div className="ocr-inline-prompt">
+                                        <label className="input-label" htmlFor="llm-freeform-prompt">
+                                          LLM追加指示
+                                        </label>
+                                        <p className="subtle">
+                                          自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
+                                        </p>
+                                        <textarea
+                                          id="llm-freeform-prompt"
+                                          className="input ocr-llm-prompt-textarea"
+                                          rows={12}
+                                          value={ocrPrompt}
+                                          onChange={(e) => setOcrPrompt(e.target.value)}
+                                          placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                                        />
+                                      </div>
+                                    ) : (
+                                      <details className="ocr-inline-details">
+                                        <summary>LLM追加指示（任意）</summary>
+                                        <p className="subtle">
+                                          選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
+                                        </p>
+                                        <textarea
+                                          className="input ocr-llm-prompt-textarea"
+                                          rows={10}
+                                          value={ocrPrompt}
+                                          onChange={(e) => setOcrPrompt(e.target.value)}
+                                          placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                                        />
+                                      </details>
+                                    )}
+                                  </section>
+                                ) : null}
+                              </section>
+                            ) : null}
                           </div>
                           {reviewBlockerText || reviewWarningText || ocrReparseBlockedHint || ocrHardRecoveryMode ? (
                             <div className="warning-banner warning-banner--compact">
@@ -6724,14 +7656,6 @@ const loadOcrPages = async () => {
                           <summary>補助操作と内部情報</summary>
                           <div className="ocr-secondary-tools-body">
                             <div className="ocr-edit-actions">
-                              <button
-                                className="btn ghost"
-                                type="button"
-                                onClick={() => loadOcrSheet()}
-                                disabled={ocrSheetLoading || step1Incomplete || ocrHardRecoveryMode}
-                              >
-                                {ocrSheetLoading ? "再読込中..." : "シート再読込"}
-                              </button>
                               <button
                                 className="btn ghost"
                                 type="button"
@@ -6944,64 +7868,99 @@ const loadOcrPages = async () => {
                                 </button>
                               </div>
                             ) : null}
-                            <div className="preview-zoom-controls">
-                              <button
-                                className="btn ghost"
-                                type="button"
-                                onClick={() => updateOcrPreviewZoom(-OCR_PREVIEW_ZOOM_STEP)}
-                                disabled={ocrPreviewZoom <= OCR_PREVIEW_ZOOM_MIN}
-                              >
-                                -
-                              </button>
-                              <button className="btn ghost" type="button" onClick={resetOcrPreviewZoom}>
-                                {ocrPreviewZoomPercent}%
-                              </button>
-                              <button
-                                className="btn ghost"
-                                type="button"
-                                onClick={() => updateOcrPreviewZoom(OCR_PREVIEW_ZOOM_STEP)}
-                                disabled={ocrPreviewZoom >= OCR_PREVIEW_ZOOM_MAX}
-                              >
-                                +
-                              </button>
-                            </div>
+                            {primaryPreviewOpenUrl ? (
+                              <a href={primaryPreviewOpenUrl} target="_blank" rel="noreferrer" className="ghost-link">
+                                別タブで開く
+                              </a>
+                            ) : null}
                           </div>
                         </div>
                         <div className="edit-hint active">
                           {shouldShowOriginalPdfPreview
-                            ? step2FallbackSummary || "原本PDFを見ながら、右のシートだけを更新します。"
+                            ? step2FallbackSummary || (showingArtifactPdf
+                              ? "OCR生成PDFを見ながら、右のシートだけを更新します。"
+                              : "原本PDFを見ながら、右のシートだけを更新します。")
                             : "左は比較用です。編集は右のシートだけを更新します。"}
                         </div>
-                        {shouldShowOriginalPdfPreview ? (
-                          pdfUrl ? (
-                            <iframe
-                              title={shouldFallbackToRawPdfPreview ? "order-pdf-fallback" : "order-pdf-original"}
-                              src={pdfPreviewUrl}
-                              className="pdf-frame pdf-frame-compact"
-                            />
+                        <div className="preview-surface">
+                          {shouldShowOriginalPdfPreview ? (
+                            canHighlightOriginalPreview ? (
+                              <div
+                                ref={ocrPreviewWrapperRef}
+                                className="ocr-preview-wrapper ocr-preview-wrapper--framed"
+                                data-testid="ocr-preview-wrapper"
+                                data-preview-mode="original-image"
+                              >
+                                <img
+                                  ref={overlayImageRef}
+                                  src={originalPreviewImageUrl}
+                                  alt={shouldFallbackToRawPdfPreview ? "Original PDF preview fallback" : "Original PDF preview"}
+                                  className="ocr-preview"
+                                />
+                                {focusedOverlayHighlight ? (
+                                  <div
+                                    className="ocr-overlay-row-highlight"
+                                    data-testid="ocr-overlay-row-highlight"
+                                    data-overlay-page={focusedOverlayHighlight.pageIndex ?? focusedOverlayHighlight.pageArrayIndex + 1}
+                                    data-overlay-row={focusedOverlayHighlight.localRowIndex + 1}
+                                    data-match-reason={focusedOverlayHighlight.matchReason}
+                                    style={{
+                                      left: `${focusedOverlayHighlight.left}px`,
+                                      top: `${focusedOverlayHighlight.top}px`,
+                                      width: `${focusedOverlayHighlight.width}px`,
+                                      height: `${focusedOverlayHighlight.height}px`,
+                                    }}
+                                  />
+                                ) : null}
+                              </div>
+                            ) : pdfUrl ? (
+                              <iframe
+                                title={shouldFallbackToRawPdfPreview ? "order-pdf-fallback" : "order-pdf-original"}
+                                src={pdfUrl}
+                                className="pdf-frame pdf-frame-compact preview-frame"
+                              />
+                            ) : (
+                              <div className="preview-placeholder">{pdfError || "PDFを読み込み中..."}</div>
+                            )
+                          ) : showOcrOverlay ? (
+                            <div
+                              ref={ocrPreviewWrapperRef}
+                              className="ocr-preview-wrapper ocr-preview-wrapper--framed"
+                              data-testid="ocr-preview-wrapper"
+                            >
+                              <img
+                                ref={overlayImageRef}
+                                src={ocrOverlayUrl || ""}
+                                alt="OCR overlay"
+                                className="ocr-preview"
+                                onError={() => {
+                                  setOcrOverlayError(true);
+                                  if (!ocrOverlayRetry && !ocrPagesLoading) {
+                                    setOcrOverlayRetry(true);
+                                    loadOcrPages();
+                                  }
+                                }}
+                              />
+                              {focusedOverlayHighlight ? (
+                                <div
+                                  className="ocr-overlay-row-highlight"
+                                  data-testid="ocr-overlay-row-highlight"
+                                  data-overlay-page={focusedOverlayHighlight.pageIndex ?? focusedOverlayHighlight.pageArrayIndex + 1}
+                                  data-overlay-row={focusedOverlayHighlight.localRowIndex + 1}
+                                  data-match-reason={focusedOverlayHighlight.matchReason}
+                                  style={{
+                                    left: `${focusedOverlayHighlight.left}px`,
+                                    top: `${focusedOverlayHighlight.top}px`,
+                                    width: `${focusedOverlayHighlight.width}px`,
+                                    height: `${focusedOverlayHighlight.height}px`,
+                                  }}
+                                />
+                              ) : null}
+                            </div>
                           ) : (
-                            <div className="preview-placeholder">{pdfError || "PDFを読み込み中..."}</div>
-                          )
-                        ) : showOcrOverlay ? (
-                          <div className="ocr-preview-wrapper">
-                            <img
-                              ref={overlayImageRef}
-                              src={ocrOverlayUrl || ""}
-                              alt="OCR overlay"
-                              className="ocr-preview"
-                              style={previewAssetStyle}
-                              onError={() => {
-                                setOcrOverlayError(true);
-                                if (!ocrOverlayRetry && !ocrPagesLoading) {
-                                  setOcrOverlayRetry(true);
-                                  loadOcrPages();
-                                }
-                              }}
-                            />
-                          </div>
-                        ) : (
-                          <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
-                        )}
+                            <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
+                          )}
+                        </div>
                         {!shouldShowOriginalPdfPreview && usingSyntheticOverlay ? (
                           <p className="subtle">
                             OCR overlay artifact が無いため、PDFレンダリング画像を比較表示しています。
@@ -7024,19 +7983,22 @@ const loadOcrPages = async () => {
                         ) : null}
                         {!shouldShowOriginalPdfPreview && showLayoutOverlay ? (
                           showLayoutOverlayImage ? (
-                            <img
-                              src={layoutOverlayUrl || ""}
-                              alt="Layout overlay"
-                              className="ocr-preview"
-                              style={previewAssetStyle}
-                              onError={() => {
-                                setLayoutOverlayError(true);
-                                if (!layoutOverlayRetry && !ocrPagesLoading) {
-                                  setLayoutOverlayRetry(true);
-                                  loadOcrPages();
-                                }
-                              }}
-                            />
+                            <div className="preview-surface preview-surface--secondary">
+                              <div className="ocr-preview-wrapper ocr-preview-wrapper--framed">
+                                <img
+                                  src={layoutOverlayUrl || ""}
+                                  alt="Layout overlay"
+                                  className="ocr-preview"
+                                  onError={() => {
+                                    setLayoutOverlayError(true);
+                                    if (!layoutOverlayRetry && !ocrPagesLoading) {
+                                      setLayoutOverlayRetry(true);
+                                      loadOcrPages();
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </div>
                           ) : (
                             <div className="preview-placeholder">{layoutOverlayPlaceholder}</div>
                           )
@@ -7045,6 +8007,23 @@ const loadOcrPages = async () => {
                     </div>
                     <div className="ocr-workspace-editor">
                       <div className="ocr-edit ocr-edit--sheet">
+                        <div className="ocr-sheet-save-banner">
+                          <div>
+                            <p className="ocr-flow-branch-label">シート保存</p>
+                            <h4>右のシートを直したら、ここで保存</h4>
+                            <p className="subtle">
+                              分岐の選択に関係なく、修正した内容をこの場で下書き保存できます。
+                            </p>
+                          </div>
+                          <button
+                            className="btn primary"
+                            type="button"
+                            onClick={saveOcrSheetExact}
+                            disabled={ocrTableSaving || !canSaveDraftSheet}
+                          >
+                            {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
+                          </button>
+                        </div>
                         {activeEditorRows.length ? (
                           <div className="ocr-sheet-wrap">
                             <table className="ocr-sheet-table">
@@ -7082,10 +8061,13 @@ const loadOcrPages = async () => {
                                 {ocrSheetRows.map((row, rowIdx) => (
                                   <tr
                                     key={`ocr-sheet-row-${rowIdx}`}
+                                    data-row-index={rowIdx + 1}
+                                    data-focused={focusedSheetRowIndex === rowIdx ? "true" : "false"}
                                     className={[
                                       "ocr-sheet-row",
                                       ocrSheetRowDateStripeClasses[rowIdx] || "ocr-sheet-row-date-a",
                                       ocrSheetRowBoundaryClasses[rowIdx] || "",
+                                      focusedSheetRowIndex === rowIdx ? "ocr-sheet-row-focused" : "",
                                     ]
                                       .filter(Boolean)
                                       .join(" ")}
@@ -7109,6 +8091,7 @@ const loadOcrPages = async () => {
                                         <input
                                           className={`input ocr-sheet-input ${ocrSheetColumnSpecs[cellIdx]?.className || ""}`}
                                           value={row[cellIdx] ?? ""}
+                                          onFocus={() => focusOcrSheetRow(rowIdx)}
                                           onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
                                         />
                                       </td>
@@ -7118,6 +8101,7 @@ const loadOcrPages = async () => {
                                         <button
                                           className="btn ghost"
                                           type="button"
+                                          onFocus={() => focusOcrSheetRow(rowIdx)}
                                           onClick={() => duplicateOcrTableRow(rowIdx)}
                                           disabled={ocrHardRecoveryMode}
                                         >
@@ -7126,6 +8110,7 @@ const loadOcrPages = async () => {
                                         <button
                                           className="btn ghost"
                                           type="button"
+                                          onFocus={() => focusOcrSheetRow(rowIdx)}
                                           onClick={() => removeOcrTableRow(rowIdx)}
                                           disabled={ocrHardRecoveryMode}
                                         >
@@ -7654,6 +8639,40 @@ const loadOcrPages = async () => {
               </div>
             </header>
             {bagMessage ? <p className="subtle">{bagMessage}</p> : null}
+            {bagAppliedOverrides.length > 0 ? (
+              <div className="bag-override-panel">
+                <div className="bag-override-header">
+                  <strong>日別単位補正が適用されています</strong>
+                  <span className="subtle">この値は袋分けと個別出力の両方に反映されています。</span>
+                </div>
+                <div className="bag-override-list">
+                  {bagAppliedOverrides.map((item) => (
+                    <div
+                      key={[
+                        item.override_id || "-",
+                        item.date || "-",
+                        item.daypart || "-",
+                        item.menu_name || "-",
+                        item.diet_type || "-",
+                      ].join("__")}
+                      className="bag-override-item"
+                    >
+                      <p className="bag-override-main">
+                        {item.date || "-"} / {item.daypart || "-"} / {item.menu_name || "-"} /{" "}
+                        {item.diet_type ? formatDietType(item.diet_type) : "-"}
+                      </p>
+                      <p className="bag-override-meta">
+                        {item.qty_per_serving != null ? item.qty_per_serving : "-"}
+                        {normalizeUnitType(item.unit_type)}
+                        /人
+                        {item.menu_category ? ` / ${item.menu_category}` : ""}
+                      </p>
+                      {item.note ? <p className="bag-override-note">{item.note}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {bagRows.length === 0 ? (
               <p className="subtle">袋分け結果がありません。</p>
             ) : (
@@ -7738,13 +8757,22 @@ const loadOcrPages = async () => {
                 <button
                   className="btn ghost"
                   type="button"
-                  onClick={registerTrainingSample}
-                  disabled={trainingSampleSaving}
+                  onClick={() => {
+                    void registerTrainingSample();
+                  }}
+                  disabled={trainingSampleSaving || confirmSaving}
                 >
                   {trainingSampleSaving ? "登録中..." : "学習データ登録"}
                 </button>
-                <button className="btn primary" onClick={confirm} disabled={!effectiveCanConfirm}>
-                  確定
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={() => {
+                    void confirm();
+                  }}
+                  disabled={confirmSaving || !effectiveCanConfirm}
+                >
+                  {confirmSaving ? "確定中..." : "確定"}
                 </button>
               </div>
             </header>
@@ -7953,7 +8981,7 @@ const loadOcrPages = async () => {
               className="btn primary"
               type="button"
               onClick={() => void goNextStep()}
-              disabled={!isLastStep && !canStepNext}
+              disabled={isLastStep ? confirmSaving || trainingSampleSaving || !effectiveCanConfirm : !canStepNext}
             >
               {nextStepButtonLabel}
             </button>
@@ -8030,10 +9058,10 @@ const loadOcrPages = async () => {
         .panel {
           background: #ffffff;
           border-radius: 18px;
-          padding: 20px;
+          padding: 16px;
           border: 1px solid rgba(25, 32, 30, 0.08);
           box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
-          margin-bottom: 20px;
+          margin-bottom: 16px;
         }
 
         .step-panel {
@@ -8141,7 +9169,7 @@ const loadOcrPages = async () => {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          margin-bottom: 16px;
+          margin-bottom: 12px;
         }
 
         .panel-header > div {
@@ -8176,9 +9204,21 @@ const loadOcrPages = async () => {
 
         .summary-grid {
           display: grid;
-          gap: 16px;
+          gap: 12px;
           grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
           align-items: end;
+        }
+
+        .summary-grid--compact {
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+          align-items: stretch;
+        }
+
+        .summary-primary-card {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #f8fbfa;
         }
 
         .summary-value {
@@ -8310,7 +9350,6 @@ const loadOcrPages = async () => {
         }
 
         .workflow-summary-card {
-          margin-top: 14px;
           padding: 12px 14px;
           border-radius: 12px;
           background: #f4f7f6;
@@ -8326,6 +9365,44 @@ const loadOcrPages = async () => {
           font-size: 14px;
           font-weight: 700;
           color: #21302d;
+        }
+
+        .summary-details {
+          margin-top: 10px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #fbfbf9;
+        }
+
+        .summary-details summary {
+          cursor: pointer;
+          font-weight: 700;
+          color: #2f3e3b;
+          list-style: none;
+        }
+
+        .summary-details summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .summary-details-grid {
+          margin-top: 10px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .summary-detail-list {
+          display: grid;
+          gap: 10px;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+
+        .summary-details-stack {
+          margin-top: 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
         }
 
         .input {
@@ -8379,7 +9456,6 @@ const loadOcrPages = async () => {
         }
 
         .prompt-panel {
-          margin-top: 14px;
           padding: 12px;
           border-radius: 14px;
           border: 1px solid rgba(25, 32, 30, 0.08);
@@ -8481,6 +9557,12 @@ const loadOcrPages = async () => {
           background: #f5f2eb;
         }
 
+        .ocr-preview-wrapper--framed {
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 14px;
+          background: #f5f2eb;
+        }
+
         .ocr-preview-wrapper .ocr-preview {
           border: none;
         }
@@ -8516,6 +9598,17 @@ const loadOcrPages = async () => {
         .ocr-overlay-cell.active {
           outline-color: rgba(31, 42, 42, 0.9);
           background: rgba(255, 255, 255, 0.55);
+        }
+
+        .ocr-overlay-row-highlight {
+          position: absolute;
+          border: 3px solid rgba(193, 83, 28, 0.95);
+          background: rgba(255, 195, 136, 0.22);
+          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.72), 0 8px 22px rgba(193, 83, 28, 0.18);
+          border-radius: 8px;
+          pointer-events: none;
+          z-index: 3;
+          transition: top 120ms ease, height 120ms ease;
         }
 
         .ocr-overlay-text {
@@ -8605,7 +9698,7 @@ const loadOcrPages = async () => {
         .ocr-workspace {
           display: grid;
           gap: 16px;
-          grid-template-columns: minmax(420px, 0.92fr) minmax(640px, 1.28fr);
+          grid-template-columns: minmax(360px, 0.92fr) minmax(520px, 1.08fr);
           margin-bottom: 16px;
           align-items: start;
         }
@@ -8621,6 +9714,30 @@ const loadOcrPages = async () => {
 
         .ocr-edit--sheet {
           height: 100%;
+        }
+
+        .ocr-sheet-save-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 10px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(31, 42, 42, 0.16);
+          background: linear-gradient(135deg, #f6efe0 0%, #fffaf1 100%);
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+        }
+
+        .ocr-sheet-save-banner h4 {
+          margin: 2px 0 4px;
+          font-size: 15px;
+          color: #243431;
+        }
+
+        .ocr-sheet-save-banner :global(.btn) {
+          min-width: 180px;
         }
 
         .ocr-preview-card {
@@ -8673,12 +9790,21 @@ const loadOcrPages = async () => {
           border-color: rgba(25, 32, 30, 0.18);
         }
 
-        .preview-zoom-controls {
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          gap: 6px;
-          flex-wrap: wrap;
+        .preview-surface {
+          border-radius: 14px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #f5f2eb;
+          overflow: hidden;
+        }
+
+        .preview-surface--secondary {
+          margin-top: 8px;
+        }
+
+        .preview-frame {
+          display: block;
+          border: none;
+          border-radius: 0;
         }
 
         .preview-placeholder {
@@ -8905,8 +10031,8 @@ const loadOcrPages = async () => {
 
         .ocr-edit {
           margin-top: 0;
-          padding: 10px;
-          border-radius: 14px;
+          padding: 8px;
+          border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.08);
           background: #fbfbf9;
         }
@@ -8917,12 +10043,12 @@ const loadOcrPages = async () => {
           justify-content: space-between;
           gap: 12px;
           flex-wrap: wrap;
-          margin-bottom: 10px;
+          margin-bottom: 8px;
         }
 
         .ocr-edit-title {
-          margin: 4px 0 0;
-          font-size: 18px;
+          margin: 2px 0 0;
+          font-size: 16px;
           color: #223431;
         }
 
@@ -9006,13 +10132,13 @@ const loadOcrPages = async () => {
 
         .ocr-flow-card {
           margin-bottom: 10px;
-          padding: 14px;
-          border-radius: 14px;
+          padding: 10px;
+          border-radius: 12px;
           border: 1px solid rgba(24, 42, 40, 0.1);
           background: #f3f5f2;
           display: flex;
           flex-direction: column;
-          gap: 12px;
+          gap: 10px;
         }
 
         .ocr-flow-header {
@@ -9059,15 +10185,15 @@ const loadOcrPages = async () => {
         .ocr-flow-track {
           display: grid;
           grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
-          gap: 10px;
+          gap: 8px;
           align-items: stretch;
         }
 
         .ocr-flow-step {
           display: flex;
-          gap: 10px;
+          gap: 8px;
           align-items: flex-start;
-          padding: 12px;
+          padding: 9px 10px;
           border-radius: 12px;
           border: 1px solid rgba(24, 42, 40, 0.12);
           background: #ffffff;
@@ -9094,14 +10220,14 @@ const loadOcrPages = async () => {
 
         .ocr-flow-step-title {
           margin: 0;
-          font-size: 14px;
+          font-size: 13px;
           font-weight: 700;
           color: #243431;
         }
 
         .ocr-flow-step-note {
-          margin: 4px 0 0;
-          font-size: 12px;
+          margin: 2px 0 0;
+          font-size: 11px;
           color: #556168;
         }
 
@@ -9116,6 +10242,102 @@ const loadOcrPages = async () => {
           display: grid;
           gap: 12px;
           grid-template-columns: minmax(0, 1fr);
+        }
+
+        .ocr-flow-branches--wizard {
+          gap: 10px;
+        }
+
+        .ocr-flow-question-card,
+        .ocr-flow-panel,
+        .ocr-flow-finish-card {
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid rgba(24, 42, 40, 0.12);
+          background: #ffffff;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .ocr-flow-rail {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .ocr-flow-finish-card {
+          background: linear-gradient(135deg, #f7f0e1 0%, #fff9ef 100%);
+          border-color: rgba(31, 42, 42, 0.16);
+        }
+
+        .ocr-flow-finish-copy {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .ocr-flow-panel.is-processing {
+          background: #fcfcfa;
+        }
+
+        .ocr-flow-panel--repair {
+          min-width: 0;
+        }
+
+        .ocr-flow-panel-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+
+        .ocr-flow-choice-grid {
+          display: grid;
+          gap: 8px;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .ocr-flow-choice-button,
+        .ocr-flow-subchoice {
+          border: 1px solid rgba(24, 42, 40, 0.12);
+          background: #f8fbfa;
+          color: #243431;
+          border-radius: 12px;
+          padding: 10px 12px;
+          text-align: left;
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+          cursor: pointer;
+        }
+
+        .ocr-flow-choice-button.active,
+        .ocr-flow-subchoice.active {
+          border-color: rgba(31, 42, 42, 0.28);
+          background: #edf3f1;
+          box-shadow: inset 0 0 0 1px rgba(31, 42, 42, 0.08);
+        }
+
+        .ocr-flow-choice-title {
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .ocr-flow-choice-note {
+          font-size: 11px;
+          color: #556168;
+        }
+
+        .ocr-flow-subchoices {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .ocr-flow-subchoice {
+          min-width: 0;
         }
 
         .ocr-flow-branch {
@@ -9166,13 +10388,13 @@ const loadOcrPages = async () => {
         }
 
         .ocr-remediation-group {
-          padding: 10px;
+          padding: 9px;
           border-radius: 12px;
           border: 1px solid rgba(24, 42, 40, 0.1);
           background: #f9faf8;
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: 6px;
         }
 
         .ocr-remediation-group--llm {
@@ -9231,7 +10453,7 @@ const loadOcrPages = async () => {
         .ocr-inline-prompt textarea {
           margin-top: 8px;
           width: 100%;
-          min-height: 220px;
+          min-height: 120px;
           resize: vertical;
           font-size: 14px;
           line-height: 1.6;
@@ -9255,7 +10477,7 @@ const loadOcrPages = async () => {
 
         .ocr-llm-prompt-textarea {
           width: 100%;
-          min-height: 220px;
+          min-height: 120px;
           font-size: 14px;
           line-height: 1.6;
         }
@@ -9283,6 +10505,15 @@ const loadOcrPages = async () => {
             grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.4fr);
             align-items: start;
           }
+
+          .ocr-flow-branches--wizard {
+            grid-template-columns: minmax(0, 1fr);
+          }
+
+          .ocr-flow-branches--wizard.has-repair-panel {
+            grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+            align-items: start;
+          }
         }
 
         @media (max-width: 920px) {
@@ -9292,6 +10523,10 @@ const loadOcrPages = async () => {
 
           .ocr-remediation-group--llm {
             grid-column: auto;
+          }
+
+          .ocr-flow-subchoices {
+            grid-template-columns: minmax(0, 1fr);
           }
         }
 
@@ -9555,6 +10790,11 @@ const loadOcrPages = async () => {
           border-top: 2px solid #aeb4b9;
         }
 
+        .ocr-sheet-row.ocr-sheet-row-focused td,
+        .ocr-sheet-row.ocr-sheet-row-focused th.ocr-sheet-row-index {
+          box-shadow: inset 0 0 0 2px rgba(193, 83, 28, 0.38);
+        }
+
         .failed-list {
           margin: 8px 0 0;
           padding-left: 18px;
@@ -9732,6 +10972,52 @@ const loadOcrPages = async () => {
           margin: 0;
         }
 
+        .bag-override-panel {
+          margin-bottom: 14px;
+          padding: 14px;
+          border-radius: 14px;
+          border: 1px solid rgba(25, 32, 30, 0.09);
+          background: #f4f7f5;
+        }
+
+        .bag-override-header {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          margin-bottom: 10px;
+        }
+
+        .bag-override-list {
+          display: grid;
+          gap: 10px;
+        }
+
+        .bag-override-item {
+          border-radius: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #ffffff;
+          padding: 10px 12px;
+        }
+
+        .bag-override-main {
+          margin: 0;
+          font-size: 13px;
+          font-weight: 700;
+          color: #1f2a2a;
+        }
+
+        .bag-override-meta {
+          margin: 4px 0 0;
+          font-size: 12px;
+          color: #5d6a66;
+        }
+
+        .bag-override-note {
+          margin: 6px 0 0;
+          font-size: 12px;
+          color: #4d5d58;
+        }
+
         .date-group {
           padding: 12px;
           border-radius: 14px;
@@ -9870,6 +11156,13 @@ const loadOcrPages = async () => {
             position: static;
           }
           .summary-actions {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .ocr-flow-choice-grid {
+            grid-template-columns: 1fr;
+          }
+          .ocr-flow-panel-header {
             flex-direction: column;
             align-items: stretch;
           }

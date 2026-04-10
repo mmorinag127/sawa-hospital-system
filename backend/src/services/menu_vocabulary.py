@@ -13,18 +13,36 @@ DIET_TYPE_LABELS: Final[dict[str, str]] = {
     "mixer": "ミキサー",
     "daycare": "通所",
     "staff": "職員",
+    "no_fried": "禁食(揚げ物禁)",
     "tea": "お茶",
     "business": "事業",
     "diabetes": "糖尿",
     "pregnancy": "妊娠",
     "sesame_allergy": "ゴマアレルギー",
     "no_meat": "禁食(肉禁)",
+    "forbidden_other": "禁食(肉卵魚禁)",
     "no_fish": "禁食(魚禁)",
     "change_1": "変更1",
     "change_2": "変更2",
     "regular_1600kcal": "常食1600kcal",
     "soft_1600kcal": "軟菜1600kcal",
     "mixer_1600kcal": "ミキサー1600kcal",
+    "1600kcal": "1600kcal",
+    "unknown": "不明",
+}
+
+AGGREGATED_DIET_TYPE_LABELS: Final[dict[str, str]] = {
+    "regular": "常食",
+    "soft": "軟菜",
+    "mixer": "ミキサー",
+    "forbidden": "禁食",
+    "tea": "お茶",
+    "business": "事業",
+    "diabetes": "糖尿",
+    "pregnancy": "妊娠",
+    "sesame_allergy": "ゴマアレルギー",
+    "change_1": "変更1",
+    "change_2": "変更2",
     "1600kcal": "1600kcal",
     "unknown": "不明",
 }
@@ -61,6 +79,8 @@ def normalize_diet_type(value: object) -> str | None:
         base = "daycare"
     elif "staff" in compact or "職員" in compact:
         base = "staff"
+    elif "nofried" in compact or "揚げ物禁" in normalized or "揚物禁" in normalized:
+        base = "no_fried"
     elif "tea" in compact or "お茶" in compact:
         base = "tea"
     elif "business" in compact or "事業" in compact:
@@ -73,6 +93,12 @@ def normalize_diet_type(value: object) -> str | None:
         "アレル" in normalized or "allergy" in compact
     ):
         base = "sesame_allergy"
+    elif (
+        ("肉" in compact or "meat" in compact)
+        and ("卵" in compact or "玉子" in normalized or "egg" in compact)
+        and ("魚" in compact or "鯖" in normalized or "さば" in normalized or "fish" in compact)
+    ) or "肉卵魚禁" in normalized:
+        base = "forbidden_other"
     elif "nomeat" in compact or "nobeef" in compact or "禁食肉禁" in compact or "肉禁" in compact:
         base = "no_meat"
     elif "nofish" in compact or "禁食魚禁" in compact or "魚禁" in compact:
@@ -106,3 +132,25 @@ def format_diet_type_label(value: object) -> str:
     if not normalized:
         return "-"
     return DIET_TYPE_LABELS.get(normalized, str(value).strip() or "-")
+
+
+def bucket_diet_type_for_aggregation(value: object) -> str | None:
+    normalized = normalize_diet_type(value)
+    if not normalized:
+        return None
+    if normalized in {"regular", "regular_bag", "daycare", "staff", "regular_1600kcal"}:
+        return "regular"
+    if normalized in {"soft", "soft_1600kcal"}:
+        return "soft"
+    if normalized in {"mixer", "mixer_1600kcal"}:
+        return "mixer"
+    if normalized in {"no_fried", "no_meat", "no_fish", "forbidden_other"}:
+        return "forbidden"
+    return normalized
+
+
+def format_aggregated_diet_type_label(value: object) -> str:
+    normalized = bucket_diet_type_for_aggregation(value)
+    if not normalized:
+        return "-"
+    return AGGREGATED_DIET_TYPE_LABELS.get(normalized, str(value).strip() or "-")

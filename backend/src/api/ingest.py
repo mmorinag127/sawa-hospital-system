@@ -5,11 +5,25 @@ from fastapi import APIRouter, HTTPException, status, Depends, File, Form, Uploa
 import time
 from sqlalchemy import desc, select
 
-from src.workers.ingest_worker import enqueue_ingest, enqueue_ingest_async, enqueue_ingest_job_async
-from src.services.ingest_job_service import list_pending_jobs, list_jobs, reset_stale_processing
+from src.workers.ingest_worker import (
+    enqueue_ingest,
+    enqueue_ingest_job_async,
+    enqueue_uploaded_pdf_async,
+    process_uploaded_pdf_job,
+)
+from src.services.ingest_job_service import list_pending_jobs, list_jobs, reset_stale_processing, restart_ingest_job
 from src.api.auth import require_role
 from src.services.ingest_policy import ingest_chunk_delay_seconds
 from src.services.manual_upload_service import ManualUploadConfigError, ManualUploadSavedFile, save_uploaded_pdf
+from src.services.ingest_job_service import create_ingest_job
+from src.services.uploaded_pdf_service import (
+    build_ingest_payload,
+    create_uploaded_pdf_from_upload,
+    get_uploaded_pdf,
+    is_uploaded_pdf_completion_ready,
+    list_uploaded_pdfs,
+    requeue_uploaded_pdf,
+)
 from src.db import session_scope
 from src.models.order import Order
 
@@ -97,20 +111,34 @@ async def _handle_uploaded_pdf(
         "original_filename": saved.original_filename,
         "content_sha256": saved.content_sha256,
     }
-    job_id, enqueued = enqueue_ingest_async(payload, force=force_value)
-    order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued else None
-    existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if not enqueued else None
+    uploaded_pdf, duplicate_blocked = create_uploaded_pdf_from_upload(
+        saved=saved,
+        facility_hint=facility_hint,
+        week_hint=week_hint,
+        facility_name=facility_name,
+        skip_ocr=skip_ocr_value,
+        source_kind="manual_upload",
+        force=force_value,
+    )
+    job_id, enqueued = create_ingest_job(payload, force=force_value)
+    if not duplicate_blocked:
+        enqueue_uploaded_pdf_async(uploaded_pdf["id"])
+    order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued and not duplicate_blocked else None
+    existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if duplicate_blocked else None
     return {
         "accepted": True,
         "filename": saved.original_filename,
+        "uploaded_pdf_id": uploaded_pdf["id"],
         "message_id": saved.message_id,
         "ingest_job_id": job_id,
         "pdf_uri": saved.pdf_uri,
         "received_at": saved.received_at.isoformat(),
-        "duplicate_blocked": not enqueued,
+        "duplicate_blocked": duplicate_blocked or not enqueued,
         "order_id": order_id,
         "existing_order_id": existing_order_id,
         "source_kind": "manual_upload",
+        "status": uploaded_pdf["status"],
+        "current_stage": uploaded_pdf["current_stage"],
     }
 
 
@@ -157,6 +185,36 @@ def retry_pending_jobs(limit: int = 10):
 @router.get("/jobs", dependencies=[Depends(require_role("admin"))])
 def list_ingest_jobs(status: str | None = None, limit: int = 50):
     return {"items": list_jobs(status=status, limit=limit)}
+
+
+@router.get("/uploads", dependencies=[Depends(require_role("operator"))])
+def list_uploaded_pdf_rows(status: str | None = None, limit: int = 100):
+    return {"items": list_uploaded_pdfs(status=status, limit=limit)}
+
+
+@router.get("/uploads/{uploaded_pdf_id}", dependencies=[Depends(require_role("operator"))])
+def get_uploaded_pdf_row(uploaded_pdf_id: str):
+    row = get_uploaded_pdf(uploaded_pdf_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="uploaded_pdf_not_found")
+    return row
+
+
+@router.post("/uploads/{uploaded_pdf_id}/retry", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
+def retry_uploaded_pdf(uploaded_pdf_id: str):
+    row = get_uploaded_pdf(uploaded_pdf_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="uploaded_pdf_not_found")
+    status_value = str(row.get("status") or "").strip().lower()
+    if status_value == "completed" and is_uploaded_pdf_completion_ready(uploaded_pdf_id):
+        raise HTTPException(status_code=409, detail="uploaded_pdf_already_completed")
+    message_id = str(row.get("message_id") or "").strip()
+    updated = requeue_uploaded_pdf(uploaded_pdf_id)
+    if message_id:
+        restart_ingest_job(message_id)
+    process_uploaded_pdf_job(uploaded_pdf_id)
+    refreshed = get_uploaded_pdf(uploaded_pdf_id)
+    return {"accepted": True, "item": refreshed or updated}
 
 
 @router.post("/reset-stale", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("admin"))])

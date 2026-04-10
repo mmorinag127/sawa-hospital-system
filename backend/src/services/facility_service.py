@@ -167,6 +167,7 @@ def update_facility(facility_id: str, name: str | None, areas: list | None) -> d
 
 def update_config(facility_id: str, config: dict) -> bool:
     updated = False
+    sanitized_config = config_service.sanitize_facility_config_for_storage(facility_id, config)
     with session_scope() as session:
         _ensure_facility_sync(session)
         session.flush()
@@ -179,7 +180,7 @@ def update_config(facility_id: str, config: dict) -> bool:
             return False
         # replace config
         session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
-        session.add(FacilityConfig(facility_id=facility_id, config_json=config))
+        session.add(FacilityConfig(facility_id=facility_id, config_json=sanitized_config))
         logger.info("Facility config updated", fac=facility_id)
         updated = True
     if updated:
@@ -188,7 +189,7 @@ def update_config(facility_id: str, config: dict) -> bool:
             actor="system",
             target=facility_id,
             fac=facility_id,
-            metadata={"keys": list(config.keys())},
+            metadata={"keys": list(sanitized_config.keys())},
         )
     return updated
 

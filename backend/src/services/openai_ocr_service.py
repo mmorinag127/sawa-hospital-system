@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
@@ -481,6 +482,13 @@ def _request_openai_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response_raw = response.read().decode("utf-8")
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(f"OpenAI OCR timeout after {timeout:.0f}s") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            raise RuntimeError(f"OpenAI OCR timeout after {timeout:.0f}s") from exc
+        raise RuntimeError(f"OpenAI OCR request failed: {exc}") from exc
     except urllib.error.HTTPError as exc:
         detail = ""
         try:

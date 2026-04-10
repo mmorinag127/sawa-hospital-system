@@ -39,7 +39,9 @@ export const getOcrSheetColumnSpec = (
     normalizedDiet === "regular" ||
     normalizedDiet === "daycare" ||
     normalizedDiet === "staff" ||
+    normalizedDiet === "no_fried" ||
     normalizedDiet === "no_meat" ||
+    normalizedDiet === "forbidden_other" ||
     normalizedDiet === "no_fish" ||
     normalizedDiet === "soft" ||
     normalizedDiet === "mixer" ||
@@ -52,7 +54,10 @@ export const getOcrSheetColumnSpec = (
     fieldRaw.startsWith("qty.") ||
     isKnownDiet ||
     combined.includes("肉禁") ||
+    combined.includes("肉卵魚禁") ||
     combined.includes("魚禁") ||
+    combined.includes("揚げ物禁") ||
+    combined.includes("揚物禁") ||
     combined.includes("変更1") ||
     combined.includes("変更2") ||
     combined.includes("軟菜") ||

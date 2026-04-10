@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 
@@ -28,6 +28,74 @@ type UploadItemResult = UploadResponse & {
   error?: string;
 };
 
+type UploadedPdfRow = {
+  id: string;
+  message_id?: string | null;
+  original_filename?: string | null;
+  received_at?: string | null;
+  status?: string | null;
+  current_stage?: string | null;
+  attempt_count?: number | null;
+  max_attempts?: number | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
+  facility_hint?: string | null;
+  week_hint?: string | null;
+  current_order_id?: string | null;
+  current_document_id?: string | null;
+  lease_expires_at?: string | null;
+};
+
+const uploadedPdfStatusLabel = (value?: string | null) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "pending") return "未処理";
+  if (normalized === "processing") return "処理中";
+  if (normalized === "retry_wait") return "再試行待ち";
+  if (normalized === "completed") return "完了";
+  if (normalized === "manual_review") return "要介入";
+  if (normalized === "failed_permanent") return "恒久失敗";
+  return value || "-";
+};
+
+const uploadedPdfStageLabel = (value?: string | null) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "uploaded") return "アップロード済み";
+  if (normalized === "ingest_running") return "取込処理中";
+  if (normalized === "retry_wait") return "再試行待ち";
+  if (normalized === "manual_review") return "要介入";
+  if (normalized === "completed") return "完了";
+  return value || "-";
+};
+
+const formatTimestamp = (value?: string | null) => {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+const uploadedPdfActiveProcessing = (row: UploadedPdfRow) => {
+  if (String(row.status || "").trim().toLowerCase() !== "processing") return false;
+  const leaseText = String(row.lease_expires_at || "").trim();
+  if (!leaseText) return true;
+  const leaseExpiresAt = new Date(leaseText);
+  if (Number.isNaN(leaseExpiresAt.getTime())) return true;
+  return leaseExpiresAt.getTime() > Date.now();
+};
+
+const uploadedPdfCanRetry = (row: UploadedPdfRow) => {
+  const status = String(row.status || "").trim().toLowerCase();
+  if (status === "completed") return false;
+  if (uploadedPdfActiveProcessing(row)) return false;
+  return true;
+};
+
 export default function PdfUploadPage() {
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [facilityHint, setFacilityHint] = useState("");
@@ -39,7 +107,58 @@ export default function PdfUploadPage() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<UploadItemResult[]>([]);
+  const [uploadedRows, setUploadedRows] = useState<UploadedPdfRow[]>([]);
+  const [uploadedStatusFilter, setUploadedStatusFilter] = useState("");
+  const [uploadsLoading, setUploadsLoading] = useState(false);
+  const [uploadsError, setUploadsError] = useState("");
+  const [uploadsNotice, setUploadsNotice] = useState("");
+  const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const loadUploadedRows = async () => {
+    setUploadsLoading(true);
+    setUploadsError("");
+    try {
+      const params = uploadedStatusFilter ? { status: uploadedStatusFilter, limit: 50 } : { limit: 50 };
+      const res = await apiClient.get("/ingest/uploads", { params });
+      setUploadedRows(Array.isArray(res.data?.items) ? res.data.items : []);
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "取込済みPDF一覧の取得に失敗しました。";
+      setUploadsError(String(detail));
+    } finally {
+      setUploadsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadUploadedRows();
+  }, [uploadedStatusFilter]);
+
+  const retryUploadedPdf = async (row: UploadedPdfRow) => {
+    if (!uploadedPdfCanRetry(row)) return;
+    if (!window.confirm(`「${row.original_filename || row.id}」を再処理に戻します。`)) return;
+    setRetryBusyId(row.id);
+    setUploadsError("");
+    setUploadsNotice("");
+    try {
+      await apiClient.post(`/ingest/uploads/${row.id}/retry`);
+      setUploadsNotice(`「${row.original_filename || row.id}」を再処理に戻しました。`);
+      await loadUploadedRows();
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "再処理の投入に失敗しました。";
+      setUploadsError(String(detail));
+    } finally {
+      setRetryBusyId("");
+    }
+  };
 
   const submit = async () => {
     if (pdfFiles.length === 0) {
@@ -106,6 +225,7 @@ export default function PdfUploadPage() {
       );
     }
     setLoading(false);
+    void loadUploadedRows();
     setPdfFiles([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -355,6 +475,105 @@ export default function PdfUploadPage() {
         ) : null}
       </section>
 
+      <section className="panel">
+        <header className="panel-header panel-header-stack">
+          <div>
+            <h2>最近の取込PDF</h2>
+            <p className="subtle">
+              受け付けたPDFを直接確認できます。未処理や処理落ちの行は、ここから再処理に戻します。
+            </p>
+          </div>
+          <div className="history-toolbar">
+            <label className="field history-filter">
+              <span className="field-label">状態</span>
+              <select
+                className="input"
+                value={uploadedStatusFilter}
+                onChange={(e) => setUploadedStatusFilter(e.target.value)}
+              >
+                <option value="">すべて</option>
+                <option value="pending">未処理</option>
+                <option value="processing">処理中</option>
+                <option value="retry_wait">再試行待ち</option>
+                <option value="manual_review">要介入</option>
+                <option value="completed">完了</option>
+              </select>
+            </label>
+            <button className="btn secondary" type="button" onClick={() => void loadUploadedRows()} disabled={uploadsLoading}>
+              {uploadsLoading ? "更新中..." : "最新に更新"}
+            </button>
+          </div>
+        </header>
+
+        {uploadsNotice ? <p className="message message-success">{uploadsNotice}</p> : null}
+        {uploadsError ? <p className="message message-error">{uploadsError}</p> : null}
+
+        {uploadsLoading && uploadedRows.length === 0 ? (
+          <p className="subtle">読み込み中...</p>
+        ) : uploadedRows.length === 0 ? (
+          <p className="subtle">該当する取込済みPDFはありません。</p>
+        ) : (
+          <div className="history-list">
+            {uploadedRows.map((row) => {
+              const retryDisabled = !uploadedPdfCanRetry(row);
+              const orderId = String(row.current_order_id || "").trim();
+              const processingActive = uploadedPdfActiveProcessing(row);
+              return (
+                <article key={row.id} className="history-card">
+                  <div className="history-card-head">
+                    <div>
+                      <p className="history-card-id">{row.id}</p>
+                      <h3 className="history-card-title">{row.original_filename || row.message_id || row.id}</h3>
+                    </div>
+                    <div className="history-badges">
+                      <span className="history-badge">{uploadedPdfStatusLabel(row.status)}</span>
+                      <span className="history-badge history-badge-stage">{uploadedPdfStageLabel(row.current_stage)}</span>
+                    </div>
+                  </div>
+                  <div className="history-meta">
+                    <span>受付ID: {row.message_id || "-"}</span>
+                    <span>受信日時: {formatTimestamp(row.received_at)}</span>
+                    <span>
+                      試行回数: {row.attempt_count || 0} / {row.max_attempts || "-"}
+                    </span>
+                    <span>施設ヒント: {row.facility_hint || "-"}</span>
+                    <span>週ヒント: {row.week_hint || "-"}</span>
+                    <span>対象注文ID: {orderId || "-"}</span>
+                  </div>
+                  {row.last_error_message ? (
+                    <p className="history-error">
+                      エラー: {row.last_error_message}
+                    </p>
+                  ) : null}
+                  {processingActive ? (
+                    <p className="history-hint">現在処理中のため、処理が止まった時だけ再処理に戻してください。</p>
+                  ) : null}
+                  <div className="actions">
+                    {orderId ? (
+                      <Link href={`/orders/${orderId}`} className="btn secondary">
+                        注文詳細を開く
+                      </Link>
+                    ) : row.message_id ? (
+                      <Link href={`/orders?search=${encodeURIComponent(row.message_id)}`} className="btn secondary">
+                        注文一覧で探す
+                      </Link>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn primary"
+                      onClick={() => void retryUploadedPdf(row)}
+                      disabled={retryDisabled || retryBusyId === row.id}
+                    >
+                      {retryBusyId === row.id ? "再投入中..." : "再処理に戻す"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <style jsx>{`
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
@@ -399,6 +618,13 @@ export default function PdfUploadPage() {
         }
         .panel-header {
           margin-bottom: 16px;
+        }
+        .panel-header-stack {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
         }
         .steps {
           display: grid;
@@ -505,6 +731,12 @@ export default function PdfUploadPage() {
           margin-top: 16px;
           color: #374240;
         }
+        .message-success {
+          color: #204b34;
+        }
+        .message-error {
+          color: #8b2d1f;
+        }
         .result {
           margin-top: 16px;
           display: grid;
@@ -568,6 +800,85 @@ export default function PdfUploadPage() {
         .result-raw {
           margin-top: 14px;
           background: #fff;
+        }
+        .history-toolbar {
+          display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          align-items: flex-end;
+        }
+        .history-filter {
+          min-width: 180px;
+        }
+        .history-list {
+          display: grid;
+          gap: 14px;
+        }
+        .history-card {
+          border-radius: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #fcfbf7;
+          padding: 16px;
+          display: grid;
+          gap: 12px;
+        }
+        .history-card-head {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          flex-wrap: wrap;
+          align-items: flex-start;
+        }
+        .history-card-id {
+          margin: 0 0 4px;
+          color: #6f7f79;
+          font-size: 12px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .history-card-title {
+          margin: 0;
+          font-size: 18px;
+        }
+        .history-badges {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .history-badge {
+          display: inline-flex;
+          align-items: center;
+          min-height: 30px;
+          padding: 0 10px;
+          border-radius: 999px;
+          background: #eef2f0;
+          color: #31423f;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .history-badge-stage {
+          background: #f6f1e6;
+          color: #6f521c;
+        }
+        .history-meta {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 8px 12px;
+          color: #374240;
+          font-size: 13px;
+        }
+        .history-error {
+          margin: 0;
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: #fff2ef;
+          border: 1px solid rgba(139, 45, 31, 0.12);
+          color: #8b2d1f;
+        }
+        .history-hint {
+          margin: 0;
+          color: #5f615c;
+          font-size: 13px;
         }
       `}</style>
     </main>

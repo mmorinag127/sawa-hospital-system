@@ -16,6 +16,19 @@ type Order = {
   facility?: string | null;
   week?: string | null;
   received_at?: string | null;
+  candidate_resolution?: {
+    resolutions?: {
+      facility?: {
+        resolved_value?: string | null;
+        resolved_label?: string | null;
+        candidates?: Array<{
+          value?: string | null;
+          label?: string | null;
+          score?: number | null;
+        }> | null;
+      } | null;
+    } | null;
+  } | null;
 };
 
 type MenuInfo = {
@@ -87,11 +100,6 @@ type ShippingTodayPayload = {
 
 const STATUS_KEYS = ["未着", "要確認", "確定", "エラー"] as const;
 
-const buildMonthId = () => {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-};
-
 const formatDate = (value?: string | null) => {
   if (!value) return "未取得";
   const date = new Date(value);
@@ -108,6 +116,36 @@ const formatSystemStatus = (value?: string | null) => {
   if (raw === "misconfigured") return "未設定";
   if (raw === "running") return "実行中";
   return value || "未取得";
+};
+
+const inlineFacilityHint = (order: Order): FacilityHint | null => {
+  const facility = order.candidate_resolution?.resolutions?.facility;
+  const resolvedValue = String(facility?.resolved_value || "").trim();
+  const resolvedLabel = String(facility?.resolved_label || "").trim();
+  if (resolvedValue && resolvedLabel) {
+    return {
+      order_id: String(order.id || ""),
+      facility_id: resolvedValue,
+      facility_name: resolvedLabel,
+      score: null,
+      reason: "orders_list_candidate_resolution",
+      auto: null,
+    };
+  }
+  const firstCandidate = Array.isArray(facility?.candidates) ? facility?.candidates?.[0] : null;
+  const candidateValue = String(firstCandidate?.value || "").trim();
+  const candidateLabel = String(firstCandidate?.label || "").trim();
+  if (candidateValue && candidateLabel) {
+    return {
+      order_id: String(order.id || ""),
+      facility_id: candidateValue,
+      facility_name: candidateLabel,
+      score: typeof firstCandidate?.score === "number" ? firstCandidate.score : null,
+      reason: "orders_list_candidate_resolution",
+      auto: null,
+    };
+  }
+  return null;
 };
 
 export default function HomePage() {
@@ -300,7 +338,7 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     const unresolved = pendingOrders
-      .filter((order) => !order.facility && order.id)
+      .filter((order) => !order.facility && order.id && !inlineFacilityHint(order))
       .map((order) => String(order.id || ""))
       .filter((orderId) => orderId && !facilityHints[orderId]);
 
@@ -341,6 +379,11 @@ export default function HomePage() {
     if (facilityId) {
       const name = facilityNameMap[facilityId];
       return name ? `${name} (${facilityId})` : facilityId;
+    }
+    const inlineHint = inlineFacilityHint(order);
+    if (inlineHint?.facility_name) {
+      const score = inlineHint.score != null ? ` / score=${inlineHint.score}` : "";
+      return `推定: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
     }
     const orderId = order.id || "";
     const hint = orderId ? facilityHints[orderId] : null;
@@ -408,7 +451,7 @@ export default function HomePage() {
             <Link href="/pdf-upload" className="mini-link">
               注文書アップロードへ
             </Link>
-            <Link href={`/menus/${buildMonthId()}`} className="mini-link">
+            <Link href="/menus" className="mini-link">
               月次メニューへ
             </Link>
           </div>

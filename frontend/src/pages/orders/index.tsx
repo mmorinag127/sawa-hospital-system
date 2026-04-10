@@ -17,9 +17,29 @@ type Order = {
   document: string;
   facility?: string | null;
   week?: string | null;
+  week_value?: string | null;
+  week_label?: string | null;
+  candidate_resolution?: {
+    resolutions?: {
+      facility?: {
+        resolved_value?: string | null;
+        resolved_label?: string | null;
+        candidates?: Array<{
+          value?: string | null;
+          label?: string | null;
+          score?: number | null;
+        }> | null;
+      } | null;
+      week?: {
+        resolved_value?: string | null;
+        resolved_label?: string | null;
+      } | null;
+    } | null;
+  } | null;
   id?: string;
   received_at?: string | null;
   message_id?: string | null;
+  ocr_status?: string | null;
   ocr_review_state?: string | null;
   ocr_review_badges?: string[] | null;
   ocr_has_saved_draft?: boolean | null;
@@ -29,6 +49,9 @@ type Order = {
   ocr_processing_stage?: string | null;
   ocr_result_state?: string | null;
   ocr_confirmed_lines_retained?: boolean | null;
+  archived_at?: string | null;
+  archived_by?: string | null;
+  is_archived?: boolean | null;
   workflow_state?: {
     state?: string | null;
     headline?: string | null;
@@ -42,7 +65,49 @@ type Order = {
     blockers?: string[] | null;
     warnings?: string[] | null;
   } | null;
+  ocr_pages_count?: number | null;
 };
+
+type WeekGroup = {
+  key: string;
+  label: string;
+  sortKey: number;
+  temporary: boolean;
+  counts: Record<string, number>;
+  missingFacilityCount: number;
+  registeredFacilityCount: number;
+  orders: Order[];
+  facilitySlots: Array<{
+    facilityId: string;
+    facilityName: string;
+    facilityIds: string[];
+    orders: Order[];
+  }>;
+  unmatchedOrders: Order[];
+};
+
+type FacilityDisplayGroup = {
+  key: string;
+  label: string;
+  facilityIds: string[];
+};
+
+const FACILITY_DISPLAY_GROUPS: FacilityDisplayGroup[] = [
+  {
+    key: "FAC-GRP-IKOI",
+    label: "いこいの森 / いこいの森プラス",
+    facilityIds: ["FAC00013", "FAC00016"],
+  },
+  {
+    key: "FAC-GRP-SHIMANTO",
+    label: "ケアハウス四万十 / ケアハウス四万十ピア",
+    facilityIds: ["FAC00011", "FAC00015"],
+  },
+];
+
+const FACILITY_DISPLAY_GROUP_BY_ID = new Map<string, FacilityDisplayGroup>(
+  FACILITY_DISPLAY_GROUPS.flatMap((group) => group.facilityIds.map((facilityId) => [facilityId, group] as const)),
+);
 
 const compareOrdersByReceivedAt = (left: Order, right: Order) => {
   const leftTime = left.received_at ? new Date(left.received_at).getTime() : 0;
@@ -50,6 +115,88 @@ const compareOrdersByReceivedAt = (left: Order, right: Order) => {
   if (rightTime !== leftTime) return rightTime - leftTime;
   return String(right.id || "").localeCompare(String(left.id || ""), "ja");
 };
+
+const normalizeWeekGroup = (order: Order) => {
+  const candidateWeek = order.candidate_resolution?.resolutions?.week;
+  const candidateValue = String(candidateWeek?.resolved_value || "").trim();
+  const candidateLabel = String(candidateWeek?.resolved_label || "").trim();
+  const rawValue = candidateValue || String(order.week_value || order.week || "").trim();
+  const rawLabel = candidateLabel || String(order.week_label || "").trim();
+  const usesTemporaryWeek = Boolean(candidateValue || candidateLabel);
+  const explicitRange = rawValue.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+  if (explicitRange) {
+    const label = rawLabel || `${explicitRange[2].slice(5).replace("-", "/")} - ${explicitRange[3].slice(5).replace("-", "/")}`;
+    return {
+      key: rawValue,
+      label,
+      sortKey: Date.parse(explicitRange[3]),
+      temporary: usesTemporaryWeek,
+    };
+  }
+  if (rawLabel) {
+    return {
+      key: rawValue || rawLabel,
+      label: rawLabel,
+      sortKey: Date.parse(`${String(rawValue || "").slice(0, 7)}-01`) || 0,
+      temporary: usesTemporaryWeek || rawLabel.includes("("),
+    };
+  }
+  if (rawValue) {
+    return {
+      key: rawValue,
+      label: rawValue,
+      sortKey: Date.parse(`${String(rawValue).slice(0, 7)}-01`) || 0,
+      temporary: usesTemporaryWeek,
+    };
+  }
+  return {
+    key: "unresolved",
+    label: "暫定週次未確定",
+    sortKey: 0,
+    temporary: false,
+  };
+};
+
+const weekMenuId = (order: Order) => {
+  const rawValue = String(
+    order.candidate_resolution?.resolutions?.week?.resolved_value || order.week_value || order.week || "",
+  ).trim();
+  if (!rawValue) return "";
+  if (rawValue.includes("@")) return rawValue.split("@", 1)[0];
+  return rawValue.slice(0, 7);
+};
+
+const inlineFacilityHint = (order: Order): FacilityHint | null => {
+  const facility = order.candidate_resolution?.resolutions?.facility;
+  const resolvedValue = String(facility?.resolved_value || "").trim();
+  const resolvedLabel = String(facility?.resolved_label || "").trim();
+  if (resolvedValue && resolvedLabel) {
+    return {
+      order_id: String(order.id || ""),
+      facility_id: resolvedValue,
+      facility_name: resolvedLabel,
+      score: null,
+      reason: "orders_list_candidate_resolution",
+      auto: null,
+    };
+  }
+  const firstCandidate = Array.isArray(facility?.candidates) ? facility?.candidates?.[0] : null;
+  const candidateValue = String(firstCandidate?.value || "").trim();
+  const candidateLabel = String(firstCandidate?.label || "").trim();
+  if (candidateValue && candidateLabel) {
+    return {
+      order_id: String(order.id || ""),
+      facility_id: candidateValue,
+      facility_name: candidateLabel,
+      score: typeof firstCandidate?.score === "number" ? firstCandidate.score : null,
+      reason: "orders_list_candidate_resolution",
+      auto: null,
+    };
+  }
+  return null;
+};
+
+const hasRegisteredFacility = (order: Order) => Boolean(String(order.facility || "").trim());
 
 export default function OrdersPage() {
   const router = useRouter();
@@ -59,9 +206,14 @@ export default function OrdersPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
+  const [showArchived, setShowArchived] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
+  const [archiveNotice, setArchiveNotice] = useState<string>("");
+  const [archiveError, setArchiveError] = useState<string>("");
   const [reloadToken, setReloadToken] = useState<number>(0);
+  const [expandedWeekGroups, setExpandedWeekGroups] = useState<Record<string, boolean>>({});
+  const [archiveBusyWeek, setArchiveBusyWeek] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -91,7 +243,9 @@ export default function OrdersPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const params = statusFilter ? { status: statusFilter, include_ocr: false } : { include_ocr: false };
+    const params = statusFilter
+      ? { status: statusFilter, include_ocr: false, include_archived: showArchived }
+      : { include_ocr: false, include_archived: showArchived };
     setIsLoading(true);
     setLoadError("");
     apiClient
@@ -115,12 +269,12 @@ export default function OrdersPage() {
     return () => {
       cancelled = true;
     };
-  }, [statusFilter, reloadToken]);
+  }, [statusFilter, reloadToken, showArchived]);
 
   useEffect(() => {
     let cancelled = false;
     const unresolved = orders
-      .filter((order) => !order.facility && order.id)
+      .filter((order) => !order.facility && order.id && !inlineFacilityHint(order))
       .sort(compareOrdersByReceivedAt)
       .slice(0, 60)
       .map((order) => String(order.id || ""))
@@ -163,6 +317,11 @@ export default function OrdersPage() {
       const name = facilityNameMap[facilityId];
       return name ? `${name} (${facilityId})` : facilityId;
     }
+    const inlineHint = inlineFacilityHint(order);
+    if (inlineHint?.facility_name) {
+      const score = inlineHint.score != null ? ` / score=${inlineHint.score}` : "";
+      return `推定: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
+    }
     const orderId = order.id || "";
     const hint = orderId ? facilityHints[orderId] : null;
     if (hint?.facility_name) {
@@ -177,8 +336,11 @@ export default function OrdersPage() {
       if (unresolvedOnly && order.facility) return false;
       if (!search) return true;
       const token = search.toLowerCase();
+      const normalizedWeek = normalizeWeekGroup(order);
       const facilityId = order.facility || "";
       const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
+      const inlineHint = inlineFacilityHint(order);
+      const inlineHintName = inlineHint?.facility_name ? String(inlineHint.facility_name) : "";
       const hint = order.id ? facilityHints[order.id] : null;
       const hintName = hint?.facility_name ? String(hint.facility_name) : "";
       return (
@@ -186,8 +348,11 @@ export default function OrdersPage() {
         (order.message_id || "").toLowerCase().includes(token) ||
         facilityId.toLowerCase().includes(token) ||
         facilityName.toLowerCase().includes(token) ||
+        inlineHintName.toLowerCase().includes(token) ||
         hintName.toLowerCase().includes(token) ||
         (order.week || "").toLowerCase().includes(token) ||
+        normalizedWeek.key.toLowerCase().includes(token) ||
+        normalizedWeek.label.toLowerCase().includes(token) ||
         (order.document || "").toLowerCase().includes(token)
       );
     });
@@ -195,35 +360,41 @@ export default function OrdersPage() {
 
   const sortedOrders = useMemo(() => [...filteredOrders].sort(compareOrdersByReceivedAt), [filteredOrders]);
 
-  const groupedRows = useMemo(() => {
-    const groups = new Map<string, { facility: string; week: string; counts: Record<string, number> }>();
-    filteredOrders.forEach((order) => {
-      const facility = order.facility || "未確定";
-      const week = order.week || "未確定";
-      const key = `${facility}__${week}`;
-      const current =
-        groups.get(key) || {
-          facility,
-          week,
-          counts: { 未着: 0, 要確認: 0, 確定: 0, エラー: 0 },
-        };
-      if (current.counts[order.status] !== undefined) {
-        current.counts[order.status] += 1;
-      }
-      groups.set(key, current);
-    });
-    return Array.from(groups.values()).sort((left, right) => {
-      if (left.week !== right.week) return right.week.localeCompare(left.week, "ja");
-      return left.facility.localeCompare(right.facility, "ja");
-    });
-  }, [filteredOrders]);
-
-  const formatReceivedAt = (value?: string | null) => {
-    if (!value) return "不明";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleString("ja-JP");
+  const resolvedFacilityIdForOrder = (order: Order) => {
+    const confirmed = String(order.facility || "").trim();
+    if (confirmed) return confirmed;
+    const inlineHint = inlineFacilityHint(order);
+    const inlineValue = String(inlineHint?.facility_id || "").trim();
+    if (inlineValue) return inlineValue;
+    const hinted = order.id ? facilityHints[order.id] : null;
+    const hintedValue = String(hinted?.facility_id || "").trim();
+    if (hintedValue) return hintedValue;
+    return "";
   };
+
+  const displayFacilityGroupForId = (facilityId: string): FacilityDisplayGroup => {
+    const explicitGroup = FACILITY_DISPLAY_GROUP_BY_ID.get(facilityId);
+    if (explicitGroup) return explicitGroup;
+    return {
+      key: facilityId,
+      label: facilityNameMap[facilityId] || facilityId,
+      facilityIds: [facilityId],
+    };
+  };
+
+  const allFacilityDisplayGroups = useMemo(() => {
+    const ids = new Set<string>(Object.keys(facilityNameMap));
+    sortedOrders.forEach((order) => {
+      const facilityId = resolvedFacilityIdForOrder(order);
+      if (facilityId) ids.add(facilityId);
+    });
+    const groups = new Map<string, FacilityDisplayGroup>();
+    Array.from(ids).forEach((facilityId) => {
+      const group = displayFacilityGroupForId(facilityId);
+      if (!groups.has(group.key)) groups.set(group.key, group);
+    });
+    return Array.from(groups.values()).sort((left, right) => left.label.localeCompare(right.label, "ja"));
+  }, [facilityHints, facilityNameMap, sortedOrders]);
 
   const statusClass = (status?: string | null) => {
     switch (status) {
@@ -346,6 +517,391 @@ export default function OrdersPage() {
     return "";
   };
 
+  const weekGroups = useMemo(() => {
+    const groups = new Map<string, WeekGroup>();
+    sortedOrders.forEach((order) => {
+      const weekGroup = normalizeWeekGroup(order);
+      const current =
+        groups.get(weekGroup.key) || {
+          ...weekGroup,
+          counts: { 未着: 0, 要確認: 0, 確定: 0, エラー: 0 },
+          missingFacilityCount: 0,
+          registeredFacilityCount: 0,
+          orders: [],
+          facilitySlots: [],
+          unmatchedOrders: [],
+        };
+      if (current.counts[order.status] !== undefined) current.counts[order.status] += 1;
+      if (hasRegisteredFacility(order)) {
+        current.registeredFacilityCount += 1;
+      } else {
+        current.missingFacilityCount += 1;
+      }
+      current.orders.push(order);
+      groups.set(weekGroup.key, current);
+    });
+    groups.forEach((group) => {
+      const facilityOrderMap = new Map<string, Order[]>();
+      const unmatchedOrders: Order[] = [];
+      group.orders.forEach((order) => {
+        const facilityId = resolvedFacilityIdForOrder(order);
+        if (!facilityId) {
+          unmatchedOrders.push(order);
+          return;
+        }
+        const displayGroup = displayFacilityGroupForId(facilityId);
+        const bucket = facilityOrderMap.get(displayGroup.key) || [];
+        bucket.push(order);
+        facilityOrderMap.set(displayGroup.key, bucket);
+      });
+      group.facilitySlots =
+        group.key === "unresolved"
+          ? []
+          : allFacilityDisplayGroups.map((facilityGroup) => ({
+              facilityId: facilityGroup.key,
+              facilityName: facilityGroup.label,
+              facilityIds: facilityGroup.facilityIds,
+              orders: facilityOrderMap.get(facilityGroup.key) || [],
+            }));
+      group.unmatchedOrders = unmatchedOrders.sort(compareOrdersByReceivedAt);
+    });
+    return Array.from(groups.values()).sort((left, right) => {
+      if (left.key === "unresolved" && right.key !== "unresolved") return -1;
+      if (right.key === "unresolved" && left.key !== "unresolved") return 1;
+      if (right.sortKey !== left.sortKey) return right.sortKey - left.sortKey;
+      return left.label.localeCompare(right.label, "ja");
+    });
+  }, [allFacilityDisplayGroups, facilityHints, facilityNameMap, sortedOrders]);
+
+  const archivedCountForWeekGroup = (group: WeekGroup) =>
+    group.orders.filter((order) => Boolean(order.is_archived)).length;
+
+  const activeOrderIdsForWeekGroup = (group: WeekGroup) =>
+    group.orders
+      .filter((order) => !order.is_archived)
+      .map((order) => String(order.id || "").trim())
+      .filter(Boolean);
+
+  const archivedOrderIdsForWeekGroup = (group: WeekGroup) =>
+    group.orders
+      .filter((order) => Boolean(order.is_archived))
+      .map((order) => String(order.id || "").trim())
+      .filter(Boolean);
+
+  const canArchiveWeekGroup = (group: WeekGroup) => {
+    if (group.key === "unresolved") return false;
+    return activeOrderIdsForWeekGroup(group).length > 0;
+  };
+
+  const canUnarchiveWeekGroup = (group: WeekGroup) => {
+    if (group.key === "unresolved") return false;
+    return archivedOrderIdsForWeekGroup(group).length > 0;
+  };
+
+  const bulkArchivableWeekGroups = useMemo(
+    () => weekGroups.filter((group) => canArchiveWeekGroup(group)),
+    [weekGroups],
+  );
+
+  const bulkRestorableWeekGroups = useMemo(
+    () => weekGroups.filter((group) => canUnarchiveWeekGroup(group)),
+    [weekGroups],
+  );
+
+  const archiveWeekGroup = async (group: WeekGroup) => {
+    const orderIds = activeOrderIdsForWeekGroup(group);
+    if (!orderIds.length) return;
+    if (!window.confirm(`「${group.label}」をアーカイブします。通常の注文一覧から除外されます。`)) {
+      return;
+    }
+    setArchiveBusyWeek(group.key);
+    setArchiveNotice("");
+    setArchiveError("");
+    try {
+      await apiClient.post("/orders/archive-week", {
+        week_value: group.key,
+        order_ids: orderIds,
+      });
+      setArchiveNotice(`「${group.label}」をアーカイブしました。`);
+      setReloadToken((value) => value + 1);
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail?.message
+        || err?.response?.data?.detail?.error
+        || err?.response?.data?.detail
+        || err?.message
+        || "週次アーカイブに失敗しました。";
+      setArchiveError(String(detail));
+    } finally {
+      setArchiveBusyWeek("");
+    }
+  };
+
+  const unarchiveWeekGroup = async (group: WeekGroup) => {
+    const orderIds = archivedOrderIdsForWeekGroup(group);
+    if (!orderIds.length) return;
+    if (!window.confirm(`「${group.label}」のアーカイブを解除します。`)) {
+      return;
+    }
+    setArchiveBusyWeek(group.key);
+    setArchiveNotice("");
+    setArchiveError("");
+    try {
+      await apiClient.post("/orders/unarchive-week", {
+        week_value: group.key,
+        order_ids: orderIds,
+      });
+      setArchiveNotice(`「${group.label}」を通常表示に戻しました。`);
+      setReloadToken((value) => value + 1);
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail?.message
+        || err?.response?.data?.detail?.error
+        || err?.response?.data?.detail
+        || err?.message
+        || "アーカイブ解除に失敗しました。";
+      setArchiveError(String(detail));
+    } finally {
+      setArchiveBusyWeek("");
+    }
+  };
+
+  const archiveAllVisibleWeekGroups = async () => {
+    if (bulkArchivableWeekGroups.length === 0) return;
+    if (
+      !window.confirm(
+        `表示中の週次 ${bulkArchivableWeekGroups.length} 件を一括アーカイブします。通常の注文一覧から除外されます。`,
+      )
+    ) {
+      return;
+    }
+    setArchiveBusyWeek("__bulk_archive__");
+    setArchiveNotice("");
+    setArchiveError("");
+    const archivedLabels: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (const group of bulkArchivableWeekGroups) {
+        const orderIds = activeOrderIdsForWeekGroup(group);
+        if (!orderIds.length) continue;
+        try {
+          await apiClient.post("/orders/archive-week", {
+            week_value: group.key,
+            order_ids: orderIds,
+          });
+          archivedLabels.push(group.label);
+        } catch (err: any) {
+          const detail =
+            err?.response?.data?.detail?.message
+            || err?.response?.data?.detail?.error
+            || err?.response?.data?.detail
+            || err?.message
+            || "週次アーカイブに失敗しました。";
+          failures.push(`${group.label}: ${String(detail)}`);
+        }
+      }
+      if (archivedLabels.length > 0) {
+        setArchiveNotice(`${archivedLabels.length} 件の週次をアーカイブしました。`);
+        setReloadToken((value) => value + 1);
+      }
+      if (failures.length > 0) {
+        setArchiveError(failures.join(" / "));
+      }
+    } finally {
+      setArchiveBusyWeek("");
+    }
+  };
+
+  const unarchiveAllVisibleWeekGroups = async () => {
+    if (bulkRestorableWeekGroups.length === 0) return;
+    if (
+      !window.confirm(
+        `表示中のアーカイブ済み週次 ${bulkRestorableWeekGroups.length} 件を一括解除します。`,
+      )
+    ) {
+      return;
+    }
+    setArchiveBusyWeek("__bulk_restore__");
+    setArchiveNotice("");
+    setArchiveError("");
+    const restoredLabels: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (const group of bulkRestorableWeekGroups) {
+        const orderIds = archivedOrderIdsForWeekGroup(group);
+        if (!orderIds.length) continue;
+        try {
+          await apiClient.post("/orders/unarchive-week", {
+            week_value: group.key,
+            order_ids: orderIds,
+          });
+          restoredLabels.push(group.label);
+        } catch (err: any) {
+          const detail =
+            err?.response?.data?.detail?.message
+            || err?.response?.data?.detail?.error
+            || err?.response?.data?.detail
+            || err?.message
+            || "アーカイブ解除に失敗しました。";
+          failures.push(`${group.label}: ${String(detail)}`);
+        }
+      }
+      if (restoredLabels.length > 0) {
+        setArchiveNotice(`${restoredLabels.length} 件の週次を通常表示に戻しました。`);
+        setReloadToken((value) => value + 1);
+      }
+      if (failures.length > 0) {
+        setArchiveError(failures.join(" / "));
+      }
+    } finally {
+      setArchiveBusyWeek("");
+    }
+  };
+
+  const isWeekGroupExpanded = (groupKey: string) => expandedWeekGroups[groupKey] === true;
+
+  const toggleWeekGroup = (groupKey: string) => {
+    setExpandedWeekGroups((current) => ({
+      ...current,
+      [groupKey]: current[groupKey] !== true,
+    }));
+  };
+
+  const renderOrderCard = (order: Order) => {
+    const badges = visibleReviewBadges(order);
+    const weekBucket = normalizeWeekGroup(order);
+    return (
+      <article key={order.id || order.document} className={`order-card ${reviewToneClass(order)}`.trim()}>
+        <div className="order-card-top">
+          <div>
+            <p className="order-card-facility">{facilityLabel(order)}</p>
+            <p className="order-card-title">{order.id || "注文ID未発行"}</p>
+          </div>
+          <span className={`status-pill ${statusClass(order.status)}`}>{order.status}</span>
+        </div>
+        <p className="order-card-week">{weekBucket.label}</p>
+        {workflowHeadlineText(order) ? (
+          <div className="list-workflow">
+            <p className="list-workflow-title">{workflowHeadlineText(order)}</p>
+            {workflowPrimaryActionLabel(order) && workflowPrimaryActionLabel(order) !== workflowHeadlineText(order) ? (
+              <p className="list-workflow-action">次: {workflowPrimaryActionLabel(order)}</p>
+            ) : null}
+            {workflowSupportText(order) ? <p className="list-workflow-support">{workflowSupportText(order)}</p> : null}
+          </div>
+        ) : null}
+        {badges.workflowBadge ||
+        badges.secondaryBadges.length ||
+        processingStageLabel(order.ocr_processing_stage) ||
+        order.ocr_confirmed_lines_retained ? (
+          <div className="review-badges">
+            {badges.workflowBadge ? <span className="review-badge">{badges.workflowBadge}</span> : null}
+            {badges.secondaryBadges.map((badge) => (
+              <span className="review-badge" key={`${order.id || order.document}-${badge}`}>
+                {badge}
+              </span>
+            ))}
+            {!order.workflow_state && order.ocr_review_state === "processing" && processingStageLabel(order.ocr_processing_stage) ? (
+              <span className="review-badge">{processingStageLabel(order.ocr_processing_stage)}</span>
+            ) : null}
+            {!order.workflow_state && order.ocr_confirmed_lines_retained ? (
+              <span className="review-badge">確定明細保持</span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="list-actions">
+          <Link href={`/orders/${order.id}`} className="list-link">
+            詳細
+          </Link>
+          {weekMenuId(order) ? (
+            <Link href={`/menus/${weekMenuId(order)}`} className="list-link">
+              メニュー
+            </Link>
+          ) : null}
+        </div>
+      </article>
+    );
+  };
+
+  const renderWeekGroup = (group: WeekGroup) => {
+    const expanded = isWeekGroupExpanded(group.key);
+    const bodyId = `week-group-body-${group.key.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+    const archivedCount = archivedCountForWeekGroup(group);
+    return (
+      <section
+        key={group.key}
+        className={`week-group${group.key === "unresolved" ? " week-group-unresolved" : ""}`}
+      >
+        <header className="week-group-header">
+          <div>
+            <p className="week-group-kicker">
+              {group.key === "unresolved" ? "要確認の暫定グループ" : group.temporary ? "OCRの暫定週次" : "登録済み週次"}
+            </p>
+            <h3>{group.label}</h3>
+            {group.missingFacilityCount > 0 ? (
+              <p className="week-group-alert">
+                {group.registeredFacilityCount === 0
+                  ? "この週は施設未登録の注文だけです。"
+                  : `施設未登録の注文が ${group.missingFacilityCount} 件あります。`}
+              </p>
+            ) : null}
+          </div>
+          <div className="week-group-header-actions">
+            <div className="week-counts">
+              {archivedCount > 0 ? (
+                <span className="week-count week-count-archived">
+                  アーカイブ済み {archivedCount}
+                </span>
+              ) : null}
+              {Object.entries(group.counts)
+                .filter(([, count]) => count > 0)
+                .map(([label, count]) => (
+                  <span className="week-count" key={`${group.key}-${label}`}>
+                    {label} {count}
+                  </span>
+                ))}
+            </div>
+            <button
+              type="button"
+              className="week-group-toggle"
+              aria-expanded={expanded}
+              aria-controls={bodyId}
+              onClick={() => toggleWeekGroup(group.key)}
+            >
+              {expanded ? "閉じる" : "開く"}
+            </button>
+            {group.key !== "unresolved" && canArchiveWeekGroup(group) ? (
+              <button
+                type="button"
+                className="week-group-action week-group-action-archive"
+                onClick={() => archiveWeekGroup(group)}
+                disabled={archiveBusyWeek === group.key}
+              >
+                {archiveBusyWeek === group.key ? "処理中..." : "アーカイブ"}
+              </button>
+            ) : null}
+            {group.key !== "unresolved" && canUnarchiveWeekGroup(group) ? (
+              <button
+                type="button"
+                className="week-group-action week-group-action-restore"
+                onClick={() => unarchiveWeekGroup(group)}
+                disabled={archiveBusyWeek === group.key}
+              >
+                {archiveBusyWeek === group.key ? "処理中..." : "戻す"}
+              </button>
+            ) : null}
+          </div>
+        </header>
+        {expanded ? (
+          <div id={bodyId} className="week-group-body">
+            <div className="order-card-grid">
+              {group.orders.map((order) => renderOrderCard(order))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+    );
+  };
+
   return (
     <main className="page">
       <header className="hero">
@@ -390,62 +946,58 @@ export default function OrdersPage() {
               onChange={(e) => setUnresolvedOnly(e.target.checked)}
             />
           </label>
+          <label className="field checkbox">
+            <span className="field-label">アーカイブ済みを表示</span>
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+          </label>
         </div>
       </section>
 
       <section className="panel">
         <header className="panel-header">
-          <h2>施設×週 進捗</h2>
+          <div>
+            <h2>週次ごとの注文</h2>
+            <p className="subtle">OCRから読めた暫定週次で束ねています。ここでは受付IDと受信日時は省いています。</p>
+          </div>
           <button className="ghost-link" type="button" onClick={() => setReloadToken((value) => value + 1)}>
             最新に更新
           </button>
         </header>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>施設</th>
-                <th>週</th>
-                <th>未着</th>
-                <th>要確認</th>
-                <th>確定</th>
-                <th>エラー</th>
-              </tr>
-            </thead>
-            <tbody>
-              {groupedRows.length === 0 ? (
-                <tr>
-                  <td colSpan={6}>該当データなし</td>
-                </tr>
-              ) : (
-                groupedRows.map((row) => (
-                  <tr key={`${row.facility}-${row.week}`}>
-                    <td>
-                      {row.facility === "未確定"
-                        ? "未確定"
-                        : facilityNameMap[row.facility]
-                          ? `${facilityNameMap[row.facility]} (${row.facility})`
-                          : row.facility}
-                    </td>
-                    <td>{row.week}</td>
-                    <td>{row.counts["未着"]}</td>
-                    <td>{row.counts["要確認"]}</td>
-                    <td>{row.counts["確定"]}</td>
-                    <td>{row.counts["エラー"]}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="panel">
-        <header className="panel-header">
-          <h2>注文リスト</h2>
-          <span className="subtle">詳細を開いて処理します。</span>
-        </header>
-        <div className="list">
+        {archiveNotice ? <p className="archive-feedback archive-feedback-success">{archiveNotice}</p> : null}
+        {archiveError ? <p className="archive-feedback archive-feedback-error">{archiveError}</p> : null}
+        {bulkArchivableWeekGroups.length > 0 || bulkRestorableWeekGroups.length > 0 ? (
+          <div className="week-bulk-actions">
+            {bulkArchivableWeekGroups.length > 0 ? (
+              <button
+                type="button"
+                className="week-group-action week-group-action-archive"
+                onClick={archiveAllVisibleWeekGroups}
+                disabled={archiveBusyWeek === "__bulk_archive__" || archiveBusyWeek === "__bulk_restore__"}
+              >
+                {archiveBusyWeek === "__bulk_archive__"
+                  ? "処理中..."
+                  : `表示中の週次を一括アーカイブ (${bulkArchivableWeekGroups.length})`}
+              </button>
+            ) : null}
+            {bulkRestorableWeekGroups.length > 0 ? (
+              <button
+                type="button"
+                className="week-group-action week-group-action-restore"
+                onClick={unarchiveAllVisibleWeekGroups}
+                disabled={archiveBusyWeek === "__bulk_archive__" || archiveBusyWeek === "__bulk_restore__"}
+              >
+                {archiveBusyWeek === "__bulk_restore__"
+                  ? "処理中..."
+                  : `表示中の週次のアーカイブを解除 (${bulkRestorableWeekGroups.length})`}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="week-groups">
           {isLoading ? (
             <p className="subtle">読み込み中...</p>
           ) : loadError ? (
@@ -460,64 +1012,7 @@ export default function OrdersPage() {
               {orders.length === 0 ? "注文データがありません。" : "フィルタ条件に一致する注文がありません。"}
             </p>
           ) : (
-            sortedOrders.map((order) => (
-              <div key={order.id || order.document} className={`list-item ${reviewToneClass(order)}`.trim()}>
-                <div className="list-main">
-                  <p className="list-title">{order.id || "注文ID未発行"}</p>
-                  <p className="list-meta">
-                    施設: {facilityLabel(order)} / 週: {order.week || "未確定"} / 受信:{" "}
-                    {formatReceivedAt(order.received_at)} / 受付ID: {order.message_id || "不明"}
-                  </p>
-                  {workflowHeadlineText(order) ? (
-                    <div className="list-workflow">
-                      <p className="list-workflow-title">{workflowHeadlineText(order)}</p>
-                      {workflowPrimaryActionLabel(order) && workflowPrimaryActionLabel(order) !== workflowHeadlineText(order) ? (
-                        <p className="list-workflow-action">次: {workflowPrimaryActionLabel(order)}</p>
-                      ) : null}
-                      {workflowSupportText(order) ? (
-                        <p className="list-workflow-support">{workflowSupportText(order)}</p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {visibleReviewBadges(order).workflowBadge ||
-                  visibleReviewBadges(order).secondaryBadges.length ||
-                  processingStageLabel(order.ocr_processing_stage) ||
-                  order.ocr_confirmed_lines_retained ? (
-                    <div className="review-badges">
-                      {visibleReviewBadges(order).workflowBadge ? (
-                        <span className="review-badge">
-                          {visibleReviewBadges(order).workflowBadge}
-                        </span>
-                      ) : null}
-                      {visibleReviewBadges(order).secondaryBadges.map((badge) => (
-                        <span className="review-badge" key={`${order.id || order.document}-${badge}`}>
-                          {badge}
-                        </span>
-                      ))}
-                      {!order.workflow_state && order.ocr_review_state === "processing" && processingStageLabel(order.ocr_processing_stage) ? (
-                        <span className="review-badge">
-                          {processingStageLabel(order.ocr_processing_stage)}
-                        </span>
-                      ) : null}
-                      {!order.workflow_state && order.ocr_confirmed_lines_retained ? (
-                        <span className="review-badge">確定明細保持</span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="list-actions">
-                  <span className={`status-pill ${statusClass(order.status)}`}>{order.status}</span>
-                  <Link href={`/orders/${order.id}`} className="list-link">
-                    詳細
-                  </Link>
-                  {order.week ? (
-                    <Link href={`/menus/${order.week}`} className="list-link">
-                      メニュー
-                    </Link>
-                  ) : null}
-                </div>
-              </div>
-            ))
+            weekGroups.map((group) => renderWeekGroup(group))
           )}
         </div>
       </section>
@@ -661,107 +1156,364 @@ export default function OrdersPage() {
           text-underline-offset: 2px;
         }
 
-        .table-wrap {
-          overflow-x: auto;
-        }
-
-        table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 14px;
-        }
-
-        th,
-        td {
-          padding: 10px;
-          text-align: left;
-        }
-
-        thead {
-          background: #f4f1ea;
-        }
-
-        tbody tr:nth-child(even) {
-          background: #faf9f5;
-        }
-
-        .list {
+        :global(.week-groups) {
           display: grid;
-          gap: 12px;
+          gap: 18px;
         }
 
-        .list-item {
+        :global(.week-group) {
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 18px;
+          background: linear-gradient(180deg, rgba(250, 247, 240, 0.65), rgba(255, 255, 255, 0.96));
+          padding: 18px;
+        }
+
+        :global(.week-group-unresolved) {
+          border: 1px solid rgba(61, 74, 71, 0.14);
+          background:
+            linear-gradient(180deg, rgba(248, 246, 242, 0.98), rgba(241, 237, 231, 0.98));
+          box-shadow:
+            inset 0 0 0 1px rgba(255, 255, 255, 0.7),
+            0 16px 30px rgba(28, 36, 34, 0.08);
+        }
+
+        :global(.week-group-header) {
           display: flex;
+          align-items: flex-start;
           justify-content: space-between;
-          align-items: center;
-          gap: 14px;
-          padding: 12px 14px;
-          border-radius: 12px;
-          border: 1px solid rgba(25, 32, 30, 0.06);
-          background: #fbfbf9;
+          gap: 16px;
         }
 
-        .list-item-review {
-          border-color: rgba(171, 125, 35, 0.22);
-          background: #fffaf0;
+        :global(.week-group-header h3) {
+          margin: 2px 0 0;
+          font-size: 22px;
+          line-height: 1.2;
         }
 
-        .list-item-error {
-          border-color: rgba(148, 47, 44, 0.18);
-          background: #fff4f3;
+        :global(.week-group-kicker) {
+          margin: 0;
+          color: #6f7f79;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
         }
 
-        .list-main {
-          min-width: 0;
+        :global(.week-group-unresolved .week-group-kicker) {
+          color: #5d6b66;
         }
 
-        .list-title {
-          margin: 0 0 4px;
+        :global(.week-group-unresolved .week-group-header h3) {
+          color: #20302d;
+        }
+
+        :global(.week-group-alert) {
+          margin: 8px 0 0;
+          color: #7a4a1f;
+          font-size: 13px;
           font-weight: 700;
         }
 
-        .list-meta {
-          margin: 0;
+        :global(.week-group-header-actions) {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 10px;
+        }
+
+        :global(.week-group-body) {
+          margin-top: 14px;
+        }
+
+        .archive-feedback {
+          margin: 0 0 16px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          font-size: 14px;
+        }
+
+        .archive-feedback-success {
+          background: #edf7f1;
+          color: #204b34;
+          border: 1px solid rgba(32, 75, 52, 0.12);
+        }
+
+        .archive-feedback-error {
+          background: #fff2ef;
+          color: #8b2d1f;
+          border: 1px solid rgba(139, 45, 31, 0.16);
+        }
+
+        .week-bulk-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin: 0 0 16px;
+        }
+
+        :global(.week-counts) {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 8px;
+        }
+
+        :global(.week-count) {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 999px;
+          padding: 6px 10px;
+          background: #eef2f0;
+          color: #31423f;
           font-size: 12px;
-          color: #5f7b74;
+          font-weight: 700;
+        }
+
+        :global(.week-count-archived) {
+          background: #eef1f7;
+          color: #48536a;
+        }
+
+        :global(.week-group-unresolved .week-count) {
+          background: #e8ecea;
+          color: #31423f;
+          border: 1px solid rgba(61, 74, 71, 0.1);
+        }
+
+        :global(.week-group-toggle),
+        :global(.week-group-action) {
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          background: #ffffff;
+          color: #243330;
+          padding: 8px 14px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        :global(.week-group-action-restore) {
+          background: #f6f7fb;
+        }
+
+        :global(.week-group-toggle:hover),
+        :global(.week-group-action:hover) {
+          background: #f6f8f7;
+        }
+
+        :global(.week-group-action:disabled) {
+          opacity: 0.6;
+          cursor: wait;
+        }
+
+        .week-group-unresolved :global(.order-card),
+        .week-group-unresolved :global(.order-card.list-item-review),
+        .week-group-unresolved :global(.order-card.list-item-error) {
+          background: #ffffff;
+          border: 1px solid rgba(61, 74, 71, 0.12);
+          box-shadow:
+            0 14px 26px rgba(27, 35, 33, 0.08),
+            0 2px 0 rgba(255, 255, 255, 0.72) inset;
+        }
+
+        .week-group-unresolved :global(.missing-order-card) {
+          background: rgba(255, 255, 255, 0.98);
+          border-color: rgba(61, 74, 71, 0.16);
+        }
+
+        .week-group-unresolved :global(.list-link) {
+          background: rgba(243, 245, 244, 0.98);
+        }
+
+        .week-group-unresolved :global(.order-card-facility),
+        .week-group-unresolved :global(.order-card-week) {
+          color: #52625d;
+        }
+
+        .week-group-unresolved :global(.list-workflow) {
+          background: rgba(246, 248, 247, 0.98);
+          border-color: rgba(61, 74, 71, 0.08);
+        }
+
+        .facility-slot-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+          gap: 14px;
+        }
+
+        .facility-slot {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: rgba(255, 255, 255, 0.92);
+        }
+
+        .facility-slot-missing {
+          background: #faf7f1;
+          border-style: dashed;
+        }
+
+        .facility-slot-unmatched {
+          border-color: rgba(171, 125, 35, 0.28);
+          background: #fffaf0;
+        }
+
+        .facility-slot-top {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .facility-slot-kicker {
+          margin: 0;
+          color: #6f7f79;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+        }
+
+        .facility-slot-name {
+          margin: 4px 0 0;
+          font-size: 18px;
+          line-height: 1.25;
+        }
+
+        .facility-slot-badge {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 999px;
+          padding: 6px 10px;
+          background: #eef2f0;
+          color: #31423f;
+          font-size: 12px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+
+        .missing-order-card {
+          border-radius: 12px;
+          padding: 12px;
+          border: 1px dashed rgba(122, 95, 49, 0.28);
+          background: #fffdf8;
+        }
+
+        .missing-order-title {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 800;
+          color: #5f4727;
+        }
+
+        .missing-order-text {
+          margin: 6px 0 0;
+          font-size: 12px;
+          color: #6e5c43;
           line-height: 1.5;
         }
 
-        .list-workflow {
-          margin-top: 8px;
-          padding: 8px 10px;
+        :global(.order-card-grid) {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+          gap: 12px;
+        }
+
+        :global(.order-card-grid--nested) {
+          grid-template-columns: 1fr;
+        }
+
+        :global(.order-card) {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          min-height: 100%;
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          background: #ffffff;
+          box-shadow: 0 10px 18px rgba(27, 35, 33, 0.04);
+        }
+
+        :global(.order-card.list-item-review) {
+          border-color: rgba(171, 125, 35, 0.28);
+          background: #fff8ef;
+        }
+
+        :global(.order-card.list-item-error) {
+          border-color: rgba(148, 47, 44, 0.22);
+          background: #fff2f1;
+        }
+
+        :global(.order-card-top) {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }
+
+        :global(.order-card-facility) {
+          margin: 0;
+          color: #52625d;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+
+        :global(.order-card-title) {
+          margin: 4px 0 0;
+          font-size: 18px;
+          font-weight: 700;
+          line-height: 1.25;
+          word-break: break-word;
+        }
+
+        :global(.order-card-week) {
+          margin: 0;
+          color: #1f2a2a;
+          font-size: 13px;
+          font-weight: 700;
+          letter-spacing: 0.01em;
+        }
+
+        :global(.list-workflow) {
+          margin-top: 0;
+          padding: 10px 11px;
           border-radius: 10px;
           background: #f4f7f6;
           border: 1px solid rgba(25, 32, 30, 0.06);
         }
 
-        .list-workflow-title {
+        :global(.list-workflow-title) {
           margin: 0;
           font-size: 13px;
           font-weight: 600;
           color: #21302d;
         }
 
-        .list-workflow-action {
+        :global(.list-workflow-action) {
           margin: 4px 0 0;
           font-size: 12px;
           color: #52625d;
         }
 
-        .list-workflow-support {
+        :global(.list-workflow-support) {
           margin: 4px 0 0;
           font-size: 12px;
           color: #7a8783;
         }
 
-        .review-badges {
+        :global(.review-badges) {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
           margin-top: 8px;
         }
 
-        .review-badge {
+        :global(.review-badge) {
           display: inline-flex;
           align-items: center;
           padding: 3px 9px;
@@ -774,12 +1526,13 @@ export default function OrdersPage() {
           white-space: nowrap;
         }
 
-        .list-actions {
+        :global(.list-actions) {
           display: flex;
           align-items: center;
           gap: 10px;
           flex-wrap: wrap;
-          justify-content: flex-end;
+          justify-content: flex-start;
+          margin-top: auto;
         }
 
         .retry-button {
@@ -793,7 +1546,7 @@ export default function OrdersPage() {
           font-weight: 600;
         }
 
-        .status-pill {
+        :global(.status-pill) {
           background: #e6ebe9;
           padding: 4px 10px;
           border-radius: 999px;
@@ -802,22 +1555,22 @@ export default function OrdersPage() {
           white-space: nowrap;
         }
 
-        .status-pill.status-pending {
+        :global(.status-pill.status-pending) {
           background: #f6dfe6;
           color: #7a2f4b;
         }
 
-        .status-pill.status-review {
+        :global(.status-pill.status-review) {
           background: #f5e2c9;
           color: #7a4a1f;
         }
 
-        .status-pill.status-confirmed {
+        :global(.status-pill.status-confirmed) {
           background: #dce8f5;
           color: #2f4f7a;
         }
 
-        .status-pill.status-error {
+        :global(.status-pill.status-error) {
           background: #f4dedb;
           color: #7a2f2a;
         }
@@ -836,6 +1589,11 @@ export default function OrdersPage() {
           cursor: pointer;
         }
 
+        .week-group-action:disabled {
+          opacity: 0.6;
+          cursor: wait;
+        }
+
         :global(.list-link:hover) {
           background: #d8e0dd;
           text-decoration: underline;
@@ -843,14 +1601,33 @@ export default function OrdersPage() {
         }
 
         @media (max-width: 720px) {
-          .list-item {
-            align-items: flex-start;
+          :global(.week-group) {
+            padding: 14px;
+          }
+
+          :global(.week-group-header) {
             flex-direction: column;
           }
 
-          .list-actions {
+          :global(.week-group-header-actions) {
+            align-items: flex-start;
             width: 100%;
+          }
+
+          :global(.week-counts) {
             justify-content: flex-start;
+          }
+
+          :global(.order-card-grid) {
+            grid-template-columns: 1fr;
+          }
+
+          :global(.order-card-top) {
+            flex-direction: column;
+          }
+
+          :global(.status-pill) {
+            align-self: flex-start;
           }
         }
       `}</style>

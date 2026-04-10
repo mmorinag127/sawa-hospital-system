@@ -18,6 +18,8 @@ class Order(Base):
     message_id = Column(String, nullable=False)
     received_at = Column(DateTime, default=datetime.utcnow)
     lines_updated_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by = Column(String, nullable=True)
 
     lines = relationship("OrderLine", back_populates="order", cascade="all, delete-orphan")
 

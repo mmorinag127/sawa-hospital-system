@@ -88,8 +88,7 @@
     "normalize_whitespace": true,
     "fill_forward_roles": [
       "date",
-      "daypart",
-      "menu_name"
+      "daypart"
     ],
     "fill_missing_date_with_hint": true,
     "fill_missing_date_with_first_seen": true,
@@ -580,6 +579,84 @@
             "column_index": 9
           }
         ]
+      },
+      "fax_template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
+      "fax_template_ids": [
+        "fax_layout_regular_staff_daycare_other_forbidden_v1",
+        "fax_layout_regular_staff_daycare_v1"
+      ],
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "通所",
+            "diet_type": "daycare",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "職員",
+            "diet_type": "staff",
+            "area_id": "X"
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "header": "揚げ物禁",
+            "diet_type": "no_fried",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 10,
+            "role": "note",
+            "header": "備考欄"
+          }
+        ]
       }
     },
     {
@@ -660,6 +737,11 @@
           }
         ]
       },
+      "fax_template_id": "fax_layout_soft_packaging_forbidden_v1",
+      "fax_template_ids": [
+        "fax_layout_soft_packaging_forbidden_v1",
+        "fax_layout_regular_forbidden_v1"
+      ],
       "label_profile_override": {
         "expiry_offset_months": 3
       }
@@ -1442,53 +1524,58 @@
           },
           {
             "index": 2,
+            "role": "aux",
+            "header": "補助区分"
+          },
+          {
+            "index": 3,
             "role": "menu_name",
             "header": "メニュー"
           },
           {
-            "index": 3,
+            "index": 4,
             "role": "quantity",
             "header": "常食",
             "diet_type": "regular",
             "area_id": "X"
           },
           {
-            "index": 4,
+            "index": 5,
             "role": "quantity",
             "header": "職員",
             "diet_type": "staff",
             "area_id": "X"
           },
           {
-            "index": 5,
+            "index": 6,
             "role": "quantity",
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X"
           },
           {
-            "index": 6,
+            "index": 7,
+            "role": "quantity",
+            "header": "肉卵魚禁",
+            "diet_type": "forbidden_other",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
             "role": "quantity",
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X"
           },
           {
-            "index": 7,
+            "index": 9,
             "role": "quantity",
             "header": "ゴマアレルギー",
             "diet_type": "sesame_allergy",
             "area_id": "X"
           },
           {
-            "index": 8,
-            "role": "quantity",
-            "header": "変更1",
-            "diet_type": "change_1",
-            "area_id": "X"
-          },
-          {
-            "index": 9,
+            "index": 10,
             "role": "note",
             "header": "備考欄"
           }

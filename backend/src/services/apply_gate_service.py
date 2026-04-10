@@ -18,7 +18,7 @@ _RECOVERABLE_BLOCKING_WARNINGS = {
     "sheet_date_mismatch",
     "sheet_canonical_mismatch",
     "sheet_suspicious_blank_row",
-    "ocr_evidence_recovery_required",
+    "sheet_structural_projection_corrupted",
     "template_resolution_blocked",
 }
 
@@ -122,6 +122,11 @@ def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
         for item in list(draft_sheet.get("warnings_json") or []) + list((draft_payload or {}).get("warnings") or [])
         if str(item or "").strip()
     ]
+    warnings = [
+        token
+        for token in warnings
+        if token not in {"llm_patch_applied"}
+    ]
     return len(blockers) == 0 and len(warnings) == 0
 
 
@@ -129,6 +134,7 @@ def evaluate_sheet_gate(
     *,
     rows: list[Any] | None,
     source: str | None,
+    has_semantic_fields: bool = False,
     blockers: list[str] | None,
     warnings: list[str] | None,
     draft_newer_than_lines: bool = False,
@@ -155,11 +161,18 @@ def evaluate_sheet_gate(
         position_fallback_semantics_ready=position_fallback_semantics_ready,
     )
     normalized_reparse_status = str(reparse_status or "").strip().lower()
+    bypass_monthly_menu_object_block = _semantic_sheet_can_bypass_monthly_menu_object_block(
+        rows=rows,
+        has_semantic_fields=has_semantic_fields,
+    )
 
-    if "sheet_weekly_menu_missing" in normalized_warnings:
+    if "sheet_weekly_menu_missing" in normalized_warnings and not has_semantic_fields:
         apply_blockers.append("weekly_menu_missing")
         confirm_blockers.append("weekly_menu_missing")
     for blocker in normalized_blockers:
+        if blocker == "monthly_menu_object_missing" and bypass_monthly_menu_object_block:
+            confirm_warnings.append("monthly_menu_object_missing")
+            continue
         apply_blockers.append(blocker)
         confirm_blockers.append(blocker)
     for warning in normalized_warnings:
@@ -174,7 +187,7 @@ def evaluate_sheet_gate(
         apply_blockers.append("rows_empty")
     if "sheet_ocr_review_required" in normalized_warnings:
         confirm_warnings.append("ocr_review_required")
-    if normalized_source.startswith("ocr_table"):
+    if normalized_source.startswith("ocr_table") and not has_semantic_fields:
         confirm_warnings.append("ocr_table_fallback")
     if normalized_reparse_status == "stalled":
         apply_blockers.append("reparse_stale")
@@ -187,11 +200,59 @@ def evaluate_sheet_gate(
     }
 
 
+def evaluate_sheet_gate_from_context(
+    current_sheet_context: dict[str, Any] | None,
+    *,
+    draft_newer_than_lines: bool = False,
+    auto_apply_blocked: bool = False,
+    reparse_status: str | None = None,
+    position_fallback_semantics_ready: bool = False,
+) -> dict[str, list[str]]:
+    context = current_sheet_context if isinstance(current_sheet_context, dict) else {}
+    return evaluate_sheet_gate(
+        rows=context.get("rows") if isinstance(context.get("rows"), list) else None,
+        source=str(context.get("source") or "").strip() or None,
+        has_semantic_fields=bool(context.get("has_semantic_fields")),
+        blockers=[str(item).strip() for item in (context.get("blockers") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (context.get("warnings") or []) if str(item).strip()],
+        draft_newer_than_lines=draft_newer_than_lines,
+        auto_apply_blocked=auto_apply_blocked,
+        reparse_status=reparse_status,
+        clean_saved_draft=bool(context.get("clean_saved_draft")),
+        position_fallback_semantics_ready=position_fallback_semantics_ready,
+    )
+
+
+def _menu_context_blockers(menu_context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(menu_context, dict):
+        return []
+    if isinstance(menu_context.get("order_codes"), list):
+        return _dedupe_tokens([str(item).strip() for item in (menu_context.get("order_codes") or []) if str(item).strip()])
+    if menu_context.get("weekly_menu_missing"):
+        return ["monthly_menu_object_missing"]
+    if menu_context.get("menu_entries_missing"):
+        return ["menu_entries_missing"]
+    return []
+
+
+def _semantic_sheet_can_bypass_monthly_menu_object_block(
+    *,
+    rows: list[Any] | None,
+    has_semantic_fields: bool,
+) -> bool:
+    if not has_semantic_fields:
+        return False
+    if not isinstance(rows, list) or len(rows) <= 0:
+        return False
+    return True
+
+
 def evaluate_apply_gate(
     *,
     order_payload: dict[str, Any] | None,
     evidence_run: dict[str, Any] | None,
     draft_sheet: dict[str, Any] | None,
+    current_sheet_context: dict[str, Any] | None = None,
     candidate_resolution: dict[str, Any] | None,
     menu_context: dict[str, Any] | None = None,
     sheet_gate: dict[str, Any] | None = None,
@@ -203,7 +264,8 @@ def evaluate_apply_gate(
 
     facility = str((order_payload or {}).get("facility") or "").strip()
     week = str((order_payload or {}).get("week_value") or (order_payload or {}).get("week") or "").strip()
-    clean_saved_draft = has_clean_saved_draft(draft_sheet)
+    context = current_sheet_context if isinstance(current_sheet_context, dict) else {}
+    clean_saved_draft = bool(context.get("clean_saved_draft")) if context else has_clean_saved_draft(draft_sheet)
     evidence_payload = (evidence_run or {}).get("payload_json") if isinstance(evidence_run, dict) else None
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
@@ -219,14 +281,6 @@ def evaluate_apply_gate(
     if not week:
         apply_blockers.append("week_missing")
         confirm_blockers.append("week_missing")
-
-    if isinstance(menu_context, dict):
-        if menu_context.get("weekly_menu_missing"):
-            apply_blockers.append("weekly_menu_missing")
-            confirm_blockers.append("weekly_menu_missing")
-        elif menu_context.get("menu_entries_missing"):
-            apply_blockers.append("menu_entries_missing")
-            confirm_blockers.append("menu_entries_missing")
 
     capabilities = (evidence_run or {}).get("capabilities_json") if isinstance(evidence_run, dict) else {}
     quantity_selected_via_user_choice = False
@@ -268,6 +322,13 @@ def evaluate_apply_gate(
             apply_warnings.append("column_mapping_review_required")
             confirm_warnings.append("column_mapping_review_required")
         if (
+            isinstance(column_mapping, dict)
+            and column_mapping.get("partial_quantity_mapping")
+            and not clean_saved_draft
+        ):
+            apply_blockers.append("sheet_quantity_column_unmapped")
+            confirm_blockers.append("sheet_quantity_column_unmapped")
+        if (
             isinstance(quantity, dict)
             and quantity.get("attention_required")
             and not quantity.get("selected_via_user_choice")
@@ -285,19 +346,41 @@ def evaluate_apply_gate(
         apply_warnings.append("numeric_trust_low")
         confirm_warnings.append("numeric_trust_low")
 
-    draft_payload = None
-    if isinstance(draft_sheet, dict):
-        draft_payload = draft_sheet.get("draft_sheet_json") if isinstance(draft_sheet.get("draft_sheet_json"), dict) else draft_sheet
-    rows = draft_payload.get("rows") if isinstance(draft_payload, dict) else None
+    draft_payload = (
+        context.get("draft_payload")
+        if isinstance(context.get("draft_payload"), dict)
+        else (
+            draft_sheet.get("draft_sheet_json")
+            if isinstance(draft_sheet, dict) and isinstance(draft_sheet.get("draft_sheet_json"), dict)
+            else draft_sheet
+        )
+    )
+    rows = context.get("rows") if isinstance(context.get("rows"), list) else (draft_payload.get("rows") if isinstance(draft_payload, dict) else None)
     if not isinstance(rows, list) or len(rows) <= 0:
         apply_blockers.append("draft_rows_empty")
         confirm_blockers.append("draft_rows_empty")
 
-    source = canonical_sheet_source(
-        (draft_payload or {}).get("source"),
-        has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
+    source = (
+        str(context.get("source") or "").strip()
+        if context
+        else canonical_sheet_source(
+            (draft_payload or {}).get("source"),
+            has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
+        )
     )
-    if source.startswith("ocr_table"):
+    has_semantic_fields = bool(context.get("has_semantic_fields")) if context else False
+    bypass_monthly_menu_object_block = _semantic_sheet_can_bypass_monthly_menu_object_block(
+        rows=rows,
+        has_semantic_fields=has_semantic_fields,
+    )
+    for menu_blocker in _menu_context_blockers(menu_context):
+        if menu_blocker == "monthly_menu_object_missing" and bypass_monthly_menu_object_block:
+            apply_warnings.append(menu_blocker)
+            confirm_warnings.append(menu_blocker)
+            continue
+        apply_blockers.append(menu_blocker)
+        confirm_blockers.append(menu_blocker)
+    if source.startswith("ocr_table") and not has_semantic_fields:
         apply_warnings.append("ocr_table_fallback")
         confirm_warnings.append("ocr_table_fallback")
 

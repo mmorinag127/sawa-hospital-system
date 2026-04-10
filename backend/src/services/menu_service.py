@@ -2,6 +2,7 @@ from io import BytesIO
 from datetime import date, datetime, timezone
 from collections import Counter
 from pathlib import Path
+from difflib import SequenceMatcher
 import re
 import unicodedata
 import threading
@@ -90,6 +91,57 @@ _MENU_SCHEMA_INITIALIZED = False
 _MENU_SCHEMA_LOCK = threading.RLock()
 _JST = ZoneInfo("Asia/Tokyo")
 
+_MENU_ENTRY_DAYPART_SORT_ORDER = {
+    "朝": 0,
+    "朝食": 0,
+    "朝アサ": 0,
+    "昼": 1,
+    "昼食": 1,
+    "昼ヒル": 1,
+    "夕": 2,
+    "夕食": 2,
+    "夕ユウ": 2,
+}
+
+
+class MenuMasterResolutionRequired(Exception):
+    def __init__(self, issues: list[dict]):
+        super().__init__("menu master resolution required")
+        self.issues = issues
+
+
+def _menu_entry_sort_key(entry) -> tuple[str, int, int, str]:
+    if isinstance(entry, dict):
+        menu_date = str(entry.get("menu_date") or "")
+        daypart = str(entry.get("daypart") or "")
+        slot_index_raw = entry.get("slot_index")
+        entry_id = str(entry.get("id") or "")
+    else:
+        menu_date_value = getattr(entry, "menu_date", None)
+        menu_date = menu_date_value.isoformat() if isinstance(menu_date_value, date) else ""
+        daypart = str(getattr(entry, "daypart", "") or "")
+        slot_index_raw = getattr(entry, "slot_index", None)
+        entry_id = str(getattr(entry, "id", "") or "")
+    try:
+        slot_index = int(slot_index_raw) if slot_index_raw is not None else 0
+    except (TypeError, ValueError):
+        slot_index = 0
+    return (
+        menu_date,
+        _MENU_ENTRY_DAYPART_SORT_ORDER.get(daypart, 99),
+        slot_index,
+        entry_id,
+    )
+
+
+def _normalize_menu_match_key(value: str) -> str:
+    normalized = _normalize_menu_name(value)
+    if not normalized:
+        return ""
+    normalized = re.sub(r"添[)）]?[^\n]*$", "", normalized)
+    normalized = normalized.replace("の", "")
+    return normalized
+
 
 def _ensure_menu_master_condiments() -> bool:
     inspector = inspect(engine)
@@ -129,6 +181,26 @@ def _ensure_monthly_menu_items_menu_master_id() -> bool:
         inspector = inspect(engine)
         columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
     return "menu_master_id" in columns
+
+
+def _ensure_monthly_menu_items_master_resolution_mode() -> bool:
+    inspector = inspect(engine)
+    if "monthly_menu_items" not in inspector.get_table_names():
+        return False
+    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
+    if "master_resolution_mode" in columns:
+        return True
+    migrated = False
+    with engine.begin() as conn:
+        try:
+            conn.execute(text("ALTER TABLE monthly_menu_items ADD COLUMN master_resolution_mode VARCHAR"))
+            migrated = True
+        except Exception as exc:
+            logger.warning("Failed to ensure monthly_menu_items.master_resolution_mode", error=str(exc))
+    if migrated:
+        inspector = inspect(engine)
+        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
+    return "master_resolution_mode" in columns
 
 
 def _ensure_monthly_menu_entries_scope_column() -> bool:
@@ -219,10 +291,13 @@ def ensure_menu_schema() -> None:
             return
         condiments_ok = _ensure_menu_master_condiments()
         monthly_item_ok = _ensure_monthly_menu_items_menu_master_id()
+        monthly_item_mode_ok = _ensure_monthly_menu_items_master_resolution_mode()
         monthly_entry_ok = _ensure_monthly_menu_entries_scope_column()
         indexes_ok = _ensure_menu_unique_indexes()
         # Only memoize success when the expected tables/columns are actually present.
-        _MENU_SCHEMA_INITIALIZED = bool(condiments_ok and monthly_item_ok and monthly_entry_ok and indexes_ok)
+        _MENU_SCHEMA_INITIALIZED = bool(
+            condiments_ok and monthly_item_ok and monthly_item_mode_ok and monthly_entry_ok and indexes_ok
+        )
 
 _TEMP_COLD_HINTS = (
     "サラダ",
@@ -253,6 +328,10 @@ _TEMP_HOT_HINTS = (
     "卵とじ",
     "蒸",
 )
+
+_GRAM_UNIT_ALIASES = {"g", "ｇ", "gram", "grams"}
+_CUT_UNIT_ALIASES = {"cut", "slice", "slices"}
+_COUNT_UNIT_ALIASES = {"count", "piece", "pieces"}
 
 
 def _resolve_menu_name_column(columns: list[str]) -> str:
@@ -316,6 +395,22 @@ def _infer_unit_type(menu_name: str | None) -> str | None:
     if "個" in text:
         return "count"
     return "g"
+
+
+def _normalize_menu_unit_type(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower().replace(" ", "").replace("　", "")
+    if lowered in _GRAM_UNIT_ALIASES or "グラム" in text:
+        return "g"
+    if "切" in text or "枚" in text or lowered in _CUT_UNIT_ALIASES:
+        return "cut"
+    if "個" in text or lowered in _COUNT_UNIT_ALIASES:
+        return "count"
+    return text
 
 
 def _is_blank_value(value: object) -> bool:
@@ -828,6 +923,8 @@ def _coerce_master_field_value(field: str, value: object) -> object:
         if coerced is None:
             return _INVALID_PATCH_VALUE
         return coerced
+    if field in {"unit_type", "bag_max_unit"}:
+        return _normalize_menu_unit_type(value)
     if field == "temp_type":
         return _normalize_temp_type(value)
     if field == "daypart":
@@ -874,6 +971,431 @@ def _extract_master_patch(
     return patch
 
 
+def _find_menu_master_by_normalized(session, normalized_name: str) -> MenuMaster | None:
+    if not normalized_name:
+        return None
+    for pending in session.new:
+        if isinstance(pending, MenuMaster) and pending.normalized_name == normalized_name:
+            return pending
+    return (
+        session.execute(select(MenuMaster).where(MenuMaster.normalized_name == normalized_name))
+        .scalars()
+        .first()
+    )
+
+
+def _apply_seed_fields_if_blank(target, seed_fields: dict[str, object] | None) -> None:
+    if not seed_fields:
+        return
+    for field, raw in seed_fields.items():
+        if field not in _MASTER_FIELDS:
+            continue
+        value = _coerce_master_field_value(field, raw)
+        if value is _INVALID_PATCH_VALUE or _is_blank_value(value):
+            continue
+        current = getattr(target, field, None)
+        if _is_blank_value(current):
+            setattr(target, field, value)
+
+
+def _find_menu_master_candidates(session, name: str, *, limit: int = 8) -> list[dict]:
+    normalized_name = _normalize_menu_name(name)
+    match_key = _normalize_menu_match_key(name)
+    if not normalized_name or not match_key:
+        return []
+    masters = session.execute(select(MenuMaster).order_by(MenuMaster.name.asc())).scalars().all()
+    scored: list[tuple[int, int, str, MenuMaster, str]] = []
+    for master in masters:
+        master_normalized = master.normalized_name or _normalize_menu_name(master.name or "")
+        master_key = _normalize_menu_match_key(master.name or "")
+        score = None
+        reason = None
+        if master_normalized == normalized_name:
+            continue
+        if not master_key:
+            continue
+        if master_key == match_key:
+            score = 95
+            reason = "normalized"
+        elif match_key in master_key or master_key in match_key:
+            score = 87
+            reason = "partial"
+        else:
+            ratio = SequenceMatcher(None, match_key, master_key).ratio()
+            if ratio >= 0.62:
+                score = round(ratio * 100)
+                reason = "similar"
+        if score is None:
+            continue
+        scored.append((score, abs(len(master_key) - len(match_key)), master.name or "", master, reason or "similar"))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    payload: list[dict] = []
+    seen_ids: set[str] = set()
+    for score, _, _, master, reason in scored:
+        if master.id in seen_ids:
+            continue
+        seen_ids.add(master.id)
+        candidate = serialize_menu_master(master)
+        candidate["match_score"] = score
+        candidate["match_reason"] = reason
+        payload.append(candidate)
+        if len(payload) >= limit:
+            break
+    return payload
+
+
+def _index_menu_master_resolutions(menu_master_resolutions: list[dict] | None) -> dict[str, dict]:
+    indexed: dict[str, dict] = {}
+    for raw in menu_master_resolutions or []:
+        if not isinstance(raw, dict):
+            continue
+        source_name = str(raw.get("source_name") or "").strip()
+        if not source_name:
+            continue
+        indexed[source_name] = raw
+    return indexed
+
+
+def _build_menu_master_resolution_issue(
+    name: str,
+    seed_patch: dict[str, object] | None,
+    candidates: list[dict],
+) -> dict:
+    return {
+        "source_name": name,
+        "normalized_name": _normalize_menu_name(name),
+        "reason": "candidate_review_required" if candidates else "missing",
+        "suggested_patch": {
+            "name": name,
+            "unit_type": _normalize_menu_unit_type((seed_patch or {}).get("unit_type")),
+            "qty_per_serving": (seed_patch or {}).get("qty_per_serving"),
+            "temp_type": _normalize_temp_type((seed_patch or {}).get("temp_type")),
+            "daypart": _coerce_master_field_value("daypart", (seed_patch or {}).get("daypart")),
+            "category": (seed_patch or {}).get("category"),
+        },
+        "candidates": candidates,
+    }
+
+
+def _build_upload_menu_master_plan(
+    session,
+    name: str,
+    seed_patch: dict[str, object] | None,
+    resolution: dict | None,
+) -> dict:
+    normalized = _normalize_menu_name(name)
+    if not normalized:
+        raise ValueError("name is required")
+    exact_master = _find_menu_master_by_normalized(session, normalized)
+    if exact_master:
+        return {
+            "action": "existing",
+            "menu_master_id": exact_master.id,
+            "seed_fields": dict(seed_patch or {}),
+        }
+
+    resolution = resolution if isinstance(resolution, dict) else None
+    if resolution:
+        action = str(resolution.get("action") or "").strip().lower()
+        if action == "existing":
+            selected_id = str(resolution.get("menu_master_id") or "").strip()
+            selected = session.get(MenuMaster, selected_id) if selected_id else None
+            if not selected:
+                raise ValueError(f"menu master candidate not found: {name}")
+            return {
+                "action": "existing",
+                "menu_master_id": selected.id,
+                "seed_fields": dict(seed_patch or {}),
+            }
+        if action == "create":
+            create_name = str(resolution.get("name") or name).strip() or name
+            create_patch = dict(seed_patch or {})
+            create_patch.update(
+                _extract_master_patch(
+                    resolution,
+                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                )
+            )
+            if _is_blank_value(create_patch.get("unit_type")) or create_patch.get("qty_per_serving") is None:
+                raise ValueError(f"menu master create requires unit_type and qty_per_serving: {name}")
+            return {
+                "action": "create",
+                "name": create_name,
+                "seed_fields": create_patch,
+            }
+        raise ValueError(f"unknown menu master resolution action: {name}")
+
+    candidates = _find_menu_master_candidates(session, name)
+    return {"issue": _build_menu_master_resolution_issue(name, seed_patch, candidates)}
+
+
+def _get_or_create_menu_master_without_rename(
+    session,
+    name: str,
+    *,
+    seed_fields: dict[str, object] | None = None,
+) -> MenuMaster | None:
+    text_name = (name or "").strip()
+    if not text_name:
+        return None
+    normalized = _normalize_menu_name(text_name)
+    if not normalized:
+        return None
+    master = _find_menu_master_by_normalized(session, normalized)
+    if master is None:
+        master = MenuMaster(id=f"MNU{uuid4().hex[:8]}", name=text_name, normalized_name=normalized)
+        session.add(master)
+        _apply_master_patch(master, seed_fields)
+        return master
+    _apply_seed_fields_if_blank(master, seed_fields)
+    return master
+
+
+def _materialize_upload_menu_master_plan(session, name: str, plan: dict) -> MenuMaster | None:
+    action = str(plan.get("action") or "").strip().lower()
+    seed_fields = plan.get("seed_fields") if isinstance(plan.get("seed_fields"), dict) else None
+    if action == "existing":
+        menu_master_id = str(plan.get("menu_master_id") or "").strip()
+        master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+        if master is None:
+            raise ValueError(f"menu master candidate not found: {name}")
+        _apply_seed_fields_if_blank(master, seed_fields)
+        return master
+    if action == "create":
+        return _get_or_create_menu_master_without_rename(
+            session,
+            str(plan.get("name") or name),
+            seed_fields=seed_fields,
+        )
+    raise ValueError(f"unknown menu master resolution action: {name}")
+
+
+def _normalize_master_field_for_compare(field: str, value: object) -> object:
+    if field == "name":
+        return str(value or "").strip()
+    if field in {"unit_type", "bag_max_unit"}:
+        return _normalize_menu_unit_type(value)
+    if field == "qty_per_serving":
+        return _coerce_float(value)
+    if field == "temp_type":
+        return _normalize_temp_type(value)
+    if field == "daypart":
+        return None
+    if field == "category":
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("（", "(").replace("）", ")")
+        normalized = re.sub(r"\s+", "", normalized)
+        base = re.sub(r"\([^)]*\)", "", normalized).strip()
+        return base or normalized or None
+    return value
+
+
+def _select_single_value(values: list[object]) -> object | None:
+    normalized = [value for value in values if not _is_blank_value(value)]
+    if not normalized:
+        return None
+    unique: list[object] = []
+    for value in normalized:
+        if value not in unique:
+            unique.append(value)
+    if len(unique) != 1:
+        return None
+    return unique[0]
+
+
+def _derive_monthly_item_patch(item: MonthlyMenuItem, entries: list[MonthlyMenuEntry]) -> dict[str, object]:
+    payload = serialize_item(item)
+    patch = _extract_master_patch(payload, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
+    scope = (item.facility_override or "").strip()
+    diet_type = normalize_diet_type(getattr(item, "diet_type", None))
+    matching_entries = [
+        entry
+        for entry in entries
+        if (entry.name or "").strip() == (item.name or "").strip()
+        and (entry.facility_override or "").strip() == scope
+        and normalize_diet_type(entry.diet_type) == diet_type
+    ]
+    if "daypart" not in patch:
+        inferred_daypart = _select_single_value(
+            [_coerce_master_field_value("daypart", entry.daypart) for entry in matching_entries]
+        )
+        if inferred_daypart is not None:
+            patch["daypart"] = inferred_daypart
+    if "category" not in patch:
+        inferred_category = _select_single_value([str(entry.category or "").strip() or None for entry in matching_entries])
+        if inferred_category is not None:
+            patch["category"] = inferred_category
+    return patch
+
+
+def _build_master_field_diffs(
+    name: str,
+    patch: dict[str, object],
+    master: MenuMaster,
+) -> list[dict]:
+    diffs: list[dict] = []
+    field_specs = (
+        ("name", "メニュー名", name, master.name),
+        ("unit_type", "単位", patch.get("unit_type"), master.unit_type),
+        ("qty_per_serving", "量", patch.get("qty_per_serving"), master.qty_per_serving),
+        ("temp_type", "温冷", patch.get("temp_type"), master.temp_type),
+        ("category", "区分", patch.get("category"), master.category),
+    )
+    for field, label, monthly_value, master_value in field_specs:
+        normalized_monthly = _normalize_master_field_for_compare(field, monthly_value)
+        if _is_blank_value(normalized_monthly):
+            continue
+        normalized_master = _normalize_master_field_for_compare(field, master_value)
+        if field == "qty_per_serving":
+            if normalized_master is not None and normalized_monthly is not None:
+                if abs(float(normalized_master) - float(normalized_monthly)) < 1e-9:
+                    continue
+            elif normalized_master == normalized_monthly:
+                continue
+        elif normalized_monthly == normalized_master:
+            continue
+        diffs.append(
+            {
+                "field": field,
+                "label": label,
+                "monthly_value": normalized_monthly,
+                "master_value": normalized_master,
+            }
+        )
+    return diffs
+
+
+def _build_menu_master_check_issue(
+    session,
+    item: MonthlyMenuItem,
+    entries: list[MonthlyMenuEntry],
+) -> dict | None:
+    item_name = (item.name or "").strip()
+    if not item_name:
+        return None
+    patch = _derive_monthly_item_patch(item, entries)
+    linked_master = session.get(MenuMaster, item.menu_master_id) if item.menu_master_id else None
+    exact_master = _find_menu_master_by_normalized(session, _normalize_menu_name(item_name))
+    target_master = linked_master or exact_master
+    if target_master is None:
+        candidates = _find_menu_master_candidates(session, item_name)
+        return {
+            "item_id": item.id,
+            "source_name": item_name,
+            "normalized_name": _normalize_menu_name(item_name),
+            "issue_type": "missing",
+            "reason": "candidate_review_required" if candidates else "missing",
+            "suggested_patch": _build_menu_master_resolution_issue(item_name, patch, [])["suggested_patch"],
+            "candidates": candidates,
+            "current_master": None,
+            "field_diffs": [],
+        }
+    if str(getattr(item, "master_resolution_mode", "") or "").strip().lower() == "month_only":
+        return None
+    field_diffs = _build_master_field_diffs(item_name, patch, target_master)
+    if not field_diffs:
+        return None
+    return {
+        "item_id": item.id,
+        "source_name": item_name,
+        "normalized_name": _normalize_menu_name(item_name),
+        "issue_type": "diff",
+        "reason": "field_diff",
+        "suggested_patch": _build_menu_master_resolution_issue(item_name, patch, [])["suggested_patch"],
+        "candidates": [],
+        "current_master": serialize_menu_master(target_master),
+        "field_diffs": field_diffs,
+    }
+
+
+def _build_menu_master_update_body(
+    name: str,
+    patch: dict[str, object],
+    master: MenuMaster,
+) -> dict[str, object]:
+    update_body: dict[str, object] = {}
+    if _normalize_master_field_for_compare("name", name) != _normalize_master_field_for_compare("name", master.name):
+        update_body["name"] = name
+    for field in ("unit_type", "qty_per_serving", "temp_type", "category"):
+        normalized_patch = _normalize_master_field_for_compare(field, patch.get(field))
+        if _is_blank_value(normalized_patch):
+            continue
+        normalized_master = _normalize_master_field_for_compare(field, getattr(master, field, None))
+        if field == "qty_per_serving":
+            if normalized_master is not None and normalized_patch is not None:
+                if abs(float(normalized_master) - float(normalized_patch)) < 1e-9:
+                    continue
+            elif normalized_master == normalized_patch:
+                continue
+        elif normalized_patch == normalized_master:
+            continue
+        update_body[field] = patch.get(field)
+    return update_body
+
+
+def _build_menu_master_checks(session, items: list[MonthlyMenuItem], entries: list[MonthlyMenuEntry]) -> dict:
+    issues: list[dict] = []
+    for item in sorted(items, key=lambda row: ((row.facility_override or ""), (row.name or ""), (row.id or ""))):
+        issue = _build_menu_master_check_issue(session, item, entries)
+        if issue:
+            issues.append(issue)
+    return {
+        "count": len(issues),
+        "issues": issues,
+    }
+
+
+def _update_menu_master_in_session(session, master: MenuMaster, body: dict) -> None:
+    if "name" in body:
+        next_name = str(body.get("name") or "").strip()
+        if not next_name:
+            raise ValueError("name is required")
+        next_normalized = _normalize_menu_name(next_name)
+        conflict = (
+            session.execute(select(MenuMaster).where(MenuMaster.normalized_name == next_normalized))
+            .scalars()
+            .first()
+        )
+        if conflict and conflict.id != master.id:
+            raise ValueError("duplicate menu name")
+        master.name = next_name
+        master.normalized_name = next_normalized
+    if "unit_type" in body:
+        master.unit_type = _coerce_master_field_value("unit_type", body.get("unit_type"))
+    if "qty_per_serving" in body:
+        master.qty_per_serving = _coerce_float(body.get("qty_per_serving"))
+    if "bag_max_qty" in body:
+        master.bag_max_qty = _coerce_float(body.get("bag_max_qty"))
+    if "bag_max_unit" in body:
+        master.bag_max_unit = _coerce_master_field_value("bag_max_unit", body.get("bag_max_unit"))
+    if "temp_type" in body:
+        master.temp_type = _normalize_temp_type(body.get("temp_type"))
+    if "daypart" in body:
+        master.daypart = _coerce_master_field_value("daypart", body.get("daypart"))
+    if "category" in body:
+        master.category = body.get("category") or None
+    if "condiments" in body:
+        raw = body.get("condiments")
+        if isinstance(raw, list):
+            master.condiments = [str(item).strip() for item in raw if str(item).strip()]
+        elif raw is None or raw == "":
+            master.condiments = []
+
+
+def _apply_monthly_item_patch_in_session(item: MonthlyMenuItem, patch: dict[str, object] | None) -> None:
+    if not patch:
+        return
+    for field in ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"):
+        if field not in patch:
+            continue
+        value = _coerce_master_field_value(field, patch.get(field))
+        if value is _INVALID_PATCH_VALUE:
+            continue
+        setattr(item, field, value)
+
+
 def _ensure_menu_master(
     session,
     name: str,
@@ -893,32 +1415,14 @@ def _ensure_menu_master(
         if candidate and candidate.normalized_name == normalized:
             master = candidate
     if master is None:
-        for pending in session.new:
-            if isinstance(pending, MenuMaster) and pending.normalized_name == normalized:
-                master = pending
-                break
-    if master is None:
-        master = (
-            session.execute(select(MenuMaster).where(MenuMaster.normalized_name == normalized))
-            .scalars()
-            .first()
-        )
+        master = _find_menu_master_by_normalized(session, normalized)
     if master is None:
         master = MenuMaster(id=f"MNU{uuid4().hex[:8]}", name=text_name, normalized_name=normalized)
         session.add(master)
     else:
         master.name = text_name
 
-    if seed_fields:
-        for field, raw in seed_fields.items():
-            if field not in _MASTER_FIELDS:
-                continue
-            value = _coerce_master_field_value(field, raw)
-            if value is _INVALID_PATCH_VALUE or _is_blank_value(value):
-                continue
-            current = getattr(master, field, None)
-            if _is_blank_value(current):
-                setattr(master, field, value)
+    _apply_seed_fields_if_blank(master, seed_fields)
     return master
 
 
@@ -1031,6 +1535,8 @@ def _build_master_defaults_index(
                     value = master_value
             if field == "temp_type":
                 value = _normalize_temp_type(value)
+            elif field in {"unit_type", "bag_max_unit"}:
+                value = _normalize_menu_unit_type(value)
             if value is not None:
                 payload[field] = value
         if master.condiments:
@@ -1225,6 +1731,8 @@ def create_menu(
     actor: str = "system",
     upload_metadata: dict | None = None,
     scope_override: str | None = None,
+    menu_master_resolutions: list[dict] | None = None,
+    require_menu_master_review: bool = False,
 ):
     ensure_menu_schema()
     # Seed default rules outside the write transaction to avoid sqlite write-lock contention
@@ -1257,6 +1765,29 @@ def create_menu(
         deduped_names.append(raw_name)
     names = deduped_names
     resolved_scope_override = _normalize_scope_override(scope_override)
+    parsed_items = _apply_rules_to_items(parsed_items)
+    parsed_meta = {str(item.get("name") or ""): item for item in parsed_items}
+    resolution_map = _index_menu_master_resolutions(menu_master_resolutions)
+    with session_scope() as session:
+        master_plans: dict[str, dict] = {}
+        issues: list[dict] = []
+        for name in names:
+            meta = parsed_meta.get(name, {})
+            seed_patch = _extract_master_patch(meta, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
+            plan = _build_upload_menu_master_plan(session, name, seed_patch, resolution_map.get(name))
+            issue = plan.get("issue") if isinstance(plan, dict) else None
+            if issue:
+                if require_menu_master_review:
+                    issues.append(issue)
+                    continue
+                plan = {
+                    "action": "create",
+                    "name": name,
+                    "seed_fields": dict(seed_patch or {}),
+                }
+            master_plans[name] = plan
+        if issues and require_menu_master_review:
+            raise MenuMasterResolutionRequired(issues)
     with session_scope() as session:
         replaced = False
         menu = session.get(MonthlyMenu, month_id)
@@ -1286,21 +1817,25 @@ def create_menu(
             session.flush()
             session.refresh(menu)
 
-        parsed_items = _apply_rules_to_items(parsed_items)
-        parsed_meta = {item.get("name"): item for item in parsed_items}
         for name in names:
-            meta = parsed_meta.get(name, {})
             item_id = f"MMI{uuid4().hex[:6]}"
-            seed_patch = _extract_master_patch(meta, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
-            master = _ensure_menu_master(session, name, seed_fields=seed_patch)
+            master = _materialize_upload_menu_master_plan(session, name, master_plans[name])
+            meta = parsed_meta.get(name, {})
+            item_patch = _extract_master_patch(meta, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
             session.add(
                 MonthlyMenuItem(
                     id=item_id,
                     monthly_menu_id=month_id,
                     menu_master_id=master.id if master else None,
                     name=name,
+                    unit_type=_coerce_master_field_value("unit_type", item_patch.get("unit_type")),
+                    qty_per_serving=_coerce_float(item_patch.get("qty_per_serving")),
+                    temp_type=_normalize_temp_type(item_patch.get("temp_type")),
+                    daypart=_coerce_master_field_value("daypart", item_patch.get("daypart")),
+                    category=item_patch.get("category"),
                     diet_type=normalize_diet_type(meta.get("diet_type")),
                     facility_override=resolved_scope_override,
+                    master_resolution_mode=None,
                 )
             )
         for entry in entries:
@@ -1479,6 +2014,7 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
         if master:
             item.menu_master_id = master.id
         _upsert_menu_master(session, item, master_patch, master)
+        item.master_resolution_mode = None
         for field in _MASTER_FIELDS:
             setattr(item, field, None)
         logger.info("Menu item updated", month_id=month_id, item_id=item_id)
@@ -1575,15 +2111,26 @@ def serialize_menu(menu: MonthlyMenu, latest_upload_log: AuditLog | None = None)
     }
 
 
+def _serialize_synthetic_menu(month_id: str, latest_upload_log: AuditLog | None = None) -> dict:
+    uploaded_at = latest_upload_log.created_at.isoformat() if latest_upload_log and latest_upload_log.created_at else None
+    display_name = _format_menu_upload_display(latest_upload_log.created_at if latest_upload_log else None) or month_id
+    return {
+        "id": month_id,
+        "filename": None,
+        "display_name": display_name,
+        "uploaded_at": uploaded_at,
+    }
+
+
 def serialize_menu_master(master: MenuMaster) -> dict:
     return {
         "id": master.id,
         "name": master.name,
         "normalized_name": master.normalized_name,
-        "unit_type": master.unit_type,
+        "unit_type": _normalize_menu_unit_type(master.unit_type),
         "qty_per_serving": master.qty_per_serving,
         "bag_max_qty": master.bag_max_qty,
-        "bag_max_unit": master.bag_max_unit,
+        "bag_max_unit": _normalize_menu_unit_type(master.bag_max_unit),
         "temp_type": _normalize_temp_type(master.temp_type),
         "daypart": _coerce_master_field_value("daypart", master.daypart),
         "category": master.category,
@@ -1624,10 +2171,10 @@ def create_menu_master(body: dict) -> dict:
             id=f"MNU{uuid4().hex[:8]}",
             name=name,
             normalized_name=normalized,
-            unit_type=body.get("unit_type"),
+            unit_type=_coerce_master_field_value("unit_type", body.get("unit_type")),
             qty_per_serving=_coerce_float(body.get("qty_per_serving")),
             bag_max_qty=_coerce_float(body.get("bag_max_qty")),
-            bag_max_unit=body.get("bag_max_unit"),
+            bag_max_unit=_coerce_master_field_value("bag_max_unit", body.get("bag_max_unit")),
             temp_type=_normalize_temp_type(body.get("temp_type")),
             daypart=_coerce_master_field_value("daypart", body.get("daypart")),
             category=body.get("category"),
@@ -1647,40 +2194,7 @@ def update_menu_master(master_id: str, body: dict) -> bool:
         master = session.get(MenuMaster, master_id)
         if not master:
             return False
-        if "name" in body:
-            next_name = str(body.get("name") or "").strip()
-            if not next_name:
-                raise ValueError("name is required")
-            next_normalized = _normalize_menu_name(next_name)
-            conflict = (
-                session.execute(select(MenuMaster).where(MenuMaster.normalized_name == next_normalized))
-                .scalars()
-                .first()
-            )
-            if conflict and conflict.id != master.id:
-                raise ValueError("duplicate menu name")
-            master.name = next_name
-            master.normalized_name = next_normalized
-        if "unit_type" in body:
-            master.unit_type = body.get("unit_type") or None
-        if "qty_per_serving" in body:
-            master.qty_per_serving = _coerce_float(body.get("qty_per_serving"))
-        if "bag_max_qty" in body:
-            master.bag_max_qty = _coerce_float(body.get("bag_max_qty"))
-        if "bag_max_unit" in body:
-            master.bag_max_unit = body.get("bag_max_unit") or None
-        if "temp_type" in body:
-            master.temp_type = _normalize_temp_type(body.get("temp_type"))
-        if "daypart" in body:
-            master.daypart = _coerce_master_field_value("daypart", body.get("daypart"))
-        if "category" in body:
-            master.category = body.get("category") or None
-        if "condiments" in body:
-            raw = body.get("condiments")
-            if isinstance(raw, list):
-                master.condiments = [str(item).strip() for item in raw if str(item).strip()]
-            elif raw is None or raw == "":
-                master.condiments = []
+        _update_menu_master_in_session(session, master, body)
         return True
 
 
@@ -1690,15 +2204,16 @@ def serialize_item(item: MonthlyMenuItem):
         "month_id": item.monthly_menu_id,
         "menu_master_id": item.menu_master_id,
         "name": item.name,
-        "unit_type": item.unit_type,
+        "unit_type": _normalize_menu_unit_type(item.unit_type),
         "qty_per_serving": item.qty_per_serving,
         "temp_type": _normalize_temp_type(item.temp_type),
         "daypart": _coerce_master_field_value("daypart", item.daypart),
         "category": item.category,
         "diet_type": normalize_diet_type(getattr(item, "diet_type", None)),
         "facility_override": item.facility_override,
+        "master_resolution_mode": str(getattr(item, "master_resolution_mode", "") or "").strip() or None,
         "bag_max_qty": None,
-        "bag_max_unit": None,
+        "bag_max_unit": _normalize_menu_unit_type(getattr(item, "bag_max_unit", None)),
     }
 
 
@@ -1714,6 +2229,143 @@ def serialize_entry(entry: MonthlyMenuEntry) -> dict:
         "slot_index": entry.slot_index,
         "facility_override": entry.facility_override,
     }
+
+
+def _normalize_month_id(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", text):
+        return None
+    return text
+
+
+def _shift_month_id(month_id: str, delta: int) -> str | None:
+    normalized = _normalize_month_id(month_id)
+    if not normalized:
+        return None
+    year = int(normalized[:4])
+    month = int(normalized[5:7])
+    index = year * 12 + (month - 1) + delta
+    shifted_year = index // 12
+    shifted_month = (index % 12) + 1
+    return f"{shifted_year:04d}-{shifted_month:02d}"
+
+
+def _payload_contains_requested_month(payload: dict | None, month_id: str) -> bool:
+    normalized = _normalize_month_id(month_id)
+    if not normalized or not isinstance(payload, dict):
+        return False
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        menu_date = entry.get("menu_date")
+        if not menu_date:
+            continue
+        try:
+            parsed = date.fromisoformat(str(menu_date))
+        except Exception:
+            continue
+        if f"{parsed.year:04d}-{parsed.month:02d}" == normalized:
+            return True
+    return False
+
+
+def _canonicalize_resolved_menu_payload(
+    payload: dict | None,
+    requested_month_id: str,
+    resolved_month_id: str,
+) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    requested = _normalize_month_id(requested_month_id)
+    resolved = _normalize_month_id(resolved_month_id)
+    if not requested or not resolved or requested == resolved:
+        return payload
+
+    normalized_payload = dict(payload)
+
+    menu_payload = payload.get("menu")
+    if isinstance(menu_payload, dict):
+        rewritten_menu = dict(menu_payload)
+        rewritten_menu["id"] = requested
+        rewritten_menu["requested_month_id"] = requested
+        rewritten_menu["source_month_id"] = resolved
+        normalized_payload["menu"] = rewritten_menu
+
+    def _rewrite_month_id(rows: object) -> object:
+        if not isinstance(rows, list):
+            return rows
+        rewritten_rows: list[object] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                rewritten_rows.append(row)
+                continue
+            updated = dict(row)
+            if "month_id" in updated:
+                updated["month_id"] = requested
+            updated["requested_month_id"] = requested
+            updated["source_month_id"] = resolved
+            rewritten_rows.append(updated)
+        return rewritten_rows
+
+    normalized_payload["items"] = _rewrite_month_id(payload.get("items"))
+    normalized_payload["entries"] = _rewrite_month_id(payload.get("entries"))
+    if "master_checks" in payload:
+        normalized_payload["master_checks"] = _rewrite_month_id(payload.get("master_checks"))
+    return normalized_payload
+
+
+def _get_menu_for_facility_direct(month_id: str, facility_id: str | None) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        menu = session.get(MonthlyMenu, month_id)
+        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
+        menu_payload = (
+            serialize_menu(menu, latest_upload_log)
+            if menu
+            else _serialize_synthetic_menu(month_id, latest_upload_log)
+        )
+    items = get_menu_items_for_facility(month_id, facility_id)
+    entries = get_menu_entries_for_facility(month_id, facility_id)
+    if not menu and not items and not entries:
+        return None
+    return {
+        "menu": menu_payload,
+        "items": items,
+        "entries": entries,
+    }
+
+
+def _get_menu_direct(month_id: str) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        menu = session.get(MonthlyMenu, month_id)
+        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
+        menu_payload = (
+            serialize_menu(menu, latest_upload_log)
+            if menu
+            else _serialize_synthetic_menu(month_id, latest_upload_log)
+        )
+        items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
+        entries = (
+            session.query(MonthlyMenuEntry)
+            .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
+            .all()
+        )
+        if not menu and not items and not entries:
+            return None
+        payload = [serialize_item(i) for i in items]
+        serialized_entries = [serialize_entry(entry) for entry in entries]
+        serialized_entries.sort(key=_menu_entry_sort_key)
+        return {
+            "menu": menu_payload,
+            "items": _merge_master_defaults(payload, None),
+            "entries": serialized_entries,
+            "master_checks": _build_menu_master_checks(session, items, entries),
+        }
 
 
 def _is_blank(value: str | None) -> bool:
@@ -1796,7 +2448,9 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
         if not entries:
             return []
         if not facility_id:
-            return [serialize_entry(entry) for entry in entries if _is_blank(entry.facility_override)]
+            resolved = [serialize_entry(entry) for entry in entries if _is_blank(entry.facility_override)]
+            resolved.sort(key=_menu_entry_sort_key)
+            return resolved
 
         scope_ids = _resolve_override_scope_ids(session, facility_id)
         rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
@@ -1821,50 +2475,71 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
             ):
                 selected[key] = (row_rank, entry)
         resolved = [serialize_entry(payload[1]) for payload in selected.values()]
-        resolved.sort(
-            key=lambda entry: (
-                entry.get("menu_date") or "",
-                entry.get("daypart") or "",
-                int(entry.get("slot_index") or 0),
-                str(entry.get("id") or ""),
-            )
-        )
+        resolved.sort(key=_menu_entry_sort_key)
         return resolved
 
 
 def get_menu_for_facility(month_id: str, facility_id: str | None) -> dict | None:
-    ensure_menu_schema()
-    with session_scope() as session:
-        menu = session.get(MonthlyMenu, month_id)
-        if not menu:
-            return None
-        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
-        return {
-            "menu": serialize_menu(menu, latest_upload_log),
-            "items": get_menu_items_for_facility(month_id, facility_id),
-            "entries": get_menu_entries_for_facility(month_id, facility_id),
-        }
+    payload = _get_menu_for_facility_direct(month_id, facility_id)
+    if payload is not None:
+        return payload
+    for delta in (-1, 1):
+        shifted = _shift_month_id(month_id, delta)
+        if not shifted:
+            continue
+        shifted_payload = _get_menu_for_facility_direct(shifted, facility_id)
+        if shifted_payload is None:
+            continue
+        if _payload_contains_requested_month(shifted_payload, month_id):
+            return _canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted)
+    return None
 
 
 def get_menu(month_id: str) -> dict | None:
+    payload = _get_menu_direct(month_id)
+    if payload is not None:
+        return payload
+    for delta in (-1, 1):
+        shifted = _shift_month_id(month_id, delta)
+        if not shifted:
+            continue
+        shifted_payload = _get_menu_direct(shifted)
+        if shifted_payload is None:
+            continue
+        if _payload_contains_requested_month(shifted_payload, month_id):
+            return _canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted)
+    return None
+
+
+def get_latest_menu() -> dict | None:
     ensure_menu_schema()
     with session_scope() as session:
-        menu = session.get(MonthlyMenu, month_id)
-        if not menu:
+        menus = session.query(MonthlyMenu).all()
+        if not menus:
             return None
-        latest_upload_log = _get_latest_menu_upload_log(session, month_id)
-        items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
+        latest = max(
+            menus,
+            key=lambda row: (
+                row.month_start.isoformat() if row.month_start else "",
+                str(row.id or ""),
+            ),
+        )
+        latest_upload_log = _get_latest_menu_upload_log(session, latest.id)
+        items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == latest.id).all()
         entries = (
             session.query(MonthlyMenuEntry)
-            .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .filter(MonthlyMenuEntry.monthly_menu_id == latest.id)
             .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
             .all()
         )
         payload = [serialize_item(i) for i in items]
+        serialized_entries = [serialize_entry(entry) for entry in entries]
+        serialized_entries.sort(key=_menu_entry_sort_key)
         return {
-            "menu": serialize_menu(menu, latest_upload_log),
+            "menu": serialize_menu(latest, latest_upload_log),
             "items": _merge_master_defaults(payload, None),
-            "entries": [serialize_entry(entry) for entry in entries],
+            "entries": serialized_entries,
+            "master_checks": _build_menu_master_checks(session, items, entries),
         }
 
 
@@ -1883,6 +2558,112 @@ def get_item(item_id: str) -> dict | None:
             return None
         merged = _merge_master_defaults([serialize_item(item)], item.facility_override)
         return merged[0] if merged else serialize_item(item)
+
+
+def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        item = session.get(MonthlyMenuItem, item_id)
+        if not item or item.monthly_menu_id != month_id:
+            return None
+        entries = (
+            session.query(MonthlyMenuEntry)
+            .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
+            .all()
+        )
+        patch = _derive_monthly_item_patch(item, entries)
+        action = str(body.get("action") or "").strip().lower()
+        if action == "existing":
+            menu_master_id = str(body.get("menu_master_id") or "").strip()
+            master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+            if not master:
+                raise ValueError("menu master not found")
+            item.menu_master_id = master.id
+            item.master_resolution_mode = None
+            return {"resolved": True, "mode": "existing", "menu_master_id": master.id}
+        if action == "create":
+            create_name = str(body.get("name") or item.name or "").strip()
+            create_patch = dict(patch)
+            create_patch.update(
+                _extract_master_patch(
+                    body,
+                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                )
+            )
+            if _is_blank_value(create_name):
+                raise ValueError("name is required")
+            if _is_blank_value(create_patch.get("unit_type")) or create_patch.get("qty_per_serving") is None:
+                raise ValueError("unit_type and qty_per_serving are required")
+            master = _get_or_create_menu_master_without_rename(session, create_name, seed_fields=create_patch)
+            if not master:
+                raise ValueError("failed to create menu master")
+            item.menu_master_id = master.id
+            item.master_resolution_mode = None
+            return {"resolved": True, "mode": "create", "menu_master_id": master.id}
+        if action == "update":
+            menu_master_id = str(body.get("menu_master_id") or item.menu_master_id or "").strip()
+            master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+            if master is None:
+                master = _find_menu_master_by_normalized(session, _normalize_menu_name(item.name or ""))
+            if not master:
+                raise ValueError("menu master not found")
+            update_body = _build_menu_master_update_body(item.name or "", patch, master)
+            update_body.update(
+                _extract_master_patch(
+                    body,
+                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                )
+            )
+            if "name" in body and not _is_blank_value(body.get("name")):
+                update_body["name"] = str(body.get("name") or "").strip()
+            _update_menu_master_in_session(session, master, update_body)
+            item.menu_master_id = master.id
+            item.master_resolution_mode = None
+            return {"resolved": True, "mode": "update", "menu_master_id": master.id}
+        if action == "month_only":
+            menu_master_id = str(body.get("menu_master_id") or item.menu_master_id or "").strip()
+            master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+            if master is None:
+                master = _find_menu_master_by_normalized(session, _normalize_menu_name(item.name or ""))
+            item_patch = dict(patch)
+            item_patch.update(
+                _extract_master_patch(
+                    body,
+                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                    allow_null=True,
+                )
+            )
+            if _is_blank_value(item_patch.get("qty_per_serving")):
+                fallback_qty = patch.get("qty_per_serving")
+                if _is_blank_value(fallback_qty) and master is not None:
+                    fallback_qty = getattr(master, "qty_per_serving", None)
+                if not _is_blank_value(fallback_qty):
+                    item_patch["qty_per_serving"] = fallback_qty
+            _apply_monthly_item_patch_in_session(item, item_patch)
+            item.master_resolution_mode = "month_only"
+            return {
+                "resolved": True,
+                "mode": "month_only",
+                "menu_master_id": item.menu_master_id,
+            }
+        if action == "category_only":
+            menu_master_id = str(body.get("menu_master_id") or item.menu_master_id or "").strip()
+            master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+            if master is None:
+                master = _find_menu_master_by_normalized(session, _normalize_menu_name(item.name or ""))
+            if not master:
+                raise ValueError("menu master not found")
+            category = body.get("category")
+            if _is_blank_value(category):
+                category = patch.get("category")
+            if _is_blank_value(category):
+                raise ValueError("category is required")
+            _update_menu_master_in_session(session, master, {"category": category})
+            item.menu_master_id = master.id
+            item.master_resolution_mode = None
+            return {"resolved": True, "mode": "category_only", "menu_master_id": master.id}
+        raise ValueError("unknown action")
 
 
 def resolve_menu_defaults(names: list[str], facility_id: str | None = None) -> dict[str, dict]:

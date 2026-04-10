@@ -27,6 +27,7 @@ from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregat
 from src.models.shipping_tracking import ShippingTrackingLog
 from src.models.user import AuditLog, Notification
 from src.models.document import OrderDocument
+from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 
 
 Base.metadata.create_all(bind=engine)
@@ -52,6 +53,8 @@ _OPERATIONAL_MODELS: list[tuple[str, Any]] = [
     ("order_ocr_revisions", OrderOcrRevision),
     ("ocr_jobs", OcrJob),
     ("ingest_jobs", IngestJob),
+    ("uploaded_pdf_attempts", UploadedPdfAttempt),
+    ("uploaded_pdfs", UploadedPdf),
     ("orders", Order),
     ("shipping_tracking_logs", ShippingTrackingLog),
     ("ocr_training_samples", OcrTrainingSample),

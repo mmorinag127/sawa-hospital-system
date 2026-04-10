@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import select
 
@@ -9,6 +9,7 @@ from src.db import session_scope
 from src.models.order import Order
 from src.services import config_service
 from src.services import output_builder
+from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services.order_service import serialize_order
 
 
@@ -44,13 +45,39 @@ def _iter_confirmed_orders() -> Iterable[Order]:
             yield order
 
 
-def build_totals(date_from: date | None, date_to: date | None) -> list[dict]:
+def _resolve_facility_name(facility_id: object) -> str:
+    facility_code = str(facility_id or "").strip()
+    if not facility_code:
+        return ""
+    try:
+        facility_config = config_service.get_facility_config(facility_code) or {}
+    except Exception:
+        return ""
+    return str(facility_config.get("facility_name") or "").strip()
+
+
+def _serialize_order_refs(order_refs: dict[tuple[str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = list(order_refs.values())
+    rows.sort(
+        key=lambda row: (
+            row.get("facility_id") or "",
+            row.get("order_id") or "",
+            row.get("source_diet_type") or "",
+        )
+    )
+    return rows
+
+
+def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     grouped: dict[tuple, dict] = {}
+    facility_name_cache: dict[str, str] = {}
     for order in _iter_confirmed_orders():
         order_payload = serialize_order(order)
         order_lines = output_builder.build_order_lines_for_outputs(order_payload)
+        order_id = str(order_payload.get("id") or order.id or "").strip()
+        facility_id = str(order_payload.get("facility") or "").strip()
         for line in order_lines:
             line_date = _ensure_date(line.get("date"))
             if not _filter_date(line_date, date_from, date_to):
@@ -58,12 +85,13 @@ def build_totals(date_from: date | None, date_to: date | None) -> list[dict]:
             qty = output_builder._safe_qty(line, zero_as_empty)  # noqa: SLF001
             if qty is None:
                 continue
+            aggregated_diet_type = bucket_diet_type_for_aggregation(line.get("diet_type")) or "unknown"
             key = (
                 line_date,
                 line.get("daypart"),
                 line.get("menu_category"),
                 line.get("menu_name"),
-                line.get("diet_type"),
+                aggregated_diet_type,
             )
             row = grouped.setdefault(
                 key,
@@ -72,11 +100,37 @@ def build_totals(date_from: date | None, date_to: date | None) -> list[dict]:
                     "daypart": line.get("daypart"),
                     "menu_category": line.get("menu_category"),
                     "menu_name": line.get("menu_name"),
-                    "diet_type": line.get("diet_type"),
+                    "diet_type": aggregated_diet_type,
                     "quantity": 0.0,
+                    "_order_refs": {},
                 },
             )
             row["quantity"] += float(qty)
+            if include_order_refs:
+                facility_name = facility_name_cache.get(facility_id)
+                if facility_name is None:
+                    facility_name = _resolve_facility_name(facility_id)
+                    facility_name_cache[facility_id] = facility_name
+                source_diet_type = str(line.get("diet_type") or "").strip() or "unknown"
+                ref_key = (
+                    order_id,
+                    facility_id,
+                    source_diet_type,
+                    str(line.get("area_id") or "").strip() or "X",
+                )
+                ref = row["_order_refs"].setdefault(
+                    ref_key,
+                    {
+                        "order_id": order_id,
+                        "facility_id": facility_id,
+                        "facility_name": facility_name,
+                        "source_diet_type": source_diet_type,
+                        "aggregated_diet_type": aggregated_diet_type,
+                        "area_id": str(line.get("area_id") or "").strip() or "X",
+                        "quantity": 0.0,
+                    },
+                )
+                ref["quantity"] += float(qty)
 
     rows = list(grouped.values())
     rows.sort(
@@ -89,6 +143,9 @@ def build_totals(date_from: date | None, date_to: date | None) -> list[dict]:
         )
     )
     for row in rows:
+        order_refs = row.pop("_order_refs", {})
         if row.get("date") and hasattr(row["date"], "isoformat"):
             row["date"] = row["date"].isoformat()
+        if include_order_refs:
+            row["order_refs"] = _serialize_order_refs(order_refs)
     return rows

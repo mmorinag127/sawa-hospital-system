@@ -50,6 +50,13 @@ export const normalizeWeekValue = (value?: string | null) => {
   return `${normalizedMonth}@${match[2]}~${match[3]}`;
 };
 
+export const isConcreteWeekValue = (value?: string | null) => normalizeWeekValue(value).includes("@");
+
+export const normalizeConcreteWeekValue = (value?: string | null) => {
+  const normalized = normalizeWeekValue(value);
+  return normalized.includes("@") ? normalized : "";
+};
+
 export const extractWeekMonthId = (value?: string | null) => {
   const normalizedRange = normalizeWeekValue(value);
   if (!normalizedRange) return normalizeWeekId(value);
@@ -71,6 +78,41 @@ export const formatWeekLabel = (value?: string | null, fallbackLabel?: string | 
     return normalizedRange;
   }
   return normalizeWeekId(value) || "";
+};
+
+export const calendarDateFromWeekValue = (value?: string | null) => {
+  const normalizedRange = normalizeWeekValue(value);
+  if (normalizedRange.includes("@")) {
+    const match = normalizedRange.match(/^\d{4}-\d{2}@(\d{4}-\d{2}-\d{2})~/);
+    if (match) return match[1];
+  }
+  const monthId = normalizeWeekId(value);
+  if (monthId) return `${monthId}-01`;
+  return "";
+};
+
+export const deriveWeekValueFromCalendarDate = (value?: string | null) => {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const anchor = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(anchor.getTime())) return "";
+  const weekday = anchor.getUTCDay();
+  const start = new Date(anchor);
+  start.setUTCDate(anchor.getUTCDate() - weekday);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  const monthId = `${year}-${String(month).padStart(2, "0")}`;
+  const formatDate = (date: Date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+  const clippedStart = formatDate(start) < `${monthId}-01` ? `${monthId}-01` : formatDate(start);
+  const monthEnd = new Date(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1));
+  monthEnd.setUTCDate(monthEnd.getUTCDate() - 1);
+  const monthEndText = formatDate(monthEnd);
+  const clippedEnd = formatDate(end) > monthEndText ? monthEndText : formatDate(end);
+  return `${monthId}@${clippedStart}~${clippedEnd}`;
 };
 
 export const normalizeBagGroupToken = (value: unknown, fallback = "") =>

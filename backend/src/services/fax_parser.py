@@ -82,6 +82,20 @@ def _normalize_token_text(text: str) -> str:
     return text.translate(_FULLWIDTH_TRANSLATION).strip()
 
 
+def _canonical_daypart(value: Any) -> str:
+    text = _normalize_cell(value, True).translate(_FULLWIDTH_TRANSLATION)
+    text = re.sub(r"[\s　]+", "", text)
+    if not text:
+        return ""
+    if "朝" in text:
+        return "朝"
+    if "昼" in text:
+        return "昼"
+    if "夕" in text or "夜" in text:
+        return "夕"
+    return ""
+
+
 def _group_tokens_by_row(tokens: list[dict], tolerance: float) -> list[list[dict]]:
     rows: list[list[dict]] = []
     row_centers: list[float] = []
@@ -576,7 +590,7 @@ def parse_order_lines(
     rows_are_body_only = bool(quantity_rules.get("rows_are_body_only", False))
     max_quantity_abs_raw = quantity_rules.get("max_quantity_abs")
     if max_quantity_abs_raw is None and strict_numeric_quantity_cell:
-        max_quantity_abs_raw = os.getenv("OCR_SHEET_MAX_QTY", "150")
+        max_quantity_abs_raw = os.getenv("OCR_SHEET_MAX_QTY", "999")
     try:
         max_quantity_abs = (
             float(max_quantity_abs_raw)
@@ -654,7 +668,8 @@ def parse_order_lines(
     large_cell_mode = bool(template.get("large_cell_mode", False))
     fill_forward_roles = set(template.get("fill_forward_roles") or [])
     if large_cell_mode:
-        fill_forward_roles.update({"date", "daypart", "menu_name"})
+        fill_forward_roles.update({"date", "daypart"})
+    fill_forward_roles.discard("menu_name")
     fill_missing_date_with_hint = bool(template.get("fill_missing_date_with_hint", False))
     if "fill_missing_date_with_first_seen" in template:
         fill_missing_date_with_first_seen = bool(template.get("fill_missing_date_with_first_seen"))
@@ -696,6 +711,7 @@ def parse_order_lines(
     qty_ffill_scope = template.get("grid_quantity_ffill_scope", "date")
     qty_carry: dict[int, float] = {}
     qty_carry_key = None
+    carry_forward_daypart_date = None
 
     for source_row_index, row in enumerate(rows[effective_header_rows:]):
         base = {
@@ -715,7 +731,7 @@ def parse_order_lines(
             if role == "date":
                 base["date"] = parse_date_string(cell, received_at)
             elif role == "daypart":
-                base["daypart"] = cell or None
+                base["daypart"] = _canonical_daypart(cell) or None
             elif role == "menu_name":
                 base["menu_name"] = cell or None
             elif role == "note":
@@ -736,12 +752,23 @@ def parse_order_lines(
                     "quantity_corrected": None,
                 }
 
+        current_row_date = base.get("date")
+        if (
+            "daypart" in fill_forward_roles
+            and isinstance(current_row_date, date)
+            and isinstance(carry_forward_daypart_date, date)
+            and current_row_date != carry_forward_daypart_date
+        ):
+            carry_forward["daypart"] = None
+
         for role in fill_forward_roles:
             if role not in base:
                 continue
             value = base.get(role)
             if value:
                 carry_forward[role] = value
+                if role == "daypart":
+                    carry_forward_daypart_date = current_row_date
             else:
                 base[role] = carry_forward.get(role)
         if fill_missing_date_with_hint and base.get("date") is None and default_date is not None:

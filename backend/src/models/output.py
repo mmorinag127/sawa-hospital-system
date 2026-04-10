@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Float, Date, ForeignKey, JSON
+from sqlalchemy import Column, String, DateTime, Float, Date, ForeignKey, JSON, UniqueConstraint
 
 from src.db import Base
 
@@ -52,3 +52,33 @@ class ManufacturingAggregateRow(Base):
     bag_type = Column(String, nullable=True)
     quantity = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DailyOutputPortionOverride(Base):
+    __tablename__ = "daily_output_portion_overrides"
+    __table_args__ = (
+        UniqueConstraint(
+            "output_date",
+            "facility_id",
+            "normalized_menu_name",
+            "diet_type",
+            "daypart",
+            "menu_category",
+            name="uq_daily_output_portion_override_scope",
+        ),
+    )
+
+    id = Column(String, primary_key=True)
+    output_date = Column(Date, nullable=False, index=True)
+    facility_id = Column(String, nullable=False, index=True)
+    menu_name = Column(String, nullable=False)
+    normalized_menu_name = Column(String, nullable=False, index=True)
+    diet_type = Column(String, nullable=False, default="")
+    daypart = Column(String, nullable=False, default="")
+    menu_category = Column(String, nullable=False, default="")
+    unit_type = Column(String, nullable=False)
+    qty_per_serving = Column(Float, nullable=False)
+    note = Column(String, nullable=True)
+    updated_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

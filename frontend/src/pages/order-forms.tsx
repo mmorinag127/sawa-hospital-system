@@ -136,7 +136,7 @@ export default function OrderFormsPage() {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 10000);
-      setMessage("注文書を生成し、Excelをダウンロードしました。");
+      setMessage("注文書を生成し、週次シート付きのExcelをダウンロードしました。");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       setMessage(detail ? `生成に失敗しました: ${detail}` : "生成に失敗しました。");
@@ -151,7 +151,7 @@ export default function OrderFormsPage() {
         <div>
           <p className="eyebrow">Order Form Builder</p>
           <h1>注文書生成</h1>
-          <p className="subtle">施設・対象月・パターンを指定して注文書を自動生成します。</p>
+          <p className="subtle">施設・対象月・パターンを指定して、週次シート付きの注文書を自動生成します。</p>
         </div>
         <TopNav />
       </header>

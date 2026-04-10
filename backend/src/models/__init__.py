@@ -22,7 +22,14 @@ from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate  # n
 from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
 from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
-from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow  # noqa: F401
+from src.models.output import (  # noqa: F401
+    Bag,
+    LabelRow,
+    DeliveryNote,
+    ManufacturingAggregateRow,
+    DailyOutputPortionOverride,
+)
 from src.models.user import User, AuditLog, Notification  # noqa: F401
 from src.models.shipping_tracking import ShippingTrackingLog  # noqa: F401
 from src.models.ocr_training_sample import OcrTrainingSample  # noqa: F401
+from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt  # noqa: F401

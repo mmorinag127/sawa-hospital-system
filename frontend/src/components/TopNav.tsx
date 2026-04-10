@@ -17,11 +17,6 @@ type NavGroup = {
   items: NavItem[];
 };
 
-const buildMonthId = () => {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-};
-
 const normalizePath = (path: string) => path.split("?")[0]?.split("#")[0] ?? path;
 
 export default function TopNav() {
@@ -98,7 +93,7 @@ export default function TopNav() {
       description: "月次・基準・マスター・ルール",
       items: [
         {
-          href: `/menus/${buildMonthId()}`,
+          href: "/menus",
           label: "月次メニュー",
           isActive: (path) => path.startsWith("/menus"),
         },

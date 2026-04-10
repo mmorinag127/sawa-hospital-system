@@ -9,6 +9,7 @@ from src.services.intake_mode_service import get_intake_status
 from src.services.ocr_pipeline_state_store import load_pipeline_state
 from src.services.ocr_pipeline_service import get_pipeline_config, get_pipeline_runtime_status
 from src.services.ocr_quality_service import summarize_reparse_quality
+from src.services.uploaded_pdf_service import summarize_uploaded_pdfs
 from src.services.system_maintenance_service import (
     clear_operational_data,
     export_database_snapshot,
@@ -33,6 +34,7 @@ def system_status():
     intake = get_intake_status()
     oauth_config_ok = bool(GOOGLE_OAUTH_CLIENT_IDS)
     ingest_summary = summarize_ingest_jobs()
+    uploaded_pdf_summary = summarize_uploaded_pdfs()
     db_quota = get_db_quota_status()
     try:
         ocr_reparse_quality = summarize_reparse_quality()
@@ -75,6 +77,7 @@ def system_status():
             "poll_interval_seconds": pipeline_runtime.get("poll_interval_seconds"),
         },
         "ingest_jobs": ingest_summary,
+        "uploaded_pdfs": uploaded_pdf_summary,
         "db_quota": db_quota,
         "ocr_reparse_quality": ocr_reparse_quality,
     }

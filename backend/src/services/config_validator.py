@@ -41,6 +41,68 @@ _MAIN_FIELD_PATTERN = re.compile(
 )
 
 
+def _normalize_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _normalize_area_token(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"x", "common", "共通"}:
+        return "x"
+    if raw in {"2", "2f", "2階"}:
+        return "2f"
+    if raw in {"3", "3f", "3階"}:
+        return "3f"
+    return _normalize_token(raw) or "x"
+
+
+def _derive_main_ocr_row_fields_from_columns(columns: Any) -> list[str]:
+    derived: list[str] = []
+    for column in sorted(
+        [item for item in _ensure_list(columns, "columns", []) if isinstance(item, dict)],
+        key=lambda item: int(item.get("index") or 0),
+    ):
+        role = str(column.get("role") or "").strip().lower()
+        if role == "date":
+            derived.append("date_mmdd")
+            continue
+        if role == "daypart":
+            derived.append("daypart")
+            continue
+        if role == "menu_name":
+            derived.append("menu")
+            continue
+        if role == "note":
+            derived.append("remarks")
+            continue
+        if role not in {"quantity", "quantity_change"}:
+            continue
+        diet = _normalize_token(column.get("diet_type") or column.get("name") or column.get("header"))
+        if not diet:
+            continue
+        area = _normalize_area_token(column.get("area_id") or "x")
+        derived.append(f"qty.{diet}_{area}")
+    return derived
+
+
+def _validate_column_field_consistency(
+    columns: Any,
+    fields: Any,
+    path: str,
+    errors: list[str],
+) -> None:
+    values = _ensure_list(fields, path, errors)
+    normalized_fields = [str(item).strip() for item in values if isinstance(item, str) and str(item).strip()]
+    if not normalized_fields:
+        return
+    derived = _derive_main_ocr_row_fields_from_columns(columns)
+    if derived and derived != normalized_fields:
+        errors.append(
+            f"{path} does not match {path.rsplit('.', 1)[0]}.columns "
+            f"(expected {derived}, got {normalized_fields})"
+        )
+
+
 def _validate_main_ocr_row_fields(
     fields: Any,
     path: str,
@@ -378,12 +440,24 @@ def validate_facility_config(config: Any) -> dict:
         errors,
         warnings,
     )
+    _validate_column_field_consistency(
+        fax_override.get("columns"),
+        fax_override.get("main_ocr_row_fields"),
+        "fax_template_override.main_ocr_row_fields",
+        errors,
+    )
     fax_template = _ensure_dict(config_dict.get("fax_template"), "fax_template", errors)
     _validate_main_ocr_row_fields(
         fax_template.get("main_ocr_row_fields"),
         "fax_template.main_ocr_row_fields",
         errors,
         warnings,
+    )
+    _validate_column_field_consistency(
+        fax_template.get("columns"),
+        fax_template.get("main_ocr_row_fields"),
+        "fax_template.main_ocr_row_fields",
+        errors,
     )
     _validate_packaging_policy(config_dict.get("packaging_policy_override"), errors)
     _validate_label_profile(config_dict.get("label_profile_override"), errors)
@@ -460,6 +534,12 @@ def validate_facility_master(master: Any) -> dict:
             errors,
             warnings,
         )
+        _validate_column_field_consistency(
+            fax_override.get("columns"),
+            fax_override.get("main_ocr_row_fields"),
+            f"facilities[{idx}].fax_template_override.main_ocr_row_fields",
+            errors,
+        )
         fax_template = _ensure_dict(
             fac.get("fax_template"),
             f"facilities[{idx}].fax_template",
@@ -470,6 +550,12 @@ def validate_facility_master(master: Any) -> dict:
             f"facilities[{idx}].fax_template.main_ocr_row_fields",
             errors,
             warnings,
+        )
+        _validate_column_field_consistency(
+            fax_template.get("columns"),
+            fax_template.get("main_ocr_row_fields"),
+            f"facilities[{idx}].fax_template.main_ocr_row_fields",
+            errors,
         )
         _validate_packaging_policy(fac.get("packaging_policy_override"), errors)
         _validate_label_profile(fac.get("label_profile_override"), errors)

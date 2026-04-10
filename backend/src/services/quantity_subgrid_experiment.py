@@ -7,7 +7,11 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
-from app.yomitoku_runner import run_yomitoku
+try:
+    from app.yomitoku_runner import run_yomitoku
+except ModuleNotFoundError:  # pragma: no cover - optional OCR experiment dependency
+    def run_yomitoku(*args, **kwargs):  # type: ignore[no-redef]
+        raise ModuleNotFoundError("app.yomitoku_runner is unavailable in this environment")
 
 
 _DATE_RE = re.compile(r"\d{1,2}/\d{1,2}")

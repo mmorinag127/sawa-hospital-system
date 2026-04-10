@@ -42,12 +42,14 @@ type DailyBagDietGroup = {
   diet_type?: string | null;
   total_quantity?: number | null;
   total_amount_label?: string | null;
+  calculation_basis_label?: string | null;
   bag_type_groups?: DailyBagTypeGroup[];
 };
 
 type DailyBagMenuGroup = {
   daypart?: string | null;
   daypart_key?: string | null;
+  menu_category?: string | null;
   menu_name?: string | null;
   diet_groups?: DailyBagDietGroup[];
 };
@@ -56,6 +58,56 @@ type DailyBagSummaryResponse = {
   date?: string | null;
   order_count?: number | null;
   groups?: DailyBagMenuGroup[];
+};
+
+type DailyOutputOverrideVariant = {
+  menu_name?: string | null;
+  daypart?: string | null;
+  menu_category?: string | null;
+  unit_type?: string | null;
+  qty_per_serving?: number | null;
+  basis_label?: string | null;
+  order_ids?: string[] | null;
+};
+
+type DailyOutputOverrideRow = {
+  facility_id?: string | null;
+  facility_label?: string | null;
+  diet_type?: string | null;
+  order_count?: number | null;
+  total_quantity?: number | null;
+  current_basis_label?: string | null;
+  current_qty_per_serving?: number | null;
+  current_unit_type?: string | null;
+  requires_intervention?: boolean | null;
+  current_variants?: DailyOutputOverrideVariant[] | null;
+  override?: {
+    id?: string | null;
+    unit_type?: string | null;
+    qty_per_serving?: number | null;
+    note?: string | null;
+  } | null;
+};
+
+type DailyOutputOverrideResponse = {
+  date?: string | null;
+  daypart?: string | null;
+  menu_name?: string | null;
+  menu_category?: string | null;
+  rows?: DailyOutputOverrideRow[];
+};
+
+type DailyOutputOverrideDraft = {
+  qty_per_serving: string;
+  unit_type: string;
+  note: string;
+  acknowledge_ambiguous: boolean;
+};
+
+type DailyOutputOverrideBulkDraft = {
+  qty_per_serving: string;
+  unit_type: string;
+  note: string;
 };
 
 type TotalRow = {
@@ -71,18 +123,26 @@ const dietTypeLabels: Record<string, string> = {
   regular: "常食",
   regular_bag: "常食(袋分け)",
   soft: "軟菜",
+  soft_mixer: "軟菜/ミキサー",
   mixer: "ミキサー",
   daycare: "通所",
   staff: "職員",
+  forbidden: "禁食",
   tea: "お茶",
   business: "事業",
   diabetes: "糖尿",
   pregnancy: "妊娠",
   sesame_allergy: "ゴマアレルギー",
+  no_fried: "禁食(揚げ物禁)",
   no_meat: "禁食(肉禁)",
+  forbidden_other: "禁食(肉卵魚禁)",
   no_fish: "禁食(魚禁)",
   change_1: "変更1",
   change_2: "変更2",
+  regular_1600kcal: "常食1600kcal",
+  soft_1600kcal: "軟菜1600kcal",
+  mixer_1600kcal: "ミキサー1600kcal",
+  "1600kcal": "1600kcal",
   placeholder: "-",
   unknown: "不明",
 };
@@ -97,20 +157,17 @@ const bagTypeLabels: Record<string, string> = {
 
 const preferredDietOrder = [
   "regular",
-  "regular_bag",
   "soft",
   "mixer",
-  "daycare",
-  "staff",
+  "forbidden",
   "tea",
   "business",
   "diabetes",
   "pregnancy",
   "sesame_allergy",
-  "no_meat",
-  "no_fish",
   "change_1",
   "change_2",
+  "1600kcal",
   "placeholder",
   "unknown",
 ];
@@ -180,6 +237,31 @@ const formatBagType = (value?: string | null) => {
   return bagTypeLabels[token] || bagTypeLabels[token.toLowerCase()] || token;
 };
 
+const buildDailyOutputOverrideRowKey = (row: DailyOutputOverrideRow) =>
+  `${String(row.facility_id || "").trim()}__${String(row.diet_type || "").trim() || "unknown"}`;
+
+const overrideUnitOptions = [
+  { value: "g", label: "グラム" },
+  { value: "切", label: "切れ" },
+  { value: "個", label: "個" },
+];
+
+const normalizeOverrideUnitValue = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "g";
+  const compact = raw.toLowerCase().replace(/[　\s]+/g, "");
+  if (compact === "g" || compact === "ｇ" || raw.includes("グラム")) return "g";
+  if (raw.includes("切") || raw.includes("枚") || compact === "cut" || compact === "slice" || compact === "slices")
+    return "切";
+  if (raw.includes("個") || compact === "count" || compact === "piece" || compact === "pieces") return "個";
+  return "g";
+};
+
+const formatOverrideUnitLabel = (value?: string | null) => {
+  const normalized = normalizeOverrideUnitValue(value);
+  return overrideUnitOptions.find((option) => option.value === normalized)?.label || normalized;
+};
+
 const sumDietQuantity = (group?: DailyBagMenuGroup | null) => {
   const diets = Array.isArray(group?.diet_groups) ? group?.diet_groups : [];
   return diets.reduce((sum, diet) => sum + Number(diet?.total_quantity || 0), 0);
@@ -208,6 +290,19 @@ export default function DailyDeliveryNotesPage() {
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
   const [dailyBagSummary, setDailyBagSummary] = useState<DailyBagSummaryResponse>({});
   const [totalsRows, setTotalsRows] = useState<TotalRow[]>([]);
+  const [overrideEditor, setOverrideEditor] = useState<DailyOutputOverrideResponse | null>(null);
+  const [overrideEditorLoading, setOverrideEditorLoading] = useState(false);
+  const [overrideEditorMessage, setOverrideEditorMessage] = useState("");
+  const [overrideEditorDrafts, setOverrideEditorDrafts] = useState<Record<string, DailyOutputOverrideDraft>>({});
+  const [overrideEditorBulkDraft, setOverrideEditorBulkDraft] = useState<DailyOutputOverrideBulkDraft>({
+    qty_per_serving: "",
+    unit_type: "g",
+    note: "",
+  });
+  const [overrideEditorSavingKey, setOverrideEditorSavingKey] = useState("");
+  const [overrideEditorBulkSaving, setOverrideEditorBulkSaving] = useState(false);
+  const [overrideEditorSelectedFacilityId, setOverrideEditorSelectedFacilityId] = useState("");
+  const [overrideEditorSelectedDietType, setOverrideEditorSelectedDietType] = useState("");
 
   useEffect(() => {
     if (!date) {
@@ -339,6 +434,307 @@ export default function DailyDeliveryNotesPage() {
       setTotalsRows([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const closeOverrideEditor = () => {
+    setOverrideEditor(null);
+    setOverrideEditorLoading(false);
+    setOverrideEditorMessage("");
+    setOverrideEditorDrafts({});
+    setOverrideEditorBulkDraft({ qty_per_serving: "", unit_type: "g", note: "" });
+    setOverrideEditorSavingKey("");
+    setOverrideEditorBulkSaving(false);
+    setOverrideEditorSelectedFacilityId("");
+    setOverrideEditorSelectedDietType("");
+  };
+
+  const openOverrideEditor = async (menuGroup: DailyBagMenuGroup) => {
+    if (!date) return;
+    setOverrideEditorLoading(true);
+    setOverrideEditorMessage("");
+    setOverrideEditorDrafts({});
+    setOverrideEditorBulkSaving(false);
+    try {
+      const res = await apiClient.get("/orders/daily-output-overrides", {
+        params: {
+          date,
+          daypart: menuGroup.daypart || menuGroup.daypart_key || "",
+          menu_name: menuGroup.menu_name || "",
+          menu_category: menuGroup.menu_category || "",
+        },
+      });
+      const payload: DailyOutputOverrideResponse = res.data || {};
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const nextDrafts: Record<string, DailyOutputOverrideDraft> = {};
+      rows.forEach((row) => {
+        const key = buildDailyOutputOverrideRowKey(row);
+        nextDrafts[key] = {
+          qty_per_serving:
+            row.override?.qty_per_serving != null
+              ? String(row.override.qty_per_serving)
+              : row.current_qty_per_serving != null
+                ? String(row.current_qty_per_serving)
+                : "",
+          unit_type: normalizeOverrideUnitValue(row.override?.unit_type || row.current_unit_type || "g"),
+          note: String(row.override?.note || ""),
+          acknowledge_ambiguous: false,
+        };
+      });
+      setOverrideEditor(payload);
+      setOverrideEditorDrafts(nextDrafts);
+      setOverrideEditorBulkDraft({
+        qty_per_serving:
+          rows[0]?.override?.qty_per_serving != null
+            ? String(rows[0].override?.qty_per_serving)
+            : rows[0]?.current_qty_per_serving != null
+              ? String(rows[0].current_qty_per_serving)
+            : "",
+        unit_type: normalizeOverrideUnitValue(rows[0]?.override?.unit_type || rows[0]?.current_unit_type || "g"),
+        note: "",
+      });
+      if (!overrideEditorSelectedFacilityId) {
+        setOverrideEditorSelectedFacilityId(String(rows[0]?.facility_id || "").trim());
+      }
+      if (!overrideEditorSelectedDietType) {
+        setOverrideEditorSelectedDietType(normalizeDietType(rows[0]?.diet_type));
+      }
+      if (!rows.length) {
+        setOverrideEditorMessage("編集対象の施設別行がありません。");
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setOverrideEditor({ date, daypart: menuGroup.daypart || "", menu_name: menuGroup.menu_name || "", menu_category: menuGroup.menu_category || "", rows: [] });
+      setOverrideEditorMessage(detail ? `設定一覧の取得に失敗しました: ${detail}` : "設定一覧の取得に失敗しました。");
+      setOverrideEditorSelectedFacilityId("");
+      setOverrideEditorSelectedDietType("");
+    } finally {
+      setOverrideEditorLoading(false);
+    }
+  };
+
+  const updateOverrideDraft = (
+    rowKey: string,
+    patch: Partial<DailyOutputOverrideDraft>,
+  ) => {
+    setOverrideEditorDrafts((prev) => {
+      const current = prev[rowKey] || {
+        qty_per_serving: "",
+        unit_type: "g",
+        note: "",
+        acknowledge_ambiguous: false,
+      };
+      return {
+        ...prev,
+        [rowKey]: {
+          ...current,
+          ...patch,
+          unit_type: normalizeOverrideUnitValue(patch.unit_type ?? current.unit_type),
+        },
+      };
+    });
+  };
+
+  const updateOverrideBulkDraft = (patch: Partial<DailyOutputOverrideBulkDraft>) => {
+    setOverrideEditorBulkDraft((prev) => ({
+      ...prev,
+      ...patch,
+      unit_type: normalizeOverrideUnitValue(patch.unit_type ?? prev.unit_type),
+    }));
+  };
+
+  const validateOverrideDraft = (draft: { qty_per_serving: string }) => {
+    if (!draft.qty_per_serving.trim()) {
+      return "1単位量を入力してください。";
+    }
+    const qtyPerServing = Number(draft.qty_per_serving);
+    if (!Number.isFinite(qtyPerServing) || qtyPerServing < 0) {
+      return "1単位量は0以上の数値で入力してください。";
+    }
+    return "";
+  };
+
+  const overrideEditorRows = useMemo(
+    () => (Array.isArray(overrideEditor?.rows) ? overrideEditor?.rows : []),
+    [overrideEditor],
+  );
+
+  const overrideFacilityOptions = useMemo(() => {
+    const options: { facility_id: string; facility_label: string; row_count: number; override_count: number }[] = [];
+    const seen = new Map<string, { facility_id: string; facility_label: string; row_count: number; override_count: number }>();
+    overrideEditorRows.forEach((row) => {
+      const facilityId = String(row.facility_id || "").trim();
+      if (!facilityId) return;
+      const current =
+        seen.get(facilityId) ||
+        {
+          facility_id: facilityId,
+          facility_label: String(row.facility_label || row.facility_id || "未確定"),
+          row_count: 0,
+          override_count: 0,
+        };
+      current.row_count += 1;
+      if (row.override?.id) current.override_count += 1;
+      seen.set(facilityId, current);
+    });
+    seen.forEach((value) => options.push(value));
+    return options;
+  }, [overrideEditorRows]);
+
+  const selectedFacilityRows = useMemo(
+    () =>
+      overrideEditorRows.filter(
+        (row) => String(row.facility_id || "").trim() === overrideEditorSelectedFacilityId,
+      ),
+    [overrideEditorRows, overrideEditorSelectedFacilityId],
+  );
+
+  const selectedOverrideRow = useMemo(() => {
+    if (!selectedFacilityRows.length) return null;
+    return (
+      selectedFacilityRows.find((row) => normalizeDietType(row.diet_type) === overrideEditorSelectedDietType) ||
+      selectedFacilityRows[0]
+    );
+  }, [overrideEditorSelectedDietType, selectedFacilityRows]);
+
+  useEffect(() => {
+    if (!overrideEditorRows.length) {
+      if (overrideEditorSelectedFacilityId) setOverrideEditorSelectedFacilityId("");
+      if (overrideEditorSelectedDietType) setOverrideEditorSelectedDietType("");
+      return;
+    }
+    const facilityIds = new Set(overrideEditorRows.map((row) => String(row.facility_id || "").trim()).filter(Boolean));
+    let nextFacilityId = overrideEditorSelectedFacilityId;
+    if (!nextFacilityId || !facilityIds.has(nextFacilityId)) {
+      nextFacilityId = String(overrideEditorRows[0]?.facility_id || "").trim();
+      if (nextFacilityId !== overrideEditorSelectedFacilityId) {
+        setOverrideEditorSelectedFacilityId(nextFacilityId);
+      }
+    }
+    if (!nextFacilityId) return;
+    const facilityRows = overrideEditorRows.filter((row) => String(row.facility_id || "").trim() === nextFacilityId);
+    if (!facilityRows.length) return;
+    const hasSelectedDiet = facilityRows.some(
+      (row) => normalizeDietType(row.diet_type) === overrideEditorSelectedDietType,
+    );
+    if (!hasSelectedDiet) {
+      const nextDietType = normalizeDietType(facilityRows[0]?.diet_type);
+      if (nextDietType !== overrideEditorSelectedDietType) {
+        setOverrideEditorSelectedDietType(nextDietType);
+      }
+    }
+  }, [overrideEditorRows, overrideEditorSelectedFacilityId, overrideEditorSelectedDietType]);
+
+  const saveOverrideRow = async (row: DailyOutputOverrideRow) => {
+    if (!overrideEditor?.date) return;
+    const rowKey = buildDailyOutputOverrideRowKey(row);
+    const draft = overrideEditorDrafts[rowKey];
+    if (!draft) return;
+    const validationError = validateOverrideDraft(draft);
+    if (validationError) {
+      setOverrideEditorMessage(validationError);
+      return;
+    }
+    const qtyPerServing = Number(draft.qty_per_serving);
+    setOverrideEditorSavingKey(rowKey);
+    setOverrideEditorMessage("");
+    try {
+      await apiClient.post("/orders/daily-output-overrides/upsert", {
+        date: overrideEditor.date,
+        facility_id: row.facility_id,
+        menu_name: overrideEditor.menu_name,
+        diet_type: row.diet_type,
+        daypart: overrideEditor.daypart,
+        menu_category: overrideEditor.menu_category,
+        qty_per_serving: qtyPerServing,
+        unit_type: draft.unit_type,
+        note: draft.note,
+        acknowledge_ambiguous: draft.acknowledge_ambiguous,
+      });
+      await Promise.all([openOverrideEditor({
+        daypart: overrideEditor.daypart,
+        menu_name: overrideEditor.menu_name,
+        menu_category: overrideEditor.menu_category,
+      }), loadOrders()]);
+      setOverrideEditorMessage("施設別単位設定を保存しました。");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      if (detail?.code === "daily_output_override_ambiguous") {
+        setOverrideEditorMessage("現状が複数候補です。候補を確認し、理解したうえで保存に進んでください。");
+        updateOverrideDraft(rowKey, { acknowledge_ambiguous: true });
+      } else if (detail?.code === "daily_output_override_target_not_found") {
+        setOverrideEditorMessage("対象の施設別行が見つかりません。日別一覧を再取得してからやり直してください。");
+      } else if (typeof detail === "string" && detail) {
+        setOverrideEditorMessage(detail);
+      } else {
+        setOverrideEditorMessage("施設別単位設定の保存に失敗しました。");
+      }
+    } finally {
+      setOverrideEditorSavingKey("");
+    }
+  };
+
+  const saveBulkOverride = async () => {
+    if (!overrideEditor?.date) return;
+    const validationError = validateOverrideDraft(overrideEditorBulkDraft);
+    if (validationError) {
+      setOverrideEditorMessage(validationError);
+      return;
+    }
+    setOverrideEditorBulkSaving(true);
+    setOverrideEditorMessage("");
+    try {
+      await apiClient.post("/orders/daily-output-overrides/upsert-bulk", {
+        date: overrideEditor.date,
+        menu_name: overrideEditor.menu_name,
+        daypart: overrideEditor.daypart,
+        menu_category: overrideEditor.menu_category,
+        qty_per_serving: Number(overrideEditorBulkDraft.qty_per_serving),
+        unit_type: overrideEditorBulkDraft.unit_type,
+        note: overrideEditorBulkDraft.note,
+      });
+      await Promise.all([
+        openOverrideEditor({
+          daypart: overrideEditor.daypart,
+          menu_name: overrideEditor.menu_name,
+          menu_category: overrideEditor.menu_category,
+        }),
+        loadOrders(),
+      ]);
+      setOverrideEditorMessage("全施設の単位設定を保存しました。");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      if (detail?.code === "daily_output_override_bulk_requires_intervention") {
+        setOverrideEditorMessage("曖昧な施設が含まれるため一括保存できません。施設を選んで個別に確定してください。");
+      } else if (typeof detail === "string" && detail) {
+        setOverrideEditorMessage(detail);
+      } else {
+        setOverrideEditorMessage("全施設の単位設定保存に失敗しました。");
+      }
+    } finally {
+      setOverrideEditorBulkSaving(false);
+    }
+  };
+
+  const deleteOverrideRow = async (row: DailyOutputOverrideRow) => {
+    const overrideId = row.override?.id;
+    if (!overrideId || !overrideEditor) return;
+    const rowKey = buildDailyOutputOverrideRowKey(row);
+    setOverrideEditorSavingKey(rowKey);
+    setOverrideEditorMessage("");
+    try {
+      await apiClient.delete(`/orders/daily-output-overrides/${overrideId}`);
+      await Promise.all([openOverrideEditor({
+        daypart: overrideEditor.daypart,
+        menu_name: overrideEditor.menu_name,
+        menu_category: overrideEditor.menu_category,
+      }), loadOrders()]);
+      setOverrideEditorMessage("施設別単位設定を解除しました。");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setOverrideEditorMessage(detail ? `解除に失敗しました: ${detail}` : "解除に失敗しました。");
+    } finally {
+      setOverrideEditorSavingKey("");
     }
   };
 
@@ -578,17 +974,29 @@ export default function DailyDeliveryNotesPage() {
                         <div>
                           <p className="menu-bag-name">{menuGroup.menu_name || "-"}</p>
                           <p className="menu-bag-meta">
+                            {menuGroup.menu_category || "-"} /{" "}
                             {Array.isArray(menuGroup.diet_groups) ? menuGroup.diet_groups.length : 0}区分 /{" "}
                             {formatQuantity(sumDietQuantity(menuGroup))}食
                           </p>
                         </div>
                       </summary>
                       <div className="menu-bag-body">
+                        <div className="menu-bag-actions">
+                          <button
+                            className="btn ghost"
+                            type="button"
+                            onClick={() => openOverrideEditor(menuGroup)}
+                          >
+                            施設別単位設定
+                          </button>
+                        </div>
                         <table className="menu-bag-table">
                           <thead>
                             <tr>
+                              <th>献立区分</th>
                               <th>区分</th>
                               <th>注文数</th>
+                              <th>計算基準</th>
                               <th>計算結果</th>
                               <th>袋種</th>
                             </tr>
@@ -596,8 +1004,10 @@ export default function DailyDeliveryNotesPage() {
                           <tbody>
                             {(menuGroup.diet_groups || []).map((dietGroup) => (
                               <tr key={`${menuGroup.menu_name}-${dietGroup.diet_type}`}>
+                                <td>{menuGroup.menu_category || "-"}</td>
                                 <td>{formatDietType(dietGroup.diet_type)}</td>
                                 <td className="numeric">{formatQuantity(dietGroup.total_quantity)}</td>
+                                <td>{dietGroup.calculation_basis_label || "-"}</td>
                                 <td>{dietGroup.total_amount_label || "計算不可"}</td>
                                 <td>
                                   <div className="bag-type-stack">
@@ -688,6 +1098,232 @@ export default function DailyDeliveryNotesPage() {
           </table>
         </div>
       </section>
+
+      {overrideEditor ? (
+        <div className="override-modal-backdrop" role="presentation" onClick={closeOverrideEditor}>
+          <div className="override-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-header">
+              <div>
+                <h2>施設別単位設定</h2>
+                <p className="subtle">
+                  {overrideEditor.date || date} / {overrideEditor.daypart || "-"} / {overrideEditor.menu_name || "-"} /{" "}
+                  {overrideEditor.menu_category || "-"}
+                </p>
+              </div>
+              <button className="btn ghost" type="button" onClick={closeOverrideEditor}>
+                閉じる
+              </button>
+            </div>
+            <p className="subtle helper-text">
+              ここで保存した値は、その日の袋分けと個別注文の出力に反映されます。曖昧な行は候補を確認してから保存してください。
+            </p>
+            {overrideEditorMessage ? <p className="message">{overrideEditorMessage}</p> : null}
+            {overrideEditorLoading ? (
+              <p className="subtle">読込中...</p>
+            ) : !Array.isArray(overrideEditor.rows) || overrideEditor.rows.length === 0 ? (
+              <p className="subtle">対象の施設別行がありません。</p>
+            ) : (
+              <div className="override-editor-shell">
+                <section className="override-editor-card override-bulk-card">
+                  <div className="override-editor-head">
+                    <div>
+                      <p className="override-facility">全施設に一括適用</p>
+                      <p className="override-meta">
+                        {overrideEditorRows.length}区分 / {overrideFacilityOptions.length}施設
+                      </p>
+                    </div>
+                    <span className="badge">一括設定</span>
+                  </div>
+                  <p className="subtle override-bulk-note">
+                    ここで保存した値は、このメニューの全施設・全区分に反映されます。曖昧な施設がある場合は一括保存を止めて、下で個別に介入します。
+                  </p>
+                  <div className="override-form-grid">
+                    <label className="field">
+                      <span className="field-label">1単位量</span>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={overrideEditorBulkDraft.qty_per_serving}
+                        onChange={(event) => updateOverrideBulkDraft({ qty_per_serving: event.target.value })}
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">単位</span>
+                      <select
+                        className="input"
+                        value={overrideEditorBulkDraft.unit_type}
+                        onChange={(event) => updateOverrideBulkDraft({ unit_type: event.target.value })}
+                      >
+                        {overrideUnitOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field override-note-field">
+                      <span className="field-label">理由メモ</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={overrideEditorBulkDraft.note}
+                        onChange={(event) => updateOverrideBulkDraft({ note: event.target.value })}
+                        placeholder={`例: 全施設 ${formatOverrideUnitLabel(overrideEditorBulkDraft.unit_type)}を統一`}
+                      />
+                    </label>
+                  </div>
+                  <div className="actions override-actions">
+                    <button className="btn primary" type="button" onClick={saveBulkOverride} disabled={overrideEditorBulkSaving}>
+                      {overrideEditorBulkSaving ? "保存中..." : "全施設に保存"}
+                    </button>
+                  </div>
+                </section>
+
+                <section className="override-editor-card">
+                  <div className="override-selector-grid">
+                    <label className="field">
+                      <span className="field-label">施設を選ぶ</span>
+                      <select
+                        className="input"
+                        value={overrideEditorSelectedFacilityId}
+                        onChange={(event) => setOverrideEditorSelectedFacilityId(event.target.value)}
+                      >
+                        {overrideFacilityOptions.map((option) => (
+                          <option key={option.facility_id} value={option.facility_id}>
+                            {option.facility_label}
+                            {option.override_count > 0 ? " / override有" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {selectedFacilityRows.length > 1 ? (
+                      <label className="field">
+                        <span className="field-label">区分を選ぶ</span>
+                        <select
+                          className="input"
+                          value={overrideEditorSelectedDietType}
+                          onChange={(event) => setOverrideEditorSelectedDietType(event.target.value)}
+                        >
+                          {selectedFacilityRows.map((row) => (
+                            <option key={buildDailyOutputOverrideRowKey(row)} value={normalizeDietType(row.diet_type)}>
+                              {formatDietType(row.diet_type)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </div>
+                  {selectedOverrideRow ? (() => {
+                    const row = selectedOverrideRow;
+                    const rowKey = buildDailyOutputOverrideRowKey(row);
+                    const draft = overrideEditorDrafts[rowKey] || {
+                      qty_per_serving: "",
+                      unit_type: "g",
+                      note: "",
+                      acknowledge_ambiguous: false,
+                    };
+                    const saving = overrideEditorSavingKey === rowKey;
+                    return (
+                      <>
+                        <div className="override-editor-head">
+                          <div>
+                            <p className="override-facility">{row.facility_label || row.facility_id || "未確定"}</p>
+                            <p className="override-meta">
+                              {formatDietType(row.diet_type)} / {formatQuantity(row.total_quantity)}食 / {row.order_count || 0}注文
+                            </p>
+                          </div>
+                          <span className="badge">{row.override ? "override適用中" : "現在値"}</span>
+                        </div>
+                        <div className="override-current">
+                          <span>現在の計算基準</span>
+                          <strong>{row.current_basis_label || "未設定"}</strong>
+                        </div>
+                        {row.requires_intervention ? (
+                          <div className="override-warning">
+                            <p>現状が複数候補です。保存するとこの施設/区分の値を統一します。</p>
+                            <div className="override-candidate-list">
+                              {(row.current_variants || []).map((variant, index) => (
+                                <div key={`${rowKey}-variant-${index}`} className="override-candidate-row">
+                                  <span>
+                                    {variant.menu_name || overrideEditor.menu_name || "-"} / {variant.menu_category || "-"} /{" "}
+                                    {variant.basis_label || "未設定"}
+                                  </span>
+                                  <strong>{(variant.order_ids || []).length}件</strong>
+                                </div>
+                              ))}
+                            </div>
+                            <label className="checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={draft.acknowledge_ambiguous}
+                                onChange={(event) =>
+                                  updateOverrideDraft(rowKey, { acknowledge_ambiguous: event.target.checked })
+                                }
+                              />
+                              <span>候補を確認し、この値で上書きすることを理解した</span>
+                            </label>
+                          </div>
+                        ) : null}
+                        <div className="override-form-grid">
+                          <label className="field">
+                            <span className="field-label">1単位量</span>
+                            <input
+                              className="input"
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              value={draft.qty_per_serving}
+                              onChange={(event) => updateOverrideDraft(rowKey, { qty_per_serving: event.target.value })}
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="field-label">単位</span>
+                            <select
+                              className="input"
+                              value={draft.unit_type}
+                              onChange={(event) => updateOverrideDraft(rowKey, { unit_type: event.target.value })}
+                            >
+                              {overrideUnitOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="field override-note-field">
+                            <span className="field-label">理由メモ</span>
+                            <input
+                              className="input"
+                              type="text"
+                              value={draft.note}
+                              onChange={(event) => updateOverrideDraft(rowKey, { note: event.target.value })}
+                              placeholder={`例: この施設のみ${formatOverrideUnitLabel(draft.unit_type)}を調整`}
+                            />
+                          </label>
+                        </div>
+                        <div className="actions override-actions">
+                          <button className="btn primary" type="button" onClick={() => saveOverrideRow(row)} disabled={saving}>
+                            {saving ? "保存中..." : "保存"}
+                          </button>
+                          {row.override?.id ? (
+                            <button className="btn ghost" type="button" onClick={() => deleteOverrideRow(row)} disabled={saving}>
+                              解除
+                            </button>
+                          ) : null}
+                        </div>
+                      </>
+                    );
+                  })() : (
+                    <p className="subtle">施設を選択してください。</p>
+                  )}
+                </section>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       <style jsx>{`
         :global(body) {
@@ -957,6 +1593,12 @@ export default function DailyDeliveryNotesPage() {
           padding: 12px 16px 16px;
         }
 
+        .menu-bag-actions {
+          display: flex;
+          justify-content: flex-end;
+          margin-bottom: 12px;
+        }
+
         .menu-bag-table {
           min-width: 100%;
         }
@@ -1020,6 +1662,186 @@ export default function DailyDeliveryNotesPage() {
           font-size: 12px;
           color: #51615c;
           padding-top: 8px;
+        }
+
+        .override-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 40;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(20, 26, 25, 0.38);
+          backdrop-filter: blur(3px);
+        }
+
+        .override-modal {
+          width: min(960px, 100%);
+          max-height: min(88vh, 920px);
+          overflow: auto;
+          border-radius: 22px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #fffdf9;
+          box-shadow: 0 28px 70px rgba(17, 24, 22, 0.22);
+          padding: 22px 22px 24px;
+        }
+
+        .override-editor-shell {
+          display: grid;
+          gap: 14px;
+          margin-top: 14px;
+        }
+
+        .override-editor-card {
+          border-radius: 18px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #ffffff;
+          box-shadow: 0 10px 24px rgba(25, 32, 30, 0.06);
+          padding: 16px;
+        }
+
+        .override-editor-head {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+          margin-bottom: 10px;
+        }
+
+        .override-facility {
+          margin: 0;
+          font-size: 16px;
+          font-weight: 800;
+          color: #1f2a2a;
+        }
+
+        .override-bulk-card {
+          border-style: dashed;
+        }
+
+        .override-bulk-note {
+          margin: 0 0 12px;
+        }
+
+        .override-selector-grid {
+          display: grid;
+          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          margin-bottom: 16px;
+        }
+
+        .override-meta {
+          margin: 6px 0 0;
+          font-size: 13px;
+          color: #5f6d68;
+        }
+
+        .override-current {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          border-radius: 12px;
+          background: #f4f7f5;
+          padding: 10px 12px;
+          margin-bottom: 12px;
+        }
+
+        .override-current span {
+          font-size: 12px;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: #5f7b74;
+        }
+
+        .override-current strong {
+          color: #1f2a2a;
+          font-size: 14px;
+        }
+
+        .override-warning {
+          border-radius: 14px;
+          border: 1px solid rgba(158, 98, 36, 0.18);
+          background: #f9efe2;
+          color: #6b4217;
+          padding: 12px;
+          margin-bottom: 12px;
+        }
+
+        .override-warning p {
+          margin: 0 0 10px;
+          font-size: 13px;
+        }
+
+        .override-candidate-list {
+          display: grid;
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+
+        .override-candidate-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.72);
+          padding: 8px 10px;
+          font-size: 12px;
+        }
+
+        .checkbox-row {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          font-size: 13px;
+          color: #5a4022;
+        }
+
+        .checkbox-row input {
+          margin-top: 2px;
+        }
+
+        .override-form-grid {
+          display: grid;
+          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+
+        .override-note-field {
+          grid-column: 1 / -1;
+        }
+
+        .override-actions {
+          justify-content: flex-end;
+          margin-top: 14px;
+        }
+
+        @media (max-width: 720px) {
+          .override-modal-backdrop {
+            padding: 12px;
+          }
+
+          .override-modal {
+            padding: 18px 16px 18px;
+            max-height: 92vh;
+          }
+
+          .override-editor-head,
+          .override-current {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .override-actions {
+            justify-content: stretch;
+          }
+
+          .override-actions .btn {
+            flex: 1 1 0;
+            text-align: center;
+          }
         }
       `}</style>
       <style jsx global>{`

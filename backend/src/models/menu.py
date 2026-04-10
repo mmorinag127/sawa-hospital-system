@@ -103,6 +103,7 @@ class MonthlyMenuItem(Base):
     category = Column(String, nullable=True)
     diet_type = Column(String, nullable=True)
     facility_override = Column(String, nullable=True)
+    master_resolution_mode = Column(String, nullable=True)
 
     menu = relationship("MonthlyMenu", back_populates="items")
 

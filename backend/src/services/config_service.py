@@ -306,6 +306,14 @@ def _normalize_field_diet_token(value: object) -> str:
         return "daycare"
     if "staff" in token or "職員" in token:
         return "staff"
+    if "nofried" in token or "揚げ物禁" in str(value or "") or "揚物禁" in str(value or ""):
+        return "no_fried"
+    if (
+        ("肉" in token or "meat" in token)
+        and ("卵" in token or "玉子" in token or "egg" in token)
+        and ("魚" in token or "鯖" in token or "さば" in token or "fish" in token)
+    ) or "肉卵魚禁" in str(value or ""):
+        return "forbidden_other"
     if "nomeat" in token or ("禁" in token and "肉" in token):
         return "no_meat"
     if "nofish" in token or ("禁" in token and "魚" in token):
@@ -370,7 +378,9 @@ def _default_header_for_quantity(diet: str, area: str) -> str:
         "daycare": "通所",
         "staff": "職員",
         "no_meat": "禁食(肉禁)",
+        "forbidden_other": "禁食(肉卵魚禁)",
         "no_fish": "禁食(魚禁)",
+        "no_fried": "揚げ物禁",
         "change_1": "変更1",
         "change_2": "変更2",
         "unknown": "不明",
@@ -402,6 +412,151 @@ def _parse_quantity_field_name(value: object) -> dict[str, str] | None:
         "area": area,
         "field": f"qty.{raw_diet}_{raw_area}",
     }
+
+
+def _quantity_signature(col: dict[str, Any]) -> tuple[str, str]:
+    diet = _normalize_field_diet_token(col.get("diet_type") or col.get("name") or col.get("header"))
+    area = _normalize_field_area_token(col.get("area_id") or "X")
+    return diet, area
+
+
+def _normalize_main_ocr_row_fields(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _fax_override_columns_are_authoritative(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return bool(value.get("columns_authoritative"))
+
+
+def _normalize_authoritative_fax_override(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = deepcopy(value)
+    normalized_columns = normalize_fax_template_columns(value.get("columns"))
+    if normalized_columns:
+        normalized["columns"] = normalized_columns
+        explicit_fields = _normalize_main_ocr_row_fields(value.get("main_ocr_row_fields"))
+        normalized["main_ocr_row_fields"] = explicit_fields or _derive_row_fields_from_columns(normalized_columns)
+    elif "columns" in normalized:
+        normalized.pop("columns", None)
+        normalized.pop("main_ocr_row_fields", None)
+    if not normalized:
+        return None
+    return normalized
+
+
+def _should_prefer_master_fax_override(
+    current_override: Any,
+    master_override: Any,
+) -> bool:
+    if _fax_override_columns_are_authoritative(current_override):
+        return False
+    if not isinstance(current_override, dict) or not isinstance(master_override, dict):
+        return False
+    current_columns = normalize_fax_template_columns(current_override.get("columns"))
+    master_columns = normalize_fax_template_columns(master_override.get("columns"))
+    if not current_columns or not master_columns:
+        return False
+    current_aux = [col for col in current_columns if str(col.get("role") or "").strip().lower() == "aux"]
+    master_aux = [col for col in master_columns if str(col.get("role") or "").strip().lower() == "aux"]
+    if not master_aux or len(current_aux) >= len(master_aux):
+        return False
+
+    current_menu_index = next(
+        (int(col.get("index") or 0) for col in current_columns if str(col.get("role") or "").strip().lower() == "menu_name"),
+        None,
+    )
+    master_menu_index = next(
+        (int(col.get("index") or 0) for col in master_columns if str(col.get("role") or "").strip().lower() == "menu_name"),
+        None,
+    )
+    if current_menu_index is None or master_menu_index is None or current_menu_index >= master_menu_index:
+        return False
+
+    current_qty = [_quantity_signature(col) for col in current_columns if str(col.get("role") or "").strip().lower() == "quantity"]
+    master_qty = [_quantity_signature(col) for col in master_columns if str(col.get("role") or "").strip().lower() == "quantity"]
+    if not current_qty or not master_qty:
+        return False
+    shared_qty = len(set(current_qty) & set(master_qty))
+    minimum_shared = max(2, min(len(current_qty), len(master_qty)) - 1)
+    if shared_qty < minimum_shared:
+        return False
+
+    # Typical stale shape: master keeps the omitted aux gap while the persisted override stays
+    # left-shifted. Even when the quantity family list matches, the missing aux column still
+    # makes the persisted override structurally wrong for OCR source indexes.
+    return True
+
+
+def _reconcile_fax_template_override(
+    current_override: Any,
+    master_override: Any,
+    *,
+    drop_redundant: bool,
+) -> dict[str, Any] | None:
+    if not isinstance(current_override, dict):
+        return None
+    if _fax_override_columns_are_authoritative(current_override):
+        return _normalize_authoritative_fax_override(current_override)
+    if not isinstance(master_override, dict):
+        return deepcopy(current_override)
+
+    reconciled = deepcopy(current_override)
+    current_columns = normalize_fax_template_columns(current_override.get("columns"))
+    master_columns = normalize_fax_template_columns(master_override.get("columns"))
+    current_fields = _normalize_main_ocr_row_fields(current_override.get("main_ocr_row_fields"))
+    master_fields = _normalize_main_ocr_row_fields(master_override.get("main_ocr_row_fields"))
+    if not master_fields and master_columns:
+        master_fields = _derive_row_fields_from_columns(master_columns)
+
+    columns_identical = bool(current_columns and master_columns and current_columns == master_columns)
+    prefer_master = _should_prefer_master_fax_override(current_override, master_override)
+
+    if columns_identical or prefer_master:
+        if master_columns:
+            if drop_redundant and columns_identical and not prefer_master:
+                reconciled.pop("columns", None)
+            else:
+                reconciled["columns"] = deepcopy(master_columns)
+
+        if master_fields:
+            if current_fields != master_fields:
+                reconciled["main_ocr_row_fields"] = deepcopy(master_fields)
+            elif drop_redundant:
+                reconciled.pop("main_ocr_row_fields", None)
+
+    if not reconciled:
+        return None
+    return reconciled
+
+
+def sanitize_facility_config_for_storage(facility_id: str, config: dict[str, Any]) -> dict[str, Any]:
+    sanitized = deepcopy(config)
+    fax_override = sanitized.get("fax_template_override")
+    if not isinstance(fax_override, dict):
+        return sanitized
+
+    master_override = None
+    master = load_facility_master()
+    for fac_master in master.get("facilities", []):
+        if fac_master.get("facility_id") == facility_id:
+            master_override = fac_master.get("fax_template_override")
+            break
+
+    reconciled = _reconcile_fax_template_override(
+        fax_override,
+        master_override,
+        drop_redundant=True,
+    )
+    if reconciled is None:
+        sanitized.pop("fax_template_override", None)
+    else:
+        sanitized["fax_template_override"] = reconciled
+    return sanitized
 
 
 def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
@@ -815,6 +970,17 @@ def get_facility_by_id(facility_id: str) -> Optional[dict]:
             master = load_facility_master()
             for fac_master in master.get("facilities", []):
                 if fac_master.get("facility_id") == facility_id:
+                    master_override = fac_master.get("fax_template_override")
+                    current_override = facility.get("fax_template_override")
+                    reconciled_override = _reconcile_fax_template_override(
+                        current_override,
+                        master_override,
+                        drop_redundant=False,
+                    )
+                    if reconciled_override is None:
+                        facility.pop("fax_template_override", None)
+                    else:
+                        facility["fax_template_override"] = reconciled_override
                     for key, value in fac_master.items():
                         if key not in facility or facility[key] in (None, [], {}):
                             facility[key] = value
