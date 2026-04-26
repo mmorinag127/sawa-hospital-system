@@ -22663,7 +22663,7 @@ def _expanded_cell_same_daypart_copy_enabled(
             week_sheet_name=week_sheet_name,
             error=str(exc),
         )
-    return bool(facility_config.get("expanded_cell_same_daypart_copy_enabled"))
+    return False
 
 
 def _apply_expanded_cell_same_daypart_copy(

@@ -440,9 +440,6 @@ def validate_facility_config(config: Any) -> dict:
     warnings: list[str] = []
     config_dict = _ensure_dict(config, "config", errors)
     _validate_ocr_provider_config(config_dict, "config", errors)
-    expanded_cell_copy_enabled = config_dict.get("expanded_cell_same_daypart_copy_enabled")
-    if expanded_cell_copy_enabled is not None and not isinstance(expanded_cell_copy_enabled, bool):
-        errors.append("config.expanded_cell_same_daypart_copy_enabled must be a boolean")
     pattern_id = config_dict.get("order_form_pattern_id")
     if pattern_id is not None and not isinstance(pattern_id, str):
         errors.append("config.order_form_pattern_id must be a string")
@@ -507,11 +504,6 @@ def validate_facility_master(master: Any) -> dict:
         if not fac.get("facility_name"):
             errors.append(f"facilities[{idx}].facility_name is required")
         _validate_ocr_provider_config(fac, f"facilities[{idx}]", errors)
-        expanded_cell_copy_enabled = fac.get("expanded_cell_same_daypart_copy_enabled")
-        if expanded_cell_copy_enabled is not None and not isinstance(expanded_cell_copy_enabled, bool):
-            errors.append(
-                f"facilities[{idx}].expanded_cell_same_daypart_copy_enabled must be a boolean"
-            )
         fax_template_ids = fac.get("fax_template_ids")
         if fax_template_ids is not None:
             template_ids = _ensure_list(

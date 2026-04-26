@@ -122,38 +122,17 @@ def test_apply_expanded_cell_same_daypart_copy_skips_four_row_cluster():
     assert rows[3]["values"][3] == ""
 
 
-def test_build_confirm_materialization_candidate_applies_expanded_cell_copy_when_enabled():
-    order_service.clear_all()
+def test_legacy_manual_flag_does_not_enable_unmerged_template():
     previous_config = facility_service.get_facility_config("FAC00014") or {}
     next_config = dict(previous_config)
     next_config["expanded_cell_same_daypart_copy_enabled"] = True
     assert facility_service.update_config("FAC00014", next_config)
     try:
-        order = _seed_order("msg-expanded-cell-confirm-candidate")
-        saved, error = order_service.save_ocr_sheet_exact(
-            order["id"],
-            header=_fac00014_header(),
-            rows=[
-                ["03/21", "朝", "Menu A", "44", "", "", "", "", "", ""],
-                ["03/21", "朝", "Menu B", "", "", "", "", "", "", ""],
-                ["03/21", "昼", "Menu C", "", "", "", "", "", "", ""],
-            ],
-            fields=_fac00014_fields(),
-            row_ids=["draft-row-1", "draft-row-2", "draft-row-3"],
-            ui_mode="sheet",
+        facility_config = config_service.get_facility_config("FAC00014")
+        assert not order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+            facility_config,
+            week_sheet_name="4月26日～4月30日",
         )
-        assert error is None
-        assert saved is not None
-
-        candidate = order_service.build_confirm_materialization_candidate(order["id"])
-
-        assert isinstance(candidate, dict)
-        assert candidate["error"] is None
-        assert candidate["line_count"] == 2
-        assert [
-            (line["menu_name"], line["quantity_original"])
-            for line in candidate["lines"]
-        ] == [("Menu A", 44), ("Menu B", 44)]
     finally:
         assert facility_service.update_config("FAC00014", previous_config)
 
@@ -219,38 +198,6 @@ def test_expanded_cell_copy_does_not_enable_for_unmerged_template_without_manual
             facility_config,
             week_sheet_name="4月26日～4月30日",
         )
-    finally:
-        assert facility_service.update_config("FAC00014", previous_config)
-
-
-def test_build_order_lines_for_outputs_prefers_expanded_cell_materialization_candidate():
-    order_service.clear_all()
-    previous_config = facility_service.get_facility_config("FAC00014") or {}
-    next_config = dict(previous_config)
-    next_config["expanded_cell_same_daypart_copy_enabled"] = True
-    assert facility_service.update_config("FAC00014", next_config)
-    try:
-        order = _seed_order("msg-expanded-cell-output-builder")
-        saved, error = order_service.save_ocr_sheet_exact(
-            order["id"],
-            header=_fac00014_header(),
-            rows=[
-                ["03/21", "朝", "Menu A", "48", "", "", "", "", "", ""],
-                ["03/21", "朝", "Menu B", "", "", "", "", "", "", ""],
-            ],
-            fields=_fac00014_fields(),
-            row_ids=["output-row-1", "output-row-2"],
-            ui_mode="sheet",
-        )
-        assert error is None
-        assert saved is not None
-
-        lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(order["id"]))
-
-        assert [
-            (line["menu_name"], line["quantity_original"])
-            for line in lines
-        ] == [("Menu A", 48), ("Menu B", 48)]
     finally:
         assert facility_service.update_config("FAC00014", previous_config)
 
