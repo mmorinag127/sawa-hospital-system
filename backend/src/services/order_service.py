@@ -214,6 +214,13 @@ def _format_sheet_week_label(value: object) -> str:
     return sheet_week_service.format_sheet_week_label(value)
 
 
+def _week_sheet_name_from_week_value(value: object) -> str | None:
+    _month_id, start_date, end_date = _parse_sheet_week_value(value)
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return None
+    return f"{start_date.month}月{start_date.day}日～{end_date.month}月{end_date.day}日"
+
+
 def _clip_entries_to_sheet_week_range(entries: list[dict[str, Any]], week_value: object) -> list[dict[str, Any]]:
     month_id, start_date, end_date = _parse_sheet_week_value(week_value)
     if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
@@ -5123,6 +5130,7 @@ def _build_materialization_candidate_from_draft_record(
         fields=draft_sheet.get("fields"),
         rows_payload=rows_payload,
         facility_config=facility_config,
+        week_sheet_name=_week_sheet_name_from_week_value(existing_week_code),
     )
     policy = config_service.load_ingest_policy()
     effective_received_at = received_at or datetime.utcnow()
@@ -5370,8 +5378,12 @@ def _apply_expanded_cell_copy_to_materialization_rows_payload(
     fields: object,
     rows_payload: object,
     facility_config: dict[str, Any] | None,
+    week_sheet_name: str | None = None,
 ) -> object:
-    if not _expanded_cell_same_daypart_copy_enabled(facility_config):
+    if not _expanded_cell_same_daypart_copy_enabled(
+        facility_config,
+        week_sheet_name=week_sheet_name,
+    ):
         return rows_payload
     if not isinstance(fields, list) or not isinstance(rows_payload, list) or not rows_payload:
         return rows_payload
@@ -22631,9 +22643,26 @@ def _fill_cluster_consensus_quantities(
     return filled
 
 
-def _expanded_cell_same_daypart_copy_enabled(facility_config: dict[str, Any] | None) -> bool:
+def _expanded_cell_same_daypart_copy_enabled(
+    facility_config: dict[str, Any] | None,
+    *,
+    week_sheet_name: str | None = None,
+) -> bool:
     if not isinstance(facility_config, dict):
         return False
+    try:
+        if order_form_service.facility_template_has_vertical_merged_quantity_cells(
+            facility_config,
+            week_sheet_name=week_sheet_name,
+        ):
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to inspect facility template merged quantity cells",
+            facility_id=facility_config.get("facility_id"),
+            week_sheet_name=week_sheet_name,
+            error=str(exc),
+        )
     return bool(facility_config.get("expanded_cell_same_daypart_copy_enabled"))
 
 
@@ -25039,7 +25068,10 @@ def get_ocr_sheet(
     rows = _clone_sheet_rows(base_rows)
     sheet_warnings: list[str] = []
     shell_projection_stats: dict[str, Any] = {}
-    expanded_cell_same_daypart_copy_enabled = _expanded_cell_same_daypart_copy_enabled(facility_config)
+    expanded_cell_same_daypart_copy_enabled = _expanded_cell_same_daypart_copy_enabled(
+        facility_config,
+        week_sheet_name=_week_sheet_name_from_week_value(resolved_week_id),
+    )
     payload_mapping_block_reason = _sheet_payload_mapping_block_reason(
         source=source,
         ocr_payload=ocr_payload,

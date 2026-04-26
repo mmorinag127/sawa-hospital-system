@@ -1027,6 +1027,18 @@ def _column_slots_from_worksheet(worksheet: Any, *, col_count: int) -> list[dict
             role, slot_name, label = "quantity", "qty.no_fish_x", "魚禁"
         elif "常食" in header_blob:
             role, slot_name, label = "quantity", "qty.regular_x", "常食"
+        elif "糖尿" in header_blob:
+            role, slot_name, label = "quantity", "qty.diabetes_x", "糖尿"
+        elif "職員" in header_blob:
+            role, slot_name, label = "quantity", "qty.staff_x", "職員"
+        elif "通所" in header_blob:
+            role, slot_name, label = "quantity", "qty.daycare_x", "通所"
+        elif "軟菜" in header_blob:
+            role, slot_name, label = "quantity", "qty.soft_x", "軟菜"
+        elif "ミキサ" in header_blob or "ﾐｷｻ" in header_blob:
+            role, slot_name, label = "quantity", "qty.mixer_x", "ミキサー"
+        elif "袋分" in header_blob:
+            role, slot_name, label = "quantity", "qty.regular_bag_x", "袋分け"
         elif "変更1" in header_blob or "変更①" in header_blob:
             role, slot_name, label = "quantity", "qty.change_1_x", "変更1"
         elif "変更2" in header_blob or "変更②" in header_blob:
@@ -1087,8 +1099,8 @@ def _source_worksheet_for_structure_template(*, facility_id: str, week_sheet_nam
     fax_template_id = str(order_form_service._infer_fax_template_id_from_facility(facility) or "").strip()  # noqa: SLF001
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
-    source_workbook_name = order_form_service._resolve_source_workbook_name_for_week_sheet(  # noqa: SLF001
-        fax_template_id,
+    source_workbook_name = order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
         week_sheet_name,
     )
     source_workbook_path = order_form_service._resolve_source_workbook_path(source_workbook_name)  # noqa: SLF001

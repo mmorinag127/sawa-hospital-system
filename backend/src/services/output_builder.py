@@ -841,7 +841,10 @@ def build_order_lines_for_outputs(order: dict) -> list[dict]:
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
-    if order_service._expanded_cell_same_daypart_copy_enabled(facility_config):  # noqa: SLF001
+    if order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+        facility_config,
+        week_sheet_name=order_service._week_sheet_name_from_week_value(week_value),  # noqa: SLF001
+    ):
         order_id = order.get("id")
         if order_id:
             materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)

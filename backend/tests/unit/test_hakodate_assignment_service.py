@@ -482,6 +482,26 @@ def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_ro
     assert result["assignments"][1]["merged_cell"]["row_span"] == 2
 
 
+def test_column_slots_detect_diabetes_quantity_from_template_header() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.cell(row=7, column=1, value="日付")
+    worksheet.cell(row=7, column=2, value="区分")
+    worksheet.cell(row=7, column=4, value="献立")
+    worksheet.cell(row=7, column=5, value="常食")
+    worksheet.cell(row=7, column=6, value="糖尿")
+
+    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
+        worksheet,
+        col_count=6,
+    )
+
+    assert slots[4]["role"] == "quantity"
+    assert slots[4]["slot_name"] == "qty.regular_x"
+    assert slots[5]["role"] == "quantity"
+    assert slots[5]["slot_name"] == "qty.diabetes_x"
+
+
 def test_structure_slot_assignment_blocks_when_detected_table_box_is_invalid(monkeypatch) -> None:
     skeleton_rows = [{"row_id": "row-a", "date": "2026-04-26", "daypart": "朝", "menu_name": "献立A"}]
     structure_grid = {

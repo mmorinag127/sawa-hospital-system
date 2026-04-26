@@ -196,6 +196,77 @@ def test_clear_week_sheet_body_preserves_quantity_body_merges_for_diabetes_templ
     assert worksheet["F11"].value is None
 
 
+def test_template_scan_detects_vertical_merged_quantity_cells_for_sibling_templates() -> None:
+    assert order_form_service.source_workbook_has_vertical_merged_quantity_cells(
+        "いこいの森プラス　2604.xlsx",
+        week_sheet_name="4月26日～4月30日",
+    )
+    assert order_form_service.source_workbook_has_vertical_merged_quantity_cells(
+        "百々家 2604.xlsx",
+        week_sheet_name="4月26日～4月30日",
+    )
+    assert not order_form_service.source_workbook_has_vertical_merged_quantity_cells(
+        "共通　2604.xlsx",
+        week_sheet_name="4月26日～4月30日",
+    )
+
+
+def test_facility_template_scan_prefers_matching_facility_source_workbook() -> None:
+    facility = {
+        "facility_id": "FAC00007",
+        "facility_name": "ゆうゆう（株）百々家",
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+    }
+
+    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
+        "4月26日～4月30日",
+    ) == "百々家 2604.xlsx"
+    assert order_form_service.facility_template_has_vertical_merged_quantity_cells(
+        facility,
+        week_sheet_name="4月26日～4月30日",
+    )
+
+
+def test_build_fax_order_form_excel_uses_facility_matching_source_workbook(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        order_form_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "facility_name": "ゆうゆう（株）百々家",
+            "fax_template_id": "fax_layout_regular_forbidden_v1",
+        },
+    )
+
+    output = order_form_service.build_fax_order_form_excel(
+        facility_id="FACMOMO",
+        week_sheet_name="4月26日～4月30日",
+        output_dir=tmp_path,
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["4月26日～4月30日"]
+    metadata = _metadata_rows(workbook)
+
+    assert metadata["source_workbook"] == "百々家 2604.xlsx"
+    assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
+
+
+def test_clear_week_sheet_body_uses_header_detected_quantity_columns_for_sibling_template() -> None:
+    source_path = order_form_service._resolve_source_workbook_path("百々家 2604.xlsx")
+    workbook = load_workbook(source_path)
+    worksheet = workbook["4月26日～4月30日"]
+
+    assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
+
+    order_form_service._clear_week_sheet_body(worksheet)
+    merged_ranges = {str(item) for item in worksheet.merged_cells.ranges}
+
+    assert "E11:E12" in merged_ranges
+    assert worksheet["E11"].value is None
+
+
 def test_build_order_form_excel_supports_six_week_months(tmp_path, monkeypatch):
     source_name = "source.xlsx"
     _build_source_workbook(tmp_path / source_name, order_form_service._DEFAULT_WEEK_SHEET)
