@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from src.db import Base, engine, session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
-from src.services import evidence_manifest_service, template_resolution_service
+from src.services import evidence_manifest_service, order_current_state_service, template_resolution_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -389,7 +389,8 @@ def persist_evidence_run(
         session.flush()
         created = _serialize_evidence_run(run, include_payload=True)
         created["created"] = True
-        return created
+    order_current_state_service.delete_current_state(record["order_id"])
+    return created
 
 
 def backfill_evidence_run_from_cached_payload(

@@ -11,7 +11,12 @@ from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services.ocr_job_service import describe_job_state, get_job as get_ocr_job
+from src.services.ocr_job_service import (
+    describe_job_state,
+    get_job as get_ocr_job,
+    get_job_request_mode,
+    is_order_reparse_job,
+)
 from src.services import (
     apply_gate_service,
     candidate_resolution_service,
@@ -21,6 +26,7 @@ from src.services import (
     menu_service,
     ocr_evidence_service,
     position_column_mapping_service,
+    week_candidate_service,
 )
 
 
@@ -48,6 +54,19 @@ def _serialize(row: OrderWorkflowState) -> dict[str, Any]:
         "confidence_band": row.confidence_band,
         "last_transition_at": row.last_transition_at.isoformat() if isinstance(row.last_transition_at, datetime) else None,
     }
+
+
+def _attach_top_level_apply_flags(
+    payload: dict[str, Any],
+    apply_gate: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    gate = apply_gate if isinstance(apply_gate, dict) else {}
+    normalized = dict(payload)
+    normalized["can_apply"] = bool(gate.get("can_apply", False))
+    normalized["can_confirm"] = bool(gate.get("can_confirm", False))
+    return normalized
 
 
 def get_workflow_state(order_id: str) -> dict[str, Any] | None:
@@ -84,15 +103,35 @@ def _load_order_payload(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    try:
+        from src.services import order_service as _order_service
+    except Exception:
+        _order_service = None
+    if _order_service is not None:
+        canonical_payload = _order_service.get_order_by_id(normalized_order_id)
+        if isinstance(canonical_payload, dict):
+            return canonical_payload
     with session_scope() as session:
         order = session.get(Order, normalized_order_id)
         if not order:
             return None
+        week_selection = week_candidate_service.resolve_current_week_selection(
+            order.week_code,
+            received_at=order.received_at,
+            facility_id=str(order.facility_code or "").strip() or None,
+        )
+        week_month_id = str(week_selection.get("month_id") or order.week_code or "").strip() or None
+        week_value = (
+            str(week_selection.get("resolved_week_value") or "").strip()
+            or str(week_selection.get("stored_week_value") or "").strip()
+            or week_month_id
+        )
         return {
             "id": order.id,
             "facility": order.facility_code,
-            "week": order.week_code,
-            "week_value": order.week_code,
+            "week": week_month_id,
+            "week_value": week_value,
+            "persisted_week_value": week_value,
             "status": order.status,
             "received_at": order.received_at,
             "lines_updated_at": order.lines_updated_at,
@@ -202,8 +241,8 @@ def _build_menu_context_from_current_sheet_context(
     if not diagnostics:
         return _build_menu_context(facility_code=facility_code, week_code=week_code)
     resolved_week = (
-        str(context.get("resolved_week_id") or "").strip()
-        or str(week_code or "").strip()
+        str(week_code or "").strip()
+        or str(context.get("resolved_week_id") or "").strip()
     )
     month_id, _week_start, _week_end = _parse_sheet_week_range(resolved_week)
     order_codes = [str(item).strip() for item in (diagnostics.get("order_codes") or []) if str(item).strip()]
@@ -246,51 +285,19 @@ def _build_sheet_gate(
     order_id: str,
     order_payload: dict[str, Any] | None,
     draft_sheet: dict[str, Any] | None,
+    active_evidence_run: dict[str, Any] | None = None,
     candidate_resolution: dict[str, Any] | None = None,
     current_sheet_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    draft_payload = (
-        current_sheet_context.get("draft_payload")
-        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("draft_payload"), dict)
-        else (
-            draft_sheet.get("draft_sheet_json")
-            if isinstance(draft_sheet, dict) and isinstance(draft_sheet.get("draft_sheet_json"), dict)
-            else (draft_sheet if isinstance(draft_sheet, dict) else {})
-        )
+    sheet_state = apply_gate_service.resolve_current_sheet_state(
+        current_sheet_context,
+        draft_sheet,
     )
-    fields = (
-        list(current_sheet_context.get("fields") or [])
-        if isinstance(current_sheet_context, dict)
-        else (draft_payload.get("fields") if isinstance(draft_payload, dict) else None)
-    )
-    rows = (
-        list(current_sheet_context.get("rows") or [])
-        if isinstance(current_sheet_context, dict)
-        else (draft_payload.get("rows") if isinstance(draft_payload, dict) else None)
-    )
-    if isinstance(current_sheet_context, dict):
-        has_semantic_fields = bool(current_sheet_context.get("has_semantic_fields"))
-        source = str(current_sheet_context.get("source") or "").strip() or "draft"
-        blockers = list(current_sheet_context.get("blockers") or [])
-        warnings = list(current_sheet_context.get("warnings") or [])
-    else:
-        normalized_fields = [
-            str(field or "").strip()
-            for field in (fields or [])
-            if str(field or "").strip()
-        ] if isinstance(fields, list) else []
-        has_semantic_fields = bool(normalized_fields) and not all(
-            re.fullmatch(r"col\d+", token) for token in normalized_fields
-        )
-        source = apply_gate_service.canonical_sheet_source(
-            (draft_payload or {}).get("source"),
-            has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
-        )
-        blockers = []
-        warnings = []
-        if isinstance(draft_sheet, dict):
-            blockers = [str(item or "").strip() for item in (draft_sheet.get("blockers_json") or []) if str(item or "").strip()]
-            warnings = [str(item or "").strip() for item in (draft_sheet.get("warnings_json") or []) if str(item or "").strip()]
+    rows = sheet_state.get("rows") if isinstance(sheet_state.get("rows"), list) else None
+    has_semantic_fields = bool(sheet_state.get("has_semantic_fields"))
+    source = str(sheet_state.get("source") or "").strip() or "draft"
+    blockers = [str(item).strip() for item in (sheet_state.get("blockers") or []) if str(item).strip()]
+    warnings = [str(item).strip() for item in (sheet_state.get("warnings") or []) if str(item).strip()]
     draft_newer_than_lines = False
     if isinstance(draft_sheet, dict) and str(draft_sheet.get("id") or "").strip():
         lines_updated_at = order_payload.get("lines_updated_at") if isinstance(order_payload, dict) else None
@@ -302,31 +309,36 @@ def _build_sheet_gate(
                 draft_newer_than_lines = datetime.fromisoformat(draft_edited_at) > lines_updated_at
             except Exception:
                 draft_newer_than_lines = True
-    clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
+    clean_saved_draft = bool(sheet_state.get("clean_saved_draft"))
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
     reparse_job = get_ocr_job(f"OCR-{order_id}")
+    if not is_order_reparse_job(reparse_job if isinstance(reparse_job, dict) else None, order_id):
+        reparse_job = None
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
-    if isinstance(current_sheet_context, dict):
-        return apply_gate_service.evaluate_sheet_gate_from_context(
-            current_sheet_context,
-            draft_newer_than_lines=draft_newer_than_lines,
-            auto_apply_blocked="auto_apply_blocked" in blockers or "auto_apply_blocked" in warnings,
-            reparse_status=reparse_state.get("status"),
-            position_fallback_semantics_ready=position_fallback_semantics_ready,
-        )
     return apply_gate_service.evaluate_sheet_gate(
         rows=rows if isinstance(rows, list) else None,
         source=source,
         has_semantic_fields=has_semantic_fields,
-        blockers=blockers,
-        warnings=warnings,
+        blockers=[
+            item
+            for item in blockers
+            if item not in {"monthly_menu_object_missing", "menu_entries_missing", "weekly_menu_missing"}
+        ],
+        warnings=[
+            item
+            for item in warnings
+            if item not in {"monthly_menu_object_missing", "menu_entries_missing", "weekly_menu_missing"}
+        ],
         draft_newer_than_lines=draft_newer_than_lines,
         auto_apply_blocked="auto_apply_blocked" in blockers or "auto_apply_blocked" in warnings,
         reparse_status=reparse_state.get("status"),
         clean_saved_draft=clean_saved_draft,
         position_fallback_semantics_ready=position_fallback_semantics_ready,
+        authoritative_persisted_draft=bool(sheet_state.get("authoritative_persisted_draft")),
+        base_evidence_run_id=str(sheet_state.get("base_evidence_run_id") or "").strip() or None,
+        active_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
     )
 
 
@@ -348,9 +360,7 @@ def _infer_reparse_request_mode(
         return ""
     metrics = reparse_job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
-    direct_mode = (
-        str(metrics.get("request_mode") or metrics.get("rerun_mode") or "").strip().lower()
-    )
+    direct_mode = get_job_request_mode(reparse_job)
     if direct_mode:
         return direct_mode
     if metrics.get("evidence_only_rerun") is True:
@@ -391,6 +401,42 @@ def _resolve_candidate_evidence_run(
     if latest_evidence_run_id and latest_evidence_run_id != active_evidence_run_id:
         return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     return None
+
+
+def _parse_optional_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _candidate_requires_prompt(
+    candidate_evidence_run: dict[str, Any] | None,
+    acknowledged_candidate_decision: dict[str, Any] | None,
+) -> bool:
+    candidate_evidence_run_id = str((candidate_evidence_run or {}).get("id") or "").strip() or None
+    if not candidate_evidence_run_id:
+        return False
+    if not isinstance(acknowledged_candidate_decision, dict):
+        return True
+    acknowledged_candidate_evidence_run_id = (
+        str(acknowledged_candidate_decision.get("selected_value") or "").strip() or None
+    )
+    if candidate_evidence_run_id == acknowledged_candidate_evidence_run_id:
+        return False
+    candidate_created_at = _parse_optional_datetime(
+        (candidate_evidence_run or {}).get("created_at"),
+    )
+    acknowledged_selected_at = _parse_optional_datetime(
+        acknowledged_candidate_decision.get("selected_at"),
+    )
+    if candidate_created_at is not None and acknowledged_selected_at is not None:
+        return candidate_created_at > acknowledged_selected_at
+    return True
 
 
 def _augment_workflow_evidence_run(
@@ -437,6 +483,7 @@ def _load_workflow_current_sheet_context(
     order_id: str,
     *,
     refresh_draft_from_semantic: bool = True,
+    force_refresh: bool = False,
 ) -> dict[str, Any] | None:
     try:
         from src.services import order_service as _order_service
@@ -468,6 +515,13 @@ def _load_workflow_current_sheet_context(
             "menu_diagnostics": {},
             "resolved_week_id": None,
         }
+    if force_refresh:
+        return _order_service.refresh_current_sheet_context(
+            order_id,
+            refresh_draft_from_semantic=refresh_draft_from_semantic,
+            upgrade_generic_from_sheet=True,
+            backfill_from_revision=False,
+        )
     return _order_service.get_current_sheet_context(
         order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -502,6 +556,81 @@ def _draft_sheet_has_quantity_values(draft_sheet: dict[str, Any] | None) -> bool
             if idx < len(row) and str(row[idx] or "").strip():
                 return True
     return False
+
+
+def _current_sheet_clears_evidence_review(
+    current_sheet_context: dict[str, Any] | None,
+    active_evidence_run: dict[str, Any] | None = None,
+) -> bool:
+    sheet_state = apply_gate_service.resolve_current_sheet_state(
+        current_sheet_context,
+        None,
+    )
+    rows = sheet_state.get("rows")
+    if not bool(sheet_state.get("has_semantic_fields")) or not isinstance(rows, list) or not rows:
+        return False
+    sheet_gate = apply_gate_service.evaluate_sheet_gate(
+        rows=rows,
+        source=str(sheet_state.get("source") or "").strip() or None,
+        has_semantic_fields=bool(sheet_state.get("has_semantic_fields")),
+        blockers=[str(item).strip() for item in (sheet_state.get("blockers") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (sheet_state.get("warnings") or []) if str(item).strip()],
+        clean_saved_draft=bool(sheet_state.get("clean_saved_draft")),
+        authoritative_persisted_draft=bool(sheet_state.get("authoritative_persisted_draft")),
+        base_evidence_run_id=str(sheet_state.get("base_evidence_run_id") or "").strip() or None,
+        active_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
+    )
+    if (sheet_gate.get("apply_blockers") or []) or (sheet_gate.get("confirm_blockers") or []):
+        return False
+    review_warnings = {
+        "sheet_ocr_review_required",
+        "sheet_payload_mapping_low_confidence",
+        "sheet_order_lines_unmapped_fallback_payload",
+        "column_mapping_review_required",
+        "quantity_review_required",
+        "numeric_trust_low",
+    }
+    stale_authoritative_sheet = apply_gate_service.authoritative_sheet_suppresses_stale_evidence_issues(
+        source=str(sheet_state.get("source") or "").strip() or None,
+        rows=rows,
+        has_semantic_fields=bool(sheet_state.get("has_semantic_fields")),
+        clean_saved_draft=bool(sheet_state.get("clean_saved_draft")),
+        authoritative_persisted_draft=bool(sheet_state.get("authoritative_persisted_draft")),
+        base_evidence_run_id=str(sheet_state.get("base_evidence_run_id") or "").strip() or None,
+        active_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
+    )
+    warnings = set(
+        apply_gate_service.filter_stale_issue_tokens(
+            [str(item or "").strip() for item in (sheet_state.get("warnings") or []) if str(item or "").strip()],
+            source=str(sheet_state.get("source") or "").strip() or None,
+            clean_saved_draft=bool(sheet_state.get("clean_saved_draft")),
+            stale_authoritative_sheet=stale_authoritative_sheet,
+        )
+    )
+    if warnings & review_warnings:
+        return False
+    return True
+
+
+def _suppress_stale_evidence_review_warnings(apply_gate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(apply_gate, dict):
+        return apply_gate
+    stale_tokens = {
+        "column_mapping_review_required",
+        "quantity_review_required",
+        "numeric_trust_low",
+    }
+    suppressed = dict(apply_gate)
+    for key in ("warnings", "apply_warnings", "confirm_warnings"):
+        values = suppressed.get(key)
+        if not isinstance(values, list):
+            continue
+        suppressed[key] = [
+            str(item).strip()
+            for item in values
+            if str(item).strip() and str(item).strip() not in stale_tokens
+        ]
+    return suppressed
 
 
 def _decision_selected_label(decision: dict[str, Any], selected_value: str) -> str:
@@ -573,7 +702,11 @@ def _merge_selected_decisions_into_resolution(
         for key, value in resolutions.items()
         if isinstance(value, dict) and bool(value.get("requires_user_choice"))
     ]
-    candidate_resolution["requires_user_choice"] = bool(candidate_resolution["critical_choices"])
+    gate_summary = candidate_resolution_service.summarize_resolution_gate(
+        resolutions if isinstance(resolutions, dict) else {},
+    )
+    candidate_resolution["gate_summary"] = gate_summary
+    candidate_resolution["requires_user_choice"] = bool(gate_summary.get("choice_required_types"))
     candidate_resolution["attention_required"] = bool(
         any(
             isinstance(value, dict) and bool(value.get("attention_required"))
@@ -592,7 +725,7 @@ def _derive_state(
     apply_gate: dict[str, Any] | None,
     reparse_state: dict[str, Any] | None = None,
     reparse_request_mode: str | None = None,
-    has_new_candidate: bool = False,
+    current_sheet_review_cleared: bool = False,
 ) -> tuple[str, str, str | None, list[str], list[str], str]:
     blockers = list((apply_gate or {}).get("blockers") or [])
     warnings = list((apply_gate or {}).get("warnings") or [])
@@ -609,19 +742,23 @@ def _derive_state(
     order_status = str((order_payload or {}).get("status") or "").strip()
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
     resolutions = (candidate_resolution or {}).get("resolutions") if isinstance(candidate_resolution, dict) else {}
-    unresolved_choice_types = {
-        str(key).strip()
-        for key, value in (resolutions or {}).items()
-        if isinstance(value, dict) and value.get("requires_user_choice")
-    }
-    if clean_saved_draft:
-        unresolved_choice_types = {
-            decision_type
-            for decision_type in unresolved_choice_types
-            if decision_type in {"facility", "week"}
+    gate_summary = candidate_resolution_service.summarize_resolution_gate(
+        resolutions if isinstance(resolutions, dict) else {},
+        suppress_decision_types={"template", "column_mapping", "quantity"} if clean_saved_draft else set(),
+    )
+    blocker_tokens = {str(item).strip() for item in blockers if str(item).strip()}
+    identity_choice_required = bool(
+        blocker_tokens
+        & {"facility_choice_required", "facility_unresolved", "week_choice_required", "week_unresolved"}
+    )
+    layout_choice_required = bool(
+        blocker_tokens
+        & {
+            "template_choice_required",
+            "column_mapping_choice_required",
+            "quantity_choice_required",
         }
-    identity_choice_required = bool(unresolved_choice_types & {"facility", "week"})
-    layout_choice_required = bool(unresolved_choice_types & {"template", "column_mapping", "quantity"})
+    )
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
@@ -677,12 +814,18 @@ def _derive_state(
     has_persisted_draft = bool(isinstance(draft_sheet, dict) and str(draft_sheet.get("id") or "").strip())
     has_high_risk_numeric_issues = _has_reviewable_numeric_issues(evidence_payload)
     draft_requests_ocr_review = "sheet_ocr_review_required" in filtered_draft_warnings
+    if current_sheet_review_cleared:
+        attention_required = False
+        semantic_shell_only = False
+        numeric_trust_low = False
+        has_high_risk_numeric_issues = False
+        draft_requests_ocr_review = False
     reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
     normalized_reparse_request_mode = str(reparse_request_mode or "").strip().lower()
     draft_waiting_apply = "draft_newer_than_lines" in warnings
     if order_status == "確定" and not draft_waiting_apply:
         return "confirmed", "確定済み", "none", blockers, warnings, "high"
-    if normalized_reparse_request_mode == "ocr_rerun" and reparse_status in {"running", "pending"}:
+    if normalized_reparse_request_mode == "ocr_rerun" and reparse_status in {"running", "pending", "awaiting_output", "recovering"}:
         return "rerun_in_progress", "OCRパイプラインを再取得しています", "wait_for_rerun", blockers, warnings, "low"
     if (
         normalized_reparse_request_mode == "ocr_rerun"
@@ -699,8 +842,6 @@ def _derive_state(
             warnings,
             "low",
         )
-    if has_new_candidate:
-        return "new_evidence_available", "新しいOCR候補があります。切替えるか選んでください", "switch_to_new_evidence", blockers, warnings, "medium"
     if not isinstance(evidence_run, dict):
         return "uploaded", "OCR証拠の生成待ちです", "run_ocr_pipeline", blockers or ["evidence_missing"], warnings, "low"
     if isinstance(capabilities, dict) and capabilities.get("recovery_required"):
@@ -712,7 +853,7 @@ def _derive_state(
     semantic_only_blockers = [
         item
         for item in blockers
-        if item not in {"semantic_shell_only", "evidence_edit_unavailable", "draft_rows_empty"}
+        if item not in {"semantic_shell_only", "evidence_edit_unavailable", "draft_rows_empty", "rows_empty"}
     ]
     if (
         numeric_trust_low
@@ -736,6 +877,8 @@ def _derive_state(
         if blockers:
             return "draft_blocked", "下書きはありますが、反映前に条件の解消が必要です", "resolve_blockers", blockers, warnings, "medium"
         return "draft_ready", "下書きを確認して必要なら修正してください", "edit_draft", blockers, warnings, "medium"
+    if blockers:
+        return "draft_blocked", "下書きはありますが、反映前に条件の解消が必要です", "resolve_blockers", blockers, warnings, "medium"
     return "evidence_ready", "OCR証拠を確認できます", "open_draft", blockers, warnings, "medium"
 
 
@@ -743,6 +886,7 @@ def refresh_workflow_state(
     order_id: str,
     *,
     refresh_draft_from_semantic: bool = True,
+    include_candidate_preview: bool = True,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -752,74 +896,180 @@ def refresh_workflow_state(
         current_state = get_workflow_state(normalized_order_id)
         if current_state is not None:
             return current_state
+    current_sheet_context = _load_workflow_current_sheet_context(
+        normalized_order_id,
+        refresh_draft_from_semantic=refresh_draft_from_semantic,
+        force_refresh=True,
+    )
     stack_token = _WORKFLOW_REFRESH_STACK.set((*refresh_stack, normalized_order_id))
     try:
-        return _refresh_workflow_state_impl(
+        return _build_workflow_state_projection(
             normalized_order_id,
             refresh_draft_from_semantic=refresh_draft_from_semantic,
+            include_candidate_preview=include_candidate_preview,
+            current_sheet_context_override=current_sheet_context,
+            force_refresh_current_sheet=False,
+            persist=True,
         )
     finally:
         _WORKFLOW_REFRESH_STACK.reset(stack_token)
 
 
-def _refresh_workflow_state_impl(
+def project_workflow_state(
+    order_id: str,
+    *,
+    refresh_draft_from_semantic: bool = True,
+    current_sheet_context: dict[str, Any] | None = None,
+    include_candidate_preview: bool = True,
+) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    return _build_workflow_state_projection(
+        normalized_order_id,
+        refresh_draft_from_semantic=refresh_draft_from_semantic,
+        include_candidate_preview=include_candidate_preview,
+        current_sheet_context_override=current_sheet_context,
+        force_refresh_current_sheet=False,
+        persist=False,
+    )
+
+
+def _build_workflow_state_projection(
     normalized_order_id: str,
     *,
     refresh_draft_from_semantic: bool = True,
+    include_candidate_preview: bool = True,
+    current_sheet_context_override: dict[str, Any] | None = None,
+    force_refresh_current_sheet: bool = False,
+    persist: bool = True,
 ) -> dict[str, Any] | None:
-    current_sheet_context = _load_workflow_current_sheet_context(
-        normalized_order_id,
-        refresh_draft_from_semantic=refresh_draft_from_semantic,
+    current_sheet_context = (
+        current_sheet_context_override
+        if isinstance(current_sheet_context_override, dict)
+        else _load_workflow_current_sheet_context(
+            normalized_order_id,
+            refresh_draft_from_semantic=refresh_draft_from_semantic,
+            force_refresh=force_refresh_current_sheet,
+        )
     )
-    order_payload = _load_order_payload(normalized_order_id)
-    if not isinstance(order_payload, dict) and isinstance(current_sheet_context, dict):
+    order_payload = (
+        current_sheet_context.get("order_payload")
+        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("order_payload"), dict)
+        else _load_order_payload(normalized_order_id)
+    )
+    if isinstance(current_sheet_context, dict):
         context_order_payload = current_sheet_context.get("order_payload")
         if isinstance(context_order_payload, dict):
             order_payload = context_order_payload
     if not isinstance(order_payload, dict):
         return None
+    current_sheet_facility_code = (
+        str((current_sheet_context or {}).get("facility_id") or "").strip() or None
+    )
+    order_facility_code = str(order_payload.get("facility") or "").strip() or None
+    order_week_code = (
+        str(order_payload.get("persisted_week_value") or "").strip()
+        or str(order_payload.get("week_value") or "").strip()
+        or str(order_payload.get("week") or "").strip()
+        or None
+    )
+    current_sheet_week_code = (
+        str((current_sheet_context or {}).get("resolved_week_id") or "").strip() or None
+    )
+    current_week_code = (
+        order_week_code
+        if order_week_code and "@" in order_week_code
+        else current_sheet_week_code
+        or order_week_code
+    )
     evidence_run = ocr_evidence_service.get_latest_evidence_run(normalized_order_id)
     draft_sheet = (
         current_sheet_context.get("draft_record")
         if isinstance(current_sheet_context, dict)
         else None
     )
-    reparse_job = get_ocr_job(f"OCR-{normalized_order_id}")
+    order_bound_job = get_ocr_job(f"OCR-{normalized_order_id}")
+    reparse_job = (
+        order_bound_job
+        if is_order_reparse_job(order_bound_job if isinstance(order_bound_job, dict) else None, normalized_order_id)
+        else None
+    )
     active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
     active_evidence_run = _augment_workflow_evidence_run(
         active_evidence_run,
-        facility_code=str(order_payload.get("facility") or "").strip() or None,
+        facility_code=order_facility_code or current_sheet_facility_code,
     )
     candidate_evidence_run = _resolve_candidate_evidence_run(
         evidence_run,
         active_evidence_run,
         reparse_job if isinstance(reparse_job, dict) else None,
     )
-    has_new_candidate = isinstance(candidate_evidence_run, dict)
+    candidate_evidence_run_id = str((candidate_evidence_run or {}).get("id") or "").strip() or None
+    acknowledged_candidate_decision = critical_decision_service.get_acknowledged_candidate_evidence_decision(
+        normalized_order_id,
+    )
+    acknowledged_candidate_evidence_run_id = (
+        str((acknowledged_candidate_decision or {}).get("selected_value") or "").strip() or None
+    )
+    try:
+        from src.services import order_service as _order_service
+    except Exception:
+        _order_service = None
+    serialized_current_sheet_revision_id = (
+        str((current_sheet_context or {}).get("current_sheet_revision_id") or "").strip()
+        or None
+    )
+    candidate_sheet_state = {
+        "current_sheet_revision_id": serialized_current_sheet_revision_id,
+        "candidate_evidence_run_id": candidate_evidence_run_id,
+        "candidate_preview_available": False,
+        "candidate_preview_error": "candidate_not_found" if not candidate_evidence_run_id else None,
+        "candidate_has_meaningful_diff": False,
+        "candidate_preview_draft": None,
+    }
+    if include_candidate_preview and _order_service is not None:
+        candidate_sheet_state = _order_service.candidate_sheet_state(
+            normalized_order_id,
+            candidate_evidence_run_id=candidate_evidence_run_id,
+            current_sheet_context=current_sheet_context,
+        )
+    candidate_preview_available = bool((candidate_sheet_state or {}).get("candidate_preview_available"))
+    candidate_has_meaningful_diff = bool((candidate_sheet_state or {}).get("candidate_has_meaningful_diff"))
+    has_new_candidate = bool(
+        isinstance(candidate_evidence_run, dict)
+        and candidate_evidence_run_id
+        and candidate_preview_available
+        and candidate_has_meaningful_diff
+        and _candidate_requires_prompt(
+            candidate_evidence_run,
+            acknowledged_candidate_decision,
+        )
+    )
     evidence_payload = active_evidence_run.get("payload_json") if isinstance(active_evidence_run, dict) else None
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
-    reparse_request_mode = _infer_reparse_request_mode(
-        reparse_job if isinstance(reparse_job, dict) else None,
-        reparse_state,
-    )
+    reparse_request_mode = _infer_reparse_request_mode(reparse_job if isinstance(reparse_job, dict) else None, reparse_state)
     if isinstance(reparse_state, dict) and reparse_request_mode:
         reparse_state = {**reparse_state, "request_mode": reparse_request_mode}
     candidate_resolution = candidate_resolution_service.resolve_order_candidates(
         order_id=normalized_order_id,
-        facility_code=str(order_payload.get("facility") or "").strip() or None,
-        week_code=(
-            str((current_sheet_context or {}).get("resolved_week_id") or "").strip()
-            or str(order_payload.get("week_value") or order_payload.get("week") or "").strip()
-            or None
-        ),
+        facility_code=order_facility_code or current_sheet_facility_code,
+        week_code=current_week_code,
         received_at=order_payload.get("received_at"),
         evidence_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
     )
-    synced_decisions = critical_decision_service.sync_pending_decisions(
+    synced_decisions_all = critical_decision_service.sync_pending_decisions(
         normalized_order_id,
         list(candidate_resolution.get("critical_choices") or []),
         base_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
     )
+    synced_decisions = [
+        item
+        for item in (synced_decisions_all or [])
+        if not critical_decision_service.is_internal_decision_type(
+            str(item.get("decision_type") or "").strip() if isinstance(item, dict) else "",
+        )
+    ]
     candidate_resolution, _unresolved_types = _merge_selected_decisions_into_resolution(
         candidate_resolution,
         synced_decisions,
@@ -832,21 +1082,24 @@ def _refresh_workflow_state_impl(
         candidate_resolution=candidate_resolution,
         menu_context=_build_menu_context_from_current_sheet_context(
             current_sheet_context=current_sheet_context,
-            facility_code=str(order_payload.get("facility") or "").strip() or None,
-            week_code=(
-                str((current_sheet_context or {}).get("resolved_week_id") or "").strip()
-                or str(order_payload.get("week_value") or order_payload.get("week") or "").strip()
-                or None
-            ),
+            facility_code=order_facility_code or current_sheet_facility_code,
+            week_code=current_week_code,
         ),
         sheet_gate=_build_sheet_gate(
             order_id=normalized_order_id,
             order_payload=order_payload,
             draft_sheet=draft_sheet,
+            active_evidence_run=active_evidence_run,
             candidate_resolution=candidate_resolution,
             current_sheet_context=current_sheet_context,
         ),
     )
+    current_sheet_review_cleared = _current_sheet_clears_evidence_review(
+        current_sheet_context,
+        active_evidence_run=active_evidence_run,
+    )
+    if current_sheet_review_cleared:
+        apply_gate = _suppress_stale_evidence_review_warnings(apply_gate)
     state, headline, primary_action, blockers, warnings, confidence_band = _derive_state(
         order_payload=order_payload,
         evidence_run=active_evidence_run,
@@ -855,7 +1108,7 @@ def _refresh_workflow_state_impl(
         apply_gate=apply_gate,
         reparse_state=reparse_state,
         reparse_request_mode=reparse_request_mode,
-        has_new_candidate=has_new_candidate,
+        current_sheet_review_cleared=current_sheet_review_cleared,
     )
     secondary_actions = []
     if state in {"uploaded", "recovery_required"}:
@@ -864,48 +1117,65 @@ def _refresh_workflow_state_impl(
         secondary_actions = ["recover_ocr_evidence", "save_draft"]
     elif state == "rerun_failed_keep_current":
         secondary_actions = ["keep_current_draft", "recover_ocr_evidence", "llm_reparse"]
-    elif state == "new_evidence_available":
-        secondary_actions = ["keep_current_draft", "llm_reparse"]
     elif state == "rerun_in_progress":
         secondary_actions = ["wait"]
     elif state in {"draft_ready", "draft_blocked", "apply_ready", "review_required"}:
         secondary_actions = ["rerun_yomitoku", "save_draft", "llm_reparse"]
     elif state in {"identity_choice_required", "layout_choice_required"}:
         secondary_actions = ["select_candidate", "save_draft"]
+    if has_new_candidate:
+        secondary_actions = list(dict.fromkeys([*secondary_actions, "switch_to_new_evidence", "keep_current_draft"]))
 
     evidence_run_id = str((active_evidence_run or {}).get("id") or "").strip() or None
     draft_id = str((draft_sheet or {}).get("id") or "").strip() or None
     confirmed_snapshot_id = _latest_confirmed_snapshot_id(normalized_order_id)
-    last_transition_at = datetime.utcnow()
-    with session_scope() as session:
-        update_payload = {
-            "evidence_run_id": evidence_run_id,
-            "draft_id": draft_id,
-            "confirmed_snapshot_id": confirmed_snapshot_id,
-            "state": state,
-            "headline": headline,
-            "primary_action": primary_action,
-            "secondary_actions_json": secondary_actions,
-            "blockers_json": blockers,
-            "warnings_json": warnings,
-            "confidence_band": confidence_band,
-            "last_transition_at": last_transition_at,
-        }
-        updated = session.execute(
-            update(OrderWorkflowState)
-            .where(OrderWorkflowState.order_id == normalized_order_id)
-            .values(**update_payload)
-        ).rowcount
-        if not updated:
-            session.add(
-                OrderWorkflowState(
-                    order_id=normalized_order_id,
-                    **update_payload,
+    update_payload = {
+        "evidence_run_id": evidence_run_id,
+        "draft_id": draft_id,
+        "confirmed_snapshot_id": confirmed_snapshot_id,
+        "state": state,
+        "headline": headline,
+        "primary_action": primary_action,
+        "secondary_actions_json": secondary_actions,
+        "blockers_json": blockers,
+        "warnings_json": warnings,
+        "confidence_band": confidence_band,
+    }
+    if persist:
+        last_transition_at = datetime.utcnow()
+        with session_scope() as session:
+            updated = session.execute(
+                update(OrderWorkflowState)
+                .where(OrderWorkflowState.order_id == normalized_order_id)
+                .values(**update_payload, last_transition_at=last_transition_at)
+            ).rowcount
+            if not updated:
+                session.add(
+                    OrderWorkflowState(
+                        order_id=normalized_order_id,
+                        last_transition_at=last_transition_at,
+                        **update_payload,
+                    )
                 )
-            )
-        session.flush()
-        row = session.get(OrderWorkflowState, normalized_order_id)
-        serialized = _serialize(row) if isinstance(row, OrderWorkflowState) else {
+            session.flush()
+            row = session.get(OrderWorkflowState, normalized_order_id)
+            serialized = _serialize(row) if isinstance(row, OrderWorkflowState) else {
+                "order_id": normalized_order_id,
+                "evidence_run_id": evidence_run_id,
+                "draft_id": draft_id,
+                "confirmed_snapshot_id": confirmed_snapshot_id,
+                "state": state,
+                "headline": headline,
+                "primary_action": primary_action,
+                "secondary_actions_json": list(secondary_actions),
+                "blockers_json": list(blockers),
+                "warnings_json": list(warnings),
+                "confidence_band": confidence_band,
+                "last_transition_at": last_transition_at.isoformat(),
+            }
+    else:
+        persisted_state = get_workflow_state(normalized_order_id)
+        serialized = {
             "order_id": normalized_order_id,
             "evidence_run_id": evidence_run_id,
             "draft_id": draft_id,
@@ -917,13 +1187,63 @@ def _refresh_workflow_state_impl(
             "blockers_json": list(blockers),
             "warnings_json": list(warnings),
             "confidence_band": confidence_band,
-            "last_transition_at": last_transition_at.isoformat(),
+            "last_transition_at": (
+                str((persisted_state or {}).get("last_transition_at") or "").strip() or None
+            ),
         }
 
     serialized["candidate_resolution"] = candidate_resolution
     serialized["critical_decisions"] = synced_decisions
     serialized["apply_gate"] = apply_gate
-    serialized["candidate_evidence_run_id"] = str((candidate_evidence_run or {}).get("id") or "").strip() or None
+    serialized = _attach_top_level_apply_flags(serialized, apply_gate)
+    serialized_current_sheet_revision_id = (
+        serialized_current_sheet_revision_id
+        or str((candidate_sheet_state or {}).get("current_sheet_revision_id") or "").strip()
+        or None
+    )
+    serialized["current_sheet_revision_id"] = serialized_current_sheet_revision_id
+    candidate_prompt_visible = bool(
+        has_new_candidate
+        and serialized_current_sheet_revision_id
+        and serialized_current_sheet_revision_id
+        == (str((candidate_sheet_state or {}).get("current_sheet_revision_id") or "").strip() or None)
+    )
+    serialized["candidate_sheet_state"] = {
+        "current_sheet_revision_id": serialized["current_sheet_revision_id"],
+        "candidate_evidence_run_id": candidate_evidence_run_id,
+        "candidate_preview_available": candidate_preview_available,
+        "candidate_has_meaningful_diff": candidate_has_meaningful_diff,
+        "candidate_preview_error": (
+            str((candidate_sheet_state or {}).get("candidate_preview_error") or "").strip() or None
+        ),
+    }
+    serialized["candidate_prompt_visible"] = candidate_prompt_visible
+    serialized["candidate_evidence_run_id"] = candidate_evidence_run_id if candidate_prompt_visible else None
+    serialized["acknowledged_candidate_evidence_run_id"] = acknowledged_candidate_evidence_run_id
+    serialized["acknowledged_candidate_evidence_at"] = (
+        acknowledged_candidate_decision.get("selected_at")
+        if isinstance(acknowledged_candidate_decision, dict)
+        else None
+    )
     serialized["active_evidence_run_id"] = str((active_evidence_run or {}).get("id") or "").strip() or None
     serialized["reparse_state"] = reparse_state
+    try:
+        from src.services import order_service as _order_service
+    except Exception:
+        _order_service = None
+    if _order_service is not None:
+        effective_ocr_status = str((reparse_state or {}).get("status") or "").strip() or None
+        if effective_ocr_status == "idle" and isinstance(active_evidence_run, dict):
+            effective_ocr_status = "done"
+        review_summary = _order_service.get_order_review_summary(
+            normalized_order_id,
+            lines_updated_at=order_payload.get("lines_updated_at"),
+            ocr_status=effective_ocr_status,
+            cached_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
+            ocr_metrics=(reparse_job.get("metrics") if isinstance(reparse_job, dict) else None),
+            order_status=order_payload.get("status"),
+            current_sheet_context=current_sheet_context,
+            sheet_gate=apply_gate,
+        )
+        serialized.update(review_summary)
     return serialized

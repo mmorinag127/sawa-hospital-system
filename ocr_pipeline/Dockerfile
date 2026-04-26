@@ -21,5 +21,5 @@ COPY app/ ./app
 COPY src/data ./src/data
 
 ENV PORT=8080
-ENV GUNICORN_TIMEOUT=900
+ENV GUNICORN_TIMEOUT=3600
 CMD ["sh", "-c", "gunicorn -b :8080 -w 1 -t ${GUNICORN_TIMEOUT} app.main:app"]

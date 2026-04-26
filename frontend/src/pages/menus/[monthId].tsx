@@ -140,6 +140,18 @@ type MenuSheetDateRow = {
   cells: Record<string, MenuEntry[]>;
 };
 
+type MenuEntryExceptionDraft = {
+  facilityIds: string[];
+  name: string;
+  unit_type: string;
+  qty_per_serving: string;
+  bag_max_qty: string;
+  bag_max_unit: string;
+  temp_type: string;
+  category: string;
+  diet_type: string;
+};
+
 const unitChoices = [
   { value: "g", label: "グラム(g)" },
   { value: "cut", label: "切れ" },
@@ -260,6 +272,21 @@ const normalizeUnitChoice = (value?: string | null) => {
   if (["count", "個", "個数", "piece", "pieces"].includes(normalized)) return "count";
   if (["g", "gram", "grams", "グラム"].includes(normalized)) return "g";
   return normalized;
+};
+
+const buildEntryExceptionDraft = (entry: MenuEntry | null, item: MenuItem | null): MenuEntryExceptionDraft | null => {
+  if (!entry) return null;
+  return {
+    facilityIds: entry.facility_override ? [entry.facility_override] : [],
+    name: entry.name || "",
+    unit_type: item?.unit_type || "",
+    qty_per_serving: item?.qty_per_serving == null ? "" : String(item.qty_per_serving),
+    bag_max_qty: item?.bag_max_qty == null ? "" : String(item.bag_max_qty),
+    bag_max_unit: item?.bag_max_unit || "",
+    temp_type: item?.temp_type || "",
+    category: item?.category || entry.category || "",
+    diet_type: item?.diet_type || entry.diet_type || "",
+  };
 };
 
 const formatUnitChoiceLabel = (value?: string | null) => {
@@ -409,6 +436,8 @@ export default function MonthlyMenuEditorPage() {
   const [masterCheckState, setMasterCheckState] = useState<MenuMasterCheckState>({ issues: [], resolutions: {} });
   const [masterCheckSavingId, setMasterCheckSavingId] = useState<string | null>(null);
   const [masterCheckNotice, setMasterCheckNotice] = useState<string>("");
+  const [entryExceptionDraft, setEntryExceptionDraft] = useState<MenuEntryExceptionDraft | null>(null);
+  const [entryExceptionSaving, setEntryExceptionSaving] = useState<boolean>(false);
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
     const value = (scopeOverride || "").trim();
@@ -426,6 +455,10 @@ export default function MonthlyMenuEditorPage() {
     const item = items.find((row) => normalizeValue(row.id) === itemId);
     return formatScopeLabel(item?.facility_override);
   };
+
+  const selectedEntry = entries.find((entry) => entry.id === selectedEntryId) || null;
+  const selectedItemIndex = findMatchingItemIndex(items, selectedEntry);
+  const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
 
   const loadUploadHistory = async () => {
     if (!monthId || Array.isArray(monthId)) return;
@@ -502,6 +535,10 @@ export default function MonthlyMenuEditorPage() {
       setSelectedEntryId(entries[0].id);
     }
   }, [entries, selectedEntryId]);
+
+  useEffect(() => {
+    setEntryExceptionDraft(buildEntryExceptionDraft(selectedEntry, selectedItem));
+  }, [selectedEntry?.id, selectedItem?.id]);
 
   const handleUpload = async () => {
     if (!monthId || Array.isArray(monthId)) return;
@@ -838,12 +875,84 @@ export default function MonthlyMenuEditorPage() {
     }
   };
 
+  const updateEntryExceptionField = (field: keyof Omit<MenuEntryExceptionDraft, "facilityIds">, value: string) => {
+    setEntryExceptionDraft((current) => {
+      if (!current) return current;
+      return { ...current, [field]: value };
+    });
+  };
+
+  const toggleEntryExceptionFacility = (facilityId: string) => {
+    setEntryExceptionDraft((current) => {
+      if (!current) return current;
+      const exists = current.facilityIds.includes(facilityId);
+      return {
+        ...current,
+        facilityIds: exists
+          ? current.facilityIds.filter((item) => item !== facilityId)
+          : [...current.facilityIds, facilityId],
+      };
+    });
+  };
+
+  const saveEntryException = async () => {
+    if (!monthId || Array.isArray(monthId) || !selectedEntry || !entryExceptionDraft) return;
+    if (entryExceptionDraft.facilityIds.length === 0) {
+      setMessage("例外メニューの対象施設を1つ以上選択してください。");
+      return;
+    }
+    if (!entryExceptionDraft.name.trim()) {
+      setMessage("例外メニュー名を入力してください。");
+      return;
+    }
+    setEntryExceptionSaving(true);
+    try {
+      const res = await apiClient.post(
+        `/monthly-menus/${monthId}/entries/${selectedEntry.id}/exceptions`,
+        {
+          facility_ids: entryExceptionDraft.facilityIds,
+          name: entryExceptionDraft.name.trim(),
+          unit_type: entryExceptionDraft.unit_type || null,
+          qty_per_serving:
+            entryExceptionDraft.qty_per_serving.trim() === ""
+              ? null
+              : Number(entryExceptionDraft.qty_per_serving),
+          bag_max_qty:
+            entryExceptionDraft.bag_max_qty.trim() === ""
+              ? null
+              : Number(entryExceptionDraft.bag_max_qty),
+          bag_max_unit: entryExceptionDraft.bag_max_unit || null,
+          temp_type: entryExceptionDraft.temp_type || null,
+          category: entryExceptionDraft.category.trim() || null,
+          diet_type: entryExceptionDraft.diet_type || null,
+        },
+      );
+      const updatedEntries = Array.isArray(res.data?.entries) ? res.data.entries : [];
+      await loadMenu();
+      if (updatedEntries.length === 1 && updatedEntries[0]?.id) {
+        setSelectedEntryId(String(updatedEntries[0].id));
+      }
+      setMessage(`例外メニューを保存しました: ${entryExceptionDraft.name.trim()}`);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      const status = err?.response?.status;
+      if (status === 403) {
+        setMessage("例外メニューの保存に失敗しました: 権限がありません。");
+      } else {
+        setMessage(
+          detail
+            ? `例外メニューの保存に失敗しました: ${formatErrorDetail(detail, "例外メニューの保存に失敗しました。")}`
+            : "例外メニューの保存に失敗しました。",
+        );
+      }
+    } finally {
+      setEntryExceptionSaving(false);
+    }
+  };
+
   const daypartOptions = uniqueValues(items, "daypart");
   const categoryOptions = uniqueValues(items, "category");
   const { columns: sheetColumns, rows: sheetDateRows } = buildMenuSheetGrid(entries, formatScopeLabel);
-  const selectedEntry = entries.find((entry) => entry.id === selectedEntryId) || null;
-  const selectedItemIndex = findMatchingItemIndex(items, selectedEntry);
-  const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
   const canSubmitPendingReview =
     pendingReview?.issues.every((issue, index) =>
       isReviewResolutionComplete(issue, pendingReview.resolutions[getReviewIssueKey(issue, index)]),
@@ -1758,6 +1867,139 @@ export default function MonthlyMenuEditorPage() {
                 ) : (
                   <p className="subtle">対応するメニュー設定がまだありません。必要なら下の補助一覧を開いて確認してください。</p>
                 )}
+                <div className="exception-form" data-testid="entry-exception-form">
+                  <div className="exception-form__header">
+                    <p className="field-label">例外メニュー</p>
+                    <p className="subtle">この位置だけ、選択した施設へ別メニューを割り当てます。</p>
+                  </div>
+                  {entryExceptionDraft ? (
+                    <>
+                      <label>
+                        <span>例外メニュー名</span>
+                        <input
+                          className="input"
+                          value={entryExceptionDraft.name}
+                          onChange={(e) => updateEntryExceptionField("name", e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>単位</span>
+                        <select
+                          className="input"
+                          value={entryExceptionDraft.unit_type}
+                          onChange={(e) => updateEntryExceptionField("unit_type", e.target.value)}
+                        >
+                          <option value="">未選択</option>
+                          {unitChoices.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>量</span>
+                        <input
+                          className="input"
+                          type="number"
+                          value={entryExceptionDraft.qty_per_serving}
+                          onChange={(e) => updateEntryExceptionField("qty_per_serving", e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>袋最大量</span>
+                        <input
+                          className="input"
+                          type="number"
+                          value={entryExceptionDraft.bag_max_qty}
+                          onChange={(e) => updateEntryExceptionField("bag_max_qty", e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>袋単位</span>
+                        <select
+                          className="input"
+                          value={entryExceptionDraft.bag_max_unit}
+                          onChange={(e) => updateEntryExceptionField("bag_max_unit", e.target.value)}
+                        >
+                          <option value="">未選択</option>
+                          {unitChoices.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>温冷</span>
+                        <select
+                          className="input"
+                          value={entryExceptionDraft.temp_type}
+                          onChange={(e) => updateEntryExceptionField("temp_type", e.target.value)}
+                        >
+                          {tempTypeChoices.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>区分</span>
+                        <input
+                          className="input"
+                          value={entryExceptionDraft.category}
+                          list="category-options"
+                          onChange={(e) => updateEntryExceptionField("category", e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>食種</span>
+                        <select
+                          className="input"
+                          value={entryExceptionDraft.diet_type}
+                          onChange={(e) => updateEntryExceptionField("diet_type", e.target.value)}
+                        >
+                          {DIET_TYPE_OPTIONS.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="exception-targets">
+                        <p className="field-label">対象施設</p>
+                        <div className="exception-targets__list">
+                          {facilities.length === 0 ? (
+                            <p className="subtle">対象施設がありません。</p>
+                          ) : (
+                            facilities.map((facility) => (
+                              <label key={facility.id} className="exception-target">
+                                <input
+                                  type="checkbox"
+                                  checked={entryExceptionDraft.facilityIds.includes(facility.id)}
+                                  onChange={() => toggleEntryExceptionFacility(facility.id)}
+                                />
+                                <span>
+                                  {facility.name} ({facility.id})
+                                </span>
+                              </label>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                      <button className="btn primary" onClick={saveEntryException} disabled={entryExceptionSaving}>
+                        {entryExceptionSaving
+                          ? "保存中..."
+                          : selectedEntry.facility_override
+                            ? "この例外メニューを更新"
+                            : "この位置に例外メニューを追加"}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="subtle">例外メニューを編集できません。</p>
+                  )}
+                </div>
               </>
             ) : (
               <p className="subtle">表示できる献立がありません。</p>
@@ -2445,6 +2687,51 @@ export default function MonthlyMenuEditorPage() {
           color: #5f7b74;
           letter-spacing: 0.04em;
           text-transform: uppercase;
+        }
+
+        .exception-form {
+          display: grid;
+          gap: 12px;
+          padding-top: 8px;
+          border-top: 1px solid rgba(25, 32, 30, 0.08);
+        }
+
+        .exception-form__header {
+          display: grid;
+          gap: 4px;
+        }
+
+        .exception-form label {
+          display: grid;
+          gap: 6px;
+        }
+
+        .exception-form label span {
+          font-size: 12px;
+          color: #5f7b74;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        .exception-targets {
+          display: grid;
+          gap: 8px;
+        }
+
+        .exception-targets__list {
+          display: grid;
+          gap: 8px;
+          max-height: 220px;
+          overflow: auto;
+          padding-right: 4px;
+        }
+
+        .exception-target {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          color: #2b403b;
+          font-size: 14px;
         }
 
         .menu-list-details summary {

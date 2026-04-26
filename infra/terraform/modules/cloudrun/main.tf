@@ -33,6 +33,21 @@ variable "service_resources" {
   default     = {}
 }
 
+variable "service_scaling" {
+  description = "Map of service name to scaling settings."
+  type = map(object({
+    min_instance_count = optional(number)
+    max_instance_count = optional(number)
+  }))
+  default = {}
+}
+
+variable "service_concurrency" {
+  description = "Map of service name to max in-instance request concurrency."
+  type        = map(number)
+  default     = {}
+}
+
 variable "secret_env_vars" {
   description = "Map of env var name to Secret Manager secret id (latest version)."
   type        = map(string)
@@ -51,6 +66,12 @@ variable "request_timeout" {
   default     = "300s"
 }
 
+variable "service_request_timeouts" {
+  description = "Per-service Cloud Run request timeout overrides."
+  type        = map(string)
+  default     = {}
+}
+
 variable "cloudsql_instances" {
   description = "List of Cloud SQL instance connection names for Cloud Run."
   type        = list(string)
@@ -58,9 +79,34 @@ variable "cloudsql_instances" {
 }
 
 resource "google_service_account" "run_exec" {
-  for_each = var.services
+  for_each     = var.services
   account_id   = "${each.key}-exec-${var.env}"
   display_name = "Cloud Run exec ${each.key} (${var.env})"
+}
+
+locals {
+  service_secret_refs = {
+    for service_name, _ in var.services :
+    service_name => merge(var.secret_env_vars, lookup(var.service_secret_env_vars, service_name, {}))
+  }
+}
+
+resource "google_project_iam_member" "secret_accessor" {
+  for_each = {
+    for service_name, secret_map in local.service_secret_refs :
+    service_name => service_name
+    if length(secret_map) > 0
+  }
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.run_exec[each.key].email}"
+}
+
+resource "google_project_iam_member" "cloudsql_client" {
+  for_each = length(var.cloudsql_instances) > 0 ? var.services : {}
+  project  = var.project_id
+  role     = "roles/cloudsql.client"
+  member   = "serviceAccount:${google_service_account.run_exec[each.key].email}"
 }
 
 resource "google_cloud_run_v2_service" "service" {
@@ -68,10 +114,22 @@ resource "google_cloud_run_v2_service" "service" {
   name     = "${each.key}-${var.env}"
   location = var.region
   project  = var.project_id
+  depends_on = [
+    google_project_iam_member.secret_accessor,
+    google_project_iam_member.cloudsql_client,
+  ]
 
   template {
-    timeout         = var.request_timeout
-    service_account = google_service_account.run_exec[each.key].email
+    timeout                          = lookup(var.service_request_timeouts, each.key, var.request_timeout)
+    service_account                  = google_service_account.run_exec[each.key].email
+    max_instance_request_concurrency = lookup(var.service_concurrency, each.key, null)
+    dynamic "scaling" {
+      for_each = lookup(var.service_scaling, each.key, null) != null ? [var.service_scaling[each.key]] : []
+      content {
+        min_instance_count = try(scaling.value.min_instance_count, null)
+        max_instance_count = try(scaling.value.max_instance_count, null)
+      }
+    }
     containers {
       image = each.value
       dynamic "resources" {

@@ -601,7 +601,6 @@ def parse_order_lines(
         max_quantity_abs = None
 
     header_rows = int(template.get("header_rows", 0))
-    effective_header_rows = 0 if rows_are_body_only else header_rows
     columns = template.get("columns", []) or []
     token_columns = template.get("token_columns") or []
     token_row_tolerance = float(template.get("token_row_tolerance", 0.008))
@@ -665,6 +664,7 @@ def parse_order_lines(
         rows = _apply_ocr_fallback(rows, row_bounds, columns, template, pdf_bytes)
     if not columns:
         columns = _columns_from_row_fields(template)
+    effective_header_rows = 0 if rows_are_body_only else header_rows
     large_cell_mode = bool(template.get("large_cell_mode", False))
     fill_forward_roles = set(template.get("fill_forward_roles") or [])
     if large_cell_mode:

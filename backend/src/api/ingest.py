@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -10,24 +11,36 @@ from src.workers.ingest_worker import (
     enqueue_ingest_job_async,
     enqueue_uploaded_pdf_async,
     process_uploaded_pdf_job,
+    run_ocr_job_recovery_once,
 )
 from src.services.ingest_job_service import list_pending_jobs, list_jobs, reset_stale_processing, restart_ingest_job
 from src.api.auth import require_role
 from src.services.ingest_policy import ingest_chunk_delay_seconds
-from src.services.manual_upload_service import ManualUploadConfigError, ManualUploadSavedFile, save_uploaded_pdf
+from src.services.manual_upload_service import (
+    ManualUploadConfigError,
+    ManualUploadSavedFile,
+    save_uploaded_pdf_pages,
+)
 from src.services.ingest_job_service import create_ingest_job
 from src.services.uploaded_pdf_service import (
     build_ingest_payload,
     create_uploaded_pdf_from_upload,
     get_uploaded_pdf,
     is_uploaded_pdf_completion_ready,
+    list_ready_uploaded_pdf_ids,
     list_uploaded_pdfs,
     requeue_uploaded_pdf,
 )
 from src.db import session_scope
 from src.models.order import Order
+from src.workers.ingest_mail_adapter import IngestEmailPayload
+from src.services import order_service
 
 router = APIRouter()
+
+# Backward-compatible import alias for tests and internal helpers that still
+# patch or call the older single-save name.
+save_uploaded_pdf = save_uploaded_pdf_pages
 
 
 def _normalize_upload_files(
@@ -74,6 +87,117 @@ def _find_latest_order_id_by_message_id(message_id: str) -> str | None:
         return rows[0] if rows else None
 
 
+def _build_upload_existing_order_preview(
+    *,
+    saved: ManualUploadSavedFile,
+    facility_hint: str | None,
+    week_hint: str | None,
+    facility_name: str | None,
+    skip_ocr_value: bool,
+) -> dict[str, Any] | None:
+    payload = IngestEmailPayload(
+        message_id=saved.message_id,
+        pdf_uri=saved.pdf_uri,
+        received_at=saved.received_at,
+        facility_hint=facility_hint,
+        week_hint=week_hint,
+        facility_name=facility_name,
+        skip_ocr=skip_ocr_value,
+        source_kind="manual_upload",
+        original_filename=saved.original_filename,
+        content_sha256=saved.content_sha256,
+    )
+    return order_service.preview_existing_order_for_ingest(payload)
+
+
+def _handle_uploaded_pdf_bytes(
+    *,
+    file_bytes: bytes,
+    raw_filename: str,
+    facility_hint: str | None,
+    week_hint: str | None,
+    facility_name: str | None,
+    received_at_value: datetime,
+    force_value: bool,
+    skip_ocr_value: bool,
+) -> dict[str, Any]:
+    try:
+        saved_result = save_uploaded_pdf(
+            pdf_bytes=file_bytes,
+            original_filename=raw_filename,
+            received_at=received_at_value,
+        )
+        if isinstance(saved_result, list):
+            saved_items = saved_result
+        else:
+            saved_items = [saved_result]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ManualUploadConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    items: list[dict[str, Any]] = []
+    for saved in saved_items:
+        payload = {
+            "message_id": saved.message_id,
+            "pdf_uri": saved.pdf_uri,
+            "received_at": saved.received_at.isoformat(),
+            "facility_hint": facility_hint or None,
+            "week_hint": week_hint or None,
+            "facility_name": facility_name or None,
+            "skip_ocr": skip_ocr_value,
+            "source_kind": "manual_upload",
+            "original_filename": saved.original_filename,
+            "content_sha256": saved.content_sha256,
+        }
+        existing_order_preview = _build_upload_existing_order_preview(
+            saved=saved,
+            facility_hint=facility_hint,
+            week_hint=week_hint,
+            facility_name=facility_name,
+            skip_ocr_value=skip_ocr_value,
+        )
+        uploaded_pdf, duplicate_blocked = create_uploaded_pdf_from_upload(
+            saved=saved,
+            facility_hint=facility_hint,
+            week_hint=week_hint,
+            facility_name=facility_name,
+            skip_ocr=skip_ocr_value,
+            source_kind="manual_upload",
+            force=force_value,
+            page_count=1,
+        )
+        job_id, enqueued = create_ingest_job(payload, force=force_value)
+        if not duplicate_blocked:
+            enqueue_uploaded_pdf_async(uploaded_pdf["id"])
+        order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued and not duplicate_blocked else None
+        existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if duplicate_blocked else None
+        items.append(
+            {
+                "accepted": True,
+                "filename": saved.original_filename,
+                "uploaded_pdf_id": uploaded_pdf["id"],
+                "message_id": saved.message_id,
+                "ingest_job_id": job_id,
+                "pdf_uri": saved.pdf_uri,
+                "received_at": saved.received_at.isoformat(),
+                "duplicate_blocked": duplicate_blocked or not enqueued,
+                "order_id": order_id,
+                "existing_order_id": existing_order_id,
+                "existing_order_preview": existing_order_preview,
+                "intake_decision": "reuse_existing_order"
+                if existing_order_preview is not None
+                else ("duplicate_blocked" if duplicate_blocked or not enqueued else "create_new_order"),
+                "source_kind": "manual_upload",
+                "status": uploaded_pdf["status"],
+                "current_stage": uploaded_pdf["current_stage"],
+                "page_number": saved.page_number,
+                "total_pages": saved.total_pages,
+            }
+        )
+    primary = items[0]
+    return {**primary, "accepted": True, "count": len(items), "items": items}
+
+
 async def _handle_uploaded_pdf(
     *,
     pdf_file: UploadFile,
@@ -87,59 +211,18 @@ async def _handle_uploaded_pdf(
     raw_filename = str(pdf_file.filename or "").strip()
     if not raw_filename:
         raise HTTPException(status_code=400, detail="pdf_file filename is required")
-    try:
-        file_bytes = await pdf_file.read()
-        saved = save_uploaded_pdf(
-            pdf_bytes=file_bytes,
-            original_filename=raw_filename,
-            received_at=received_at_value,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ManualUploadConfigError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    payload = {
-        "message_id": saved.message_id,
-        "pdf_uri": saved.pdf_uri,
-        "received_at": saved.received_at.isoformat(),
-        "facility_hint": facility_hint or None,
-        "week_hint": week_hint or None,
-        "facility_name": facility_name or None,
-        "skip_ocr": skip_ocr_value,
-        "source_kind": "manual_upload",
-        "original_filename": saved.original_filename,
-        "content_sha256": saved.content_sha256,
-    }
-    uploaded_pdf, duplicate_blocked = create_uploaded_pdf_from_upload(
-        saved=saved,
+    file_bytes = await pdf_file.read()
+    return await asyncio.to_thread(
+        _handle_uploaded_pdf_bytes,
+        file_bytes=file_bytes,
+        raw_filename=raw_filename,
         facility_hint=facility_hint,
         week_hint=week_hint,
         facility_name=facility_name,
-        skip_ocr=skip_ocr_value,
-        source_kind="manual_upload",
-        force=force_value,
+        received_at_value=received_at_value,
+        force_value=force_value,
+        skip_ocr_value=skip_ocr_value,
     )
-    job_id, enqueued = create_ingest_job(payload, force=force_value)
-    if not duplicate_blocked:
-        enqueue_uploaded_pdf_async(uploaded_pdf["id"])
-    order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued and not duplicate_blocked else None
-    existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if duplicate_blocked else None
-    return {
-        "accepted": True,
-        "filename": saved.original_filename,
-        "uploaded_pdf_id": uploaded_pdf["id"],
-        "message_id": saved.message_id,
-        "ingest_job_id": job_id,
-        "pdf_uri": saved.pdf_uri,
-        "received_at": saved.received_at.isoformat(),
-        "duplicate_blocked": duplicate_blocked or not enqueued,
-        "order_id": order_id,
-        "existing_order_id": existing_order_id,
-        "source_kind": "manual_upload",
-        "status": uploaded_pdf["status"],
-        "current_stage": uploaded_pdf["current_stage"],
-    }
 
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
@@ -157,18 +240,27 @@ async def ingest_upload(
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)
     skip_ocr_value = _parse_form_bool(skip_ocr, default=False)
-    items = [
-        await _handle_uploaded_pdf(
-            pdf_file=current_file,
-            facility_hint=facility_hint,
-            week_hint=week_hint,
-            facility_name=facility_name,
-            received_at_value=received_at_value,
-            force_value=force_value,
-            skip_ocr_value=skip_ocr_value,
-        )
-        for current_file in upload_files
-    ]
+    results = await asyncio.gather(
+        *[
+            _handle_uploaded_pdf(
+                pdf_file=current_file,
+                facility_hint=facility_hint,
+                week_hint=week_hint,
+                facility_name=facility_name,
+                received_at_value=received_at_value,
+                force_value=force_value,
+                skip_ocr_value=skip_ocr_value,
+            )
+            for current_file in upload_files
+        ]
+    )
+    items: list[dict[str, Any]] = []
+    for result in results:
+        nested_items = result.get("items")
+        if isinstance(nested_items, list) and nested_items:
+            items.extend(nested_items)
+        else:
+            items.append(result)
     primary = items[0]
     response = {**primary, "accepted": True, "count": len(items), "items": items}
     return response
@@ -180,6 +272,39 @@ def retry_pending_jobs(limit: int = 10):
     for job_id in job_ids:
         enqueue_ingest_job_async(job_id)
     return {"accepted": len(job_ids)}
+
+
+@router.post("/recover-ready", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
+def recover_ready(limit: int = 20):
+    reset_ids = reset_stale_processing(limit=limit)
+    pending_ids = list_pending_jobs(limit=limit)
+    ingest_ids: list[str] = []
+    seen_ingest: set[str] = set()
+    for job_id in [*reset_ids, *pending_ids]:
+        normalized = str(job_id or "").strip()
+        if not normalized or normalized in seen_ingest:
+            continue
+        seen_ingest.add(normalized)
+        ingest_ids.append(normalized)
+        enqueue_ingest_job_async(normalized)
+
+    uploaded_ids = [
+        str(uploaded_pdf_id or "").strip()
+        for uploaded_pdf_id in list_ready_uploaded_pdf_ids(limit=limit)
+        if str(uploaded_pdf_id or "").strip()
+    ]
+    for uploaded_pdf_id in uploaded_ids:
+        enqueue_uploaded_pdf_async(uploaded_pdf_id)
+
+    ocr_recovered = run_ocr_job_recovery_once(limit=limit)
+    return {
+        "accepted": True,
+        "limit": limit,
+        "ingest_reset": len(reset_ids),
+        "ingest_enqueued": len(ingest_ids),
+        "uploaded_enqueued": len(uploaded_ids),
+        "ocr_recovered": int(ocr_recovered or 0),
+    }
 
 
 @router.get("/jobs", dependencies=[Depends(require_role("admin"))])

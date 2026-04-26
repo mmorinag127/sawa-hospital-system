@@ -108,6 +108,180 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
 });
 
+test("monthly menu page can create a facility exception from the selected entry", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+  let savedRequest: Record<string, unknown> | null = null;
+  let exceptionSaved = false;
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method().toUpperCase();
+
+    if (path.endsWith("/auth/me") && method === "GET") {
+      await route.fulfill({ status: 200, json: { role: "admin" } });
+      return;
+    }
+
+    if (path.endsWith("/monthly-menus/scope-options") && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        json: {
+          facilities: [
+            { id: "FAC00003", name: "施設A" },
+            { id: "FAC00005", name: "施設B" },
+          ],
+          tags: [],
+        },
+      });
+      return;
+    }
+
+    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+      await route.fulfill({ status: 200, json: { items: [] } });
+      return;
+    }
+
+    if (path.endsWith("/monthly-menus/2026-03") && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        json: {
+          menu: {
+            id: "2026-03",
+            display_name: "2026年3月献立",
+          },
+          items: exceptionSaved
+            ? [
+                {
+                    id: "MMI1",
+                    month_id: "2026-03",
+                    name: "ホイコーロー",
+                    unit_type: "g",
+                    qty_per_serving: 100,
+                    daypart: "昼",
+                    category: "主菜",
+                    diet_type: "",
+                    facility_override: null,
+                },
+                {
+                    id: "MMI_EXCEPTION",
+                    month_id: "2026-03",
+                    name: "鮭の塩焼き",
+                    unit_type: "cut",
+                    qty_per_serving: 1,
+                    daypart: "昼",
+                    category: "主菜",
+                    diet_type: "",
+                    facility_override: "FAC00003",
+                },
+              ]
+            : [
+                {
+                  id: "MMI1",
+                  month_id: "2026-03",
+                  name: "ホイコーロー",
+                  unit_type: "g",
+                  qty_per_serving: 100,
+                  daypart: "昼",
+                  category: "主菜",
+                  diet_type: "",
+                  facility_override: null,
+                },
+              ],
+          entries: exceptionSaved
+            ? [
+                {
+                  id: "MME1",
+                  month_id: "2026-03",
+                  menu_date: "2026-03-24",
+                  daypart: "昼",
+                  name: "ホイコーロー",
+                  category: "主菜",
+                  diet_type: "",
+                  slot_index: 1,
+                  facility_override: null,
+                },
+                {
+                  id: "MME_EXCEPTION",
+                  month_id: "2026-03",
+                  menu_date: "2026-03-24",
+                  daypart: "昼",
+                  name: "鮭の塩焼き",
+                  category: "主菜",
+                  diet_type: "",
+                  slot_index: 1,
+                  facility_override: "FAC00003",
+                },
+              ]
+            : [
+                {
+                  id: "MME1",
+                  month_id: "2026-03",
+                  menu_date: "2026-03-24",
+                  daypart: "昼",
+                  name: "ホイコーロー",
+                  category: "主菜",
+                  diet_type: "",
+                  slot_index: 1,
+                  facility_override: null,
+                },
+              ],
+        },
+      });
+      return;
+    }
+
+    if (path.endsWith("/monthly-menus/2026-03/entries/MME1/exceptions") && method === "POST") {
+      savedRequest = JSON.parse(route.request().postData() || "{}");
+      exceptionSaved = true;
+      await route.fulfill({
+        status: 200,
+        json: {
+          updated: true,
+          entry_id: "MME1",
+          facility_ids: ["FAC00003"],
+          entries: [{ id: "MME_EXCEPTION", facility_override: "FAC00003", name: "鮭の塩焼き" }],
+          items: [{ id: "MMI_EXCEPTION", facility_override: "FAC00003", name: "鮭の塩焼き" }],
+        },
+      });
+      return;
+    }
+
+    await route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/menus/2026-03`);
+
+  await page.getByTestId("selected-entry-name").waitFor();
+  await page
+    .locator("[data-testid='entry-exception-form']")
+    .getByLabel("例外メニュー名")
+    .fill("鮭の塩焼き");
+  await page.locator("[data-testid='entry-exception-form']").getByText("施設A (FAC00003)").click();
+  await page
+    .locator("[data-testid='entry-exception-form']")
+    .getByRole("button", { name: "この位置に例外メニューを追加" })
+    .click();
+
+  expect(savedRequest).toEqual({
+    facility_ids: ["FAC00003"],
+    name: "鮭の塩焼き",
+    unit_type: "g",
+    qty_per_serving: 100,
+    bag_max_qty: null,
+    bag_max_unit: null,
+    temp_type: null,
+    category: "主菜",
+    diet_type: null,
+  });
+  await expect(page.getByText("例外メニューを保存しました: 鮭の塩焼き")).toBeVisible();
+});
+
 test("monthly menu upload asks for menu master review when backend returns 409", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
   let uploadAttemptCount = 0;

@@ -586,6 +586,7 @@
         "fax_layout_regular_staff_daycare_v1"
       ],
       "fax_template_override": {
+        "columns_authoritative": true,
         "columns": [
           {
             "index": 0,
@@ -778,12 +779,28 @@
             "column_index": 3
           },
           {
-            "name": "常食通常",
+            "name": "常食1回目",
             "source": "quantity",
             "diet_type": "regular",
             "area_id": "X",
-            "header": "常食通常",
+            "header": "常食1回目",
             "column_index": 4
+          },
+          {
+            "name": "常食2回目",
+            "source": "quantity",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "header": "常食2回目",
+            "column_index": 5
+          },
+          {
+            "name": "常食3回目",
+            "source": "quantity",
+            "diet_type": "change_2",
+            "area_id": "X",
+            "header": "常食3回目",
+            "column_index": 6
           },
           {
             "name": "常食袋分け",
@@ -791,7 +808,7 @@
             "diet_type": "regular_bag",
             "area_id": "X",
             "header": "常食袋分け",
-            "column_index": 5
+            "column_index": 7
           },
           {
             "name": "軟菜",
@@ -799,7 +816,7 @@
             "diet_type": "soft",
             "area_id": "X",
             "header": "軟菜",
-            "column_index": 6
+            "column_index": 8
           },
           {
             "name": "ミキサー",
@@ -807,37 +824,150 @@
             "diet_type": "mixer",
             "area_id": "X",
             "header": "ミキサー",
-            "column_index": 7
+            "column_index": 9
           },
           {
-            "name": "肉禁",
+            "name": "禁食肉禁",
             "source": "quantity",
             "diet_type": "no_meat",
             "area_id": "X",
-            "header": "肉禁",
-            "column_index": 8
+            "header": "禁食肉禁",
+            "column_index": 10
           },
           {
-            "name": "魚禁",
+            "name": "禁食魚禁",
             "source": "quantity",
             "diet_type": "no_fish",
             "area_id": "X",
-            "header": "魚禁",
-            "column_index": 9
+            "header": "禁食魚禁",
+            "column_index": 11
           },
           {
             "name": "備考欄",
             "source": "note",
             "header": "備考欄",
-            "column_index": 10
+            "column_index": 12
           }
         ]
       },
       "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+      "fax_template_override": {
+        "columns_authoritative": true,
+        "main_ocr_row_fields": [
+          "date_mmdd",
+          "daypart",
+          "menu",
+          "qty.regular_x",
+          "qty.change_1_x",
+          "qty.change_2_x",
+          "qty.regular_bag_x",
+          "qty.soft_x",
+          "qty.mixer_x",
+          "qty.no_meat_x",
+          "qty.no_fish_x",
+          "remarks"
+        ],
+        "columns": [
+          {
+            "index": 0,
+            "source_index": 0,
+            "role": "date",
+            "header": "日付"
+          },
+          {
+            "index": 1,
+            "source_index": 1,
+            "role": "daypart",
+            "header": "区分"
+          },
+          {
+            "index": 2,
+            "source_index": 3,
+            "role": "menu_name",
+            "header": "メニュー"
+          },
+          {
+            "index": 3,
+            "source_index": 4,
+            "role": "quantity",
+            "header": "常食1回目",
+            "diet_type": "regular",
+            "area_id": "X"
+          },
+          {
+            "index": 4,
+            "source_index": 5,
+            "role": "quantity",
+            "header": "常食2回目",
+            "diet_type": "change_1",
+            "diet_type_locked": true,
+            "area_id": "X",
+            "area_id_locked": true,
+            "name": "qty.change_1_x",
+            "name_locked": true
+          },
+          {
+            "index": 5,
+            "source_index": 6,
+            "role": "quantity",
+            "header": "常食3回目",
+            "diet_type": "change_2",
+            "diet_type_locked": true,
+            "area_id": "X",
+            "area_id_locked": true,
+            "name": "qty.change_2_x",
+            "name_locked": true
+          },
+          {
+            "index": 6,
+            "source_index": 7,
+            "role": "quantity",
+            "header": "常食袋分け",
+            "diet_type": "regular_bag",
+            "area_id": "X"
+          },
+          {
+            "index": 7,
+            "source_index": 8,
+            "role": "quantity",
+            "header": "軟菜",
+            "diet_type": "soft",
+            "area_id": "X"
+          },
+          {
+            "index": 8,
+            "source_index": 9,
+            "role": "quantity",
+            "header": "ミキサー",
+            "diet_type": "mixer",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
+            "source_index": 10,
+            "role": "quantity",
+            "header": "禁食肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X"
+          },
+          {
+            "index": 10,
+            "source_index": 11,
+            "role": "quantity",
+            "header": "禁食魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X"
+          },
+          {
+            "index": 11,
+            "source_index": 12,
+            "role": "note",
+            "header": "備考欄"
+          }
+        ]
+      },
       "fax_template_ids": [
-        "fax_layout_regular_soft_mixer_forbidden_v1",
-        "fax_layout_floor_2f3f_v1",
-        "fax_layout_regular_staff_daycare_v1"
+        "fax_layout_regular_soft_mixer_forbidden_v1"
       ]
     },
     {
@@ -1377,6 +1507,7 @@
         ]
       },
       "fax_template_override": {
+        "columns_authoritative": true,
         "columns": [
           {
             "index": 0,
@@ -1392,47 +1523,62 @@
           {
             "index": 2,
             "role": "menu_name",
-            "header": "メニュー"
+            "header": "メニュー",
+            "source_index": 3
           },
           {
             "index": 3,
             "role": "quantity",
             "header": "常食",
             "diet_type": "regular",
-            "area_id": "X"
+            "area_id": "X",
+            "source_index": 4
           },
           {
             "index": 4,
             "role": "quantity",
-            "header": "肉禁",
-            "diet_type": "no_meat",
-            "area_id": "X"
+            "header": "-",
+            "diet_type": "placeholder",
+            "area_id": "X",
+            "source_index": 5
           },
           {
             "index": 5,
             "role": "quantity",
-            "header": "魚禁",
-            "diet_type": "no_fish",
-            "area_id": "X"
+            "header": "肉禁",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "source_index": 6
           },
           {
             "index": 6,
             "role": "quantity",
-            "header": "変更1",
-            "diet_type": "change_1",
-            "area_id": "X"
+            "header": "魚禁",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "source_index": 7
           },
           {
             "index": 7,
             "role": "quantity",
-            "header": "変更2",
-            "diet_type": "change_2",
-            "area_id": "X"
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "source_index": 8
           },
           {
             "index": 8,
+            "role": "quantity",
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X",
+            "source_index": 9
+          },
+          {
+            "index": 9,
             "role": "note",
-            "header": "備考欄"
+            "header": "備考欄",
+            "source_index": 10
           }
         ]
       },
@@ -1447,9 +1593,8 @@
       "phone": "088-8567-012",
       "areas": [],
       "facility_id": "FAC00013",
-      "fax_template_id": "fax_layout_regular_diabetes_v1",
+      "fax_template_id": "fax_layout_regular_forbidden_v1",
       "fax_template_ids": [
-        "fax_layout_regular_diabetes_v1",
         "fax_layout_regular_forbidden_v1"
       ],
       "invoice_template": {
@@ -1510,6 +1655,7 @@
         "fax_layout_regular_forbidden_v1"
       ],
       "fax_template_override": {
+        "columns_authoritative": true,
         "columns": [
           {
             "index": 0,
@@ -1524,58 +1670,53 @@
           },
           {
             "index": 2,
-            "role": "aux",
-            "header": "補助区分"
-          },
-          {
-            "index": 3,
             "role": "menu_name",
             "header": "メニュー"
           },
           {
-            "index": 4,
+            "index": 3,
             "role": "quantity",
             "header": "常食",
             "diet_type": "regular",
             "area_id": "X"
           },
           {
-            "index": 5,
+            "index": 4,
             "role": "quantity",
             "header": "職員",
             "diet_type": "staff",
             "area_id": "X"
           },
           {
-            "index": 6,
+            "index": 5,
             "role": "quantity",
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X"
           },
           {
-            "index": 7,
-            "role": "quantity",
-            "header": "肉卵魚禁",
-            "diet_type": "forbidden_other",
-            "area_id": "X"
-          },
-          {
-            "index": 8,
+            "index": 6,
             "role": "quantity",
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X"
           },
           {
-            "index": 9,
+            "index": 7,
             "role": "quantity",
             "header": "ゴマアレルギー",
             "diet_type": "sesame_allergy",
             "area_id": "X"
           },
           {
-            "index": 10,
+            "index": 8,
+            "role": "quantity",
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X"
+          },
+          {
+            "index": 9,
             "role": "note",
             "header": "備考欄"
           }

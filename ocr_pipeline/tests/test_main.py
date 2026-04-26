@@ -101,6 +101,7 @@ def _install_stub_modules() -> None:
     yomitoku_runner_module = types.ModuleType("app.yomitoku_runner")
     yomitoku_runner_module.ocr_image_text = lambda *args, **kwargs: ""
     yomitoku_runner_module.ocr_image_words = lambda *args, **kwargs: []
+    yomitoku_runner_module.prewarm_analyzer = lambda *args, **kwargs: None
     yomitoku_runner_module.run_yomitoku = lambda *args, **kwargs: ([], None, None)
     sys.modules.setdefault("app.yomitoku_runner", yomitoku_runner_module)
 
@@ -110,6 +111,110 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def test_handler_writes_failed_payload_when_run_yomitoku_aborts(self):
+        class _FakeJobRef:
+            id = "job-doc"
+
+            def __init__(self):
+                self.set_payload = None
+                self.updates = []
+
+            def get(self):
+                return types.SimpleNamespace(exists=False)
+
+            def set(self, payload):
+                self.set_payload = dict(payload)
+
+            def update(self, payload):
+                self.updates.append(dict(payload))
+
+        class _FakeCollection:
+            def __init__(self, job_ref):
+                self._job_ref = job_ref
+
+            def document(self, _doc_id):
+                return self._job_ref
+
+        class _FakeDB:
+            def __init__(self, job_ref):
+                self._job_ref = job_ref
+
+            def collection(self, _name):
+                return _FakeCollection(self._job_ref)
+
+        class _FakeBlob:
+            def __init__(self):
+                self.metadata = {}
+
+            def reload(self):
+                return None
+
+            def download_as_bytes(self):
+                return b"%PDF-1.4\n%EOF\n"
+
+        class _FakeBucket:
+            def __init__(self, blob):
+                self._blob = blob
+
+            def blob(self, _name):
+                return self._blob
+
+        class _FakeGCS:
+            def __init__(self, blob):
+                self._blob = blob
+
+            def bucket(self, _name):
+                return _FakeBucket(self._blob)
+
+        job_ref = _FakeJobRef()
+        partial_calls = []
+
+        with mock.patch.object(
+            pipeline_main,
+            "request",
+            types.SimpleNamespace(
+                get_json=lambda *args, **kwargs: {
+                    "bucket": "bucket",
+                    "name": "input/test.pdf",
+                    "generation": "1",
+                }
+            ),
+        ), mock.patch.object(
+            pipeline_main,
+            "db",
+            _FakeDB(job_ref),
+        ), mock.patch.object(
+            pipeline_main,
+            "gcs",
+            _FakeGCS(_FakeBlob()),
+        ), mock.patch.object(
+            pipeline_main,
+            "_write_output_partial",
+            side_effect=lambda **kwargs: partial_calls.append(dict(kwargs)),
+        ), mock.patch.object(
+            pipeline_main,
+            "_run_template_classification",
+            return_value=(None, None),
+        ), mock.patch.object(
+            pipeline_main,
+            "correct_pdf_for_yomitoku",
+            return_value=(b"%PDF-1.4\n%EOF\n", {"applied": False, "corrected_pdf_generated": False}, []),
+        ), mock.patch.object(
+            pipeline_main,
+            "run_yomitoku",
+            side_effect=SystemExit(1),
+        ):
+            with self.assertRaises(SystemExit):
+                pipeline_main.handler()
+
+        self.assertTrue(partial_calls)
+        self.assertEqual(partial_calls[-1]["status"], "failed")
+        self.assertEqual(partial_calls[-1]["stage"], "error")
+        self.assertEqual(partial_calls[-1]["payload"]["error_type"], "SystemExit")
+        self.assertTrue(job_ref.updates)
+        self.assertEqual(job_ref.updates[-1]["status"], "failed")
+        self.assertEqual(job_ref.updates[-1]["error_type"], "SystemExit")
+
     def test_upload_corrected_pdf_artifact_returns_uri_when_correction_applied(self):
         with mock.patch.object(
             pipeline_main,
@@ -242,6 +347,71 @@ class MainArtifactTests(unittest.TestCase):
         self.assertEqual(captured["qty"], "42")
         self.assertEqual(captured["menu"], "menu-text")
         ocr_text_mock.assert_called_once_with(sample_image, device=pipeline_main.YOMITOKU_DEVICE)
+        self.assertEqual(result["template_id"], "tpl-test")
+
+    def test_template_roi_extraction_skips_ocr_words_when_column_edges_are_defined(self):
+        sample_image = object()
+
+        with mock.patch.object(
+            pipeline_main,
+            "ocr_image_words",
+            side_effect=AssertionError("ocr_image_words should not run"),
+        ), mock.patch.object(
+            pipeline_main,
+            "crop_rois",
+            return_value={"qty_cells": [], "qty_schema": {"rows": 0, "cols": 3}},
+        ), mock.patch.object(
+            pipeline_main,
+            "postprocess_and_retry",
+            return_value={"qty": {}, "qty_row_order": [], "qty_col_order": []},
+        ):
+            result = pipeline_main._run_template_roi_extraction(
+                template_context={
+                    "template_id": "tpl-test",
+                    "template": {
+                        "auto_headers": [{"name": "regular_x", "match_groups": [["常食"]]}],
+                        "rois": {
+                            "qty": {
+                                "column_edges": [0.4, 0.5, 0.6, 0.7],
+                            }
+                        },
+                    },
+                    "warped_ocr_bgr": sample_image,
+                }
+            )
+
+        self.assertEqual(result["template_id"], "tpl-test")
+
+    def test_template_roi_extraction_uses_ocr_words_when_auto_headers_need_inference(self):
+        sample_image = object()
+
+        with mock.patch.object(
+            pipeline_main,
+            "ocr_image_words",
+            return_value=[{"text": "常食", "x": 0.45, "y": 0.2}],
+        ) as ocr_words_mock, mock.patch.object(
+            pipeline_main,
+            "crop_rois",
+            return_value={"qty_cells": [], "qty_schema": {"rows": 0, "cols": 1}},
+        ), mock.patch.object(
+            pipeline_main,
+            "postprocess_and_retry",
+            return_value={"qty": {}, "qty_row_order": [], "qty_col_order": []},
+        ):
+            result = pipeline_main._run_template_roi_extraction(
+                template_context={
+                    "template_id": "tpl-test",
+                    "template": {
+                        "auto_headers": [{"name": "regular_x", "match_groups": [["常食"]]}],
+                        "rois": {
+                            "qty": {},
+                        },
+                    },
+                    "warped_ocr_bgr": sample_image,
+                }
+            )
+
+        ocr_words_mock.assert_called_once_with(sample_image, device=pipeline_main.YOMITOKU_DEVICE)
         self.assertEqual(result["template_id"], "tpl-test")
 
 

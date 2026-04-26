@@ -1,5 +1,8 @@
 from datetime import datetime
 import json
+from pathlib import Path
+import re
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Form, Query
 from fastapi.responses import Response
@@ -10,6 +13,17 @@ from src.api.auth import require_role
 from src.services.menu_upload_archive_service import save_monthly_menu_upload
 
 router = APIRouter()
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    normalized = str(filename or "").strip() or "monthly-menu.xlsx"
+    path = Path(normalized)
+    suffix = path.suffix or ".xlsx"
+    ascii_stem = path.stem.encode("ascii", "ignore").decode("ascii").strip().replace('"', "")
+    ascii_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_stem).strip("._-")
+    ascii_fallback = f"{ascii_stem or 'monthly-menu'}{suffix}"
+    encoded = quote(normalized, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 @router.get("/scope-options", dependencies=[Depends(require_role("operator"))])
@@ -122,7 +136,7 @@ def download_menu_upload(month_id: str, upload_id: str):
     if not payload.get("download_available"):
         raise HTTPException(status_code=404, detail="upload file is not available")
     filename = str(payload.get("filename") or "monthly-menu.xlsx")
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    headers = {"Content-Disposition": _attachment_content_disposition(filename)}
     return Response(
         content=payload["bytes"],
         media_type=str(payload.get("media_type") or "application/octet-stream"),
@@ -142,6 +156,17 @@ def update_menu_item(month_id: str, item_id: str, body: dict):
     if result == "invalid_name":
         raise HTTPException(status_code=400, detail="name is required")
     return {"updated": True}
+
+
+@router.post("/{month_id}/entries/{entry_id}/exceptions", dependencies=[Depends(require_role("operator"))])
+def upsert_menu_entry_exceptions(month_id: str, entry_id: str, body: dict):
+    try:
+        payload = menu_service.upsert_entry_exceptions(month_id, entry_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not payload:
+        raise HTTPException(status_code=404, detail="not found")
+    return payload
 
 
 @router.post("/{month_id}/master-checks/{item_id}/resolve", dependencies=[Depends(require_role("operator"))])

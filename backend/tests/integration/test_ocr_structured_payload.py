@@ -40,6 +40,57 @@ def _template_staff_daycare() -> dict:
     }
 
 
+def _template_fureai() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "qty.change_1_x",
+            "remarks",
+        ],
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "aux", "header": "副区分"},
+            {"index": 3, "role": "menu_name", "header": "献立"},
+            {"index": 4, "role": "aux", "header": "合計"},
+            {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 9, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 10, "role": "quantity", "header": "揚げ物禁", "diet_type": "no_fried", "area_id": "X"},
+            {"index": 11, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+            {"index": 12, "role": "note", "header": "備考欄"},
+        ],
+    }
+
+
+def _template_fureai_compact() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "qty.change_1_x",
+            "remarks",
+        ]
+    }
+
+
 def _template_staff_forbidden_sesame() -> dict:
     return {
         "main_ocr_row_fields": [
@@ -49,11 +100,71 @@ def _template_staff_forbidden_sesame() -> dict:
             "qty.regular_x",
             "qty.staff_x",
             "qty.no_meat_x",
+            "qty.forbidden_other_x",
             "qty.no_fish_x",
             "qty.sesame_allergy_x",
-            "qty.change_1_x",
             "remarks",
         ]
+    }
+
+
+def _template_staff_forbidden_sesame_with_aux() -> dict:
+    return {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "aux", "header": "補助区分"},
+            {"index": 3, "role": "menu_name", "header": "献立"},
+            {"index": 4, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 5, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "肉卵魚禁", "diet_type": "forbidden_other", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 9, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+            {"index": 10, "role": "note", "header": "備考欄"},
+        ],
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.forbidden_other_x",
+            "qty.no_fish_x",
+            "qty.sesame_allergy_x",
+            "remarks",
+        ],
+    }
+
+
+def _template_staff_forbidden_sesame_with_aux() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.forbidden_other_x",
+            "qty.no_fish_x",
+            "qty.sesame_allergy_x",
+            "remarks",
+        ],
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "aux", "header": "副区分"},
+            {"index": 3, "role": "menu_name", "header": "献立"},
+            {"index": 4, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 5, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "肉卵魚禁", "diet_type": "forbidden_other", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 9, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+            {"index": 10, "role": "note", "header": "備考欄"},
+        ],
     }
 
 
@@ -88,6 +199,35 @@ def _template_mixed() -> dict:
             "qty.no_fish_x",
             "remarks",
         ]
+    }
+
+
+def _template_drifted_floor_split() -> dict:
+    return {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_2f",
+            "qty.regular_3f",
+            "qty.soft_2f",
+            "qty.soft_3f",
+            "qty.mixer_2f",
+            "qty.mixer_3f",
+            "remarks",
+        ],
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食2F", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "role": "quantity", "header": "常食3F", "diet_type": "regular", "area_id": "3F"},
+            {"index": 5, "role": "quantity", "header": "軟菜2F", "diet_type": "soft", "area_id": "2F"},
+            {"index": 6, "role": "quantity", "header": "軟菜3F", "diet_type": "soft", "area_id": "3F"},
+            {"index": 7, "role": "quantity", "header": "ミキサー2F", "diet_type": "mixer", "area_id": "2F"},
+            {"index": 8, "role": "quantity", "header": "ミキサー3F", "diet_type": "mixer", "area_id": "3F"},
+            {"index": 9, "role": "note", "header": "備考"},
+        ],
     }
 
 
@@ -243,6 +383,59 @@ def test_extract_sheet_rows_from_payload_keeps_structured_rows_primary_when_over
     ]
 
 
+def test_rows_from_structured_payload_preserves_fureai_total_aux_column_gap():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日 付", "区 分", "", "献立", "合計", "常会", "通所", "職員", "肉禁", "禁食\n魚禁", "埼玉県", "史更1", "備考欄"],
+                            ["3/22\n(日)", "材", "副作\n四", "厚揚げとさつま芋の煮物", "", "72", "", "", "", "", "", "", ""],
+                            ["", "", "", "カリフラワーサラダ", "", "72", "", "", "", "", "", "", ""],
+                            ["", "香", "±A", "鶏じゃが", "67", "66", "", "", "", "", "", "", "鶏魚1"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_fureai())
+
+    assert rows[0][:6] == ["3/22 (日)", "材", "厚揚げとさつま芋の煮物", "72", "", ""]
+    assert rows[1][:6] == ["", "", "カリフラワーサラダ", "72", "", ""]
+    assert rows[2][:6] == ["", "香", "鶏じゃが", "66", "", ""]
+    assert rows[2][-1] == "鶏魚1"
+
+
+def test_rows_from_structured_payload_ignores_total_and_helper_aux_columns_for_fureai():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日 付", "区 分", "", "献立", "合計", "#☆", "通所", "職員", "平森", "肉蒸", "魚禁", "揚物禁", "変更1", "備考欄"],
+                            ["3/22\n(日)", "材", "副作\n四", "厚揚げとさつま芋の煮物", "", "72", "", "", "", "", "", "", "", ""],
+                            ["", "香", "±A", "鶏じゃが", "67", "66", "", "", "", "", "", "", "", "鶏魚1"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_fureai())
+
+    assert rows[0][:7] == ["3/22 (日)", "材", "厚揚げとさつま芋の煮物", "72", "", "", ""]
+    assert rows[1][:7] == ["", "香", "鶏じゃが", "66", "", "", ""]
+
+
 def test_rows_from_structured_payload_maps_staff_daycare_and_forbidden_subheaders():
     payload = {
         "pages": [
@@ -267,6 +460,60 @@ def test_rows_from_structured_payload_maps_staff_daycare_and_forbidden_subheader
     assert rows == [
         ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "note"],
     ]
+
+
+def test_rows_from_structured_payload_maps_daycare_staff_and_no_fried_subheaders():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "献立", "常食", "通所", "職員", "禁食", "", "", "変更1", "備考"],
+                            ["", "", "", "", "", "", "肉禁", "魚禁", "揚げ物禁", "", ""],
+                            ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "6", "note"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_fureai_compact())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "6", "note"],
+    ]
+
+
+def test_rows_from_structured_payload_preserves_staff_forbidden_other_with_aux_column():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区 分", "", "献立", "常\n食", "職員", "禁食", "", "", "", "備考欄"],
+                            ["", "", "", "", "", "", "肉禁", "肉・卵・魚禁", "魚禁", "ゴマアレルギー", ""],
+                            ["3/22\n(日)", "", "CH", "厚揚げとさつま芋の煮物", "105", "2", "", "", "", "", ""],
+                            ["", "", "W2", "カリフラワーサラダ", "105", "2", "", "", "", "", ""],
+                            ["", "", "主A", "鶏じゃが", "102", "2", "2", "", "", "", ""],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_staff_forbidden_sesame_with_aux())
+
+    assert rows[0] == ["3/22 (日)", "", "厚揚げとさつま芋の煮物", "105", "2", "", "", "", "", ""]
+    assert rows[1] == ["", "", "カリフラワーサラダ", "105", "2", "", "", "", "", ""]
+    assert rows[2] == ["", "", "鶏じゃが", "102", "2", "2", "", "", "", ""]
 
 
 def test_rows_from_structured_payload_maps_mixed_regular_bag_and_forbidden_subheaders():
@@ -295,6 +542,36 @@ def test_rows_from_structured_payload_maps_mixed_regular_bag_and_forbidden_subhe
     ]
 
 
+def test_rows_from_structured_payload_prefers_observed_projection_when_explicit_columns_shift_menu_column():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["", "日付", "区 分", "", "献立", "##", "44日", "禁食【軟菜】", "", "備考欄"],
+                            ["", "", "", "", "", "", "", "肉禁", "魚禁", ""],
+                            ["", "4/5\n(日)", "ま", "...", "豚肉の卵とじ", "0", "0", "", "", ""],
+                            ["", "", "", "***", "いんげんのカニ和え", "0", "0", "", "", ""],
+                            ["", "", "口", "VT", "サワラの西京焼き 添)小松菜", "58", "2", "", "", ""],
+                            ["", "", "", "OK", "じゃが芋の煮物", "58", "2", "", "", ""],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_drifted_floor_split())
+
+    assert rows is not None
+    assert rows[0][:5] == ["4/5 (日)", "ま", "豚肉の卵とじ", "0", "0"]
+    assert rows[1][:5] == ["", "", "いんげんのカニ和え", "0", "0"]
+    assert rows[2][:5] == ["", "口", "サワラの西京焼き 添)小松菜", "58", "2"]
+
+
 def test_rows_from_structured_payload_prefers_quantity_column_order_when_header_family_is_stale():
     payload = {
         "pages": [
@@ -317,6 +594,60 @@ def test_rows_from_structured_payload_prefers_quantity_column_order_when_header_
 
     assert rows == [
         ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+    ]
+
+
+def test_rows_from_structured_payload_maps_staff_other_forbidden_and_sesame_subheaders():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "献立", "常食", "職員", "禁食", "", "", "", "備考"],
+                            ["", "", "", "", "", "肉禁", "肉卵魚禁", "魚禁", "ゴマアレルギー", ""],
+                            ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_staff_forbidden_sesame())
+
+    assert rows == [
+        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "5", "note"],
+    ]
+
+
+def test_rows_from_structured_payload_maps_staff_forbidden_sesame_with_aux_column_gap():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日付", "区分", "", "献立", "常食", "職員", "禁食", "", "", "", "備考欄"],
+                            ["", "", "", "", "", "", "肉禁", "肉卵魚禁", "魚禁", "ゴマアレルギー", ""],
+                            ["3/22(日)", "", "CH", "厚揚げとさつま芋の煮物", "105", "2", "", "", "", "", ""],
+                            ["", "", "W2", "カリフラワーサラダ", "105", "2", "", "", "", "", ""],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    rows = rows_from_structured_payload(payload, _template_staff_forbidden_sesame_with_aux())
+
+    assert rows == [
+        ["3/22(日)", "", "厚揚げとさつま芋の煮物", "105", "2", "", "", "", "", ""],
+        ["", "", "カリフラワーサラダ", "105", "2", "", "", "", "", ""],
     ]
 
 

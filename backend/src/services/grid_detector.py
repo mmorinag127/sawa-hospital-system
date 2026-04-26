@@ -305,6 +305,21 @@ def _auto_detect_grid(image, template: dict) -> Optional[Tuple[list[float], list
     xs, ys = _estimate_grid_lines(v_lines, h_lines, (x0, y0, w, h), col_band_tuple, row_band_tuple)
     if len(xs) < 3 or len(ys) < 3:
         xs, ys = _estimate_grid_lines(v_lines, h_lines, (x0, y0, w, h), None, None)
+    expected_rows = int(template.get("grid_expected_rows", 0) or 0)
+    expected_columns = int(template.get("grid_expected_columns", 0) or 0)
+    if (expected_rows and len(ys) - 1 < expected_rows) or (expected_columns and len(xs) - 1 < expected_columns):
+        projection_xs, projection_ys = _projection_grid_lines(binary)
+        if expected_columns and len(projection_xs) - 1 >= expected_columns:
+            xs = projection_xs
+        if expected_rows and len(projection_ys) - 1 >= expected_rows:
+            ys = projection_ys
+        if len(xs) >= 2 and len(ys) >= 2:
+            x0 = min(xs)
+            x1 = max(xs)
+            y0 = min(ys)
+            y1 = max(ys)
+            w = max(1, x1 - x0)
+            h = max(1, y1 - y0)
     x1 = x0 + w
     y1 = y0 + h
     margin_x = max(2, int(w * 0.01))
@@ -350,6 +365,34 @@ def _auto_detect_grid(image, template: dict) -> Optional[Tuple[list[float], list
     col_edges = [x / width for x in xs]
     row_edges = [y / height for y in ys]
     return table_box, col_edges, row_edges
+
+
+def _projection_grid_lines(binary) -> tuple[list[int], list[int]]:
+    import cv2  # type: ignore
+    import numpy as np
+
+    height, width = binary.shape[:2]
+    inverted = 255 - binary
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(20, width // 80), 1),
+    )
+    vertical_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(20, height // 120)),
+    )
+    horizontal = cv2.morphologyEx(inverted, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
+    vertical = cv2.morphologyEx(inverted, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+    h_projection = horizontal.sum(axis=1) / 255.0
+    v_projection = vertical.sum(axis=0) / 255.0
+    y_threshold = max(35.0, width * 0.04)
+    x_threshold = max(35.0, height * 0.04)
+    ys = np.where(h_projection > y_threshold)[0]
+    xs = np.where(v_projection > x_threshold)[0]
+    return (
+        _cluster_positions(xs.tolist(), max_gap=max(3, width // 700)),
+        _cluster_positions(ys.tolist(), max_gap=max(3, height // 700)),
+    )
 
 
 def _auto_table_box_from_image(image, template: dict) -> Optional[list[float]]:

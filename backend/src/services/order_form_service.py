@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+import json
 from pathlib import Path
 import os
 import re
@@ -26,36 +27,6 @@ _ORDER_FORM_DEADLINE_SEARCH_MAX_ROW = 6
 _ORDER_FORM_DEADLINE_SEARCH_MAX_COL = 16
 _BOTTOM_MARKER_ROW = 69
 _WEEKDAY_LABELS = ["（月）", "（火）", "（水）", "（木）", "（金）", "（土）", "（日）"]
-_FAX_FAMILY_SOURCE_MAP = {
-    "fax_layout_regular_forbidden_v1": {
-        "source_workbook": "共通　2603.xlsx",
-        "family_label": "共通・禁食2種",
-    },
-    "fax_layout_floor_2f3f_v1": {
-        "source_workbook": "春日苑松茂　2603.xlsx",
-        "family_label": "2F/3F分割",
-    },
-    "fax_layout_regular_soft_mixer_forbidden_v1": {
-        "source_workbook": "藍テラス　2603.xlsx",
-        "family_label": "軟菜・ミキサー・禁食",
-    },
-    "fax_layout_regular_staff_daycare_v1": {
-        "source_workbook": "湘南さくら病院 2603.xlsx",
-        "family_label": "職員・禁食拡張",
-    },
-    "fax_layout_regular_diabetes_v1": {
-        "source_workbook": "いこいの森プラス　2603.xlsx",
-        "family_label": "糖尿併記",
-    },
-    "fax_layout_regular_staff_daycare_other_forbidden_v1": {
-        "source_workbook": "ふれあいの丘 2603.xlsx",
-        "family_label": "老健・職員通所・禁食",
-    },
-    "fax_layout_soft_packaging_forbidden_v1": {
-        "source_workbook": "池袋病院　2603.xlsx",
-        "family_label": "軟菜・袋分け・禁食",
-    },
-}
 _MARKER_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
 _META_FILL = PatternFill(start_color="E9EEF5", end_color="E9EEF5", fill_type="solid")
 _THIN_BORDER = Border(
@@ -64,23 +35,57 @@ _THIN_BORDER = Border(
     top=Side(style="thin", color="000000"),
     bottom=Side(style="thin", color="000000"),
 )
+_ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR = Path(__file__).resolve().parents[1] / "data" / "order_form_source_workbooks"
+_ORDER_FORM_SOURCE_TEMPLATE_MANIFEST = _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR / "manifest.json"
 
 
 def _resolve_fax_source_template_dir() -> Path:
     configured = os.getenv("FAX_SOURCE_TEMPLATE_DIR", "").strip()
     if configured:
         return Path(configured)
-
-    current = Path(__file__).resolve()
-    for parent in current.parents:
-        candidate = parent / "input_example" / "発注書"
-        if candidate.exists():
-            return candidate
-
-    return Path("/app/input_example/発注書")
+    return _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR
 
 
-_FAX_SOURCE_TEMPLATE_DIR = _resolve_fax_source_template_dir()
+def _load_fax_source_manifest() -> dict[str, dict]:
+    if not _ORDER_FORM_SOURCE_TEMPLATE_MANIFEST.exists():
+        raise RuntimeError(
+            f"order-form source manifest not found: {_ORDER_FORM_SOURCE_TEMPLATE_MANIFEST}"
+        )
+    payload = json.loads(_ORDER_FORM_SOURCE_TEMPLATE_MANIFEST.read_text(encoding="utf-8"))
+    families = payload.get("families")
+    if not isinstance(families, dict) or not families:
+        raise RuntimeError(
+            f"order-form source manifest has no families: {_ORDER_FORM_SOURCE_TEMPLATE_MANIFEST}"
+        )
+    normalized: dict[str, dict] = {}
+    for template_id, raw_spec in families.items():
+        if not isinstance(raw_spec, dict):
+            raise RuntimeError(f"invalid order-form source spec: {template_id}")
+        family_label = str(raw_spec.get("family_label") or "").strip()
+        if not family_label:
+            raise RuntimeError(f"missing family_label for order-form source spec: {template_id}")
+        month_sources_raw = raw_spec.get("month_sources") or {}
+        month_sources: dict[str, str] = {}
+        if isinstance(month_sources_raw, dict):
+            for month_id, filename in month_sources_raw.items():
+                normalized_month = _normalize_month_id(month_id)
+                filename_text = str(filename or "").strip()
+                if not filename_text:
+                    raise RuntimeError(
+                        f"missing filename for order-form source spec: {template_id} month={month_id}"
+                    )
+                month_sources[normalized_month] = filename_text
+        source_workbook = str(raw_spec.get("source_workbook") or "").strip()
+        if not month_sources and not source_workbook:
+            raise RuntimeError(
+                f"order-form source spec must define month_sources or source_workbook: {template_id}"
+            )
+        normalized[str(template_id).strip()] = {
+            "family_label": family_label,
+            "month_sources": month_sources,
+            "source_workbook": source_workbook,
+        }
+    return normalized
 
 
 def list_order_form_patterns() -> list[dict]:
@@ -92,6 +97,11 @@ def _normalize_month_id(month_id: str) -> str:
     if not _MONTH_ID_RE.match(value):
         raise ValueError("month_id must be YYYY-MM")
     return value
+
+
+_FAX_SOURCE_TEMPLATE_DIR = _resolve_fax_source_template_dir()
+_FAX_FAMILY_SOURCE_MAP = _load_fax_source_manifest()
+_SOURCE_WORKBOOK_SHEET_CACHE: dict[str, tuple[str, ...]] = {}
 
 
 def _resolve_pattern(facility: dict, pattern_id: str | None) -> dict:
@@ -108,6 +118,59 @@ def _resolve_pattern(facility: dict, pattern_id: str | None) -> dict:
     if patterns:
         return dict(patterns[0])
     return {"pattern_id": "PATTERN_A", "label": "標準A", "marker_cells": []}
+
+
+def _resolve_source_workbook_path(source_workbook_name: str) -> Path:
+    source_path = _FAX_SOURCE_TEMPLATE_DIR / source_workbook_name
+    if not source_path.exists():
+        raise ValueError(
+            f"source workbook not found: {source_workbook_name} (dir={_FAX_SOURCE_TEMPLATE_DIR})"
+        )
+    return source_path
+
+
+def _resolve_source_workbook_name_for_month(fax_template_id: str, month_id: str) -> str:
+    spec = _resolve_fax_family_spec(fax_template_id)
+    month_sources = spec.get("month_sources") or {}
+    normalized_month = _normalize_month_id(month_id)
+    if normalized_month in month_sources:
+        return str(month_sources[normalized_month])
+    source_workbook = str(spec.get("source_workbook") or "").strip()
+    if source_workbook:
+        return source_workbook
+    raise ValueError(
+        f"source workbook not configured for fax_template_id={fax_template_id} month_id={normalized_month}"
+    )
+
+
+def _source_workbook_sheetnames(source_workbook_name: str) -> tuple[str, ...]:
+    source_path = _resolve_source_workbook_path(source_workbook_name)
+    cache_key = str(source_path)
+    cached = _SOURCE_WORKBOOK_SHEET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    workbook = load_workbook(source_path, read_only=True)
+    try:
+        sheetnames = tuple(workbook.sheetnames)
+    finally:
+        workbook.close()
+    _SOURCE_WORKBOOK_SHEET_CACHE[cache_key] = sheetnames
+    return sheetnames
+
+
+def _resolve_source_workbook_name_for_week_sheet(fax_template_id: str, week_sheet_name: str) -> str:
+    spec = _resolve_fax_family_spec(fax_template_id)
+    month_sources = spec.get("month_sources") or {}
+    for month_id in sorted(month_sources):
+        source_workbook_name = str(month_sources[month_id])
+        if week_sheet_name in _source_workbook_sheetnames(source_workbook_name):
+            return source_workbook_name
+    source_workbook = str(spec.get("source_workbook") or "").strip()
+    if source_workbook:
+        return source_workbook
+    raise ValueError(
+        f"week sheet not configured for fax_template_id={fax_template_id}: {week_sheet_name}"
+    )
 
 
 def _resolve_facility(facility_id: str) -> dict:
@@ -275,6 +338,10 @@ def _clear_week_sheet_body(worksheet) -> None:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
         if max_row < _ORDER_FORM_BODY_START_ROW or min_row > _ORDER_FORM_BODY_END_ROW:
             continue
+        if min_col > 4:
+            # Quantity columns may intentionally span the breakfast/lunch/dinner
+            # block. Keep those merges and only clear their anchor values below.
+            continue
         worksheet.unmerge_cells(str(merged_range))
     for row in worksheet.iter_rows(
         min_row=_ORDER_FORM_BODY_START_ROW,
@@ -410,10 +477,8 @@ def _build_monthly_fax_order_form_workbook(
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
     spec = _resolve_fax_family_spec(fax_template_id)
-    source_workbook_name = str(spec["source_workbook"])
-    source_path = _FAX_SOURCE_TEMPLATE_DIR / source_workbook_name
-    if not source_path.exists():
-        raise ValueError(f"source workbook not found: {source_workbook_name}")
+    source_workbook_name = _resolve_source_workbook_name_for_month(fax_template_id, month_id)
+    source_path = _resolve_source_workbook_path(source_workbook_name)
 
     workbook = load_workbook(source_path)
     template_sheet_name = _DEFAULT_WEEK_SHEET if _DEFAULT_WEEK_SHEET in workbook.sheetnames else workbook.sheetnames[0]
@@ -488,10 +553,12 @@ def build_order_form_excel(
 def list_fax_order_form_template_specs() -> list[dict]:
     specs: list[dict] = []
     for template_id, payload in _FAX_FAMILY_SOURCE_MAP.items():
+        month_sources = dict(payload.get("month_sources") or {})
         specs.append(
             {
                 "fax_template_id": template_id,
-                "source_workbook": payload["source_workbook"],
+                "source_workbook": payload.get("source_workbook") or next(iter(month_sources.values()), ""),
+                "month_sources": month_sources,
                 "family_label": payload["family_label"],
             }
         )
@@ -504,14 +571,13 @@ def build_fax_base_template_excel(
     week_sheet_name: str = _DEFAULT_WEEK_SHEET,
     output_dir: Path | str | None = None,
 ) -> Path:
-    spec = _resolve_fax_family_spec(fax_template_id)
     return _render_fax_order_form_workbook(
-        source_workbook_name=spec["source_workbook"],
+        source_workbook_name=_resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name),
         week_sheet_name=week_sheet_name,
         facility_name="施設名記入欄",
         facility_id="BASE",
         fax_template_id=fax_template_id,
-        family_label=str(spec["family_label"]),
+        family_label=str(_resolve_fax_family_spec(fax_template_id)["family_label"]),
         base_label="base",
         output_dir=output_dir,
     )
@@ -532,13 +598,59 @@ def build_fax_order_form_excel(
     spec = _resolve_fax_family_spec(fax_template_id)
     facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
     return _render_fax_order_form_workbook(
-        source_workbook_name=spec["source_workbook"],
+        source_workbook_name=_resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name),
         week_sheet_name=week_sheet_name,
         facility_name=facility_name,
         facility_id=facility_id,
         fax_template_id=fax_template_id,
         family_label=str(spec["family_label"]),
         base_label="facility",
+        output_dir=output_dir,
+    )
+
+
+def _clear_order_form_body_values(
+    worksheet,
+    *,
+    start_row: int = _ORDER_FORM_BODY_START_ROW,
+    end_row: int = _ORDER_FORM_BODY_END_ROW,
+    min_col: int = 1,
+    max_col: int | None = None,
+) -> None:
+    target_max_col = max_col if max_col is not None else worksheet.max_column
+    for row in worksheet.iter_rows(
+        min_row=start_row,
+        max_row=end_row,
+        min_col=min_col,
+        max_col=target_max_col,
+    ):
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            cell.value = None
+
+
+def build_fax_structure_only_excel(
+    *,
+    facility_id: str,
+    week_sheet_name: str = _DEFAULT_WEEK_SHEET,
+    output_dir: Path | str | None = None,
+) -> Path:
+    facility = config_service.get_facility_config(facility_id)
+    if not facility:
+        raise ValueError("facility not found")
+    fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
+    if not fax_template_id:
+        raise ValueError("facility fax_template_id not found")
+    spec = _resolve_fax_family_spec(fax_template_id)
+    facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
+    return _render_fax_structure_only_workbook(
+        source_workbook_name=_resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name),
+        week_sheet_name=week_sheet_name,
+        facility_name=facility_name,
+        facility_id=facility_id,
+        fax_template_id=fax_template_id,
+        family_label=str(spec["family_label"]),
         output_dir=output_dir,
     )
 
@@ -562,9 +674,7 @@ def _render_fax_order_form_workbook(
     base_label: str,
     output_dir: Path | str | None,
 ) -> Path:
-    source_path = _FAX_SOURCE_TEMPLATE_DIR / source_workbook_name
-    if not source_path.exists():
-        raise ValueError(f"source workbook not found: {source_workbook_name}")
+    source_path = _resolve_source_workbook_path(source_workbook_name)
     workbook = load_workbook(source_path)
     if week_sheet_name not in workbook.sheetnames:
         raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
@@ -599,6 +709,49 @@ def _render_fax_order_form_workbook(
     safe_facility_id = _sanitize_filename_fragment(facility_id)
     safe_week = _sanitize_filename_fragment(week_sheet_name)
     output_name = f"fax_order_form_{base_label}_{safe_facility_id}_{safe_week}_{safe_template_id}_{stamp}.xlsx"
+    output_path = _resolve_fax_output_dir(output_dir) / output_name
+    workbook.save(output_path)
+    return output_path
+
+
+def _render_fax_structure_only_workbook(
+    *,
+    source_workbook_name: str,
+    week_sheet_name: str,
+    facility_name: str,
+    facility_id: str,
+    fax_template_id: str,
+    family_label: str,
+    output_dir: Path | str | None,
+) -> Path:
+    source_path = _resolve_source_workbook_path(source_workbook_name)
+    workbook = load_workbook(source_path)
+    if week_sheet_name not in workbook.sheetnames:
+        raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
+    _keep_only_target_sheet(workbook, week_sheet_name)
+    worksheet = workbook[week_sheet_name]
+
+    _clear_order_form_body_values(worksheet)
+    _write_facility_name(worksheet, facility_name)
+    _extend_print_area(worksheet, bottom_row=_BOTTOM_MARKER_ROW)
+    _append_hidden_metadata_sheet(
+        workbook,
+        source_workbook_name=source_workbook_name,
+        facility_id=facility_id,
+        facility_name=facility_name,
+        fax_template_id=fax_template_id,
+        family_label=family_label,
+        week_sheet_name=week_sheet_name,
+        base_label="structure_only",
+    )
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_template_id = _sanitize_filename_fragment(fax_template_id)
+    safe_facility_id = _sanitize_filename_fragment(facility_id)
+    safe_week = _sanitize_filename_fragment(week_sheet_name)
+    output_name = (
+        f"fax_order_form_structure_only_{safe_facility_id}_{safe_week}_{safe_template_id}_{stamp}.xlsx"
+    )
     output_path = _resolve_fax_output_dir(output_dir) / output_name
     workbook.save(output_path)
     return output_path

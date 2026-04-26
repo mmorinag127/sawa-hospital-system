@@ -34,3 +34,26 @@ def test_facility_config_update_contract():
     assert fetched.status_code == 200
     payload = fetched.json()
     assert payload["config"]["label_profile_override"]["storage_mode"] == "frozen"
+
+
+def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
+    client = TestClient(app)
+    fetched = client.get("/facilities/FAC00005")
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    resolved = payload.get("resolved_config") or {}
+    override = resolved.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    assert [column.get("header") for column in columns[:10]] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "軟菜",
+        "袋分け",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+        "備考欄",
+    ]

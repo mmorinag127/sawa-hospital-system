@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
 import {
@@ -14,8 +14,8 @@ import {
 } from "../../features/orders/orderDetailOcrUtils";
 import {
   buildBagSummaryRows,
-  calendarDateFromWeekValue,
   deriveWeekValueFromCalendarDate,
+  deriveWeekValueFromCalendarRange,
   extractWeekMonthId,
   formatBagCalculationResult,
   formatBagSplitBreakdown,
@@ -34,11 +34,15 @@ type OrderDetail = {
   id: string;
   status: string;
   document: string;
+  current_sheet_revision_id?: string | null;
   week?: string | null;
   week_value?: string | null;
   persisted_week_value?: string | null;
   week_label?: string | null;
   message_id?: string | null;
+  archived_at?: string | null;
+  archived_by?: string | null;
+  is_archived?: boolean | null;
   lines: {
     id?: string;
     line_id?: string;
@@ -63,6 +67,10 @@ type OrderDetail = {
     failed_cells?: number;
     provider?: string | null;
     requested_provider?: string | null;
+    request_mode?: string | null;
+    processing_stage?: string | null;
+    result_state?: string | null;
+    error?: string | null;
     row_count?: number | null;
     line_count?: number | null;
     llm_assist?: boolean | null;
@@ -93,6 +101,7 @@ type OrderDetail = {
   ocr_last_reparse_error?: string | null;
   ocr_processing_stage?: string | null;
   ocr_result_state?: string | null;
+  ocr_reparse_health?: string | null;
   ocr_confirmed_lines_retained?: boolean | null;
   workflow_state?: WorkflowStatePayload | null;
   candidate_resolution?: CandidateResolutionPayload | null;
@@ -111,12 +120,29 @@ type WorkflowStatePayload = {
   candidate_resolution?: CandidateResolutionPayload | null;
   critical_decisions?: CriticalDecisionPayload[] | null;
   apply_gate?: ApplyGatePayload | null;
+  current_sheet_revision_id?: string | null;
+  candidate_sheet_state?: CandidateSheetStatePayload | null;
+  candidate_prompt_visible?: boolean | null;
   candidate_evidence_run_id?: string | null;
+  acknowledged_candidate_evidence_run_id?: string | null;
+  active_evidence_run_id?: string | null;
   reparse_state?: ReparseStatePayload | null;
+};
+
+type CandidateSheetStatePayload = {
+  current_sheet_revision_id?: string | null;
+  candidate_evidence_run_id?: string | null;
+  candidate_preview_available?: boolean | null;
+  candidate_has_meaningful_diff?: boolean | null;
+  candidate_preview_error?: string | null;
 };
 
 type ReparseStatePayload = {
   status?: string | null;
+  request_mode?: string | null;
+  processing_stage?: string | null;
+  result_state?: string | null;
+  error?: string | null;
   progress_updated_at?: string | null;
   stale_at?: string | null;
   stale_threshold_seconds?: number | null;
@@ -128,6 +154,16 @@ type ApplyGatePayload = {
   can_confirm?: boolean | null;
   blockers?: string[] | null;
   warnings?: string[] | null;
+};
+
+type ResolutionGateStatePayload = {
+  decision_type?: string | null;
+  resolved_value?: string | null;
+  blocked_reasons?: string[] | null;
+  requires_user_choice?: boolean | null;
+  blocked?: boolean | null;
+  status?: string | null;
+  suppressed?: boolean | null;
 };
 
 type CandidateOptionPayload = {
@@ -146,6 +182,7 @@ type CandidateResolutionEntryPayload = {
   blocked_reasons?: string[] | null;
   requires_user_choice?: boolean | null;
   candidates?: CandidateOptionPayload[] | null;
+  gate_state?: ResolutionGateStatePayload | null;
 };
 
 type CandidateResolutionPayload = {
@@ -154,6 +191,18 @@ type CandidateResolutionPayload = {
   confidence_band?: string | null;
   critical_choices?: Array<Record<string, unknown>> | null;
   resolutions?: Record<string, CandidateResolutionEntryPayload> | null;
+  gate_summary?: {
+    details?: ResolutionGateStatePayload[] | null;
+    choice_required_types?: string[] | null;
+    blocked_types?: string[] | null;
+    unresolved_types?: string[] | null;
+  } | null;
+};
+
+type SheetProjectionPayload = {
+  status?: string | null;
+  reason_code?: string | null;
+  reason_message?: string | null;
 };
 
 type CriticalDecisionPayload = {
@@ -186,6 +235,12 @@ type OcrOutput = {
   }[];
   warnings?: string[];
   table_raw?: string;
+  tables?: {
+    rows?: string[][];
+    row_count?: number | null;
+    col_count?: number | null;
+  }[];
+  pages?: OcrPage[];
   facility_candidates?: FacilityCandidate[];
   ocr_source?: string;
   _reparse_debug?: ReparseDebugPayload | null;
@@ -229,6 +284,11 @@ type OcrPage = {
   ocr_overlay_url?: string | null;
   layout_overlay_url?: string | null;
   figure_urls?: string[];
+  tables?: {
+    rows?: string[][];
+    row_count?: number | null;
+    col_count?: number | null;
+  }[];
   synthetic?: boolean | null;
   synthetic_source?: string | null;
   pdf_variant_used?: string | null;
@@ -247,6 +307,10 @@ type OcrSheetPayload = {
   header?: string[];
   rows?: string[][];
   row_ids?: string[];
+  cell_confidence_rows?: string[][] | null;
+  cell_provenance_rows?: string[][] | null;
+  ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
+  ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
   source?: string;
   quantity_column_count?: number;
   warnings?: string[];
@@ -261,6 +325,7 @@ type OcrSheetPayload = {
   processing_stage?: string | null;
   result_state?: string | null;
   confirmed_lines_retained?: boolean | null;
+  sheet_projection?: SheetProjectionPayload | null;
 };
 
 type DraftSheetJsonPayload = {
@@ -269,6 +334,10 @@ type DraftSheetJsonPayload = {
   rows?: string[][] | null;
   row_ids?: string[] | null;
   rowIds?: string[] | null;
+  cell_confidence_rows?: string[][] | null;
+  cell_provenance_rows?: string[][] | null;
+  ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
+  ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
   source?: string | null;
   warnings?: string[] | null;
 };
@@ -291,6 +360,10 @@ type DraftSheetPayload = {
   header?: string[] | null;
   rows?: string[][] | null;
   row_ids?: string[] | null;
+  cell_confidence_rows?: string[][] | null;
+  cell_provenance_rows?: string[][] | null;
+  ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
+  ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
   source?: string | null;
   warnings?: string[] | null;
   review_state?: string | null;
@@ -300,6 +373,7 @@ type DraftSheetPayload = {
   critical_decisions?: CriticalDecisionPayload[] | null;
   evidence_capabilities?: Record<string, boolean> | null;
   evidence_degraded_reasons?: string[] | null;
+  sheet_projection?: SheetProjectionPayload | null;
 };
 
 type NormalizedEditorSheetPayload = {
@@ -307,8 +381,50 @@ type NormalizedEditorSheetPayload = {
   header: string[];
   rows: string[][];
   rowIds: string[];
+  cellConfidenceRows: string[][];
+  cellProvenanceRows: string[][];
+  ocrNumericCellItems: OcrNumericCellItem[];
+  ocrNumericCellSummary: OcrNumericCellSummary;
   source: string;
   warnings: string[];
+};
+
+type OcrCellConfidenceTier = "high" | "medium" | "low";
+type OcrConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
+type QuantityAssignmentStrategy = "legacy" | "hakodate";
+type OcrNumericCellClassification = "accepted" | "deterministic_candidate" | "weak_candidate" | "unresolved";
+type OcrNumericCellItem = {
+  classification?: OcrNumericCellClassification | string | null;
+  value?: string | null;
+  confidence_tier?: OcrCellConfidenceTier | string | null;
+  placement_basis?: string | null;
+  read_basis?: string | null;
+  source_row_index?: number | null;
+  source_col_index?: number | null;
+  target_row_index?: number | null;
+  target_col_index?: number | null;
+  date_key?: string | null;
+  daypart_key?: string | null;
+  menu_key?: string | null;
+  reason?: string | null;
+};
+type OcrNumericCellSummary = {
+  raw_ocr_numeric_count?: number | null;
+  accepted_count?: number | null;
+  deterministic_candidate_count?: number | null;
+  weak_candidate_count?: number | null;
+  unresolved_count?: number | null;
+};
+type OcrSheetTouchedCell = {
+  rowIndex: number;
+  cellIndex: number;
+};
+
+type OcrVisibleOverlayItem = OcrNumericCellItem & {
+  target_row_index: number;
+  target_col_index: number;
+  value: string;
+  classification: OcrNumericCellClassification;
 };
 
 type OcrEditRevision = {
@@ -388,8 +504,10 @@ type GridParams = {
 
 const OCR_SHEET_ROW_INDEX_WIDTH = 28;
 
+type ExpandedCellCopyMode = "disabled" | "enabled" | "persisted";
 type Step2WizardChoice = "" | "yes" | "no";
 type Step2RepairStage = "" | "foundation" | "candidate" | "llm" | "merged";
+type SavedSheetContextChangeMode = "keep" | "clear";
 type LlmPromptPreset =
   | "numeric_verification"
   | "column_missing"
@@ -418,6 +536,130 @@ type AppliedPortionOverride = {
 
 type DetailLine = OrderDetail["lines"][number];
 
+const EXPANDED_CELL_COPY_FACILITY_KEY = "expanded_cell_same_daypart_copy_enabled";
+
+const canonicalizeExpandedCellDaypart = (value: string) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  if (normalized.includes("朝")) return "朝";
+  if (normalized.includes("昼")) return "昼";
+  if (normalized.includes("夕")) return "夕";
+  return normalized;
+};
+
+const parseExpandedCellQuantity = (value: string) => {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10))
+    .replace(/[．。]/g, ".")
+    .replace(/[，、]/g, ",")
+    .replace(/[－ー―−]/g, "-")
+    .replace(/,/g, "");
+  if (!normalized || !/^-?\d+(?:\.\d+)?$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const resolveExpandedCellSheetIndexes = (fields: string[], header: string[]) => {
+  const normalizedFields = fields.map((field) => String(field || "").trim());
+  const normalizedHeaders = header.map((cell) => normalizeHeaderToken(String(cell || "")));
+  const dateIndex = normalizedFields.findIndex((field) => field === "date_mmdd" || field === "date");
+  const daypartIndex = normalizedFields.findIndex((field) => field === "daypart");
+  const quantityIndexes = normalizedFields
+    .map((field, idx) => (field.startsWith("qty.") ? idx : -1))
+    .filter((idx) => idx >= 0);
+  if (dateIndex >= 0 && daypartIndex >= 0 && quantityIndexes.length > 0) {
+    return { dateIndex, daypartIndex, quantityIndexes };
+  }
+  const fallbackDateIndex = normalizedHeaders.findIndex((cell) => cell === "日付" || cell === "date");
+  const fallbackDaypartIndex = normalizedHeaders.findIndex(
+    (cell) => cell === "区分" || cell === "daypart" || cell === "meal" || cell === "time",
+  );
+  const fallbackQuantityIndexes = normalizedHeaders
+    .map((cell, idx) => {
+      if (!cell) return -1;
+      if (["日付", "date", "区分", "daypart", "meal", "time", "メニュー", "menu", "menu_name", "備考", "remarks", "note"].includes(cell)) {
+        return -1;
+      }
+      return idx;
+    })
+    .filter((idx) => idx >= 0);
+  return {
+    dateIndex: fallbackDateIndex,
+    daypartIndex: fallbackDaypartIndex,
+    quantityIndexes: fallbackQuantityIndexes,
+  };
+};
+
+const applyExpandedCellSameDaypartCopyToRows = ({
+  fields,
+  header,
+  rows,
+}: {
+  fields: string[];
+  header: string[];
+  rows: string[][];
+}) => {
+  if (!rows.length) return rows;
+  const { dateIndex, daypartIndex, quantityIndexes } = resolveExpandedCellSheetIndexes(fields, header);
+  if (dateIndex < 0 || daypartIndex < 0 || quantityIndexes.length === 0) {
+    return rows;
+  }
+  const nextRows = rows.map((row) => [...row]);
+  let currentStart = 0;
+  let currentKey = "";
+  let filled = 0;
+  const flushRange = (start: number, endExclusive: number) => {
+    const clusterLength = endExclusive - start;
+    if (clusterLength < 2 || clusterLength > 3) {
+      return;
+    }
+    quantityIndexes.forEach((columnIndex) => {
+      const observed: Array<{ text: string; value: number }> = [];
+      for (let rowIndex = start; rowIndex < endExclusive; rowIndex += 1) {
+        const text = String(nextRows[rowIndex]?.[columnIndex] || "").trim();
+        const value = parseExpandedCellQuantity(text);
+        if (value == null) continue;
+        observed.push({ text, value });
+      }
+      if (observed.length !== 1) {
+        return;
+      }
+      const sourceText = observed[0].text;
+      for (let rowIndex = start; rowIndex < endExclusive; rowIndex += 1) {
+        const currentText = String(nextRows[rowIndex]?.[columnIndex] || "").trim();
+        if (parseExpandedCellQuantity(currentText) != null) {
+          continue;
+        }
+        while (nextRows[rowIndex].length <= columnIndex) {
+          nextRows[rowIndex].push("");
+        }
+        nextRows[rowIndex][columnIndex] = sourceText;
+        filled += 1;
+      }
+    });
+  };
+
+  rows.forEach((row, rowIndex) => {
+    const dateKey = String(row?.[dateIndex] || "").trim();
+    const daypartKey = canonicalizeExpandedCellDaypart(String(row?.[daypartIndex] || ""));
+    const clusterKey = `${dateKey}__${daypartKey}`;
+    if (rowIndex === 0) {
+      currentKey = clusterKey;
+      return;
+    }
+    if (clusterKey !== currentKey) {
+      flushRange(currentStart, rowIndex);
+      currentStart = rowIndex;
+      currentKey = clusterKey;
+    }
+  });
+  flushRange(currentStart, rows.length);
+  return filled > 0 ? nextRows : rows;
+};
+
 type FacilityOption = {
   id: string;
   name: string;
@@ -433,6 +675,7 @@ type WeekOption = {
 
 type FacilityTemplateColumn = {
   index: number;
+  source_index?: number;
   role: string;
   header?: string;
   name?: string;
@@ -446,6 +689,14 @@ type FacilityCandidate = {
   score?: number | null;
   reason?: string | null;
   auto?: boolean | null;
+};
+
+type PendingSavedSheetContextChange = {
+  source: "step1" | "critical_decision";
+  facility: string;
+  week: string;
+  decisionType?: string;
+  decisionValue?: string;
 };
 
 const toNumber = (value?: number | null) => (value == null || Number.isNaN(value) ? 0 : Number(value));
@@ -626,6 +877,10 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
           typeof item.index === "number" && Number.isFinite(item.index)
             ? Number(item.index)
             : idx,
+        source_index:
+          typeof item.source_index === "number" && Number.isFinite(item.source_index)
+            ? Number(item.source_index)
+            : undefined,
         role,
         header: header || defaultHeaderForFacilityTemplateColumn({ role, header, name, diet_type: dietType, area_id: areaId }),
         name: name || defaultNameForFacilityTemplateColumn({ role, name, diet_type: dietType, area_id: areaId }),
@@ -712,14 +967,22 @@ const buildOcrPromptFromCanonicalSchema = ({
   columns?: FacilityTemplateColumn[];
 }) => {
   const schemaTokens = resolveOcrPromptSchemaTokens({ fields, columns });
-  return (
-    "Return a JSON object only.\\n" +
-    `Schema: {"rows":[[${schemaTokens.join(", ")}], ...], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}\\n` +
-    "Do not output header rows or date-only headers. Output menu rows only.\\n" +
-    "Keep the quantity columns in exactly this order.\\n" +
-    'If no menu rows are readable, return {"rows":[], "errors":[{"row":0,"col":0,"reason":"unreadable"}]}.\\n' +
-    "Use null when a cell is unreadable or missing. Use ASCII digits 0-9 only in numeric cells."
-  );
+  const quantityTokens = schemaTokens.filter((token) => !["date", "menu_name", "note"].includes(token));
+  const quantityOrder = quantityTokens.length
+    ? quantityTokens.join(", ")
+    : defaultOcrPromptQuantityTokens.join(", ");
+  return [
+    "Treat the current sheet shown in the editor as the canonical row structure.",
+    "Return the full structural table for that current sheet, not a quantity-only sparse draft.",
+    "Keep row count, row order, and blank rows exactly as they appear in the current sheet.",
+    "Keep date/daypart/menu/remarks anchored to the current sheet unless the fax clearly contradicts them.",
+    "The canonical daypart blocks are 朝/昼/夕.",
+    "Fax-side 区分/category tokens can be aliases, sublabels, continuation marks, blanks, or OCR noise; use them only as within-block hints unless the fax clearly shows a new 朝/昼/夕 boundary.",
+    `Target quantity columns, left-to-right: ${quantityOrder}.`,
+    "Ignore fax-side totals, helper columns, unmatched numeric columns, and side annotations instead of shifting values into the nearest target quantity column.",
+    "Do not create new remarks from side notes, allergy notes, prohibited-diet annotations, or margin text when the current sheet remarks cell is blank.",
+    "If a quantity is unreadable, leave it blank rather than guessing across block boundaries.",
+  ].join("\\n");
 };
 
 const reindexFacilityTemplateColumns = (columns: FacilityTemplateColumn[]) =>
@@ -746,6 +1009,9 @@ const swapFacilityTemplateColumns = (
   return reindexFacilityTemplateColumns(next);
 };
 
+const removeFacilityTemplateColumn = (columns: FacilityTemplateColumn[], rowIndex: number) =>
+  reindexFacilityTemplateColumns(columns.filter((_, idx) => idx !== rowIndex));
+
 const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) =>
   columns.map((column, idx) => {
     const role = String(column.role || "").trim().toLowerCase() || "quantity";
@@ -755,6 +1021,9 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
       index: idx,
       role,
     };
+    if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) {
+      payload.source_index = Number(column.source_index);
+    }
     if (header) payload.header = header;
     if (name) payload.name = name;
     if (role === "quantity") {
@@ -1086,14 +1355,35 @@ const describeReviewBlocker = (code: string) => {
   if (normalized === "template_unresolved") {
     return "テンプレート解釈が未解決です";
   }
+  if (normalized === "template_choice_required") {
+    return "票面テンプレートの選択が必要です";
+  }
+  if (normalized === "column_mapping_choice_required") {
+    return "数量列の対応候補を選択してください";
+  }
+  if (normalized === "quantity_choice_required") {
+    return "重要な数量候補の選択が必要です";
+  }
+  if (normalized === "week_choice_required") {
+    return "対象週の選択が必要です";
+  }
   if (normalized === "sheet_quantity_column_unmapped") {
     return "数量列の対応付けが未完了です";
+  }
+  if (normalized === "sheet_payload_mapping_blocked_unresolved_template") {
+    return "テンプレートまたは数量列対応が未解決のため、OCR数量をシートへ投影していません";
   }
   if (normalized === "ocr_evidence_recovery_required" || normalized === "evidence_recovery_required") {
     return "OCR基盤の復旧が必要です";
   }
   if (normalized === "weekly_menu_missing" || normalized === "sheet_weekly_menu_missing") {
     return "対象週の月次メニューが未登録です";
+  }
+  if (normalized === "monthly_menu_object_missing") {
+    return "対象月の月次メニュー本体が未登録です";
+  }
+  if (normalized === "draft_rows_empty") {
+    return "保存済みシートに行がありません";
   }
   if (normalized === "draft_newer_than_lines" || normalized === "draft_not_applied") {
     return "保存済みの下書きが明細へ未反映です";
@@ -1103,6 +1393,9 @@ const describeReviewBlocker = (code: string) => {
   }
   if (normalized === "rows_empty") {
     return "シート行が空です";
+  }
+  if (normalized === "sheet_contract_invalid") {
+    return "正解シートの構造が不正です";
   }
   return describeReparseWarningReason(code) || code;
 };
@@ -1151,6 +1444,42 @@ const describeWorkflowPrimaryAction = (action?: string | null) => {
   if (normalized === "edit_draft") return "下書きを確認";
   if (normalized === "wait_for_rerun" || normalized === "wait") return "完了待ち";
   return String(action || "").trim();
+};
+
+const resolveCandidateEvidenceState = (currentOrder?: OrderDetail | null) => {
+  const workflowStateCode = String(currentOrder?.workflow_state?.state || "").trim().toLowerCase();
+  const candidateSheetState = currentOrder?.workflow_state?.candidate_sheet_state;
+  const candidateEvidenceRunId = String(
+    currentOrder?.workflow_state?.candidate_evidence_run_id ||
+      candidateSheetState?.candidate_evidence_run_id ||
+      "",
+  ).trim();
+  const acknowledgedCandidateEvidenceRunId = String(
+    currentOrder?.workflow_state?.acknowledged_candidate_evidence_run_id || "",
+  ).trim();
+  const activeEvidenceRunId = String(
+    currentOrder?.workflow_state?.active_evidence_run_id || "",
+  ).trim();
+  const hasUnresolvedCandidateEvidenceChoice = Boolean(
+    currentOrder?.workflow_state?.candidate_prompt_visible,
+  );
+  return {
+    workflowStateCode,
+    candidateEvidenceRunId,
+    acknowledgedCandidateEvidenceRunId,
+    activeEvidenceRunId,
+    currentSheetRevisionId: String(
+      currentOrder?.workflow_state?.current_sheet_revision_id ||
+        candidateSheetState?.current_sheet_revision_id ||
+        currentOrder?.current_sheet_revision_id ||
+        currentOrder?.ocr_draft_revision_id ||
+        "",
+    ).trim(),
+    candidatePreviewAvailable: Boolean(candidateSheetState?.candidate_preview_available),
+    candidateHasMeaningfulDiff: Boolean(candidateSheetState?.candidate_has_meaningful_diff),
+    candidatePreviewError: String(candidateSheetState?.candidate_preview_error || "").trim(),
+    hasUnresolvedCandidateEvidenceChoice,
+  };
 };
 
 const describeProcessingStage = (stage?: string | null) => {
@@ -1214,6 +1543,144 @@ const describeOcrFailure = (value?: string | null) => {
     return "OCR結果を保存できるだけの成果物が揃いませんでした。OCRパイプラインを再実行してください。";
   }
   return `OCRが失敗しました: ${raw}`;
+};
+
+type ExplicitReparseOutcome = {
+  kind: "failed" | "rejected";
+  reasonCode: string;
+  detail: string;
+};
+
+const describeReparseRejectedReason = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  const normalized = raw.toLowerCase();
+  if (!raw) {
+    return "LLM再解析結果は保存条件を満たさなかったため、現在のシートへ反映されませんでした。";
+  }
+  if (normalized === "sheet_date_anchor_drift") {
+    return "LLM再解析は日付範囲のドリフトを検知したため保存されませんでした。";
+  }
+  if (normalized === "sheet_canonical_mismatch") {
+    return "LLM再解析は週メニュー整合チェックで不一致を検知したため保存されませんでした。";
+  }
+  if (normalized === "sheet_suspicious_blank_row") {
+    return "LLM再解析は数量行の欠落を検知したため保存されませんでした。";
+  }
+  if (normalized === "sheet_row_coverage_low") {
+    return "LLM再解析はOCR行カバレッジ不足を検知したため保存されませんでした。";
+  }
+  if (normalized === "sheet_column_anomaly") {
+    return "LLM再解析は施設区分列の異常を検知したため保存されませんでした。";
+  }
+  if (normalized === "sheet_llm_audit_failed" || normalized === "draft_ready_blocked") {
+    return "LLM再解析結果は保存条件を満たさなかったため、現在のシートへ反映されませんでした。";
+  }
+  return `LLM再解析結果は保存されませんでした: ${raw}`;
+};
+
+const resolveExplicitReparseOutcome = ({
+  ocrStatus,
+  ocrError,
+  ocrProcessingStage,
+  ocrResultState,
+  ocrReparseHealth,
+  ocrMetrics,
+  workflowReparseState,
+  reparseDebug,
+}: {
+  ocrStatus?: string | null;
+  ocrError?: string | null;
+  ocrProcessingStage?: string | null;
+  ocrResultState?: string | null;
+  ocrReparseHealth?: string | null;
+  ocrMetrics?: OrderDetail["ocr_metrics"] | null;
+  workflowReparseState?: ReparseStatePayload | null;
+  reparseDebug?: ReparseDebugPayload | null;
+}): ExplicitReparseOutcome | null => {
+  const status = String(ocrStatus || "").trim().toLowerCase();
+  const resultState = String(
+    ocrResultState
+      || ocrMetrics?.result_state
+      || workflowReparseState?.result_state
+      || "",
+  )
+    .trim()
+    .toLowerCase();
+  const processingStage = String(
+    ocrProcessingStage
+      || ocrMetrics?.processing_stage
+      || workflowReparseState?.processing_stage
+      || "",
+  )
+    .trim()
+    .toLowerCase();
+  const reparseHealth = String(
+    ocrReparseHealth
+      || workflowReparseState?.status
+      || "",
+  )
+    .trim()
+    .toLowerCase();
+  const requestMode = String(
+    ocrMetrics?.request_mode
+      || workflowReparseState?.request_mode
+      || "",
+  )
+    .trim()
+    .toLowerCase();
+  const reasonCode = String(
+    ocrError
+      || ocrMetrics?.error
+      || workflowReparseState?.error
+      || reparseDebug?.error
+      || "",
+  ).trim();
+
+  const hasTerminalSignal = Boolean(
+    requestMode === "llm_reparse"
+      || resultState
+      || reparseHealth
+      || processingStage === "stale_timeout"
+      || (reasonCode && isReparseStaleTimeoutError(reasonCode)),
+  );
+  if (!hasTerminalSignal) {
+    return null;
+  }
+
+  const rejectedReason = reasonCode || resultState;
+  const isRejected =
+    resultState === "draft_ready_blocked"
+    || [
+      "sheet_date_anchor_drift",
+      "sheet_canonical_mismatch",
+      "sheet_suspicious_blank_row",
+      "sheet_row_coverage_low",
+      "sheet_column_anomaly",
+      "sheet_llm_audit_failed",
+    ].includes(rejectedReason.toLowerCase());
+  if (isRejected) {
+    return {
+      kind: "rejected",
+      reasonCode: rejectedReason,
+      detail: describeReparseRejectedReason(rejectedReason),
+    };
+  }
+
+  const isFailed =
+    ["failed", "error", "stalled"].includes(status)
+    || ["failed", "hard_failed"].includes(reparseHealth)
+    || resultState === "hard_failed"
+    || processingStage === "stale_timeout"
+    || (reasonCode && isReparseStaleTimeoutError(reasonCode));
+  if (isFailed) {
+    return {
+      kind: "failed",
+      reasonCode,
+      detail: describeOcrFailure(reasonCode || ocrError),
+    };
+  }
+
+  return null;
 };
 
 const describeReparseProgressMessage = (
@@ -1512,6 +1979,8 @@ const orderSteps = [
   },
 ];
 
+const STEP2_APPLY_NEXT_LABEL = "修正完了 / 保存して明細に反映して次へ";
+
 const makeCategoryKey = (dietType?: string | null, areaId?: string | null) => {
   const diet = (dietType || "").toLowerCase() || "unknown";
   const area = areaId || "";
@@ -1724,6 +2193,55 @@ type FocusedOverlayTarget = {
   localRowIndex: number;
   globalRowIndex: number;
   matchReason: "global_index" | "identity_match" | "global_fallback";
+};
+
+type OcrSheetCellSelection = {
+  anchorRowIndex: number;
+  anchorCellIndex: number;
+  focusRowIndex: number;
+  focusCellIndex: number;
+};
+
+type OcrSheetSelectionBounds = {
+  topRowIndex: number;
+  bottomRowIndex: number;
+  leftCellIndex: number;
+  rightCellIndex: number;
+  rowCount: number;
+  cellCount: number;
+};
+
+const getOcrSheetSelectionBounds = (
+  selection: OcrSheetCellSelection | null,
+): OcrSheetSelectionBounds | null => {
+  if (!selection) return null;
+  const topRowIndex = Math.min(selection.anchorRowIndex, selection.focusRowIndex);
+  const bottomRowIndex = Math.max(selection.anchorRowIndex, selection.focusRowIndex);
+  const leftCellIndex = Math.min(selection.anchorCellIndex, selection.focusCellIndex);
+  const rightCellIndex = Math.max(selection.anchorCellIndex, selection.focusCellIndex);
+  return {
+    topRowIndex,
+    bottomRowIndex,
+    leftCellIndex,
+    rightCellIndex,
+    rowCount: bottomRowIndex - topRowIndex + 1,
+    cellCount: rightCellIndex - leftCellIndex + 1,
+  };
+};
+
+const isOcrSheetCellWithinSelection = (
+  selection: OcrSheetCellSelection | null,
+  rowIndex: number,
+  cellIndex: number,
+) => {
+  const bounds = getOcrSheetSelectionBounds(selection);
+  if (!bounds) return false;
+  return (
+    rowIndex >= bounds.topRowIndex &&
+    rowIndex <= bounds.bottomRowIndex &&
+    cellIndex >= bounds.leftCellIndex &&
+    cellIndex <= bounds.rightCellIndex
+  );
 };
 
 const normalizeSheetMatchToken = (value?: string | null) => {
@@ -2122,7 +2640,11 @@ export default function OrderDetailPage() {
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
+  const [step1Saving, setStep1Saving] = useState<boolean>(false);
+  const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
+  const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<string>("");
+  const [archiveOrderBusy, setArchiveOrderBusy] = useState<boolean>(false);
   const [trainingSampleSaving, setTrainingSampleSaving] = useState<boolean>(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
@@ -2142,6 +2664,7 @@ export default function OrderDetailPage() {
   const [ocrTableUnits, setOcrTableUnits] = useState<string | null>(null);
   const [tableBoxUnitsOverride, setTableBoxUnitsOverride] = useState<string | null>(null);
   const [activeOcrPageIndex, setActiveOcrPageIndex] = useState<number>(0);
+  const ocrPageSelectionModeRef = useRef<"auto" | "manual">("auto");
   const [ocrTableHeader, setOcrTableHeader] = useState<string[]>([]);
   const [ocrTableRows, setOcrTableRows] = useState<string[][]>([]);
   const [ocrTablePageIndex, setOcrTablePageIndex] = useState<number | null>(null);
@@ -2149,9 +2672,23 @@ export default function OrderDetailPage() {
   const [ocrSheetHeader, setOcrSheetHeader] = useState<string[]>([]);
   const [ocrSheetRows, setOcrSheetRows] = useState<string[][]>([]);
   const [ocrSheetRowIds, setOcrSheetRowIds] = useState<string[]>([]);
+  const [ocrSheetCellConfidenceRows, setOcrSheetCellConfidenceRows] = useState<string[][]>([]);
+  const [ocrSheetCellProvenanceRows, setOcrSheetCellProvenanceRows] = useState<string[][]>([]);
+  const [ocrSheetNumericCellItems, setOcrSheetNumericCellItems] = useState<OcrNumericCellItem[]>([]);
+  const [ocrSheetNumericCellSummary, setOcrSheetNumericCellSummary] = useState<OcrNumericCellSummary>({
+    raw_ocr_numeric_count: 0,
+    accepted_count: 0,
+    deterministic_candidate_count: 0,
+    weak_candidate_count: 0,
+    unresolved_count: 0,
+  });
   const [focusedSheetRowIndex, setFocusedSheetRowIndex] = useState<number | null>(null);
+  const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; cellIndex: number } | null>(null);
+  const [ocrSheetSelection, setOcrSheetSelection] = useState<OcrSheetCellSelection | null>(null);
+  const [ocrSheetDropTarget, setOcrSheetDropTarget] = useState<{ rowIndex: number; cellIndex: number } | null>(null);
   const [ocrSheetSource, setOcrSheetSource] = useState<string>("");
   const [ocrSheetWarnings, setOcrSheetWarnings] = useState<string[]>([]);
+  const [ocrSheetProjection, setOcrSheetProjection] = useState<SheetProjectionPayload | null>(null);
   const [ocrSheetReviewState, setOcrSheetReviewState] = useState<string>("");
   const [ocrSheetCanApply, setOcrSheetCanApply] = useState<boolean>(false);
   const [ocrSheetCanConfirm, setOcrSheetCanConfirm] = useState<boolean>(false);
@@ -2164,13 +2701,30 @@ export default function OrderDetailPage() {
   const [ocrSheetResultState, setOcrSheetResultState] = useState<string>("");
   const [ocrSheetConfirmedLinesRetained, setOcrSheetConfirmedLinesRetained] = useState<boolean>(false);
   const [ocrSheetLoading, setOcrSheetLoading] = useState<boolean>(false);
+  const [ocrSheetLoadSettled, setOcrSheetLoadSettled] = useState<boolean>(false);
   const [ocrSheetMessage, setOcrSheetMessage] = useState<string>("");
   const [ocrSheetAutoRetryBlocked, setOcrSheetAutoRetryBlocked] = useState<boolean>(false);
+  const [ocrSheetColumnFillTarget, setOcrSheetColumnFillTarget] = useState<string>("");
+  const [ocrSheetColumnFillValue, setOcrSheetColumnFillValue] = useState<string>("");
+  const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<OcrConfidenceDisplayMode>("suggestion");
+  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<QuantityAssignmentStrategy>("legacy");
+  const [candidateSheetPreview, setCandidateSheetPreview] = useState<NormalizedEditorSheetPayload | null>(null);
+  const [candidateSheetPreviewLoading, setCandidateSheetPreviewLoading] = useState<boolean>(false);
+  const [candidateSheetPreviewMessage, setCandidateSheetPreviewMessage] = useState<string>("");
   const [ocrHistoryLatest, setOcrHistoryLatest] = useState<OcrEditRevision | null>(null);
   const [ocrHistoryRows, setOcrHistoryRows] = useState<OcrEditRevision[]>([]);
   const [ocrHistoryLoading, setOcrHistoryLoading] = useState<boolean>(false);
   const [ocrHistoryMessage, setOcrHistoryMessage] = useState<string>("");
   const latestSavedSheetRevisionRef = useRef<OcrEditRevision | null>(null);
+  const ocrSheetBaselinePayloadRef = useRef<NormalizedEditorSheetPayload | null>(null);
+  const ocrSheetEditedSinceLoadRef = useRef<boolean>(false);
+  const ocrSheetClipboardRef = useRef<string[][] | null>(null);
+  const ocrSheetCellRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const ocrSheetSelectionPointerActiveRef = useRef<boolean>(false);
+  const ocrSheetDragSelectionBoundsRef = useRef<OcrSheetSelectionBounds | null>(null);
+  const ocrSwapLeftColumnRef = useRef<HTMLSelectElement | null>(null);
+  const ocrSwapRightColumnRef = useRef<HTMLSelectElement | null>(null);
+  const [ocrSheetClipboardReady, setOcrSheetClipboardReady] = useState<boolean>(false);
   const [orderHistoryRows, setOrderHistoryRows] = useState<OrderHistoryItem[]>([]);
   const [orderHistoryLoading, setOrderHistoryLoading] = useState<boolean>(false);
   const [orderHistoryMessage, setOrderHistoryMessage] = useState<string>("");
@@ -2189,6 +2743,9 @@ export default function OrderDetailPage() {
   const [gridDetecting, setGridDetecting] = useState<boolean>(false);
   const [gridDetectMessage, setGridDetectMessage] = useState<string>("");
   const [facilityConfig, setFacilityConfig] = useState<Record<string, any> | null>(null);
+  const [facilityResolvedConfig, setFacilityResolvedConfig] = useState<Record<string, any> | null>(null);
+  const [expandedCellCopyMode, setExpandedCellCopyMode] = useState<ExpandedCellCopyMode>("disabled");
+  const [expandedCellCopySaving, setExpandedCellCopySaving] = useState<boolean>(false);
   const [facilityTemplateColumns, setFacilityTemplateColumns] = useState<FacilityTemplateColumn[]>([]);
   const [facilityTemplateColumnDraft, setFacilityTemplateColumnDraft] = useState<FacilityTemplateColumn[]>([]);
   const [facilityTemplateSwapLeft, setFacilityTemplateSwapLeft] = useState<string>("");
@@ -2217,7 +2774,11 @@ export default function OrderDetailPage() {
   const [criticalDecisionSaving, setCriticalDecisionSaving] = useState<string>("");
   const [ocrRecoverPending, setOcrRecoverPending] = useState<boolean>(false);
   const [switchEvidencePending, setSwitchEvidencePending] = useState<boolean>(false);
-  const [keptCurrentCandidateEvidenceId, setKeptCurrentCandidateEvidenceId] = useState<string>("");
+  const [keepCurrentPending, setKeepCurrentPending] = useState<boolean>(false);
+  const [pendingSavedSheetContextChange, setPendingSavedSheetContextChange] =
+    useState<PendingSavedSheetContextChange | null>(null);
+  const [savedSheetContextChangeApplying, setSavedSheetContextChangeApplying] =
+    useState<SavedSheetContextChangeMode | "">("");
   const [bagRows, setBagRows] = useState<BagRow[]>([]);
   const [bagAppliedOverrides, setBagAppliedOverrides] = useState<AppliedPortionOverride[]>([]);
   const [bagMessage, setBagMessage] = useState<string>("");
@@ -2236,6 +2797,7 @@ export default function OrderDetailPage() {
     height: 0,
   });
   const [ocrPreviewMode, setOcrPreviewMode] = useState<"overlay" | "original">("overlay");
+  const [ocrWorkspaceLayoutMode, setOcrWorkspaceLayoutMode] = useState<"horizontal" | "vertical">("horizontal");
   const [step2WizardChoice, setStep2WizardChoice] = useState<Step2WizardChoice>("");
   const [step2RepairStage, setStep2RepairStage] = useState<Step2RepairStage>("");
   const [activeStep, setActiveStep] = useState<number>(0);
@@ -2251,16 +2813,37 @@ export default function OrderDetailPage() {
   const reparseTimerRef = useRef<number | null>(null);
   const orderRefreshTimerRef = useRef<number | null>(null);
   const workspaceRefreshPromiseRef = useRef<Promise<OrderDetail | null> | null>(null);
+  const orderDetailRequestSeqRef = useRef(0);
+  const orderDetailAppliedSeqRef = useRef(0);
+  const ocrPagesRequestSeqRef = useRef(0);
+  const ocrSheetRequestSeqRef = useRef(0);
+  const ocrSheetAppliedSeqRef = useRef(0);
+  const workspaceRefreshTokenRef = useRef(0);
   const pdfRequestSeqRef = useRef(0);
+  const ocrPreviewRefreshKeyRef = useRef("");
+  const ocrPreviewForcedFallbackRef = useRef(false);
+  const authoritativeOrderRef = useRef<OrderDetail | null>(null);
 
-  const loadOrderDetail = async (orderId: string, options: { preserveSelections?: boolean } = {}) => {
+  useEffect(() => {
+    authoritativeOrderRef.current = order || null;
+  }, [order]);
+
+  const loadOrderDetail = async (
+    orderId: string,
+    options: { preserveSelections?: boolean } = {},
+  ): Promise<OrderDetail | null> => {
     const { preserveSelections = false } = options;
+    const requestSeq = orderDetailRequestSeqRef.current + 1;
+    orderDetailRequestSeqRef.current = requestSeq;
     const res = await apiClient.get(`/orders/${orderId}`);
     const nextOrder = (res.data || {}) as OrderDetail;
+    if (requestSeq < orderDetailAppliedSeqRef.current) {
+      return authoritativeOrderRef.current;
+    }
+    orderDetailAppliedSeqRef.current = requestSeq;
+    authoritativeOrderRef.current = nextOrder;
     const currentPersistedFacility = (order?.facility || "").trim();
-    const currentPersistedWeek = normalizeWeekValue(
-      order?.persisted_week_value || order?.week_value || order?.week || "",
-    );
+    const currentPersistedWeek = getCanonicalWeekSelectionSource(order);
     const selectedFacility = facility.trim();
     const selectedWeek = normalizeConcreteWeekValue(weekDraft);
     const preserveFacilitySelection =
@@ -2272,9 +2855,36 @@ export default function OrderDetailPage() {
       setFacility(nextOrder.facility || "");
     }
     if (!preserveWeekSelection) {
-      setWeekDraft(normalizeWeekValue(nextOrder.week_value || nextOrder.week || ""));
+      setWeekDraft(getCanonicalWeekSelectionSource(nextOrder));
     }
     return nextOrder;
+  };
+
+  const replaceAuthoritativeOrder = (nextOrder?: OrderDetail | null) => {
+    if (!nextOrder) return;
+    authoritativeOrderRef.current = nextOrder;
+    setOrder(nextOrder);
+  };
+
+  const applyAuthoritativeWorkflowStateToOrder = (nextWorkflowState: WorkflowStatePayload | null | undefined) => {
+    if (!nextWorkflowState) return;
+    const mutationSeq = orderDetailRequestSeqRef.current + 1;
+    orderDetailRequestSeqRef.current = mutationSeq;
+    orderDetailAppliedSeqRef.current = mutationSeq;
+    setOrder((current) => {
+      if (!current) return current;
+      const mergedWorkflowState = {
+        ...(current.workflow_state || {}),
+        ...nextWorkflowState,
+      };
+      const nextOrder = {
+        ...current,
+        workflow_state: mergedWorkflowState,
+        apply_gate: mergedWorkflowState.apply_gate || current.apply_gate || null,
+      };
+      authoritativeOrderRef.current = nextOrder;
+      return nextOrder;
+    });
   };
 
   const getResolvedLlmReparseModel = () => {
@@ -2297,6 +2907,9 @@ export default function OrderDetailPage() {
     setLlmReparseCustomModel("");
     setLlmReparsePromptPreset("numeric_verification");
     setFocusedSheetRowIndex(null);
+    setCandidateSheetPreview(null);
+    setCandidateSheetPreviewLoading(false);
+    setCandidateSheetPreviewMessage("");
   }, [id]);
 
   const activeEditorRows = ocrSheetRows;
@@ -2321,22 +2934,6 @@ export default function OrderDetailPage() {
     if (focusedSheetRowIndex < ocrSheetRows.length) return;
     setFocusedSheetRowIndex(null);
   }, [focusedSheetRowIndex, ocrSheetRows.length]);
-
-  useEffect(() => {
-    const candidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
-    if (!candidateEvidenceRunId) {
-      if (keptCurrentCandidateEvidenceId) {
-        setKeptCurrentCandidateEvidenceId("");
-      }
-      return;
-    }
-    if (
-      keptCurrentCandidateEvidenceId
-      && keptCurrentCandidateEvidenceId !== candidateEvidenceRunId
-    ) {
-      setKeptCurrentCandidateEvidenceId("");
-    }
-  }, [order?.workflow_state?.candidate_evidence_run_id, keptCurrentCandidateEvidenceId]);
 
   const loadShippingStatuses = async (silent: boolean = false) => {
     if (!id) return;
@@ -2382,6 +2979,8 @@ export default function OrderDetailPage() {
   useEffect(() => {
     if (!facility) {
       setFacilityConfig(null);
+      setFacilityResolvedConfig(null);
+      setExpandedCellCopyMode("disabled");
       setFacilityTemplateColumns([]);
       setFacilityTemplateColumnDraft([]);
       setFacilityTemplateMessage("");
@@ -2393,6 +2992,10 @@ export default function OrderDetailPage() {
       .then((res) => {
         if (!active) return;
         setFacilityConfig(res.data?.config || null);
+        setFacilityResolvedConfig(res.data?.resolved_config || null);
+        setExpandedCellCopyMode(
+          res.data?.resolved_config?.[EXPANDED_CELL_COPY_FACILITY_KEY] ? "persisted" : "disabled",
+        );
         const resolvedColumns = normalizeFacilityTemplateColumns(
           res.data?.resolved_config?.fax_template?.columns,
         );
@@ -2405,6 +3008,8 @@ export default function OrderDetailPage() {
       .catch(() => {
         if (!active) return;
         setFacilityConfig(null);
+        setFacilityResolvedConfig(null);
+        setExpandedCellCopyMode("disabled");
         setFacilityTemplateColumns([]);
         setFacilityTemplateColumnDraft([]);
         setFacilityTemplateSwapLeft("");
@@ -2417,6 +3022,8 @@ export default function OrderDetailPage() {
 
   useEffect(() => {
     latestSavedSheetRevisionRef.current = null;
+    ocrSheetBaselinePayloadRef.current = null;
+    ocrSheetEditedSinceLoadRef.current = false;
     setOcrPages([]);
     setOcrPagesMessage("");
     setOcrTableBox(null);
@@ -2428,10 +3035,15 @@ export default function OrderDetailPage() {
     setOcrSheetHeader([]);
     setOcrSheetRows([]);
     setOcrSheetRowIds([]);
+    setOcrSheetCellConfidenceRows([]);
+    setOcrSheetCellProvenanceRows([]);
+    setOcrSheetNumericCellItems([]);
+    setOcrSheetNumericCellSummary(blankOcrNumericCellSummary());
     setOcrSheetSource("");
     setOcrSheetWarnings([]);
     resetSheetReviewMeta();
     setOcrSheetLoading(false);
+    setOcrSheetLoadSettled(false);
     setOcrSheetMessage("");
     setOcrSheetAutoRetryBlocked(false);
     setOcrHistoryLatest(null);
@@ -2619,11 +3231,184 @@ export default function OrderDetailPage() {
     setOcrPreviewMode("overlay");
   }, [order?.id]);
 
-  const normalizeSheetEditorPayload = (payload: {
+  const normalizeSheetWarnings = (payload: { warnings?: unknown }) =>
+    Array.isArray(payload.warnings)
+      ? payload.warnings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+
+  const blankSheetCellMetadataRows = (rowCount: number, columnCount: number): string[][] =>
+    Array.from({ length: Math.max(rowCount, 0) }, () => Array.from({ length: Math.max(columnCount, 0) }, () => ""));
+
+  const normalizeSheetCellMetadataRows = (
+    rows: unknown,
+    rowCount: number,
+    columnCount: number,
+    normalizer: (value: unknown) => string = (value) => String(value ?? "").trim(),
+  ): string[][] => {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    return Array.from({ length: Math.max(rowCount, 0) }, (_, rowIndex) => {
+      const sourceRow = Array.isArray(sourceRows[rowIndex]) ? sourceRows[rowIndex] : [];
+      return Array.from({ length: Math.max(columnCount, 0) }, (_, cellIndex) =>
+        normalizer(sourceRow[cellIndex]),
+      );
+    });
+  };
+
+  const normalizeOcrCellConfidenceTier = (value: unknown): OcrCellConfidenceTier | "" => {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (normalized === "high" || normalized === "medium" || normalized === "low") {
+      return normalized;
+    }
+    return "";
+  };
+
+  const normalizeOcrNumericCellClassification = (
+    value: unknown,
+  ): OcrNumericCellClassification | "" => {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (
+      normalized === "accepted"
+      || normalized === "deterministic_candidate"
+      || normalized === "weak_candidate"
+      || normalized === "unresolved"
+    ) {
+      return normalized;
+    }
+    return "";
+  };
+
+  const blankOcrNumericCellSummary = (): OcrNumericCellSummary => ({
+    raw_ocr_numeric_count: 0,
+    accepted_count: 0,
+    deterministic_candidate_count: 0,
+    weak_candidate_count: 0,
+    unresolved_count: 0,
+  });
+
+  const normalizeOcrNumericCellSummary = (value: unknown): OcrNumericCellSummary => {
+    const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const readCount = (key: string) => {
+      const raw = source[key];
+      if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+      if (typeof raw === "string") {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+    return {
+      raw_ocr_numeric_count: readCount("raw_ocr_numeric_count"),
+      accepted_count: readCount("accepted_count"),
+      deterministic_candidate_count: readCount("deterministic_candidate_count"),
+      weak_candidate_count: readCount("weak_candidate_count"),
+      unresolved_count: readCount("unresolved_count"),
+    };
+  };
+
+  const normalizeOcrNumericCellItems = (value: unknown): OcrNumericCellItem[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((raw): OcrNumericCellItem | null => {
+        if (!raw || typeof raw !== "object") return null;
+        const item = raw as Record<string, unknown>;
+        const classification = normalizeOcrNumericCellClassification(item.classification);
+        if (!classification) return null;
+        const parseIndex = (key: string) => {
+          const candidate = item[key];
+          if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate;
+          if (typeof candidate === "string" && candidate.trim()) {
+            const parsed = Number(candidate);
+            if (Number.isInteger(parsed)) return parsed;
+          }
+          return null;
+        };
+        return {
+          classification,
+          value: String(item.value ?? "").trim(),
+          confidence_tier: normalizeOcrCellConfidenceTier(item.confidence_tier),
+          placement_basis: String(item.placement_basis ?? "").trim(),
+          read_basis: String(item.read_basis ?? "").trim(),
+          source_row_index: parseIndex("source_row_index"),
+          source_col_index: parseIndex("source_col_index"),
+          target_row_index: parseIndex("target_row_index"),
+          target_col_index: parseIndex("target_col_index"),
+          date_key: String(item.date_key ?? "").trim(),
+          daypart_key: String(item.daypart_key ?? "").trim(),
+          menu_key: String(item.menu_key ?? "").trim(),
+          reason: String(item.reason ?? "").trim(),
+        };
+      })
+      .filter((item): item is OcrNumericCellItem => Boolean(item));
+  };
+
+  const dedupeOcrSheetTouchedCells = (cells: OcrSheetTouchedCell[]): OcrSheetTouchedCell[] => {
+    const seen = new Set<string>();
+    const result: OcrSheetTouchedCell[] = [];
+    for (const cell of cells) {
+      const rowIndex = Number(cell?.rowIndex);
+      const cellIndex = Number(cell?.cellIndex);
+      if (!Number.isInteger(rowIndex) || rowIndex < 0 || !Number.isInteger(cellIndex) || cellIndex < 0) {
+        continue;
+      }
+      const key = `${rowIndex}:${cellIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ rowIndex, cellIndex });
+    }
+    return result;
+  };
+
+  const rebuildOcrNumericCellSummary = (
+    items: OcrNumericCellItem[],
+    rawOcrNumericCount: number,
+  ): OcrNumericCellSummary => {
+    const next = blankOcrNumericCellSummary();
+    next.raw_ocr_numeric_count = rawOcrNumericCount;
+    for (const item of items) {
+      const classification = normalizeOcrNumericCellClassification(item.classification);
+      if (classification === "accepted") {
+        next.accepted_count = Number(next.accepted_count || 0) + 1;
+      } else if (classification === "deterministic_candidate") {
+        next.deterministic_candidate_count = Number(next.deterministic_candidate_count || 0) + 1;
+      } else if (classification === "weak_candidate") {
+        next.weak_candidate_count = Number(next.weak_candidate_count || 0) + 1;
+      } else if (classification === "unresolved") {
+        next.unresolved_count = Number(next.unresolved_count || 0) + 1;
+      }
+    }
+    return next;
+  };
+
+  const overlayClassificationVisibleInMode = (
+    classification: OcrNumericCellClassification | "",
+    mode: OcrConfidenceDisplayMode,
+  ): boolean => {
+    if (classification === "deterministic_candidate") {
+      return mode === "assisted" || mode === "suggestion";
+    }
+    if (classification === "weak_candidate") {
+      return mode === "suggestion";
+    }
+    return false;
+  };
+
+  const confidenceTierVisibleInMode = (
+    tier: OcrCellConfidenceTier | "",
+    mode: OcrConfidenceDisplayMode,
+  ): boolean => {
+    if (!tier) return false;
+    return true;
+  };
+
+  const normalizeLooseSheetEditorPayload = (payload: {
     fields?: unknown;
     header?: unknown;
     rows?: unknown;
     rowIds?: unknown;
+    cellConfidenceRows?: unknown;
+    cellProvenanceRows?: unknown;
+    ocrNumericCellItems?: unknown;
+    ocrNumericCellSummary?: unknown;
     source?: string;
     warnings?: unknown;
   }): NormalizedEditorSheetPayload => {
@@ -2669,38 +3454,274 @@ export default function OrderDetailPage() {
       );
     });
     const normalizedRowIds = normalizedRows.map((_, idx) => rowIds[idx] || makeSheetRowId("sheet"));
-    const warnings = Array.isArray(payload.warnings)
-      ? payload.warnings.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
+    const warnings = normalizeSheetWarnings(payload);
+    const cellConfidenceRows = blankSheetCellMetadataRows(normalizedRows.length, columnCount);
+    const cellProvenanceRows = blankSheetCellMetadataRows(normalizedRows.length, columnCount);
     return {
       fields: normalizedFields,
       header: normalizedHeader,
       rows: normalizedRows,
       rowIds: normalizedRowIds,
+      cellConfidenceRows,
+      cellProvenanceRows,
+      ocrNumericCellItems: [],
+      ocrNumericCellSummary: blankOcrNumericCellSummary(),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
     };
   };
 
-  const applyNormalizedSheetEditorPayload = (payload: NormalizedEditorSheetPayload) => {
-    setOcrSheetFields(payload.fields);
-    setOcrSheetHeader(payload.header);
-    setOcrSheetRows(payload.rows);
-    setOcrSheetRowIds(payload.rowIds);
-    setOcrSheetSource(payload.source);
-    setOcrSheetWarnings(payload.warnings);
+  const normalizeCurrentSheetEditorPayload = (payload: {
+    fields?: unknown;
+    header?: unknown;
+    rows?: unknown;
+    rowIds?: unknown;
+    cellConfidenceRows?: unknown;
+    cellProvenanceRows?: unknown;
+    ocrNumericCellItems?: unknown;
+    ocrNumericCellSummary?: unknown;
+    source?: string;
+    warnings?: unknown;
+  }): NormalizedEditorSheetPayload => {
+    const fields = Array.isArray(payload.fields)
+      ? payload.fields.map((field) => String(field || "").trim()).filter(Boolean)
+      : [];
+    const headerCells = Array.isArray(payload.header)
+      ? payload.header.map((cell) => String(cell ?? ""))
+      : [];
+    const rowValues = Array.isArray(payload.rows) ? payload.rows : [];
+    const rowIds = Array.isArray(payload.rowIds)
+      ? payload.rowIds.map((rowId) => String(rowId || "").trim())
+      : [];
+    const warnings = normalizeSheetWarnings(payload);
+    const columnCount = Math.max(fields.length, headerCells.length, 0);
+    if (columnCount <= 0) {
+      return {
+        fields: [],
+        header: [],
+        rows: [],
+        rowIds: [],
+        cellConfidenceRows: [],
+        cellProvenanceRows: [],
+        ocrNumericCellItems: [],
+        ocrNumericCellSummary: blankOcrNumericCellSummary(),
+        source: typeof payload.source === "string" ? payload.source : "",
+        warnings: rowValues.length ? Array.from(new Set([...warnings, "sheet_contract_invalid"])) : warnings,
+      };
+    }
+    const normalizedHeader = Array.from({ length: columnCount }, (_, idx) => headerCells[idx] || fields[idx] || "");
+    const normalizedRows = rowValues.map((row) => {
+      const source = Array.isArray(row) ? row : [];
+      return Array.from({ length: columnCount }, (_, idx) =>
+        source[idx] == null ? "" : String(source[idx]),
+      );
+    });
+    const normalizedRowIds = normalizedRows.map((_, idx) => rowIds[idx] || makeSheetRowId("sheet"));
+    const cellConfidenceRows = normalizeSheetCellMetadataRows(
+      payload.cellConfidenceRows,
+      normalizedRows.length,
+      columnCount,
+      normalizeOcrCellConfidenceTier,
+    );
+    const cellProvenanceRows = normalizeSheetCellMetadataRows(
+      payload.cellProvenanceRows,
+      normalizedRows.length,
+      columnCount,
+    );
+    return {
+      fields,
+      header: normalizedHeader,
+      rows: normalizedRows,
+      rowIds: normalizedRowIds,
+      cellConfidenceRows,
+      cellProvenanceRows,
+      ocrNumericCellItems: normalizeOcrNumericCellItems((payload as Record<string, unknown>).ocrNumericCellItems),
+      ocrNumericCellSummary: normalizeOcrNumericCellSummary((payload as Record<string, unknown>).ocrNumericCellSummary),
+      source: typeof payload.source === "string" ? payload.source : "",
+      warnings,
+    };
   };
+
+  const splitMarkdownTableCells = (line: string): string[] => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|") || !trimmed.includes("|")) return [];
+    const content = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+    return content.split("|").map((cell) => cell.trim());
+  };
+
+  const isMarkdownSeparatorRow = (cells: string[]): boolean =>
+    cells.length > 0 &&
+    cells.every((cell) => {
+      const compact = cell.replace(/\s+/g, "");
+      return compact.length > 0 && /^:?-{3,}:?$/.test(compact);
+    });
+
+  const extractLargestMarkdownTable = (
+    markdown: string,
+  ): { header: string[]; rows: string[][] } | null => {
+    const lines = markdown
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    let current: string[][] = [];
+    let best: { header: string[]; rows: string[][] } | null = null;
+
+    const finalizeCurrent = () => {
+      if (current.length < 2) {
+        current = [];
+        return;
+      }
+      const header = current[0];
+      const dataRows = (isMarkdownSeparatorRow(current[1]) ? current.slice(2) : current.slice(1)).filter((row) =>
+        row.some((cell) => cell !== ""),
+      );
+      if (dataRows.length && (!best || dataRows.length > best.rows.length)) {
+        best = { header, rows: dataRows };
+      }
+      current = [];
+    };
+
+    for (const line of lines) {
+      const cells = splitMarkdownTableCells(line);
+      if (cells.length) {
+        current.push(cells);
+      } else {
+        finalizeCurrent();
+      }
+    }
+    finalizeCurrent();
+    return best;
+  };
+
+  const looksLikePreviewDateCell = (value: string): boolean =>
+    /(?:^|[^0-9])\d{1,2}[/-]\d{1,2}(?:\s*[\(\（][^)）]+[\)）])?/.test(String(value || "").trim());
+
+  const mergePreviewHeaderRows = (rows: string[][]): string[] => {
+    const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    return Array.from({ length: width }, (_, idx) => {
+      const parts = rows
+        .map((row) => String(row[idx] ?? "").trim())
+        .filter(Boolean);
+      if (!parts.length) return `列${idx + 1}`;
+      return parts.filter((part, partIdx) => parts.indexOf(part) === partIdx).join(" ");
+    });
+  };
+
+  const buildReadonlySheetPreviewFromStructuredTables = (
+    payload?: OcrOutput | null,
+  ): NormalizedEditorSheetPayload | null => {
+    const tableCandidates = [
+      ...(Array.isArray(payload?.tables) ? payload!.tables! : []),
+      ...((Array.isArray(payload?.pages)
+        ? payload!.pages!.flatMap((page) => (Array.isArray(page?.tables) ? page.tables : []))
+        : []) as Array<{ rows?: string[][]; row_count?: number | null; col_count?: number | null }>),
+    ];
+    const best = tableCandidates
+      .filter((table) => Array.isArray(table?.rows) && table.rows.length)
+      .sort(
+        (left, right) =>
+          Number(right?.row_count || right?.rows?.length || 0) - Number(left?.row_count || left?.rows?.length || 0),
+      )[0];
+    const rawRows = Array.isArray(best?.rows)
+      ? best!.rows!
+          .map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? "")) : []))
+          .filter((row) => row.some((cell) => cell.trim() !== ""))
+      : [];
+    if (!rawRows.length) {
+      return null;
+    }
+    const firstDateRowIndex = rawRows.findIndex((row) => row.some((cell) => looksLikePreviewDateCell(cell)));
+    const headerRows =
+      firstDateRowIndex > 0
+        ? rawRows.slice(0, Math.min(firstDateRowIndex, 2))
+        : rawRows.slice(0, Math.min(rawRows.length, 2));
+    const header = mergePreviewHeaderRows(headerRows.length ? headerRows : [rawRows[0]]);
+    const dataRows = (
+      firstDateRowIndex >= 0 ? rawRows.slice(firstDateRowIndex) : rawRows.slice(headerRows.length || 1)
+    ).filter((row) => row.some((cell) => cell.trim() !== ""));
+    if (!dataRows.length) {
+      return null;
+    }
+    return normalizeLooseSheetEditorPayload({
+      fields: Array.from({ length: Math.max(header.length, dataRows[0]?.length || 0, 1) }, (_, idx) => `col${idx + 1}`),
+      header,
+      rows: dataRows,
+      rowIds: dataRows.map((_, idx) => `ocr-structured-preview-${idx + 1}`),
+      source: "ocr_output_preview_structured",
+      warnings: ["ocr_preview_only"],
+    });
+  };
+
+  const applyExpandedCellCopyModeToPayload = (
+    payload: NormalizedEditorSheetPayload,
+    mode: ExpandedCellCopyMode = expandedCellCopyMode,
+  ): NormalizedEditorSheetPayload => {
+    const shouldCopy = mode === "enabled" || mode === "persisted";
+    if (!shouldCopy) {
+      return payload;
+    }
+    return {
+      ...payload,
+      rows: applyExpandedCellSameDaypartCopyToRows({
+        fields: payload.fields,
+        header: payload.header,
+        rows: payload.rows,
+      }),
+      cellConfidenceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
+      cellProvenanceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
+      ocrNumericCellItems: [],
+      ocrNumericCellSummary: blankOcrNumericCellSummary(),
+    };
+  };
+
+  const applyNormalizedSheetEditorPayload = (payload: NormalizedEditorSheetPayload) => {
+    ocrSheetBaselinePayloadRef.current = payload;
+    ocrSheetEditedSinceLoadRef.current = false;
+    const effectivePayload = applyExpandedCellCopyModeToPayload(payload);
+    setOcrSheetFields(effectivePayload.fields);
+    setOcrSheetHeader(effectivePayload.header);
+    setOcrSheetRows(effectivePayload.rows);
+    setOcrSheetRowIds(effectivePayload.rowIds);
+    setOcrSheetCellConfidenceRows(effectivePayload.cellConfidenceRows);
+    setOcrSheetCellProvenanceRows(effectivePayload.cellProvenanceRows);
+    setOcrSheetNumericCellItems(effectivePayload.ocrNumericCellItems);
+    setOcrSheetNumericCellSummary(effectivePayload.ocrNumericCellSummary);
+    setOcrSheetSource(effectivePayload.source);
+    setOcrSheetWarnings(effectivePayload.warnings);
+  };
+
+  useEffect(() => {
+    const baselinePayload = ocrSheetBaselinePayloadRef.current;
+    if (!baselinePayload || ocrSheetEditedSinceLoadRef.current) {
+      return;
+    }
+    const effectivePayload = applyExpandedCellCopyModeToPayload(baselinePayload, expandedCellCopyMode);
+    setOcrSheetFields(effectivePayload.fields);
+    setOcrSheetHeader(effectivePayload.header);
+    setOcrSheetRows(effectivePayload.rows);
+    setOcrSheetRowIds(effectivePayload.rowIds);
+    setOcrSheetCellConfidenceRows(effectivePayload.cellConfidenceRows);
+    setOcrSheetCellProvenanceRows(effectivePayload.cellProvenanceRows);
+    setOcrSheetNumericCellItems(effectivePayload.ocrNumericCellItems);
+    setOcrSheetNumericCellSummary(effectivePayload.ocrNumericCellSummary);
+    setOcrSheetSource(effectivePayload.source);
+    setOcrSheetWarnings(effectivePayload.warnings);
+  }, [expandedCellCopyMode]);
 
   const normalizeDraftSheetPayload = (payload?: DraftSheetPayload | null): NormalizedEditorSheetPayload => {
     const draftSheetJson =
       payload && typeof payload.draft_sheet_json === "object" && payload.draft_sheet_json
         ? payload.draft_sheet_json
         : null;
-    return normalizeSheetEditorPayload({
+    return normalizeCurrentSheetEditorPayload({
       fields: draftSheetJson?.fields ?? payload?.fields,
       header: draftSheetJson?.header ?? payload?.header,
       rows: draftSheetJson?.rows ?? payload?.rows,
       rowIds: draftSheetJson?.row_ids ?? draftSheetJson?.rowIds ?? payload?.row_ids,
+      cellConfidenceRows: draftSheetJson?.cell_confidence_rows ?? payload?.cell_confidence_rows,
+      cellProvenanceRows: draftSheetJson?.cell_provenance_rows ?? payload?.cell_provenance_rows,
+      ocrNumericCellItems: draftSheetJson?.ocr_numeric_cell_items ?? payload?.ocr_numeric_cell_items,
+      ocrNumericCellSummary: draftSheetJson?.ocr_numeric_cell_summary ?? payload?.ocr_numeric_cell_summary,
       source: String(draftSheetJson?.source || payload?.source || payload?.draft_state || "draft").trim() || "draft",
       warnings: [
         ...(Array.isArray(draftSheetJson?.warnings) ? draftSheetJson!.warnings! : []),
@@ -2710,7 +3731,119 @@ export default function OrderDetailPage() {
     });
   };
 
+  const buildReadonlySheetPreviewFromOcrOutput = (
+    payload?: OcrOutput | null,
+  ): NormalizedEditorSheetPayload | null => {
+    const editedHeader = Array.isArray(payload?.edited_table?.header)
+      ? payload!.edited_table!.header!.map((cell) => String(cell ?? ""))
+      : [];
+    const editedRows = Array.isArray(payload?.edited_table?.rows)
+      ? payload!.edited_table!.rows!
+      : [];
+    if (editedRows.length) {
+      return normalizeLooseSheetEditorPayload({
+        fields: Array.from(
+          { length: Math.max(editedHeader.length, editedRows[0]?.length || 0, 1) },
+          (_, idx) => `col${idx + 1}`,
+        ),
+        header: editedHeader,
+        rows: editedRows,
+        rowIds:
+          payload?.edited_table?.row_ids
+          ?? editedRows.map((_, idx) => `ocr-edited-preview-${idx + 1}`),
+        source: "ocr_output_preview",
+        warnings: ["ocr_preview_only"],
+      });
+    }
+    const structuredPreview = buildReadonlySheetPreviewFromStructuredTables(payload);
+    if (structuredPreview) {
+      return structuredPreview;
+    }
+    const tableRaw = typeof payload?.table_raw === "string" ? payload.table_raw.trim() : "";
+    if (!tableRaw) {
+      return null;
+    }
+    const parsedTable = extractLargestMarkdownTable(tableRaw);
+    if (!parsedTable || !parsedTable.rows.length) {
+      return null;
+    }
+    const columnCount = Math.max(
+      parsedTable.header.length,
+      parsedTable.rows.reduce((max, row) => Math.max(max, row.length), 0),
+      1,
+    );
+    return normalizeLooseSheetEditorPayload({
+      fields: Array.from({ length: columnCount }, (_, idx) => `col${idx + 1}`),
+      header:
+        parsedTable.header.length === columnCount
+          ? parsedTable.header
+          : Array.from({ length: columnCount }, (_, idx) => parsedTable.header[idx] ?? `列${idx + 1}`),
+      rows: parsedTable.rows,
+      rowIds: parsedTable.rows.map((_, idx) => `ocr-output-preview-${idx + 1}`),
+      source: "ocr_output_preview",
+      warnings: ["ocr_preview_only"],
+    });
+  };
+
+  const renderReadonlySheetPreview = (
+    preview: NormalizedEditorSheetPayload | null,
+    {
+      title,
+      note,
+      emptyMessage = "",
+      className = "ocr-candidate-preview",
+    }: {
+      title: string;
+      note: string;
+      emptyMessage?: string;
+      className?: string;
+    },
+  ) => {
+    if (!preview?.rows.length) {
+      return emptyMessage ? <p className="subtle ocr-remediation-empty">{emptyMessage}</p> : null;
+    }
+    return (
+      <div className={className}>
+        <p className="ocr-evidence-switch-title">{title}</p>
+        <p className="subtle">{note}</p>
+        <div className="ocr-sheet-wrap">
+          <table className="ocr-sheet-table ocr-sheet-table--readonly">
+            <thead>
+              <tr>
+                <th className="ocr-sheet-row-index ocr-sheet-sticky-top">#</th>
+                {preview.header.map((cell, idx) => (
+                  <th key={`${className}-header-${idx}`} className="ocr-sheet-sticky-top">
+                    {cell}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {preview.rows.map((row, rowIdx) => (
+                <tr
+                  key={`${className}-row-${rowIdx}`}
+                  className={[
+                    "ocr-sheet-row",
+                    rowIdx % 2 === 0 ? "ocr-sheet-row-date-a" : "ocr-sheet-row-date-b",
+                  ].join(" ")}
+                >
+                  <th className="ocr-sheet-row-index">{rowIdx + 1}</th>
+                  {preview.header.map((_, cellIdx) => (
+                    <td key={`${className}-cell-${rowIdx}-${cellIdx}`}>
+                      <div className="ocr-sheet-preview-cell">{row[cellIdx] ?? ""}</div>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
   const resetSheetReviewMeta = () => {
+    setOcrSheetProjection(null);
     setOcrSheetReviewState("");
     setOcrSheetCanApply(false);
     setOcrSheetCanConfirm(false);
@@ -2734,6 +3867,7 @@ export default function OrderDetailPage() {
     const confirmWarnings = Array.isArray(payload?.confirm_warnings)
       ? payload!.confirm_warnings!.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
+    setOcrSheetProjection(payload?.sheet_projection || null);
     setOcrSheetReviewState(String(payload?.review_state || "").trim());
     setOcrSheetCanApply(Boolean(payload?.can_apply));
     setOcrSheetCanConfirm(Boolean(payload?.can_confirm));
@@ -2800,6 +3934,7 @@ export default function OrderDetailPage() {
       processing_stage: !hasWorkflowState ? String(detail?.ocr_processing_stage || "").trim() : "",
       result_state: !hasWorkflowState ? String(detail?.ocr_result_state || "").trim() : "",
       confirmed_lines_retained: !hasWorkflowState && Boolean(detail?.ocr_confirmed_lines_retained),
+      sheet_projection: draftPayload?.sheet_projection || null,
     };
   };
 
@@ -2832,110 +3967,6 @@ export default function OrderDetailPage() {
     return null;
   };
 
-  const getSheetEditorPayloadFromRevision = (
-    revision: OcrEditRevision | null,
-  ): NormalizedEditorSheetPayload | null => {
-    if (!revision || revision.ui_mode !== "sheet" || !Array.isArray(revision.rows)) {
-      return null;
-    }
-    return normalizeSheetEditorPayload({
-      fields: revision.fields,
-      header: revision.header,
-      rows: revision.rows,
-      rowIds: revision.row_ids,
-      source:
-        revision.sheet_save_only || revision.sheet_save_mode === "exact"
-          ? "edited_sheet_exact"
-          : "edited_sheet",
-      warnings: [],
-    });
-  };
-
-  const isStructuralSheetField = (field: string): boolean => {
-    const normalized = String(field || "").trim();
-    return normalized === "date" || normalized === "date_mmdd" || normalized === "daypart" || normalized === "menu";
-  };
-
-  const canRebaseSavedSheetRevision = (
-    basePayload: NormalizedEditorSheetPayload,
-    revisionPayload: NormalizedEditorSheetPayload,
-  ): boolean => {
-    if (basePayload.fields.length !== revisionPayload.fields.length) {
-      return false;
-    }
-    if (basePayload.rows.length !== revisionPayload.rows.length) {
-      return false;
-    }
-    for (let idx = 0; idx < basePayload.fields.length; idx += 1) {
-      if ((basePayload.fields[idx] || "") !== (revisionPayload.fields[idx] || "")) {
-        return false;
-      }
-    }
-    if (
-      basePayload.rowIds.length === basePayload.rows.length
-      && revisionPayload.rowIds.length === revisionPayload.rows.length
-    ) {
-      for (let idx = 0; idx < basePayload.rowIds.length; idx += 1) {
-        if ((basePayload.rowIds[idx] || "") !== (revisionPayload.rowIds[idx] || "")) {
-          return false;
-        }
-      }
-    }
-    return true;
-  };
-
-  const rebaseSavedSheetRevisionOntoPayload = (
-    basePayload: NormalizedEditorSheetPayload,
-    revision: OcrEditRevision | null,
-  ): NormalizedEditorSheetPayload | null => {
-    const revisionPayload = getSheetEditorPayloadFromRevision(revision);
-    if (!revisionPayload) {
-      return basePayload.rows.length ? basePayload : null;
-    }
-    if (!basePayload.rows.length) {
-      return revisionPayload;
-    }
-    if (!canRebaseSavedSheetRevision(basePayload, revisionPayload)) {
-      return basePayload;
-    }
-    const revisionRowById = new Map<string, string[]>();
-    revisionPayload.rowIds.forEach((rowId, idx) => {
-      if (!rowId || idx >= revisionPayload.rows.length) return;
-      revisionRowById.set(rowId, revisionPayload.rows[idx]);
-    });
-    const rebasedRows = basePayload.rows.map((baseRow, rowIdx) => {
-      const baseRowId = basePayload.rowIds[rowIdx] || "";
-      const revisionRow =
-        revisionRowById.get(baseRowId) ||
-        (rowIdx < revisionPayload.rows.length ? revisionPayload.rows[rowIdx] : null);
-      if (!revisionRow) {
-        return [...baseRow];
-      }
-      const mergedRow = [...baseRow];
-      const limit = Math.min(mergedRow.length, revisionRow.length);
-      for (let colIdx = 0; colIdx < limit; colIdx += 1) {
-        const fieldKey = basePayload.fields[colIdx] || "";
-        const revisionValue = revisionRow[colIdx] ?? "";
-        if (isStructuralSheetField(fieldKey)) {
-          continue;
-        }
-        mergedRow[colIdx] = revisionValue;
-      }
-      return mergedRow;
-    });
-    return {
-      fields: [...basePayload.fields],
-      header: [...basePayload.header],
-      rows: rebasedRows,
-      rowIds: [...basePayload.rowIds],
-      source:
-        revision?.sheet_save_only || revision?.sheet_save_mode === "exact"
-          ? "edited_sheet_exact"
-          : "edited_sheet",
-      warnings: [...basePayload.warnings],
-    };
-  };
-
   const refreshOcrOutput = async (orderId: string) => {
     setOcrOutputMessage("OCR結果を取得中...");
     try {
@@ -2964,9 +3995,60 @@ export default function OrderDetailPage() {
     refreshOcrOutput(order.id);
   }, [order?.id]);
 
-  const loadWeekOptions = async (orderId: string) => {
-    setWeekOptionsLoading(true);
-    setWeekOptionsError("");
+  const resolveWeekDraftFromCanonicalSelection = (
+    currentDraft: string,
+    options: WeekOption[],
+    persistedWeekSource?: string | null,
+  ) => {
+    const normalizedCurrent = normalizeWeekValue(currentDraft);
+    const concreteCurrent = normalizeConcreteWeekValue(currentDraft);
+    const persistedWeekValue = normalizeWeekValue(persistedWeekSource || "");
+    const selectedOption = options.find((item) => item.selected && item.week_id);
+    const preserveDirtyWeekSelection = Boolean(
+      normalizedCurrent && normalizedCurrent !== persistedWeekValue,
+    );
+    if (preserveDirtyWeekSelection) {
+      return concreteCurrent || normalizedCurrent || currentDraft;
+    }
+    if (concreteCurrent) {
+      return concreteCurrent;
+    }
+    if (selectedOption?.week_id) {
+      return selectedOption.week_id;
+    }
+    return normalizedCurrent || "";
+  };
+
+  const getCanonicalWeekSelectionSource = (currentOrder?: OrderDetail | null) =>
+    normalizeWeekValue(
+      currentOrder?.persisted_week_value || currentOrder?.week_value || currentOrder?.week || "",
+    );
+
+  const getPendingStep1WeekSelection = (
+    currentWeekDraft: string,
+    rangeStart: string,
+    rangeEnd: string,
+  ) => {
+    const concreteCurrent = normalizeConcreteWeekValue(currentWeekDraft);
+    if (concreteCurrent) return concreteCurrent;
+    const explicitRange = normalizeConcreteWeekValue(
+      deriveWeekValueFromCalendarRange(rangeStart, rangeEnd),
+    );
+    if (explicitRange) return explicitRange;
+    return normalizeConcreteWeekValue(
+      deriveWeekValueFromCalendarDate(rangeStart || rangeEnd),
+    );
+  };
+
+  const loadWeekOptions = async (
+    orderId: string,
+    options: { silent?: boolean; persistedWeekSource?: string | null } = {},
+  ) => {
+    const { silent = false, persistedWeekSource } = options;
+    if (!silent) {
+      setWeekOptionsLoading(true);
+      setWeekOptionsError("");
+    }
     try {
       const res = await apiClient.get(`/orders/${orderId}/week-options`);
       const options = Array.isArray(res.data?.options)
@@ -2980,77 +4062,112 @@ export default function OrderDetailPage() {
             }))
             .filter((item) => item.week_id)
         : [];
+      const canonicalPersistedWeekSource =
+        normalizeWeekValue(persistedWeekSource ?? "") || getCanonicalWeekSelectionSource(order);
       setWeekOptions(options);
       setWeekDraft((current) => {
-        const selectedOption = options.find((item) => item.selected);
-        const normalizedCurrent = normalizeWeekValue(current);
-        const concreteCurrent = normalizeConcreteWeekValue(current);
-        const persistedWeekValue = normalizeWeekValue(
-          order?.persisted_week_value || order?.week_value || order?.week || "",
+        return resolveWeekDraftFromCanonicalSelection(
+          current,
+          options,
+          canonicalPersistedWeekSource,
         );
-        const preserveDirtyWeekSelection = Boolean(
-          normalizedCurrent && normalizedCurrent !== persistedWeekValue,
-        );
-        if (preserveDirtyWeekSelection) {
-          return concreteCurrent || normalizedCurrent || current;
-        }
-        if (concreteCurrent) {
-          return concreteCurrent;
-        }
-        if (selectedOption?.week_id) {
-          return selectedOption.week_id;
-        }
-        return "";
       });
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 404) {
         setWeekOptions([]);
-      } else {
-        setWeekOptionsError("週候補の取得に失敗しました。手入力で設定してください。");
+      } else if (!silent) {
+        setWeekOptionsError("週候補の取得に失敗しました。必要なら例外範囲を設定してください。");
       }
     } finally {
-      setWeekOptionsLoading(false);
+      if (!silent) {
+        setWeekOptionsLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     if (!order?.id) return;
-    loadWeekOptions(order.id);
+    loadWeekOptions(order.id, { persistedWeekSource: getCanonicalWeekSelectionSource(order) });
   }, [order?.id]);
+
+  useEffect(() => {
+    const nextWeekDraft = resolveWeekDraftFromCanonicalSelection(
+      weekDraft,
+      weekOptions,
+      getCanonicalWeekSelectionSource(order),
+    );
+    if (nextWeekDraft && nextWeekDraft !== weekDraft) {
+      setWeekDraft(nextWeekDraft);
+    }
+  }, [order?.persisted_week_value, order?.week, order?.week_value, weekDraft, weekOptions]);
+
+  useEffect(() => {
+    const normalizedWeek = normalizeConcreteWeekValue(weekDraft);
+    const match = normalizedWeek.match(/^\d{4}-\d{2}@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+    if (!match) {
+      setCustomWeekRangeStart("");
+      setCustomWeekRangeEnd("");
+      return;
+    }
+    setCustomWeekRangeStart(match[1]);
+    setCustomWeekRangeEnd(match[2]);
+  }, [weekDraft]);
 
   const refreshOrderWorkspace = async (
     options: {
       preserveSelections?: boolean;
       reloadSheet?: boolean;
+      reloadOcrPages?: boolean;
       reloadHistory?: boolean;
       reloadBags?: boolean;
+      reloadWeekOptions?: boolean;
       silent?: boolean;
+      force?: boolean;
     } = {},
   ) => {
     const {
       preserveSelections = true,
       reloadSheet = false,
+      reloadOcrPages = false,
       reloadHistory = false,
       reloadBags = false,
+      reloadWeekOptions = true,
+      force = false,
     } = options;
     if (!id) return null;
-    if (workspaceRefreshPromiseRef.current) {
+    if (!force && workspaceRefreshPromiseRef.current) {
       return workspaceRefreshPromiseRef.current;
     }
     const orderId = String(id);
+    const refreshToken = workspaceRefreshTokenRef.current + 1;
+    workspaceRefreshTokenRef.current = refreshToken;
     const refreshPromise = (async () => {
       const nextOrder = await loadOrderDetail(orderId, { preserveSelections });
-      await loadWeekOptions(orderId);
+      const followupTasks: Promise<unknown>[] = [];
+      if (reloadWeekOptions) {
+        followupTasks.push(
+          loadWeekOptions(orderId, {
+            silent: true,
+            persistedWeekSource: getCanonicalWeekSelectionSource(nextOrder),
+          }),
+        );
+      }
       if (reloadHistory) {
-        await loadOcrHistory({ silent: true });
-        await loadOrderHistory({ silent: true });
+        followupTasks.push(loadOcrHistory({ silent: true }));
+        followupTasks.push(loadOrderHistory({ silent: true }));
       }
       if (reloadSheet) {
-        await loadOcrSheet({ silent: true });
+        followupTasks.push(loadOcrSheet({ silent: true }));
+      }
+      if (reloadOcrPages) {
+        followupTasks.push(loadOcrPages({ silent: true, force: true }));
       }
       if (reloadBags) {
-        await loadBags();
+        followupTasks.push(loadBags());
+      }
+      if (followupTasks.length) {
+        await Promise.all(followupTasks);
       }
       return nextOrder;
     })();
@@ -3058,7 +4175,10 @@ export default function OrderDetailPage() {
     try {
       return await refreshPromise;
     } finally {
-      if (workspaceRefreshPromiseRef.current === refreshPromise) {
+      if (
+        workspaceRefreshPromiseRef.current === refreshPromise &&
+        workspaceRefreshTokenRef.current === refreshToken
+      ) {
         workspaceRefreshPromiseRef.current = null;
       }
     }
@@ -3070,6 +4190,7 @@ export default function OrderDetailPage() {
       reloadSheet?: boolean;
       reloadHistory?: boolean;
       reloadBags?: boolean;
+      reloadWeekOptions?: boolean;
     } = {},
     failureMessage?: string,
   ) => {
@@ -3083,6 +4204,14 @@ export default function OrderDetailPage() {
 
   useEffect(() => {
     if (!id) return;
+    const hasUnsavedFacilitySelection = Boolean(
+      facility.trim() && facility.trim() !== String(order?.facility || "").trim(),
+    );
+    const hasUnsavedWeekSelection = Boolean(
+      getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd)
+      && getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd)
+        !== normalizeConcreteWeekValue(getCanonicalWeekSelectionSource(order)),
+    );
     const scheduleRefresh = () => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         return;
@@ -3093,7 +4222,13 @@ export default function OrderDetailPage() {
       if (lineEditsDirty) {
         return;
       }
-      void safeRefreshOrderWorkspace({ preserveSelections: true }, "最新状態の取得に失敗しました。");
+      if (hasUnsavedFacilitySelection || hasUnsavedWeekSelection || step1Saving) {
+        return;
+      }
+      void safeRefreshOrderWorkspace(
+        { preserveSelections: true, reloadWeekOptions: false },
+        "最新状態の取得に失敗しました。",
+      );
     };
     const handleFocus = () => {
       scheduleRefresh();
@@ -3106,11 +4241,6 @@ export default function OrderDetailPage() {
     };
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    const tick = () => {
-      scheduleRefresh();
-      orderRefreshTimerRef.current = window.setTimeout(tick, 15000);
-    };
-    orderRefreshTimerRef.current = window.setTimeout(tick, 15000);
     return () => {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -3123,6 +4253,7 @@ export default function OrderDetailPage() {
     id,
     reparsePending,
     lineEditsDirty,
+    step1Saving,
     order?.facility,
     order?.persisted_week_value,
     order?.week_value,
@@ -3132,7 +4263,7 @@ export default function OrderDetailPage() {
   ]);
 
   const loadOcrSheet = async (
-    options: { silent?: boolean } = {},
+    options: { silent?: boolean; strategy?: QuantityAssignmentStrategy; force?: boolean } = {},
   ): Promise<{
     fields: string[];
     header: string[];
@@ -3141,21 +4272,34 @@ export default function OrderDetailPage() {
     source: string;
   } | null> => {
   if (!order) return null;
-  if (ocrSheetLoading) return null;
-  const { silent = false } = options;
+  const { silent = false, strategy = quantityAssignmentStrategy, force = false } = options;
+  if (ocrSheetLoading && !force) return null;
+    const requestSeq = ocrSheetRequestSeqRef.current + 1;
+    ocrSheetRequestSeqRef.current = requestSeq;
     if (!silent) {
       setOcrSheetMessage("シートを取得中...");
     }
     setOcrSheetAutoRetryBlocked(false);
+    setOcrSheetLoadSettled(false);
     setOcrSheetLoading(true);
     try {
-      const res = await apiClient.get(`/orders/${order.id}/draft-sheet`);
+      const res = await apiClient.get(`/orders/${order.id}/draft-sheet`, {
+        params: {
+          compact: 1,
+          quantity_assignment_strategy: strategy === "hakodate" ? "hakodate" : "legacy",
+        },
+        timeout: strategy === "hakodate" ? 120000 : undefined,
+      });
       const payload = (res.data || {}) as DraftSheetPayload;
       const normalizedPayload = normalizeDraftSheetPayload(payload);
-      const effectivePayload =
-        rebaseSavedSheetRevisionOntoPayload(normalizedPayload, latestSavedSheetRevisionRef.current) ||
-        normalizedPayload;
-      applyNormalizedSheetEditorPayload(effectivePayload);
+      if (requestSeq !== ocrSheetRequestSeqRef.current || requestSeq < ocrSheetAppliedSeqRef.current) {
+        return ocrSheetBaselinePayloadRef.current;
+      }
+      if (silent && ocrSheetEditedSinceLoadRef.current) {
+        return ocrSheetBaselinePayloadRef.current;
+      }
+      ocrSheetAppliedSeqRef.current = requestSeq;
+      applyNormalizedSheetEditorPayload(normalizedPayload);
       applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, payload));
       setOcrSheetAutoRetryBlocked(false);
       if (!silent) {
@@ -3164,36 +4308,20 @@ export default function OrderDetailPage() {
         );
         setOcrSheetMessage(
           reviewStateLabel
-            ? `${reviewStateLabel}のシートを読み込みました。`
-            : effectivePayload.rows.length
-              ? effectivePayload.source.startsWith("edited_sheet")
+            ? `${strategy === "hakodate" ? "箱館方式" : "旧方式"}: ${reviewStateLabel}のシートを読み込みました。`
+            : normalizedPayload.rows.length
+              ? normalizedPayload.source.startsWith("edited_sheet")
                 ? "保存済みシートを読み込みました。"
-                : "シートを取得しました。"
+                : `${strategy === "hakodate" ? "箱館方式" : "旧方式"}のシートを取得しました。`
               : "シートは取得しましたが、編集対象の行がありません。",
         );
       }
-      return effectivePayload;
+      return normalizedPayload;
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
-      const savedRevisionPayload = getSheetEditorPayloadFromRevision(latestSavedSheetRevisionRef.current);
-      if (savedRevisionPayload) {
-        applyNormalizedSheetEditorPayload(savedRevisionPayload);
-        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, null));
-        setOcrSheetAutoRetryBlocked(false);
-        if (!silent) {
-          setOcrSheetMessage("保存済みシートを読み込みました。");
-        }
-        return savedRevisionPayload;
-      }
       setOcrSheetAutoRetryBlocked(true);
       resetSheetReviewMeta();
-      setOcrSheetFields([]);
-      setOcrSheetHeader([]);
-      setOcrSheetRows([]);
-      setOcrSheetRowIds([]);
-      setOcrSheetSource("");
-      setOcrSheetWarnings([]);
       if (!silent || status === 400 || status === 404) {
         if (status === 404) {
           setOcrSheetMessage("シートを取得できませんでした。施設設定またはメニューを確認してください。");
@@ -3223,7 +4351,52 @@ export default function OrderDetailPage() {
       }
       return null;
     } finally {
-      setOcrSheetLoading(false);
+      if (requestSeq === ocrSheetRequestSeqRef.current) {
+        setOcrSheetLoading(false);
+        setOcrSheetLoadSettled(true);
+      }
+    }
+  };
+
+  const switchQuantityAssignmentStrategy = (strategy: QuantityAssignmentStrategy) => {
+    if (strategy === quantityAssignmentStrategy) return;
+    setQuantityAssignmentStrategy(strategy);
+    void loadOcrSheet({ strategy, force: true });
+  };
+
+  const loadCandidateSheetPreview = async (options: { silent?: boolean } = {}): Promise<NormalizedEditorSheetPayload | null> => {
+    if (!order) return null;
+    if (candidateSheetPreviewLoading) return null;
+    const { silent = false } = options;
+    if (!silent) {
+      setCandidateSheetPreviewMessage("候補シートを取得中...");
+    }
+    setCandidateSheetPreviewLoading(true);
+    try {
+      const res = await apiClient.get(`/orders/${order.id}/draft-sheet/candidate-preview`);
+      const payload = normalizeDraftSheetPayload((res.data || {}) as DraftSheetPayload);
+      setCandidateSheetPreview(payload);
+      setCandidateSheetPreviewMessage(
+        payload.rows.length ? "" : "候補シートは取得しましたが、表示できる行がありません。",
+      );
+      return payload;
+    } catch (err: any) {
+      const status = err?.response?.status;
+      setCandidateSheetPreview(null);
+      if (status === 404) {
+        setCandidateSheetPreviewMessage(silent ? "" : "候補シートはまだありません。");
+      } else if (status === 409) {
+        setCandidateSheetPreviewMessage(
+          silent ? "" : "候補シートはまだ表示できません。最新状態を読み直してください。",
+        );
+      } else {
+        setCandidateSheetPreviewMessage(
+          silent ? "" : "候補シートの取得に失敗しました。",
+        );
+      }
+      return null;
+    } finally {
+      setCandidateSheetPreviewLoading(false);
     }
   };
 
@@ -3234,7 +4407,7 @@ export default function OrderDetailPage() {
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で施設設定を完了してください。");
       return;
     }
-    if (!normalizeConcreteWeekValue(order.persisted_week_value || order.week || "")) {
+    if (!normalizeConcreteWeekValue(order.persisted_week_value || order.week_value || order.week || "")) {
       setOcrSheetAutoRetryBlocked(true);
       setOcrSheetMessage("シートを生成できません。先に Step1（注文書）で週を設定してください。");
       return;
@@ -3261,23 +4434,6 @@ export default function OrderDetailPage() {
       latestSavedSheetRevisionRef.current = latestSheetRevision;
       setOcrHistoryLatest(latest);
       setOcrHistoryRows(revisions);
-      if (ocrSheetRows.length) {
-        const currentSheetPayload = normalizeSheetEditorPayload({
-          fields: ocrSheetFields,
-          header: ocrSheetHeader,
-          rows: ocrSheetRows,
-          rowIds: ocrSheetRowIds,
-          source: ocrSheetSource,
-          warnings: ocrSheetWarnings,
-        });
-        const rebasedPayload = rebaseSavedSheetRevisionOntoPayload(
-          currentSheetPayload,
-          latestSheetRevision,
-        );
-        if (rebasedPayload) {
-          applyNormalizedSheetEditorPayload(rebasedPayload);
-        }
-      }
       if (!silent) {
         setOcrHistoryMessage(
           revisions.length
@@ -3344,10 +4500,10 @@ export default function OrderDetailPage() {
     loadOrderHistory({ silent: true });
   }, [order?.id]);
 
-  const currentDraftRevisionId = () =>
+  const currentSheetRevisionIdForMutation = () =>
     String(
-      latestSavedSheetRevisionRef.current?.revision_id ||
-        order?.ocr_draft_revision_id ||
+      order?.workflow_state?.current_sheet_revision_id ||
+        order?.current_sheet_revision_id ||
         "",
     ).trim();
 
@@ -3431,13 +4587,27 @@ export default function OrderDetailPage() {
     return next;
   };
 
-const loadOcrPages = async () => {
-    if (!order) return;
-    if (ocrPagesLoading) return;
+  const loadOcrPages = async (
+    options: { silent?: boolean; force?: boolean } = {},
+  ) => {
+    const currentOrder = authoritativeOrderRef.current || order;
+    const orderId = String(currentOrder?.id || "").trim();
+    if (!orderId) return;
+    const { silent = false, force = false } = options;
+    if (ocrPagesLoading && !force) return;
+    const requestSeq = ocrPagesRequestSeqRef.current + 1;
+    ocrPagesRequestSeqRef.current = requestSeq;
     setOcrPagesLoading(true);
-    setOcrPagesMessage("OCRページを取得中...");
+    if (!silent || !ocrPages.length) {
+      setOcrPagesMessage("OCRページを取得中...");
+    }
     try {
-      const res = await apiClient.get(`/orders/${order.id}/ocr-pages`);
+      const res = await apiClient.get(`/orders/${orderId}/ocr-pages`, {
+        params: { preview_only: 1 },
+      });
+      if (requestSeq < ocrPagesRequestSeqRef.current) {
+        return;
+      }
       if (res.status === 202 || res.data?.pending) {
         setOcrPagesMessage("OCRページは処理中です。");
         setOcrPages([]);
@@ -3476,15 +4646,28 @@ const loadOcrPages = async () => {
       setGridColumnEdgesDraft(metaColumnEdges ? [...metaColumnEdges] : null);
       setGridRowEdges(metaRowEdges ? [...metaRowEdges] : null);
       setGridRowEdgesDraft(metaRowEdges ? [...metaRowEdges] : null);
+      ocrPreviewRefreshKeyRef.current = [
+        orderId,
+        String(currentOrder?.current_sheet_revision_id || ""),
+        String(currentOrder?.ocr_updated_at || ""),
+        String(currentOrder?.ocr_result_state || ""),
+        String(currentOrder?.workflow_state?.current_sheet_revision_id || ""),
+        String(currentOrder?.workflow_state?.active_evidence_run_id || ""),
+        String(currentOrder?.workflow_state?.candidate_evidence_run_id || ""),
+        String(Boolean(currentOrder?.workflow_state?.candidate_prompt_visible)),
+        String(currentOrder?.workflow_state?.reparse_state?.status || ""),
+      ].join("|");
       if (pages.length) {
         const table = extractFirstTable(pages);
         if (table) {
+          ocrPageSelectionModeRef.current = "auto";
           setActiveOcrPageIndex(table.pageArrayIndex);
           setOcrTableHeader(table.header);
           setOcrTableRows(table.rows.map((row) => [...row]));
           setOcrTablePageIndex(table.pageIndex);
           setOcrTableMessage("");
         } else {
+          ocrPageSelectionModeRef.current = "auto";
           setActiveOcrPageIndex(0);
           setTableFromPage(pages[0], 0);
         }
@@ -3500,9 +4683,13 @@ const loadOcrPages = async () => {
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
         setOcrTableMessage("編集できる表が見つかりません。");
+        ocrPageSelectionModeRef.current = "auto";
         setActiveOcrPageIndex(0);
       }
     } catch (err: any) {
+      if (requestSeq < ocrPagesRequestSeqRef.current) {
+        return;
+      }
       const status = err?.response?.status;
       setOcrPagesMessage(status === 404 ? "OCRページが見つかりません。" : "OCRページの取得に失敗しました。");
       setOcrPages([]);
@@ -3518,9 +4705,12 @@ const loadOcrPages = async () => {
       setOcrTableRows([]);
       setOcrTablePageIndex(null);
       setOcrTableMessage("");
+      ocrPageSelectionModeRef.current = "auto";
       setActiveOcrPageIndex(0);
     } finally {
-      setOcrPagesLoading(false);
+      if (requestSeq === ocrPagesRequestSeqRef.current) {
+        setOcrPagesLoading(false);
+      }
     }
   };
 
@@ -3574,15 +4764,63 @@ const loadOcrPages = async () => {
     }
   };
 
-  const selectOcrPage = (pageIndex: number) => {
+  const selectOcrPage = (pageIndex: number, options?: { manual?: boolean }) => {
+    ocrPageSelectionModeRef.current = options?.manual === false ? "auto" : "manual";
     setActiveOcrPageIndex(pageIndex);
     setTableFromPage(ocrPages[pageIndex], pageIndex);
   };
 
   useEffect(() => {
     if (!order?.id) return;
-    loadOcrPages();
+    void loadOcrPages({ silent: true, force: true });
   }, [order?.id]);
+
+  useEffect(() => {
+    if (activeStep !== 1) return;
+    const currentOrder = authoritativeOrderRef.current || order;
+    if (!currentOrder?.id) return;
+    const normalizedStatus = String(currentOrder.ocr_status || "").trim().toLowerCase();
+    const normalizedResultState = String(currentOrder.ocr_result_state || "")
+      .trim()
+      .toLowerCase();
+    const normalizedReparseStatus = String(currentOrder.workflow_state?.reparse_state?.status || "")
+      .trim()
+      .toLowerCase();
+    const evidenceReady =
+      normalizedStatus === "done"
+      || normalizedResultState === "evidence_ready"
+      || normalizedResultState === "done"
+      || normalizedReparseStatus === "done";
+    if (!evidenceReady) return;
+    const nextRefreshKey = [
+      currentOrder.id,
+      String(currentOrder.current_sheet_revision_id || ""),
+      String(currentOrder.ocr_updated_at || ""),
+      String(currentOrder.ocr_result_state || ""),
+      String(currentOrder.workflow_state?.current_sheet_revision_id || ""),
+      String(currentOrder.workflow_state?.active_evidence_run_id || ""),
+      String(currentOrder.workflow_state?.candidate_evidence_run_id || ""),
+      String(Boolean(currentOrder.workflow_state?.candidate_prompt_visible)),
+      String(currentOrder.workflow_state?.reparse_state?.status || ""),
+    ].join("|");
+    if (ocrPreviewRefreshKeyRef.current === nextRefreshKey) {
+      return;
+    }
+    ocrPreviewRefreshKeyRef.current = nextRefreshKey;
+    void loadOcrPages({ silent: true, force: true });
+  }, [
+    activeStep,
+    order?.id,
+    order?.current_sheet_revision_id,
+    order?.ocr_updated_at,
+    order?.ocr_status,
+    order?.ocr_result_state,
+    order?.workflow_state?.current_sheet_revision_id,
+    order?.workflow_state?.active_evidence_run_id,
+    order?.workflow_state?.candidate_evidence_run_id,
+    order?.workflow_state?.candidate_prompt_visible,
+    order?.workflow_state?.reparse_state?.status,
+  ]);
 
   useEffect(() => {
     if (activeStep !== 1 && ocrEditMode) {
@@ -3621,11 +4859,195 @@ const loadOcrPages = async () => {
     loadBags();
   }, [order?.id]);
 
+  useEffect(() => {
+    const handlePointerRelease = () => {
+      ocrSheetSelectionPointerActiveRef.current = false;
+    };
+    window.addEventListener("mouseup", handlePointerRelease);
+    return () => window.removeEventListener("mouseup", handlePointerRelease);
+  }, []);
+
+  useEffect(() => {
+    if (!ocrSheetRows.length) {
+      setOcrSheetSelection(null);
+      setOcrSheetDropTarget(null);
+      setFocusedSheetCell(null);
+      return;
+    }
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    setOcrSheetSelection((prev) => {
+      if (!prev) return prev;
+      return {
+        anchorRowIndex: Math.min(prev.anchorRowIndex, ocrSheetRows.length - 1),
+        anchorCellIndex: Math.min(prev.anchorCellIndex, columnCount - 1),
+        focusRowIndex: Math.min(prev.focusRowIndex, ocrSheetRows.length - 1),
+        focusCellIndex: Math.min(prev.focusCellIndex, columnCount - 1),
+      };
+    });
+    setFocusedSheetCell((prev) => {
+      if (!prev) return prev;
+      return {
+        rowIndex: Math.min(prev.rowIndex, ocrSheetRows.length - 1),
+        cellIndex: Math.min(prev.cellIndex, columnCount - 1),
+      };
+    });
+  }, [ocrSheetHeader, ocrSheetRows]);
+
+  const updateOcrSheetTouchedCellMetadata = (
+    touchedCells: OcrSheetTouchedCell[],
+    provenanceValue: string = "user_edit",
+  ) => {
+    const cells = dedupeOcrSheetTouchedCells(touchedCells);
+    if (!cells.length) return;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const cellKeys = new Set(cells.map((cell) => `${cell.rowIndex}:${cell.cellIndex}`));
+    setOcrSheetCellConfidenceRows((prev) => {
+      const next = normalizeSheetCellMetadataRows(prev, ocrSheetRows.length, columnCount);
+      for (const { rowIndex, cellIndex } of cells) {
+        if (rowIndex >= next.length || cellIndex >= next[rowIndex].length) continue;
+        next[rowIndex][cellIndex] = "";
+      }
+      return next;
+    });
+    setOcrSheetCellProvenanceRows((prev) => {
+      const next = normalizeSheetCellMetadataRows(prev, ocrSheetRows.length, columnCount);
+      for (const { rowIndex, cellIndex } of cells) {
+        if (rowIndex >= next.length || cellIndex >= next[rowIndex].length) continue;
+        next[rowIndex][cellIndex] = provenanceValue;
+      }
+      return next;
+    });
+    const nextNumericItems = ocrSheetNumericCellItems.filter((item) => {
+      if (normalizeOcrNumericCellClassification(item.classification) !== "accepted") {
+        return true;
+      }
+      const rowIndex = typeof item.target_row_index === "number" ? item.target_row_index : null;
+      const cellIndex = typeof item.target_col_index === "number" ? item.target_col_index : null;
+      if (rowIndex == null || cellIndex == null) return true;
+      return !cellKeys.has(`${rowIndex}:${cellIndex}`);
+    });
+    setOcrSheetNumericCellItems(nextNumericItems);
+    setOcrSheetNumericCellSummary(rebuildOcrNumericCellSummary(nextNumericItems, ocrSheetRawNumericCount));
+  };
+
+  const clearOcrSheetOverlayState = () => {
+    ocrSheetEditedSinceLoadRef.current = true;
+    setOcrSheetCellConfidenceRows([]);
+    setOcrSheetCellProvenanceRows([]);
+    setOcrSheetNumericCellItems([]);
+    setOcrSheetNumericCellSummary(blankOcrNumericCellSummary());
+  };
+
+  const adoptVisibleOcrOverlayItems = (
+    items: OcrVisibleOverlayItem[],
+    message: string,
+  ): { adopted: number; nextRows: string[][] } => {
+    const dedupedByCell = new Map<string, OcrVisibleOverlayItem>();
+    for (const item of items) {
+      const rowIndex = Number(item?.target_row_index);
+      const cellIndex = Number(item?.target_col_index);
+      const value = String(item?.value ?? "").trim();
+      const classification = normalizeOcrNumericCellClassification(item?.classification);
+      if (
+        !Number.isInteger(rowIndex)
+        || rowIndex < 0
+        || !Number.isInteger(cellIndex)
+        || cellIndex < 0
+        || !value
+        || !classification
+      ) {
+        continue;
+      }
+      if (String(ocrSheetRows[rowIndex]?.[cellIndex] ?? "").trim()) {
+        continue;
+      }
+      dedupedByCell.set(`${rowIndex}:${cellIndex}`, {
+        ...item,
+        target_row_index: rowIndex,
+        target_col_index: cellIndex,
+        value,
+        classification,
+      });
+    }
+    const adoptableItems = Array.from(dedupedByCell.values());
+    if (!adoptableItems.length) {
+      return { adopted: 0, nextRows: ocrSheetRows };
+    }
+    ocrSheetEditedSinceLoadRef.current = true;
+    const nextRows = ocrSheetRows.map((row) => [...row]);
+    const touchedCells: OcrSheetTouchedCell[] = [];
+    for (const item of adoptableItems) {
+      while (nextRows.length <= item.target_row_index) {
+        nextRows.push([]);
+      }
+      while (nextRows[item.target_row_index].length <= item.target_col_index) {
+        nextRows[item.target_row_index].push("");
+      }
+      nextRows[item.target_row_index][item.target_col_index] = item.value;
+      touchedCells.push({ rowIndex: item.target_row_index, cellIndex: item.target_col_index });
+    }
+    const dedupedTouchedCells = dedupeOcrSheetTouchedCells(touchedCells);
+    const touchedCellKeys = new Set(dedupedTouchedCells.map((cell) => `${cell.rowIndex}:${cell.cellIndex}`));
+    const rowCount = nextRows.length;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, nextRows), 1);
+    setOcrSheetRows(nextRows);
+    setOcrSheetCellConfidenceRows((prev) => {
+      const next = normalizeSheetCellMetadataRows(prev, rowCount, columnCount);
+      for (const item of adoptableItems) {
+        if (item.target_row_index >= next.length || item.target_col_index >= next[item.target_row_index].length) {
+          continue;
+        }
+        next[item.target_row_index][item.target_col_index] = normalizeOcrCellConfidenceTier(item.confidence_tier) || "";
+      }
+      return next;
+    });
+    setOcrSheetCellProvenanceRows((prev) => {
+      const next = normalizeSheetCellMetadataRows(prev, rowCount, columnCount);
+      for (const item of adoptableItems) {
+        if (item.target_row_index >= next.length || item.target_col_index >= next[item.target_row_index].length) {
+          continue;
+        }
+        next[item.target_row_index][item.target_col_index] = "ocr_overlay_adopted";
+      }
+      return next;
+    });
+    const nextNumericItems = [
+      ...ocrSheetNumericCellItems.filter((item) => {
+        const rowIndex = typeof item.target_row_index === "number" ? item.target_row_index : null;
+        const cellIndex = typeof item.target_col_index === "number" ? item.target_col_index : null;
+        if (rowIndex == null || cellIndex == null) return true;
+        return !touchedCellKeys.has(`${rowIndex}:${cellIndex}`);
+      }),
+      ...adoptableItems.map((item) => ({
+        ...item,
+        classification: "accepted" as const,
+        confidence_tier: normalizeOcrCellConfidenceTier(item.confidence_tier) || null,
+        reason: "overlay_adopted",
+      })),
+    ];
+    setOcrSheetNumericCellItems(nextNumericItems);
+    setOcrSheetNumericCellSummary(rebuildOcrNumericCellSummary(nextNumericItems, ocrSheetRawNumericCount));
+    setOcrTableMessage(message);
+    return { adopted: adoptableItems.length, nextRows };
+  };
+
+  const markOcrSheetEdited = (
+    options: { preserveOverlay?: boolean; touchedCells?: OcrSheetTouchedCell[] } = {},
+  ) => {
+    ocrSheetEditedSinceLoadRef.current = true;
+    if (options.preserveOverlay) {
+      updateOcrSheetTouchedCellMetadata(options.touchedCells || []);
+      return;
+    }
+    clearOcrSheetOverlayState();
+  };
+
   const updateOcrTableCell = (
     rowIndex: number,
     cellIndex: number,
     value: string,
   ) => {
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells: [{ rowIndex, cellIndex }] });
     setOcrSheetRows((prev) => {
       const next = prev.map((row) => [...row]);
       while (next.length <= rowIndex) {
@@ -3639,14 +5061,684 @@ const loadOcrPages = async () => {
     });
   };
 
+  const applySelectedOcrSheetColumnFill = () => {
+    const targetColumnIndex = Number(ocrSheetColumnFillTarget);
+    const fillValue = String(ocrSheetColumnFillValue ?? "").trim();
+    if (!Number.isInteger(targetColumnIndex) || targetColumnIndex < 0 || !ocrSheetRows.length || !fillValue) {
+      return false;
+    }
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    if (targetColumnIndex >= columnCount) {
+      return false;
+    }
+    const touchedCells = Array.from({ length: ocrSheetRows.length }, (_, rowIndex) => ({
+      rowIndex,
+      cellIndex: targetColumnIndex,
+    }));
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) =>
+      prev.map((row) => {
+        const clone = [...row];
+        while (clone.length < columnCount) clone.push("");
+        clone[targetColumnIndex] = fillValue;
+        return clone;
+      }),
+    );
+    const targetLabel = ocrSheetHeaders[targetColumnIndex] || `列${targetColumnIndex + 1}`;
+    setOcrTableMessage(`列 ${targetLabel} に ${fillValue || "空欄"} を一括入力しました。`);
+    return true;
+  };
+
   const focusOcrSheetRow = (rowIndex: number) => {
+    ocrPageSelectionModeRef.current = "auto";
     setFocusedSheetRowIndex(rowIndex);
+  };
+
+  const focusOcrSheetCell = (
+    rowIndex: number,
+    cellIndex: number,
+    collapseSelection: boolean = true,
+  ) => {
+    focusOcrSheetRow(rowIndex);
+    setFocusedSheetCell({ rowIndex, cellIndex });
+    if (collapseSelection) {
+      setOcrSheetSelection({
+        anchorRowIndex: rowIndex,
+        anchorCellIndex: cellIndex,
+        focusRowIndex: rowIndex,
+        focusCellIndex: cellIndex,
+      });
+    }
+  };
+
+  const handleOcrSheetCellFocus = (rowIndex: number, cellIndex: number) => {
+    focusOcrSheetRow(rowIndex);
+    setFocusedSheetCell({ rowIndex, cellIndex });
+    if (!isOcrSheetCellWithinSelection(ocrSheetSelection, rowIndex, cellIndex)) {
+      setOcrSheetSelection({
+        anchorRowIndex: rowIndex,
+        anchorCellIndex: cellIndex,
+        focusRowIndex: rowIndex,
+        focusCellIndex: cellIndex,
+      });
+    }
+  };
+
+  const moveFocusedOcrSheetCell = (rowDelta: number, cellDelta: number) => {
+    if (!ocrSheetRows.length) return;
+    const fallbackRowIndex = focusedSheetRowIndex ?? 0;
+    const fallbackCellIndex = focusedSheetCell?.cellIndex ?? 0;
+    const nextRowIndex = Math.min(
+      Math.max((focusedSheetCell?.rowIndex ?? fallbackRowIndex) + rowDelta, 0),
+      Math.max(ocrSheetRows.length - 1, 0),
+    );
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const nextCellIndex = Math.min(
+      Math.max(fallbackCellIndex + cellDelta, 0),
+      Math.max(columnCount - 1, 0),
+    );
+    focusOcrSheetCell(nextRowIndex, nextCellIndex);
+    const refKey = `${nextRowIndex}:${nextCellIndex}`;
+    requestAnimationFrame(() => {
+      const nextInput = ocrSheetCellRefs.current[refKey];
+      if (nextInput) {
+        nextInput.focus();
+        nextInput.select();
+      }
+    });
+  };
+
+  const extendOcrSheetSelection = (rowDelta: number, cellDelta: number) => {
+    if (!ocrSheetRows.length) return;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    let nextRowIndex = 0;
+    let nextCellIndex = 0;
+    setOcrSheetSelection((prev) => {
+      const base = prev || {
+        anchorRowIndex: focusedSheetCell?.rowIndex ?? focusedSheetRowIndex ?? 0,
+        anchorCellIndex: focusedSheetCell?.cellIndex ?? 0,
+        focusRowIndex: focusedSheetCell?.rowIndex ?? focusedSheetRowIndex ?? 0,
+        focusCellIndex: focusedSheetCell?.cellIndex ?? 0,
+      };
+      nextRowIndex = Math.min(
+        Math.max(base.focusRowIndex + rowDelta, 0),
+        Math.max(ocrSheetRows.length - 1, 0),
+      );
+      nextCellIndex = Math.min(
+        Math.max(base.focusCellIndex + cellDelta, 0),
+        Math.max(columnCount - 1, 0),
+      );
+      return {
+        ...base,
+        focusRowIndex: nextRowIndex,
+        focusCellIndex: nextCellIndex,
+      };
+    });
+    setFocusedSheetCell({ rowIndex: nextRowIndex, cellIndex: nextCellIndex });
+    focusOcrSheetRow(nextRowIndex);
+    requestAnimationFrame(() => {
+      const nextInput = ocrSheetCellRefs.current[`${nextRowIndex}:${nextCellIndex}`];
+      if (nextInput) {
+        nextInput.focus();
+        nextInput.select();
+      }
+    });
+  };
+
+  const selectAllOcrSheetCells = () => {
+    if (!ocrSheetRows.length) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    setOcrSheetSelection({
+      anchorRowIndex: 0,
+      anchorCellIndex: 0,
+      focusRowIndex: Math.max(ocrSheetRows.length - 1, 0),
+      focusCellIndex: Math.max(columnCount - 1, 0),
+    });
+    focusOcrSheetCell(0, 0, false);
+    requestAnimationFrame(() => {
+      const firstInput = ocrSheetCellRefs.current["0:0"];
+      if (firstInput) {
+        firstInput.focus();
+        firstInput.select();
+      }
+    });
+    return true;
+  };
+
+  const readOcrSheetSelectionMatrix = (selection: OcrSheetCellSelection | null) => {
+    const selectionBounds = getOcrSheetSelectionBounds(selection);
+    if (!selectionBounds) return null;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    return Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+      Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => {
+        const sourceRow = selectionBounds.topRowIndex + rowOffset;
+        const sourceCell = selectionBounds.leftCellIndex + cellOffset;
+        if (sourceRow >= ocrSheetRows.length || sourceCell >= columnCount) return "";
+        return ocrSheetRows[sourceRow]?.[sourceCell] ?? "";
+      }),
+    );
+  };
+
+  const writeTextToSystemClipboard = async (text: string) => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const readTextFromSystemClipboard = async () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.readText) return "";
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return "";
+    }
+  };
+
+  const serializeOcrSheetMatrix = (matrix: string[][]) =>
+    matrix.map((row) => row.map((cell) => cell ?? "").join("\t")).join("\n");
+
+  const parseOcrSheetMatrix = (text: string) => {
+    const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const lines = normalized.split("\n");
+    while (lines.length && lines[lines.length - 1] === "") {
+      lines.pop();
+    }
+    return lines.map((line) => line.split("\t"));
+  };
+
+  const rememberOcrSheetClipboard = async (matrix: string[][]) => {
+    ocrSheetClipboardRef.current = matrix;
+    setOcrSheetClipboardReady(true);
+    const copied = await writeTextToSystemClipboard(serializeOcrSheetMatrix(matrix));
+    setOcrTableMessage(copied ? "選択範囲をコピーしました。" : "選択範囲をコピーしました。貼り付けはこの画面内で使えます。");
+  };
+
+  const clearOcrSheetSelectionContents = (message: string = "選択範囲をクリアしました。") => {
+    const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
+    if (!selectionBounds) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const touchedCells = Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+      Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => ({
+        rowIndex: selectionBounds.topRowIndex + rowOffset,
+        cellIndex: selectionBounds.leftCellIndex + cellOffset,
+      })),
+    ).flat();
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) =>
+      prev.map((row, rowIndex) => {
+        const clone = [...row];
+        while (clone.length < columnCount) clone.push("");
+        if (rowIndex < selectionBounds.topRowIndex || rowIndex > selectionBounds.bottomRowIndex) {
+          return clone;
+        }
+        for (let cellIndex = selectionBounds.leftCellIndex; cellIndex <= selectionBounds.rightCellIndex; cellIndex += 1) {
+          clone[cellIndex] = "";
+        }
+        return clone;
+      }),
+    );
+    setOcrTableMessage(message);
+    return true;
+  };
+
+  const copyOcrSheetSelection = async () => {
+    const matrix = readOcrSheetSelectionMatrix(ocrSheetSelection);
+    if (!matrix) return false;
+    await rememberOcrSheetClipboard(matrix);
+    return true;
+  };
+
+  const cutOcrSheetSelection = async () => {
+    const matrix = readOcrSheetSelectionMatrix(ocrSheetSelection);
+    if (!matrix) return false;
+    ocrSheetClipboardRef.current = matrix;
+    setOcrSheetClipboardReady(true);
+    await writeTextToSystemClipboard(serializeOcrSheetMatrix(matrix));
+    const cleared = clearOcrSheetSelectionContents("選択範囲を切り取りました。");
+    return cleared;
+  };
+
+  const applyOcrSheetMatrixAt = (
+    matrix: string[][],
+    targetRowIndex: number,
+    targetCellIndex: number,
+    successMessage: string,
+  ) => {
+    if (!matrix.length) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    if (targetRowIndex >= ocrSheetRows.length || targetCellIndex >= columnCount) return false;
+    let truncated = false;
+    const touchedCells = Array.from({ length: matrix.length }, (_, rowOffset) =>
+      Array.from({ length: matrix[rowOffset]?.length || 0 }, (_, cellOffset) => ({
+        rowIndex: targetRowIndex + rowOffset,
+        cellIndex: targetCellIndex + cellOffset,
+      })),
+    )
+      .flat()
+      .filter(
+        ({ rowIndex, cellIndex }) =>
+          rowIndex >= 0
+          && rowIndex < ocrSheetRows.length
+          && cellIndex >= 0
+          && cellIndex < columnCount,
+      );
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) =>
+      prev.map((row, rowIndex) => {
+        const clone = [...row];
+        while (clone.length < columnCount) clone.push("");
+        const sourceRowIndex = rowIndex - targetRowIndex;
+        if (sourceRowIndex < 0 || sourceRowIndex >= matrix.length) return clone;
+        const sourceRow = matrix[sourceRowIndex] || [];
+        sourceRow.forEach((value, valueCellIndex) => {
+          const destinationCellIndex = targetCellIndex + valueCellIndex;
+          if (destinationCellIndex >= columnCount) {
+            truncated = true;
+            return;
+          }
+          clone[destinationCellIndex] = value ?? "";
+        });
+        if (targetCellIndex + sourceRow.length > columnCount) truncated = true;
+        return clone;
+      }),
+    );
+    if (targetRowIndex + matrix.length > ocrSheetRows.length) truncated = true;
+    setOcrTableMessage(truncated ? `${successMessage} はみ出した分は貼り付けていません。` : successMessage);
+    focusOcrSheetCell(targetRowIndex, targetCellIndex, false);
+    requestAnimationFrame(() => {
+      const targetInput = ocrSheetCellRefs.current[`${targetRowIndex}:${targetCellIndex}`];
+      if (targetInput) {
+        targetInput.focus();
+        targetInput.select();
+      }
+    });
+    return true;
+  };
+
+  const pasteOcrSheetSelection = async (textOverride?: string) => {
+    const target = focusedSheetCell || (ocrSheetSelectionBounds
+      ? { rowIndex: ocrSheetSelectionBounds.topRowIndex, cellIndex: ocrSheetSelectionBounds.leftCellIndex }
+      : null);
+    if (!target) return false;
+    const textFromClipboard = typeof textOverride === "string" ? textOverride : await readTextFromSystemClipboard();
+    let matrix = parseOcrSheetMatrix(textFromClipboard);
+    if (!matrix.length) {
+      matrix = ocrSheetClipboardRef.current || [];
+    }
+    if (!matrix.length) return false;
+    return applyOcrSheetMatrixAt(matrix, target.rowIndex, target.cellIndex, "選択範囲を貼り付けました。");
+  };
+
+  const fillOcrSheetSelectionDown = () => {
+    const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
+    if (!selectionBounds || selectionBounds.rowCount < 2) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const touchedCells = Array.from({ length: selectionBounds.rowCount - 1 }, (_, rowOffset) =>
+      Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => ({
+        rowIndex: selectionBounds.topRowIndex + 1 + rowOffset,
+        cellIndex: selectionBounds.leftCellIndex + cellOffset,
+      })),
+    ).flat();
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) => {
+      const next = prev.map((row) => {
+        const clone = [...row];
+        while (clone.length < columnCount) clone.push("");
+        return clone;
+      });
+      const sourceRowValues = Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => {
+        const sourceCellIndex = selectionBounds.leftCellIndex + cellOffset;
+        return next[selectionBounds.topRowIndex]?.[sourceCellIndex] ?? "";
+      });
+      for (let rowIndex = selectionBounds.topRowIndex + 1; rowIndex <= selectionBounds.bottomRowIndex; rowIndex += 1) {
+        sourceRowValues.forEach((value, cellOffset) => {
+          next[rowIndex][selectionBounds.leftCellIndex + cellOffset] = value;
+        });
+      }
+      return next;
+    });
+    setOcrTableMessage("選択範囲の先頭行を下方向へコピーしました。");
+    return true;
+  };
+
+  const fillOcrSheetSelectionRight = () => {
+    const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
+    if (!selectionBounds || selectionBounds.cellCount < 2) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const touchedCells = Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+      Array.from({ length: selectionBounds.cellCount - 1 }, (_, cellOffset) => ({
+        rowIndex: selectionBounds.topRowIndex + rowOffset,
+        cellIndex: selectionBounds.leftCellIndex + 1 + cellOffset,
+      })),
+    ).flat();
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) => {
+      const next = prev.map((row) => {
+        const clone = [...row];
+        while (clone.length < columnCount) clone.push("");
+        return clone;
+      });
+      for (let rowIndex = selectionBounds.topRowIndex; rowIndex <= selectionBounds.bottomRowIndex; rowIndex += 1) {
+        const sourceValue = next[rowIndex]?.[selectionBounds.leftCellIndex] ?? "";
+        for (let cellIndex = selectionBounds.leftCellIndex + 1; cellIndex <= selectionBounds.rightCellIndex; cellIndex += 1) {
+          next[rowIndex][cellIndex] = sourceValue;
+        }
+      }
+      return next;
+    });
+    setOcrTableMessage("選択範囲の左端セルを右方向へコピーしました。");
+    return true;
+  };
+
+  const handleOcrSheetCellKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        extendOcrSheetSelection(1, 0);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        extendOcrSheetSelection(-1, 0);
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        extendOcrSheetSelection(0, 1);
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        extendOcrSheetSelection(0, -1);
+        return;
+      }
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      moveFocusedOcrSheetCell(event.shiftKey ? -1 : 1, 0);
+      return;
+    }
+    if (event.key === "Delete") {
+      event.preventDefault();
+      clearOcrSheetSelectionContents();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "c" || event.key === "C")) {
+      event.preventDefault();
+      void copyOcrSheetSelection();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "a" || event.key === "A")) {
+      event.preventDefault();
+      selectAllOcrSheetCells();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "x" || event.key === "X")) {
+      event.preventDefault();
+      void cutOcrSheetSelection();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "d" || event.key === "D")) {
+      event.preventDefault();
+      fillOcrSheetSelectionDown();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "r" || event.key === "R")) {
+      event.preventDefault();
+      fillOcrSheetSelectionRight();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === "v" || event.key === "V")) {
+      event.preventDefault();
+      void pasteOcrSheetSelection();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (event.altKey) {
+        moveFocusedOcrSheetCell(0, event.shiftKey ? -1 : 1);
+        return;
+      }
+      moveFocusedOcrSheetCell(event.shiftKey ? -1 : 1, 0);
+      return;
+    }
+    if (!event.ctrlKey && !event.metaKey) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveFocusedOcrSheetCell(1, 0);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveFocusedOcrSheetCell(-1, 0);
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveFocusedOcrSheetCell(0, 1);
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveFocusedOcrSheetCell(0, -1);
+      return;
+    }
+    focusOcrSheetCell(rowIndex, cellIndex);
+  };
+
+  const handleOcrSheetCellMouseDown = (
+    event: MouseEvent<HTMLInputElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    ocrSheetSelectionPointerActiveRef.current = true;
+    ocrPageSelectionModeRef.current = "auto";
+    if (event.shiftKey && ocrSheetSelection) {
+      setOcrSheetSelection((prev) =>
+        prev
+          ? {
+              ...prev,
+              focusRowIndex: rowIndex,
+              focusCellIndex: cellIndex,
+            }
+          : {
+              anchorRowIndex: rowIndex,
+              anchorCellIndex: cellIndex,
+              focusRowIndex: rowIndex,
+              focusCellIndex: cellIndex,
+            },
+      );
+      setFocusedSheetCell({ rowIndex, cellIndex });
+      focusOcrSheetRow(rowIndex);
+      return;
+    }
+    if (!isOcrSheetCellWithinSelection(ocrSheetSelection, rowIndex, cellIndex)) {
+      setOcrSheetSelection({
+        anchorRowIndex: rowIndex,
+        anchorCellIndex: cellIndex,
+        focusRowIndex: rowIndex,
+        focusCellIndex: cellIndex,
+      });
+    }
+    setFocusedSheetCell({ rowIndex, cellIndex });
+    focusOcrSheetRow(rowIndex);
+  };
+
+  const handleOcrSheetCellMouseEnter = (rowIndex: number, cellIndex: number) => {
+    if (!ocrSheetSelectionPointerActiveRef.current) return;
+    setOcrSheetSelection((prev) =>
+      prev
+        ? {
+            ...prev,
+            focusRowIndex: rowIndex,
+            focusCellIndex: cellIndex,
+          }
+        : {
+            anchorRowIndex: rowIndex,
+            anchorCellIndex: cellIndex,
+            focusRowIndex: rowIndex,
+            focusCellIndex: cellIndex,
+          },
+    );
+  };
+
+  const moveOcrSheetSelectionTo = (targetRowIndex: number, targetCellIndex: number) => {
+    const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
+    if (!selectionBounds) return false;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    if (
+      targetRowIndex < 0 ||
+      targetCellIndex < 0 ||
+      targetRowIndex + selectionBounds.rowCount > ocrSheetRows.length ||
+      targetCellIndex + selectionBounds.cellCount > columnCount
+    ) {
+      setOcrTableMessage("選択範囲を表の外には移動できません。");
+      return false;
+    }
+    if (
+      targetRowIndex === selectionBounds.topRowIndex &&
+      targetCellIndex === selectionBounds.leftCellIndex
+    ) {
+      return true;
+    }
+    const touchedCells = [
+      ...Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+        Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => ({
+          rowIndex: selectionBounds.topRowIndex + rowOffset,
+          cellIndex: selectionBounds.leftCellIndex + cellOffset,
+        })),
+      ).flat(),
+      ...Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+        Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => ({
+          rowIndex: targetRowIndex + rowOffset,
+          cellIndex: targetCellIndex + cellOffset,
+        })),
+      ).flat(),
+    ];
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
+    setOcrSheetRows((prev) => {
+      const next = prev.map((row) => {
+        const clone = [...row];
+        while (clone.length < columnCount) {
+          clone.push("");
+        }
+        return clone;
+      });
+      const snapshot = Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
+        Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => {
+          const sourceRow = selectionBounds.topRowIndex + rowOffset;
+          const sourceCell = selectionBounds.leftCellIndex + cellOffset;
+          return next[sourceRow]?.[sourceCell] ?? "";
+        }),
+      );
+      for (let rowOffset = 0; rowOffset < selectionBounds.rowCount; rowOffset += 1) {
+        for (let cellOffset = 0; cellOffset < selectionBounds.cellCount; cellOffset += 1) {
+          const sourceRow = selectionBounds.topRowIndex + rowOffset;
+          const sourceCell = selectionBounds.leftCellIndex + cellOffset;
+          next[sourceRow][sourceCell] = "";
+        }
+      }
+      for (let rowOffset = 0; rowOffset < selectionBounds.rowCount; rowOffset += 1) {
+        for (let cellOffset = 0; cellOffset < selectionBounds.cellCount; cellOffset += 1) {
+          next[targetRowIndex + rowOffset][targetCellIndex + cellOffset] = snapshot[rowOffset][cellOffset] ?? "";
+        }
+      }
+      return next;
+    });
+    setOcrSheetSelection({
+      anchorRowIndex: targetRowIndex,
+      anchorCellIndex: targetCellIndex,
+      focusRowIndex: targetRowIndex + selectionBounds.rowCount - 1,
+      focusCellIndex: targetCellIndex + selectionBounds.cellCount - 1,
+    });
+    setOcrTableMessage("選択範囲を移動しました。");
+    focusOcrSheetCell(targetRowIndex, targetCellIndex, false);
+    requestAnimationFrame(() => {
+      const moved = ocrSheetCellRefs.current[`${targetRowIndex}:${targetCellIndex}`];
+      if (moved) {
+        moved.focus();
+        moved.select();
+      }
+    });
+    return true;
+  };
+
+  const handleOcrSheetSelectionDragStart = (
+    event: DragEvent<HTMLInputElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
+    if (!selectionBounds || !isOcrSheetCellWithinSelection(ocrSheetSelection, rowIndex, cellIndex)) {
+      event.preventDefault();
+      return;
+    }
+    ocrSheetDragSelectionBoundsRef.current = selectionBounds;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", "ocr-sheet-selection");
+  };
+
+  const handleOcrSheetSelectionDragOver = (
+    event: DragEvent<HTMLTableCellElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    const selectionBounds = ocrSheetDragSelectionBoundsRef.current;
+    if (!selectionBounds) return;
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const canDrop =
+      rowIndex >= 0 &&
+      cellIndex >= 0 &&
+      rowIndex + selectionBounds.rowCount <= ocrSheetRows.length &&
+      cellIndex + selectionBounds.cellCount <= columnCount;
+    if (!canDrop) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setOcrSheetDropTarget({ rowIndex, cellIndex });
+  };
+
+  const handleOcrSheetSelectionDrop = (
+    event: DragEvent<HTMLTableCellElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    event.preventDefault();
+    const moved = moveOcrSheetSelectionTo(rowIndex, cellIndex);
+    ocrSheetDragSelectionBoundsRef.current = null;
+    setOcrSheetDropTarget(null);
+    if (!moved) return;
+  };
+
+  const handleOcrSheetSelectionDragEnd = () => {
+    ocrSheetDragSelectionBoundsRef.current = null;
+    setOcrSheetDropTarget(null);
+  };
+
+  const handleOcrSheetCellPaste = async (
+    event: ClipboardEvent<HTMLInputElement>,
+    rowIndex: number,
+    cellIndex: number,
+  ) => {
+    const pastedText = event.clipboardData?.getData("text/plain") || "";
+    if (!pastedText) return;
+    event.preventDefault();
+    focusOcrSheetCell(rowIndex, cellIndex, false);
+    await pasteOcrSheetSelection(pastedText);
   };
 
   const updateOcrTableHeaderCell = (
     cellIndex: number,
     value: string,
   ) => {
+    markOcrSheetEdited();
     setOcrSheetHeader((prev) => {
       const next = [...prev];
       while (next.length <= cellIndex) {
@@ -4013,6 +6105,7 @@ const loadOcrPages = async () => {
       return;
     }
     const columnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
+    markOcrSheetEdited();
     setOcrSheetRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
     setOcrSheetRowIds((prev) => [...prev, makeSheetRowId("manual")]);
   };
@@ -4022,6 +6115,7 @@ const loadOcrPages = async () => {
       setOcrTableMessage("現在は基盤復旧待ちのため、行の複製操作を止めています。");
       return;
     }
+    markOcrSheetEdited();
     setOcrSheetRows((prev) => {
       const next = prev.map((row) => [...row]);
       const row = next[rowIndex];
@@ -4042,6 +6136,7 @@ const loadOcrPages = async () => {
       setOcrTableMessage("現在は基盤復旧待ちのため、行の削除操作を止めています。");
       return;
     }
+    markOcrSheetEdited();
     setOcrSheetRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
     setOcrSheetRowIds((prev) => prev.filter((_, idx) => idx !== rowIndex));
   };
@@ -4070,6 +6165,13 @@ const loadOcrPages = async () => {
       setOcrTableMessage("シフト対象の数量列が見つかりません。");
       return;
     }
+    const touchedCells = Array.from({ length: normalizedEnd - normalizedStart + 1 }, (_, rowOffset) =>
+      quantityColumnIndexes.map((colIdx) => ({
+        rowIndex: normalizedStart + rowOffset,
+        cellIndex: colIdx,
+      })),
+    ).flat();
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
     setOcrSheetRows((prev) => {
       const next = prev.map((row) => [...row]);
       quantityColumnIndexes.forEach((colIdx) => {
@@ -4094,19 +6196,31 @@ const loadOcrPages = async () => {
     );
   };
 
-  const swapOcrTableQuantityColumns = (leftIndex: number, rightIndex: number) => {
+  const swapOcrSheetColumns = (leftIndex: number, rightIndex: number) => {
     if (ocrHardRecoveryMode) {
-      setOcrTableMessage("現在は基盤復旧待ちのため、数量列の入替操作を止めています。");
+      setOcrTableMessage("現在は基盤復旧待ちのため、列の入替操作を止めています。");
       return;
     }
     if (leftIndex === rightIndex) {
-      setOcrTableMessage("別々の数量列を選択してください。");
+      setOcrTableMessage("別々の列を選択してください。");
       return;
     }
+    if (
+      ocrSheetColumnSpecs[leftIndex]?.className !== "ocr-sheet-col-qty"
+      || ocrSheetColumnSpecs[rightIndex]?.className !== "ocr-sheet-col-qty"
+    ) {
+      setOcrTableMessage("数量列だけを入れ替えられます。");
+      return;
+    }
+    const maxIndex = Math.max(leftIndex, rightIndex);
+    const touchedCells = Array.from({ length: ocrSheetRows.length }, (_, rowIndex) => [
+      { rowIndex, cellIndex: leftIndex },
+      { rowIndex, cellIndex: rightIndex },
+    ]).flat();
+    markOcrSheetEdited({ preserveOverlay: true, touchedCells });
     setOcrSheetRows((prev) =>
       prev.map((row) => {
         const next = [...row];
-        const maxIndex = Math.max(leftIndex, rightIndex);
         while (next.length <= maxIndex) {
           next.push("");
         }
@@ -4116,20 +6230,67 @@ const loadOcrPages = async () => {
         return next;
       }),
     );
-    setOcrTableMessage(`数量列 ${leftIndex + 1} と ${rightIndex + 1} の数値を入れ替えました。`);
+    setOcrTableMessage(`数量列 ${leftIndex + 1} と ${rightIndex + 1} の数字を入れ替えました。`);
   };
 
-  const applySelectedOcrTableQuantityColumnSwap = () => {
-    const leftIndex = Number.parseInt(ocrSwapLeftColumn, 10);
-    const rightIndex = Number.parseInt(ocrSwapRightColumn, 10);
+  const applySelectedOcrSheetColumnSwap = () => {
+    const leftValue = String(ocrSwapLeftColumnRef.current?.value || ocrSwapLeftColumn || "").trim();
+    const rightValue = String(ocrSwapRightColumnRef.current?.value || ocrSwapRightColumn || "").trim();
+    const leftIndex = Number.parseInt(leftValue, 10);
+    const rightIndex = Number.parseInt(rightValue, 10);
     if (!Number.isInteger(leftIndex) || !Number.isInteger(rightIndex)) {
       setOcrTableMessage("入れ替える2つの数量列を選択してください。");
       return;
     }
-    swapOcrTableQuantityColumns(leftIndex, rightIndex);
+    swapOcrSheetColumns(leftIndex, rightIndex);
   };
 
-  const applyOcrTable = async (): Promise<{ ok: boolean; message: string }> => {
+  const toggleCurrentOrderArchive = async (nextArchived: boolean) => {
+    if (!order || archiveOrderBusy) return;
+    const confirmMessage = nextArchived
+      ? `注文 ${order.id} をアーカイブします。通常の注文一覧から除外されます。`
+      : `注文 ${order.id} のアーカイブを解除します。`;
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+    setArchiveOrderBusy(true);
+    setActionMessage(nextArchived ? "注文をアーカイブ中..." : "アーカイブを解除中...");
+    try {
+      await apiClient.post(`/orders/${order.id}/${nextArchived ? "archive" : "unarchive"}`);
+      await refreshOrderWorkspace({ preserveSelections: true, reloadHistory: false });
+      setActionMessage(
+        nextArchived
+          ? "注文をアーカイブしました。通常の注文一覧から除外されます。"
+          : "注文のアーカイブを解除しました。",
+      );
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail?.error ||
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        (nextArchived ? "注文のアーカイブに失敗しました。" : "アーカイブ解除に失敗しました。");
+      setActionMessage(String(detail));
+    } finally {
+      setArchiveOrderBusy(false);
+    }
+  };
+
+  const runOcrSheetPostMutationRefreshInBackground = (
+    task: () => Promise<void>,
+  ) => {
+    void task().catch((error) => {
+      console.error("ocr sheet background refresh failed", error);
+    });
+  };
+
+  const applyOcrTable = async (
+    options: { deferRefresh?: boolean; expectedRevisionId?: string | null } = {},
+  ): Promise<{ ok: boolean; message: string }> => {
+    const {
+      deferRefresh = false,
+      expectedRevisionId = null,
+    } = options;
     if (!order) {
       return { ok: false, message: "注文が見つかりません。" };
     }
@@ -4141,7 +6302,7 @@ const loadOcrPages = async () => {
     const trimmedFacility = facility.trim();
     const persistedFacility = (order.facility || "").trim();
     const normalizedWeek = normalizeConcreteWeekValue(weekDraft);
-    const persistedWeek = normalizeConcreteWeekValue(order.persisted_week_value || order.week || "");
+    const persistedWeek = normalizeConcreteWeekValue(order.persisted_week_value || order.week_value || order.week || "");
     if (!trimmedFacility && !persistedFacility) {
       const message = "施設が未設定のため、OCRテーブルを反映できません。先に Step1（注文書）で施設を設定してください。";
       setOcrTableMessage(message);
@@ -4159,23 +6320,15 @@ const loadOcrPages = async () => {
       setOcrTableMessage(message);
       return { ok: false, message };
     }
-    if (trimmedFacility && persistedFacility !== trimmedFacility) {
-      // Users often select a facility from suggestions but forget to persist it.
-      // Persist first so backend OCR apply can load the correct template.
-      const ok = await saveFacility(trimmedFacility);
-      if (!ok) {
-        const message = "施設の設定に失敗したため、OCRテーブルを反映できませんでした。";
-        setOcrTableMessage(message);
-        return { ok: false, message };
-      }
-    }
-    if (normalizedWeek && persistedWeek !== normalizedWeek) {
-      const ok = await saveWeek(normalizedWeek);
-      if (!ok) {
-        const message = "週の設定に失敗したため、OCRテーブルを反映できませんでした。";
-        setOcrTableMessage(message);
-        return { ok: false, message };
-      }
+    if (
+      (trimmedFacility && persistedFacility !== trimmedFacility)
+      || (normalizedWeek && persistedWeek !== normalizedWeek)
+    ) {
+      const message = hasAuthoritativeSavedSheet
+        ? "Step1 の施設または週に未保存の変更があります。先に保存し、保存済みシートの数量を保持するか空白へ戻すかを選択してください。"
+        : "Step1 の施設または週に未保存の変更があります。先に Step1 で保存してから明細へ反映してください。";
+      setOcrTableMessage(message);
+      return { ok: false, message };
     }
     let targetHeader = ocrSheetHeader;
     let targetRows = ocrSheetRows;
@@ -4207,19 +6360,26 @@ const loadOcrPages = async () => {
         ui_mode: "sheet",
         fields: targetFields,
         row_ids: targetRowIds,
-        expected_revision_id: currentDraftRevisionId() || null,
+        expected_revision_id: expectedRevisionId || currentSheetRevisionIdForMutation() || null,
         expected_lines_updated_at: order.lines_updated_at || null,
       });
-      setOrder(res.data);
+      replaceAuthoritativeOrder(res.data as OrderDetail);
       resetSheetReviewMeta();
       setLineEditsDirty(false);
       const message = "明細に反映しました。Step3で内容を確認してください。";
       setOcrTableMessage(message);
-      await refreshOrderWorkspace({ preserveSelections: true });
-      await refreshOcrOutput(order.id);
-      await loadOcrHistory({ silent: true });
-      await loadOcrSheet({ silent: true });
-      await rebuildBags();
+      const postApplyRefresh = async () => {
+        await refreshOrderWorkspace({ preserveSelections: true, force: true });
+        await refreshOcrOutput(order.id);
+        await loadOcrHistory({ silent: true });
+        await loadOcrSheet({ silent: true });
+        await rebuildBags();
+      };
+      if (deferRefresh) {
+        runOcrSheetPostMutationRefreshInBackground(postApplyRefresh);
+      } else {
+        await postApplyRefresh();
+      }
       return { ok: true, message };
     } catch (err: any) {
       const status = err?.response?.status;
@@ -4241,7 +6401,13 @@ const loadOcrPages = async () => {
     }
   };
 
-  const saveOcrSheetExact = async (): Promise<{ ok: boolean; message: string }> => {
+  const saveOcrSheetExact = async (
+    options: { deferRefresh?: boolean; successMessage?: string } = {},
+  ): Promise<{ ok: boolean; message: string; revisionId?: string | null }> => {
+    const {
+      deferRefresh = false,
+      successMessage,
+    } = options;
     if (!order) {
       return { ok: false, message: "注文が見つかりません。" };
     }
@@ -4272,22 +6438,31 @@ const loadOcrPages = async () => {
     setOcrTableSaving(true);
     setOcrTableMessage("シートを保存中...");
     try {
-      await apiClient.post(`/orders/${order.id}/draft-sheet`, {
+      const res = await apiClient.post(`/orders/${order.id}/draft-sheet`, {
         header: targetHeader,
         rows: targetRows,
         ui_mode: "sheet",
         fields: targetFields,
         row_ids: targetRowIds,
-        expected_revision_id: currentDraftRevisionId() || null,
+        expected_revision_id: currentSheetRevisionIdForMutation() || null,
         expected_lines_updated_at: order.lines_updated_at || null,
       });
-      const message = "シートを保存しました。次に「明細に反映して次へ」を押してください。";
+      const revisionId =
+        String(res.data?.draft?.id || "").trim()
+        || String(res.data?.current_sheet_revision_id || "").trim()
+        || String(res.data?.draft_payload?.current_sheet_revision_id || "").trim()
+        || String(res.data?.revision?.revision_id || "").trim()
+        || null;
+      const message = successMessage || `シートを保存しました。次に「${STEP2_APPLY_NEXT_LABEL}」を押してください。`;
       setOcrTableMessage(message);
-      await refreshOrderWorkspace({ preserveSelections: true });
+      if (deferRefresh) {
+        return { ok: true, message, revisionId };
+      }
+      await refreshOrderWorkspace({ preserveSelections: true, force: true });
       await refreshOcrOutput(order.id);
       await loadOcrHistory({ silent: true });
       await loadOcrSheet({ silent: true });
-      return { ok: true, message };
+      return { ok: true, message, revisionId };
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -4313,6 +6488,55 @@ const loadOcrPages = async () => {
     }
   };
 
+  const handleExpandedCellCopyModeChange = async (nextMode: ExpandedCellCopyMode) => {
+    if (nextMode === expandedCellCopyMode) {
+      return;
+    }
+    if (ocrSheetEditedSinceLoadRef.current) {
+      setOcrSheetMessage("手修正済みのシートがあるため、切替前に保存するか再読み込みしてください。");
+      return;
+    }
+    if (nextMode === "persisted") {
+      if (!facility.trim()) {
+        setOcrSheetMessage("施設を選択してください。");
+        return;
+      }
+      setExpandedCellCopySaving(true);
+      setOcrSheetMessage("拡大セル設定を保存中...");
+      try {
+        let config = facilityConfig;
+        if (!config) {
+          const res = await apiClient.get(`/facilities/${facility}`);
+          config = res.data?.config || {};
+          setFacilityConfig(config);
+          setFacilityResolvedConfig(res.data?.resolved_config || null);
+        }
+        const nextConfig = {
+          ...(config || {}),
+          [EXPANDED_CELL_COPY_FACILITY_KEY]: true,
+        };
+        const res = await apiClient.put(`/facilities/${facility}/config`, { config: nextConfig });
+        setFacilityConfig(nextConfig);
+        setFacilityResolvedConfig(res.data?.resolved_config || nextConfig);
+        setExpandedCellCopyMode("persisted");
+        await loadOcrSheet({ silent: true });
+        setOcrSheetMessage("この施設で拡大セルコピーを有効化しました。");
+      } catch (err: any) {
+        const status = err?.response?.status;
+        setOcrSheetMessage(status === 403 ? "権限がありません。" : "拡大セル設定の保存に失敗しました。");
+      } finally {
+        setExpandedCellCopySaving(false);
+      }
+      return;
+    }
+    setExpandedCellCopyMode(nextMode);
+    setOcrSheetMessage(
+      nextMode === "enabled"
+        ? "この注文でのみ拡大セルコピーを有効化しました。"
+        : "この画面では拡大セルコピーを無効化しました。",
+    );
+  };
+
   const enterOcrEditMode = () => {
     setOcrEditMode(true);
     setShowOcrEdit(true);
@@ -4328,25 +6552,42 @@ const loadOcrPages = async () => {
     setShowTableBoxEditor(false);
   };
 
-  const applyOcrAndMoveToDetails = async () => {
-    if (!order) return;
+  const applyOcrAndMoveToDetails = async (
+    authoritativeOrder?: OrderDetail | null,
+    options: { expectedRevisionId?: string | null } = {},
+  ) => {
+    const { expectedRevisionId = null } = options;
+    const currentOrder = authoritativeOrder || order;
+    if (!currentOrder) return;
+    const candidateEvidenceState = resolveCandidateEvidenceState(currentOrder);
+    const currentWorkflowStateCode = candidateEvidenceState.workflowStateCode;
+    const currentStep2ChoiceRequired = (
+      Array.isArray(currentOrder.critical_decisions)
+        ? currentOrder.critical_decisions
+        : Array.isArray(currentOrder.workflow_state?.critical_decisions)
+          ? currentOrder.workflow_state?.critical_decisions || []
+          : []
+    ).some((item) => {
+      const decisionType = String(item?.decision_type || "").trim().toLowerCase();
+      return decisionType !== "facility" && decisionType !== "week" && !String(item?.selected_value || "").trim();
+    });
+    const currentRerunInProgressState =
+      currentWorkflowStateCode === "rerun_in_progress" ||
+      ["running", "pending"].includes(String(currentOrder.workflow_state?.reparse_state?.status || "").trim().toLowerCase());
+    const currentSemanticShellOnly = currentWorkflowStateCode === "semantic_shell_only";
     if (ocrHardRecoveryMode) {
       setActionMessage("現在は基盤復旧待ちのため、明細反映処理を止めています。");
       return;
     }
-    if (step2ChoiceRequired) {
+    if (currentStep2ChoiceRequired) {
       setActionMessage("OCR候補の選択が未完了です。Step2 で候補を確定してから明細へ反映してください。");
       return;
     }
-    if (showNewEvidenceChoice) {
-      setActionMessage("新しいOCR候補があります。先に切り替えるか、現在のシートを維持するか選んでください。");
-      return;
-    }
-    if (rerunInProgressState) {
+    if (currentRerunInProgressState) {
       setActionMessage("OCRパイプラインを再実行しています。完了後に新しい候補を確認してください。");
       return;
     }
-    if (semanticShellOnly) {
+    if (currentSemanticShellOnly) {
       setActionMessage("メニュー枠はありますが、数量はまだ信用できません。Step2 で OCR 基盤を整えてから明細へ反映してください。");
       return;
     }
@@ -4362,7 +6603,7 @@ const loadOcrPages = async () => {
       return;
     }
     setActionMessage("OCR結果を明細に反映中...");
-    const result = await applyOcrTable();
+    const result = await applyOcrTable({ deferRefresh: true, expectedRevisionId });
     if (result.ok) {
       setActionMessage("明細に反映しました。Step3で内容を確認してください。");
       exitOcrEditMode();
@@ -4374,14 +6615,20 @@ const loadOcrPages = async () => {
 
   const completeStep2AndMoveToDetails = async () => {
     if (ocrTableSaving) return;
+    let authoritativeOrder = order;
+    let expectedRevisionId = currentSheetRevisionIdForMutation() || null;
     if (ocrHasEditableSheet && canSaveDraftSheet) {
-      const saved = await saveOcrSheetExact();
+      const saved = await saveOcrSheetExact({
+        deferRefresh: true,
+        successMessage: "シートを保存しました。明細へ反映しています...",
+      });
       if (!saved.ok) {
         setActionMessage(saved.message);
         return;
       }
+      expectedRevisionId = saved.revisionId || expectedRevisionId;
     }
-    await applyOcrAndMoveToDetails();
+    await applyOcrAndMoveToDetails(authoritativeOrder, { expectedRevisionId });
   };
 
   const saveLines = async () => {
@@ -4392,7 +6639,7 @@ const loadOcrPages = async () => {
         expected_lines_updated_at: order.lines_updated_at || null,
       });
       setLineEditsDirty(false);
-      await refreshOrderWorkspace({ preserveSelections: true, reloadBags: true });
+      await refreshOrderWorkspace({ preserveSelections: true, reloadBags: true, force: true });
       setActionMessage("保存しました。");
     } catch (err: any) {
       const status = err?.response?.status;
@@ -4408,7 +6655,12 @@ const loadOcrPages = async () => {
     }
   };
 
-  const confirm = async (options?: { successMessage?: string }) => {
+  const confirm = async (
+    options?: {
+      successMessage?: string;
+      refreshWorkspaceAfterSuccess?: boolean;
+    },
+  ) => {
     if (!order) return;
     if (confirmSaving) return false;
     if (sheetWeeklyMenuMissing) {
@@ -4426,15 +6678,30 @@ const loadOcrPages = async () => {
     }
     setConfirmSaving(true);
     try {
+      const refreshWorkspaceAfterSuccess = options?.refreshWorkspaceAfterSuccess !== false;
       setActionMessage("確定中...");
       await apiClient.post(`/orders/${order.id}/confirm`, {
-        expected_revision_id: currentDraftRevisionId() || null,
+        expected_revision_id: currentSheetRevisionIdForMutation() || null,
         expected_lines_updated_at: order.lines_updated_at || null,
       });
       setLineEditsDirty(false);
-      await refreshOrderWorkspace({ preserveSelections: true, reloadBags: true, reloadHistory: true });
-      setActionMessage(options?.successMessage ?? "確定しました。");
-      loadBags();
+      let refreshFailed = false;
+      if (refreshWorkspaceAfterSuccess) {
+        try {
+          await refreshOrderWorkspace({
+            preserveSelections: true,
+            reloadBags: true,
+            reloadHistory: true,
+            force: true,
+          });
+        } catch {
+          refreshFailed = true;
+        }
+      }
+      const successMessage = options?.successMessage ?? "確定しました。";
+      setActionMessage(
+        refreshFailed ? `${successMessage} 最新状態の取得に失敗しました。` : successMessage,
+      );
       return true;
     } catch (err: any) {
       const status = err?.response?.status;
@@ -4513,13 +6780,28 @@ const loadOcrPages = async () => {
   const confirmAndReturnToOrders = async () => {
     if (!order) return;
     if (confirmSaving || trainingSampleSaving) return;
-    const confirmed = await confirm({ successMessage: "注文一覧へ戻ります..." });
+    if (orderAlreadyConfirmed) {
+      await router.push("/orders");
+      return;
+    }
+    const confirmed = await confirm({
+      successMessage: "注文一覧へ戻ります...",
+      refreshWorkspaceAfterSuccess: false,
+    });
     if (!confirmed) return;
     await router.push("/orders");
   };
 
   const saveFacility = async (facilityId: string): Promise<boolean> => {
+    return persistFacilitySelection(facilityId);
+  };
+
+  const persistFacilitySelection = async (
+    facilityId: string,
+    options: { refreshWorkspace?: boolean; skipSheetRefresh?: boolean } = {},
+  ): Promise<boolean> => {
     if (!order) return false;
+    const { refreshWorkspace = true, skipSheetRefresh = true } = options;
     const trimmed = facilityId.trim();
     if (!trimmed) {
       setActionMessage("施設IDを入力してください。");
@@ -4529,9 +6811,12 @@ const loadOcrPages = async () => {
       await apiClient.post(`/orders/${order.id}/facility`, {
         facility: trimmed,
         expected_current_facility: order.facility || null,
+        refresh_current_sheet: !skipSheetRefresh,
       });
       setLineEditsDirty(false);
-      await refreshOrderWorkspace({ preserveSelections: true });
+      if (refreshWorkspace) {
+        await refreshOrderWorkspace({ preserveSelections: true, reloadWeekOptions: false });
+      }
       setActionMessage("施設を設定しました。");
       return true;
     } catch (err: any) {
@@ -4548,7 +6833,15 @@ const loadOcrPages = async () => {
   };
 
   const saveWeek = async (weekId: string): Promise<boolean> => {
+    return persistWeekSelection(weekId);
+  };
+
+  const persistWeekSelection = async (
+    weekId: string,
+    options: { refreshWorkspace?: boolean } = {},
+  ): Promise<boolean> => {
     if (!order) return false;
+    const { refreshWorkspace = true } = options;
     const normalizedWeek = normalizeConcreteWeekValue(weekId);
     if (!normalizedWeek) {
       setActionMessage("週の形式が不正です。候補から選択してください。");
@@ -4557,10 +6850,12 @@ const loadOcrPages = async () => {
     try {
       await apiClient.post(`/orders/${order.id}/week`, {
         week: normalizedWeek,
-        expected_current_week: order.persisted_week_value || order.week_value || order.week || null,
+        expected_current_week: getCanonicalWeekSelectionSource(order) || null,
       });
       setLineEditsDirty(false);
-      await refreshOrderWorkspace({ preserveSelections: true });
+      if (refreshWorkspace) {
+        await refreshOrderWorkspace({ preserveSelections: true, reloadWeekOptions: false });
+      }
       setWeekDraft(normalizedWeek);
       setActionMessage("週を設定しました。");
       return true;
@@ -4579,8 +6874,99 @@ const loadOcrPages = async () => {
     }
   };
 
+  const queueSavedSheetContextChange = (payload: PendingSavedSheetContextChange) => {
+    if (!payload.facility.trim()) {
+      setActionMessage("施設が未確定のため、保存済みシートの切替を進められません。");
+      return false;
+    }
+    if (!normalizeConcreteWeekValue(payload.week)) {
+      setActionMessage("週が未確定のため、保存済みシートの切替を進められません。");
+      return false;
+    }
+    setPendingSavedSheetContextChange({
+      ...payload,
+      facility: payload.facility.trim(),
+      week: normalizeConcreteWeekValue(payload.week) || payload.week,
+    });
+    setActionMessage("保存済みシートがあるため、数量の扱いを選択してください。");
+    return true;
+  };
+
+  const applySavedSheetContextChange = async (mode: SavedSheetContextChangeMode) => {
+    if (!order?.id || !pendingSavedSheetContextChange) return;
+    setSavedSheetContextChangeApplying(mode);
+    setStep1Saving(true);
+    setActionMessage(
+      mode === "keep"
+        ? "保存済みシートの数量を保ったまま、新しい骨格へ切り替えています..."
+        : "保存済みシートの数量を空白へ戻し、新しい骨格へ切り替えています...",
+    );
+    try {
+      if (pendingSavedSheetContextChange.source === "critical_decision") {
+        const decisionType = String(pendingSavedSheetContextChange.decisionType || "").trim();
+        const decisionValue = String(pendingSavedSheetContextChange.decisionValue || "").trim();
+        if (!decisionType || !decisionValue) {
+          setActionMessage("候補の反映条件が不足しているため、切替を続けられません。");
+          return;
+        }
+        try {
+          await apiClient.post(`/orders/${order.id}/critical-decisions/${decisionType}`, {
+            selected_value: decisionValue,
+          });
+        } catch (err: any) {
+          const status = err?.response?.status;
+          if (status === 404) {
+            setActionMessage("候補情報が見つかりません。最新状態を読み直してください。");
+          } else if (status === 400) {
+            setActionMessage("候補の反映に失敗しました。");
+          } else {
+            setActionMessage("候補の反映中にエラーが発生しました。");
+          }
+          return;
+        }
+      } else {
+        if (pendingSavedSheetContextChange.facility !== persistedFacility) {
+          const savedFacility = await persistFacilitySelection(pendingSavedSheetContextChange.facility, {
+            refreshWorkspace: false,
+            skipSheetRefresh: true,
+          });
+          if (!savedFacility) return;
+        }
+        if (pendingSavedSheetContextChange.week !== persistedWeek) {
+          const savedWeek = await persistWeekSelection(pendingSavedSheetContextChange.week, {
+            refreshWorkspace: false,
+          });
+          if (!savedWeek) return;
+        }
+      }
+      const overwritten = await forceWeeklyMenuOverwrite({
+        blankQuantities: mode === "clear",
+        pendingMessage:
+          mode === "keep"
+            ? "保存済みシートの数量を保ったまま、週次メニュー骨格へ切り替えています..."
+            : "保存済みシートの数量を空白へ戻し、週次メニュー骨格へ切り替えています...",
+        successMessage:
+          mode === "keep"
+            ? "保存済みシートの数量を保ったまま、新しい施設/週の骨格へ切り替えました。"
+            : "保存済みシートの数量を空白へ戻し、新しい施設/週の骨格へ切り替えました。",
+      });
+      if (!overwritten) return;
+      setPendingSavedSheetContextChange(null);
+      if (activeStep === 1) {
+        await loadOcrSheet({ silent: true });
+      }
+    } finally {
+      setSavedSheetContextChangeApplying("");
+      setStep1Saving(false);
+    }
+  };
+
   const updateStep1 = async () => {
-    const normalizedWeek = normalizeConcreteWeekValue(weekDraft);
+    const normalizedWeek = getPendingStep1WeekSelection(
+      weekDraft,
+      customWeekRangeStart,
+      customWeekRangeEnd,
+    );
     if (!facility.trim()) {
       setActionMessage("施設を選択してください。");
       return;
@@ -4591,23 +6977,50 @@ const loadOcrPages = async () => {
     }
     const persistedFacility = (order?.facility || "").trim();
     const persistedWeek = normalizeConcreteWeekValue(
-      order?.persisted_week_value || order?.week || "",
+      getCanonicalWeekSelectionSource(order),
     );
-    if (facility.trim() !== persistedFacility) {
-      const saved = await saveFacility(facility);
-      if (!saved) return;
+    const hasContextChange =
+      facility.trim() !== persistedFacility || normalizedWeek !== persistedWeek;
+    if (hasAuthoritativeSavedSheet && hasContextChange) {
+      queueSavedSheetContextChange({
+        source: "step1",
+        facility: facility.trim(),
+        week: normalizedWeek,
+      });
+      return;
     }
-    if (normalizedWeek !== persistedWeek) {
-      const saved = await saveWeek(normalizedWeek);
-      if (!saved) return;
+    setStep1Saving(true);
+    setActionMessage("設定中...");
+    try {
+      if (facility.trim() !== persistedFacility) {
+        const saved = await persistFacilitySelection(facility, { refreshWorkspace: false });
+        if (!saved) return;
+      }
+      if (normalizedWeek !== persistedWeek) {
+        const saved = await persistWeekSelection(normalizedWeek, { refreshWorkspace: false });
+        if (!saved) return;
+      }
+      if (order?.id) {
+        await refreshOrderWorkspace({ preserveSelections: true, reloadWeekOptions: true });
+      }
+      setOcrSheetAutoRetryBlocked(false);
+      if (activeStep === 1) {
+        await loadOcrSheet();
+      }
+      setActionMessage("施設と週を設定しました。");
+    } finally {
+      setStep1Saving(false);
     }
-    if (order?.id) {
-      await loadWeekOptions(order.id);
+  };
+
+  const applyCustomWeekRange = () => {
+    const weekValue = deriveWeekValueFromCalendarRange(customWeekRangeStart, customWeekRangeEnd);
+    if (!weekValue) {
+      setActionMessage("例外範囲の日付が不正です。");
+      return;
     }
-    setOcrSheetAutoRetryBlocked(false);
-    if (activeStep === 1) {
-      await loadOcrSheet();
-    }
+    setWeekDraft(weekValue);
+    setActionMessage("例外範囲を設定しました。");
   };
 
   const chooseCriticalDecision = async (decisionType: string, selectedValue: string) => {
@@ -4615,6 +7028,36 @@ const loadOcrPages = async () => {
     const normalizedType = String(decisionType || "").trim();
     const normalizedValue = String(selectedValue || "").trim();
     if (!normalizedType || !normalizedValue) return;
+    if (normalizedType === "facility" || normalizedType === "week") {
+      const targetFacility =
+        normalizedType === "facility"
+          ? normalizedValue
+          : (facility.trim() || persistedFacility || "");
+      const targetWeek = normalizeConcreteWeekValue(
+        normalizedType === "week"
+          ? normalizedValue
+          : (weekDraft || persistedWeek || ""),
+      );
+      const contextActuallyChanges =
+        targetFacility.trim() !== persistedFacility
+        || (targetWeek || "") !== (persistedWeek || "");
+      if (hasAuthoritativeSavedSheet && contextActuallyChanges) {
+        if (normalizedType === "facility") {
+          setFacility(normalizedValue);
+        }
+        if (normalizedType === "week") {
+          setWeekDraft(normalizeWeekValue(normalizedValue));
+        }
+        queueSavedSheetContextChange({
+          source: "critical_decision",
+          facility: targetFacility,
+          week: targetWeek || "",
+          decisionType: normalizedType,
+          decisionValue: normalizedValue,
+        });
+        return;
+      }
+    }
     setCriticalDecisionSaving(normalizedType);
     setActionMessage("候補を反映中...");
     try {
@@ -4643,17 +7086,48 @@ const loadOcrPages = async () => {
     }
   };
 
-  const keepCurrentDraft = () => {
-    const candidateEvidenceRunId =
-      workflowCandidateEvidenceRunId || String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+  const keepCurrentDraft = async () => {
+    const candidateEvidenceRunId = resolveCandidateEvidenceState(order).candidateEvidenceRunId;
     if (!candidateEvidenceRunId) {
       setActionMessage("現在は新しいOCR候補がありません。");
       return;
     }
-    setKeptCurrentCandidateEvidenceId(candidateEvidenceRunId);
-    setStep2WizardChoice("yes");
-    setStep2RepairStage("");
-    setActionMessage("現在のシートを維持して進みます。必要ならあとで新しいOCR候補へ切り替えられます。");
+    if (!order?.id) return;
+    setKeepCurrentPending(true);
+    setActionMessage("現在のシート維持を記録しています...");
+    try {
+      const res = await apiClient.post(`/orders/${order.id}/draft-sheet/keep-current`);
+      const nextWorkflowState = res.data && typeof res.data === "object" ? res.data : null;
+      applyAuthoritativeWorkflowStateToOrder(nextWorkflowState);
+      setStep2WizardChoice("yes");
+      setStep2RepairStage("");
+      setActionMessage("現在のシートを維持して進みます。必要ならあとで新しいOCR候補へ切り替えられます。");
+      void (async () => {
+        try {
+          const workflowRes = await apiClient.get(`/orders/${order.id}/workflow-state`);
+          const refreshedWorkflowState =
+            workflowRes.data && typeof workflowRes.data === "object" ? (workflowRes.data as WorkflowStatePayload) : null;
+          applyAuthoritativeWorkflowStateToOrder(refreshedWorkflowState);
+          await refreshOrderWorkspace({
+            preserveSelections: true,
+            reloadSheet: true,
+            reloadHistory: true,
+            force: true,
+          });
+        } catch {
+          // The keep-current acknowledgement is already authoritative. Background refresh is best-effort only.
+        }
+      })();
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        setActionMessage("現在は新しいOCR候補がありません。最新状態を読み直してください。");
+      } else {
+        setActionMessage("現在のシート維持の記録に失敗しました。");
+      }
+    } finally {
+      setKeepCurrentPending(false);
+    }
   };
 
   const switchDraftToLatestEvidence = async () => {
@@ -4662,11 +7136,11 @@ const loadOcrPages = async () => {
     setActionMessage("新しいOCR候補に切り替えています...");
     try {
       await apiClient.post(`/orders/${order.id}/draft-sheet/switch-evidence`);
-      setKeptCurrentCandidateEvidenceId("");
       await refreshOrderWorkspace({
         preserveSelections: true,
         reloadSheet: true,
         reloadHistory: true,
+        force: true,
       });
       await loadOcrSheet({ silent: true });
       setActionMessage("新しいOCR候補に切り替えました。");
@@ -4709,6 +7183,10 @@ const loadOcrPages = async () => {
         }
         if (next.role === "quantity" && (key === "diet_type" || key === "area_id")) {
           next.diet_type = normalizeDietTypeToken(next.diet_type || "") || "unknown";
+          if (key === "area_id" && !String(value || "").trim()) {
+            next.area_id = "";
+            return next;
+          }
           next.area_id = normalizeFacilityAreaToken(next.area_id || "") || "X";
           next.header = defaultHeaderForFacilityTemplateColumn(next);
           next.name = defaultNameForFacilityTemplateColumn(next);
@@ -4756,6 +7234,14 @@ const loadOcrPages = async () => {
       reindexFacilityTemplateColumns([...prev, createEmptyFacilityTemplateColumn(prev.length)]),
     );
     setFacilityTemplateMessage("施設区分列を追加しました。必要なら編集して保存してください。");
+  };
+
+  const deleteFacilityTemplateColumn = (rowIndex: number) => {
+    setShowFacilityTemplateEditor(true);
+    setFacilityTemplateSwapLeft("");
+    setFacilityTemplateSwapRight("");
+    setFacilityTemplateColumnDraft((prev) => removeFacilityTemplateColumn(prev, rowIndex));
+    setFacilityTemplateMessage("施設区分列を削除しました。必要なら保存してください。");
   };
 
   const saveFacilityTemplateColumns = async () => {
@@ -4807,7 +7293,7 @@ const loadOcrPages = async () => {
           ? "施設テンプレートに保存し、現在のシートにも反映しました。"
           : "施設テンプレートに保存しました。シートを再読込して確認してください。",
       );
-      if (order?.id && normalizeConcreteWeekValue(order.persisted_week_value || order.week || "")) {
+      if (order?.id && normalizeConcreteWeekValue(order.persisted_week_value || order.week_value || order.week || "")) {
         await refreshOrderWorkspace({ reloadSheet: true, preserveSelections: true });
       }
     } catch (err: any) {
@@ -4820,23 +7306,43 @@ const loadOcrPages = async () => {
     }
   };
 
-  const forceWeeklyMenuOverwrite = async () => {
+  const forceWeeklyMenuOverwrite = async (
+    options: { blankQuantities?: boolean; successMessage?: string; pendingMessage?: string } = {},
+  ): Promise<boolean> => {
     if (!order?.id) {
       setActionMessage("注文が見つかりません。");
-      return;
+      return false;
     }
+    const { blankQuantities = false, successMessage, pendingMessage } = options;
     setForcedSheetRecoveryPending("weekly");
-    setActionMessage("週次メニューを基準に日付・区分・メニューを復元しています...");
+    setActionMessage(
+      pendingMessage
+        || (
+          blankQuantities
+            ? "週次メニューを基準に骨格を復元し、数量を空白へ戻しています..."
+            : "週次メニューを基準に日付・区分・メニューを復元しています..."
+        ),
+    );
     try {
-      const res = await apiClient.post(`/orders/${order.id}/draft-sheet/force-weekly-menu`);
+      const res = await apiClient.post(`/orders/${order.id}/draft-sheet/force-weekly-menu`, {
+        blank_quantities: blankQuantities,
+      });
       const refreshedDraftPayload = res.data?.draft_payload || null;
       if (refreshedDraftPayload) {
         const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
         applyNormalizedSheetEditorPayload(normalizedDraftPayload);
         applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
       }
-      setActionMessage("週次メニューを基準に日付・区分・メニューを上書きしました。数量は必要なら確認してください。");
+      setActionMessage(
+        successMessage
+          || (
+            blankQuantities
+              ? "週次メニューを基準に骨格を上書きし、数量は空白へ戻しました。"
+              : "週次メニューを基準に日付・区分・メニューを上書きしました。数量は必要なら確認してください。"
+          ),
+      );
       await refreshOrderWorkspace({ reloadSheet: true, reloadHistory: true, preserveSelections: true });
+      return true;
     } catch (err: any) {
       const detail = String(err?.response?.data?.detail || "").trim();
       if (detail === "weekly_menu_missing") {
@@ -4848,6 +7354,7 @@ const loadOcrPages = async () => {
       } else {
         setActionMessage("週次メニューの強制上書きに失敗しました。");
       }
+      return false;
     } finally {
       setForcedSheetRecoveryPending("");
     }
@@ -4954,7 +7461,7 @@ const loadOcrPages = async () => {
             ? "LLM補完再解析を開始しました。まずOCR土台を確認します。"
             : "再解析を開始しました。完了まで数分かかります。"
         );
-        setOrder({
+        replaceAuthoritativeOrder({
           ...order,
           ocr_status: "running",
           ocr_error: null,
@@ -4965,7 +7472,7 @@ const loadOcrPages = async () => {
           try {
             const statusRes = await apiClient.get(`/orders/${orderId}`);
             const updated = statusRes.data as OrderDetail;
-            setOrder(updated);
+            replaceAuthoritativeOrder(updated);
             const status = updated.ocr_status || "";
             const stageLabel = describeProcessingStage(updated.ocr_processing_stage);
             if (status && status !== "running" && status !== "pending") {
@@ -5108,7 +7615,7 @@ const loadOcrPages = async () => {
         return;
       }
       if (res.data?.order) {
-        setOrder(res.data.order);
+        replaceAuthoritativeOrder(res.data.order as OrderDetail);
       }
       const reparse = res.data?.order?.reparse;
       if (reparse) {
@@ -5178,7 +7685,8 @@ const loadOcrPages = async () => {
 
   const rerunOcrPipeline = async () => {
     if (!order) return;
-    if (ocrHardRecoveryMode) {
+    const workflowPrimaryActionCode = String(order?.workflow_state?.primary_action || "").trim().toLowerCase();
+    if (ocrHardRecoveryMode && workflowPrimaryActionCode === "recover_ocr_evidence") {
       setActionMessage("現在は基盤復旧待ちのため、OCRパイプライン再実行は保留しました。");
       return;
     }
@@ -5193,21 +7701,32 @@ const loadOcrPages = async () => {
       try {
         const statusRes = await apiClient.get(`/orders/${orderId}`);
         const updated = statusRes.data as OrderDetail;
-        setOrder(updated);
+        replaceAuthoritativeOrder(updated);
+        const nextCandidatePromptVisible = Boolean(updated?.workflow_state?.candidate_prompt_visible);
         const nextState = String(updated?.workflow_state?.state || "").trim().toLowerCase();
         const nextReparseStatus = String(updated?.workflow_state?.reparse_state?.status || "").trim().toLowerCase();
-        if (nextState === "new_evidence_available") {
+        if (nextCandidatePromptVisible) {
           setReparsePending(false);
           reparseTimerRef.current = null;
           setActionMessage("新しいOCR候補ができました。候補ブロックから切り替えるか選んでください。");
-          await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
+          await refreshOrderWorkspace({
+            preserveSelections: true,
+            reloadSheet: true,
+            reloadHistory: true,
+            reloadOcrPages: true,
+          });
           return;
         }
         if (nextState === "rerun_failed_keep_current" || nextReparseStatus === "hard_failed" || nextReparseStatus === "failed") {
           setReparsePending(false);
           reparseTimerRef.current = null;
           setActionMessage("OCRパイプライン再実行に失敗しました。現在のシートは保持されています。");
-          await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
+          await refreshOrderWorkspace({
+            preserveSelections: true,
+            reloadSheet: true,
+            reloadHistory: true,
+            reloadOcrPages: true,
+          });
           return;
         }
         if (nextState === "rerun_in_progress" || ["running", "pending", "queued"].includes(nextReparseStatus)) {
@@ -5216,8 +7735,13 @@ const loadOcrPages = async () => {
         }
         setReparsePending(false);
         reparseTimerRef.current = null;
-        await refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true });
-        setActionMessage("OCRパイプライン再実行が完了しました。最新状態を確認してください。");
+        await refreshOrderWorkspace({
+          preserveSelections: true,
+          reloadSheet: true,
+          reloadHistory: true,
+          reloadOcrPages: true,
+        });
+        setActionMessage("OCRパイプライン再実行が完了しました。最新のOCR結果を表示しました。");
       } catch {
         setReparsePending(false);
         reparseTimerRef.current = null;
@@ -5227,7 +7751,7 @@ const loadOcrPages = async () => {
     try {
       const res = await apiClient.post(`/orders/${orderId}/ocr-rerun`, { stale_action: "retry" }, { timeout: 900000 });
       if (res.status === 202 || res.data?.accepted) {
-        setOrder({
+        replaceAuthoritativeOrder({
           ...order,
           ocr_status: "running",
           ocr_error: null,
@@ -5279,7 +7803,7 @@ const loadOcrPages = async () => {
       }
       await Promise.all([
         refreshOrderWorkspace({ preserveSelections: true, reloadSheet: true, reloadHistory: true }),
-        loadOcrPages(),
+        loadOcrPages({ force: true }),
         loadOcrSheet({ silent: true }),
       ]);
       setActionMessage(`復旧を再要求しました。OCR結果が揃うまでしばらくお待ちください。${errorContext(orderId)}`);
@@ -5307,7 +7831,7 @@ const loadOcrPages = async () => {
     if (!order) return;
     const next = [...order.lines];
     next[idx] = { ...next[idx], quantity_corrected: qty };
-    setOrder({ ...order, lines: next });
+    replaceAuthoritativeOrder({ ...order, lines: next });
     setLineEditsDirty(true);
   };
 
@@ -5470,11 +7994,50 @@ const loadOcrPages = async () => {
   })();
   const ocrPagesPending = ocrPagesMessage.includes("処理中");
   const rawOcrStatus = (order?.ocr_status || "").toLowerCase();
+  const workflowPrimaryActionCode = String(order?.workflow_state?.primary_action || "").trim().toLowerCase();
+  const hasEvidenceUnavailableBlocker = [
+    ...(Array.isArray(order?.workflow_state?.blockers_json)
+      ? order.workflow_state.blockers_json.map((item) => String(item || "").trim())
+      : []),
+    ...(Array.isArray(order?.workflow_state?.apply_gate?.blockers)
+      ? order.workflow_state.apply_gate.blockers.map((item) => String(item || "").trim())
+      : []),
+  ].some((code) => code === "evidence_view_unavailable" || code === "evidence_edit_unavailable");
+  const explicitTerminalReparseOutcome = resolveExplicitReparseOutcome({
+    ocrStatus: order?.ocr_status,
+    ocrError: order?.ocr_error,
+    ocrProcessingStage: order?.ocr_processing_stage,
+    ocrResultState: order?.ocr_result_state,
+    ocrReparseHealth: order?.ocr_reparse_health,
+    ocrMetrics: order?.ocr_metrics,
+    workflowReparseState: order?.workflow_state?.reparse_state,
+    reparseDebug,
+  });
   let ocrStatusLabel = "未実行";
   let ocrStatusDetail = "";
-  if (rawOcrStatus === "running" || rawOcrStatus === "pending" || (!rawOcrStatus && ocrPagesPending)) {
+  if (
+    rawOcrStatus === "running" ||
+    rawOcrStatus === "pending" ||
+    rawOcrStatus === "awaiting_output" ||
+    rawOcrStatus === "recovering" ||
+    (!rawOcrStatus && ocrPagesPending)
+  ) {
     ocrStatusLabel = "実行中";
     ocrStatusDetail = "OCRを実行中です。完了まで数分かかります。";
+  } else if (hasEvidenceUnavailableBlocker || rawOcrStatus === "blocked") {
+    if (workflowPrimaryActionCode === "recover_ocr_evidence") {
+      ocrStatusLabel = "OCR基盤待ち";
+      ocrStatusDetail = "OCR結果を表示できません。ページは開いています。OCR基盤を復旧してください。";
+    } else {
+      ocrStatusLabel = "OCR証拠待ち";
+      ocrStatusDetail = "OCR結果がありません。ページは開いています。OCRパイプラインを再実行してください。";
+    }
+  } else if (explicitTerminalReparseOutcome?.kind === "failed") {
+    ocrStatusLabel = "再解析失敗";
+    ocrStatusDetail = explicitTerminalReparseOutcome.detail;
+  } else if (explicitTerminalReparseOutcome?.kind === "rejected") {
+    ocrStatusLabel = "再解析却下";
+    ocrStatusDetail = explicitTerminalReparseOutcome.detail;
   } else if (rawOcrStatus === "stalled") {
     ocrStatusLabel = "停止";
     ocrStatusDetail = order?.ocr_error
@@ -5549,21 +8112,10 @@ const loadOcrPages = async () => {
   const canHighlightOriginalPreview = Boolean(originalPreviewImageUrl);
   const step2CriticalBannerMessages = (() => {
     const messages: string[] = [];
-    const bannerWorkflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
-    const bannerCandidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
+    const candidateEvidenceState = resolveCandidateEvidenceState(order);
+    const bannerWorkflowStateCode = candidateEvidenceState.workflowStateCode;
     const bannerReparseStateStatus = String(order?.workflow_state?.reparse_state?.status || "").trim().toLowerCase();
-    const bannerShowNewEvidenceChoice =
-      bannerWorkflowStateCode === "new_evidence_available"
-      && Boolean(
-        bannerCandidateEvidenceRunId
-        && bannerCandidateEvidenceRunId !== keptCurrentCandidateEvidenceId,
-      );
-    const bannerKeepingCurrentDraftChoice =
-      bannerWorkflowStateCode === "new_evidence_available"
-      && Boolean(
-        bannerCandidateEvidenceRunId
-        && bannerCandidateEvidenceRunId === keptCurrentCandidateEvidenceId,
-      );
+    const bannerShowNewEvidenceChoice = candidateEvidenceState.hasUnresolvedCandidateEvidenceChoice;
     const bannerRerunInProgress =
       bannerWorkflowStateCode === "rerun_in_progress"
       || bannerReparseStateStatus === "running"
@@ -5571,8 +8123,6 @@ const loadOcrPages = async () => {
     const bannerSemanticShellOnly = bannerWorkflowStateCode === "semantic_shell_only";
     if (bannerShowNewEvidenceChoice) {
       messages.push("新しいOCR候補があります。切り替えるか、現在のシートを維持するかを選んでください。");
-    } else if (bannerKeepingCurrentDraftChoice) {
-      messages.push("現在のシートを維持しています。必要ならあとで新しいOCR候補へ切り替えられます。");
     }
     if (bannerRerunInProgress) {
       messages.push("OCRパイプラインを再実行しています。完了後に新しいOCR候補を確認してください。");
@@ -5640,13 +8190,20 @@ const loadOcrPages = async () => {
   const primaryPreviewOpenUrl = shouldShowOriginalPdfPreview ? pdfUrl : showOcrOverlay ? ocrOverlayUrl : null;
   useEffect(() => {
     if (shouldFallbackToRawPdfPreview) {
+      ocrPreviewForcedFallbackRef.current = true;
       setOcrPreviewMode("original");
       return;
     }
+    if (ocrPreviewForcedFallbackRef.current && hasUsableOverlayPreview) {
+      ocrPreviewForcedFallbackRef.current = false;
+      setOcrPreviewMode("overlay");
+      return;
+    }
     if (!canShowOriginalPdfPreview && ocrPreviewMode === "original") {
+      ocrPreviewForcedFallbackRef.current = false;
       setOcrPreviewMode("overlay");
     }
-  }, [canShowOriginalPdfPreview, ocrPreviewMode, shouldFallbackToRawPdfPreview]);
+  }, [canShowOriginalPdfPreview, hasUsableOverlayPreview, ocrPreviewMode, shouldFallbackToRawPdfPreview]);
   const activeTableBox = showTableBoxEditor && tableBoxDraft ? tableBoxDraft : ocrTableBox;
   const overlayBox = (() => {
     if (!activeTableBox || overlayRowCount < 1 || overlayColumnCount < 1) return null;
@@ -5766,6 +8323,18 @@ const loadOcrPages = async () => {
       matchReason: focusedOverlayTarget.matchReason,
     };
   })();
+  const focusedOverlayMarker = focusedOverlayHighlight
+    ? {
+      top: focusedOverlayHighlight.top + focusedOverlayHighlight.height / 2,
+      left: focusedOverlayHighlight.left + 10,
+      pageArrayIndex: focusedOverlayHighlight.pageArrayIndex,
+      pageIndex: focusedOverlayHighlight.pageIndex,
+      localRowIndex: focusedOverlayHighlight.localRowIndex,
+      globalRowIndex: focusedOverlayHighlight.globalRowIndex,
+      matchReason: focusedOverlayHighlight.matchReason,
+      side: "ocr" as const,
+    }
+    : null;
   const recentOcrHistory = [...ocrHistoryRows].reverse().slice(0, 5);
   const latestOcrRevisionMode =
     ocrHistoryLatest?.ui_mode === "sheet"
@@ -5792,17 +8361,145 @@ const loadOcrPages = async () => {
     getOcrSheetColumnSpec(ocrSheetFields[idx] || "", header, normalizeDietTypeToken),
   );
   const ocrSheetQuantityColumnOptions = ocrSheetColumnSpecs
-    .map((spec, idx) =>
-      spec.className === "ocr-sheet-col-qty"
-        ? { value: String(idx), label: `${idx + 1}: ${ocrSheetHeaders[idx] || `列${idx + 1}`}` }
-        : null,
-    )
-    .filter((item): item is { value: string; label: string } => Boolean(item));
+    .map((spec, idx) => ({
+      className: spec.className,
+      value: String(idx),
+      label: `${idx + 1}: ${ocrSheetHeaders[idx] || `列${idx + 1}`}`,
+    }))
+    .filter((option) => option.className === "ocr-sheet-col-qty")
+    .map(({ value, label }) => ({ value, label }));
+  const ocrSheetBulkFillColumnOptions = ocrSheetColumnSpecs
+    .map((spec, idx) => ({
+      className: spec.className,
+      field: String(ocrSheetFields[idx] || "").trim().toLowerCase(),
+      header: String(ocrSheetHeaders[idx] || "").trim(),
+      value: String(idx),
+      label: `${idx + 1}: ${ocrSheetHeaders[idx] || `列${idx + 1}`}`,
+    }))
+    .filter((option) => {
+      if (option.className !== "ocr-sheet-col-qty") return false;
+      if (option.field.startsWith("qty.placeholder")) return false;
+      if (option.header === "-") return false;
+      return true;
+    })
+    .map(({ value, label }) => ({ value, label }));
+  const ocrSheetAcceptedVisibleCountFallback = ocrSheetRows.reduce((count, row) => {
+    return count + ocrSheetQuantityColumnOptions.reduce((rowCount, option) => {
+      const cellIndex = Number(option.value);
+      return rowCount + (String(row[cellIndex] ?? "").trim() ? 1 : 0);
+    }, 0);
+  }, 0);
+  const ocrSheetAcceptedCount = Math.max(
+    Number(ocrSheetNumericCellSummary.accepted_count || 0),
+    ocrSheetAcceptedVisibleCountFallback,
+  );
+  const ocrSheetDeterministicCandidateCount = Number(
+    ocrSheetNumericCellSummary.deterministic_candidate_count || 0,
+  );
+  const ocrSheetWeakCandidateCount = Number(ocrSheetNumericCellSummary.weak_candidate_count || 0);
+  const ocrSheetUnresolvedCount = Number(ocrSheetNumericCellSummary.unresolved_count || 0);
+  const ocrSheetRawNumericCount = Number(ocrSheetNumericCellSummary.raw_ocr_numeric_count || 0);
+  const ocrSheetVisibleOverlayCellMap = (() => {
+    const map = new Map<string, OcrNumericCellItem>();
+    const classificationRank = (classification: OcrNumericCellClassification | "") =>
+      classification === "deterministic_candidate" ? 2 : classification === "weak_candidate" ? 1 : 0;
+    for (const item of ocrSheetNumericCellItems) {
+      const classification = normalizeOcrNumericCellClassification(item.classification);
+      if (!overlayClassificationVisibleInMode(classification, ocrConfidenceDisplayMode)) {
+        continue;
+      }
+      const rowIndex = typeof item.target_row_index === "number" ? item.target_row_index : null;
+      const cellIndex = typeof item.target_col_index === "number" ? item.target_col_index : null;
+      const overlayValue = String(item.value ?? "").trim();
+      if (
+        rowIndex == null
+        || cellIndex == null
+        || rowIndex < 0
+        || cellIndex < 0
+        || !overlayValue
+        || String(ocrSheetRows[rowIndex]?.[cellIndex] ?? "").trim()
+      ) {
+        continue;
+      }
+      const key = `${rowIndex}:${cellIndex}`;
+      const current = map.get(key);
+      if (!current) {
+        map.set(key, item);
+        continue;
+      }
+      const currentClassification = normalizeOcrNumericCellClassification(current.classification);
+      if (classificationRank(classification) > classificationRank(currentClassification)) {
+        map.set(key, item);
+      }
+    }
+    return map;
+  })();
+  const ocrSheetVisibleOverlayItems = Array.from(ocrSheetVisibleOverlayCellMap.values())
+    .map((item): OcrVisibleOverlayItem | null => {
+      const rowIndex = typeof item.target_row_index === "number" ? item.target_row_index : null;
+      const cellIndex = typeof item.target_col_index === "number" ? item.target_col_index : null;
+      const classification = normalizeOcrNumericCellClassification(item.classification);
+      const value = String(item.value ?? "").trim();
+      if (rowIndex == null || cellIndex == null || !classification || !value) {
+        return null;
+      }
+      return {
+        ...item,
+        target_row_index: rowIndex,
+        target_col_index: cellIndex,
+        classification,
+        value,
+      };
+    })
+    .filter((item): item is OcrVisibleOverlayItem => Boolean(item));
+  const ocrSheetVisibleOverlayItemsByRow = (() => {
+    const map = new Map<number, OcrVisibleOverlayItem[]>();
+    for (const item of ocrSheetVisibleOverlayItems) {
+      const current = map.get(item.target_row_index) || [];
+      current.push(item);
+      map.set(item.target_row_index, current);
+    }
+    return map;
+  })();
+  const ocrSheetVisibleOverlayCount = ocrSheetVisibleOverlayCellMap.size;
+  const ocrSheetVisibleCellCount = ocrSheetAcceptedCount + ocrSheetVisibleOverlayCount;
+  const ocrSheetConfidenceLegendText = [
+    `raw ${ocrSheetRawNumericCount}`,
+    `accepted ${ocrSheetAcceptedCount}`,
+    `deterministic ${ocrSheetDeterministicCandidateCount}`,
+    `weak ${ocrSheetWeakCandidateCount}`,
+    `unresolved ${ocrSheetUnresolvedCount}`,
+    `visible ${ocrSheetVisibleCellCount}`,
+  ].join(" / ");
+  const ocrSheetConfidenceModeDescription =
+    ocrConfidenceDisplayMode === "strict"
+      ? "accepted のみを表示します。candidate overlay は出しません。"
+      : ocrConfidenceDisplayMode === "assisted"
+        ? "accepted に deterministic candidate overlay を重ねます。canonical current sheet 自体は変えません。"
+        : "accepted に deterministic / weak candidate overlay を重ねます。canonical current sheet 自体は変えません。";
+  const applyVisibleOcrOverlaySuggestions = () => {
+    adoptVisibleOcrOverlayItems(
+      ocrSheetVisibleOverlayItems,
+      ocrSheetVisibleOverlayItems.length
+        ? `表示中の提案 ${ocrSheetVisibleOverlayItems.length} 件を採用しました。`
+        : "表示中に採用できる提案がありません。",
+    );
+  };
+  const applyVisibleOcrOverlaySuggestionsForRow = (rowIndex: number) => {
+    const rowItems = ocrSheetVisibleOverlayItemsByRow.get(rowIndex) || [];
+    adoptVisibleOcrOverlayItems(
+      rowItems,
+      rowItems.length
+        ? `行 ${rowIndex + 1} の提案 ${rowItems.length} 件を採用しました。`
+        : `行 ${rowIndex + 1} に採用できる提案がありません。`,
+    );
+  };
   useEffect(() => {
     if (!focusedOverlayTarget) return;
     if (focusedOverlayTarget.pageArrayIndex === activeOcrPageIndex) return;
     if (!ocrPages[focusedOverlayTarget.pageArrayIndex]) return;
-    selectOcrPage(focusedOverlayTarget.pageArrayIndex);
+    if (ocrPageSelectionModeRef.current === "manual") return;
+    selectOcrPage(focusedOverlayTarget.pageArrayIndex, { manual: false });
   }, [focusedOverlayTarget, activeOcrPageIndex, ocrPages]);
 
   useEffect(() => {
@@ -5860,6 +8557,12 @@ const loadOcrPages = async () => {
       setOcrSwapRightColumn("");
     }
   }, [ocrSheetQuantityColumnOptions, ocrSwapLeftColumn, ocrSwapRightColumn]);
+  useEffect(() => {
+    const indices = new Set(ocrSheetBulkFillColumnOptions.map((option) => option.value));
+    if (ocrSheetColumnFillTarget && !indices.has(ocrSheetColumnFillTarget)) {
+      setOcrSheetColumnFillTarget("");
+    }
+  }, [ocrSheetBulkFillColumnOptions, ocrSheetColumnFillTarget]);
   const ocrSheetRowDateStripeClasses = (() => {
     const stripes: string[] = [];
     let tone = 0;
@@ -5922,24 +8625,39 @@ const loadOcrPages = async () => {
     });
     return boundaries;
   })();
+  const ocrSheetSelectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
   const sheetWeeklyMenuMissing = ocrSheetWarnings.includes("sheet_weekly_menu_missing");
   const ocrTableFallbackWarning = ocrSheetSource.startsWith("ocr_table") && !sheetWeeklyMenuMissing;
   const orderReviewBadges = Array.isArray(order?.ocr_review_badges)
     ? order.ocr_review_badges.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
   const dedupedOrderReviewBadges = Array.from(new Set(orderReviewBadges));
-  const workflowStateCode = String(order?.workflow_state?.state || "").trim().toLowerCase();
+  const candidateEvidenceState = resolveCandidateEvidenceState(order);
+  const workflowStateCode = candidateEvidenceState.workflowStateCode;
   const workflowHeadline = String(order?.workflow_state?.headline || "").trim();
   const workflowApplyGate = order?.apply_gate || order?.workflow_state?.apply_gate || null;
-  const workflowCandidateEvidenceRunId = String(order?.workflow_state?.candidate_evidence_run_id || "").trim();
-  const currentSheetAcceptedForCandidate =
-    Boolean(workflowCandidateEvidenceRunId) &&
-    workflowCandidateEvidenceRunId === keptCurrentCandidateEvidenceId;
+  const workflowCandidateEvidenceRunId = candidateEvidenceState.candidateEvidenceRunId;
+  const hasUnresolvedCandidateEvidenceChoice = candidateEvidenceState.hasUnresolvedCandidateEvidenceChoice;
   const criticalDecisions = Array.isArray(order?.critical_decisions)
     ? order.critical_decisions.filter((item) => item && !String(item.selected_value || "").trim())
     : Array.isArray(order?.workflow_state?.critical_decisions)
       ? (order?.workflow_state?.critical_decisions || []).filter((item) => item && !String(item.selected_value || "").trim())
       : [];
+  useEffect(() => {
+    if (!order?.id) return;
+    if (
+      !hasUnresolvedCandidateEvidenceChoice
+      || activeEditorRows.length > 0
+      || ocrSheetLoading
+      || !ocrSheetLoadSettled
+    ) {
+      setCandidateSheetPreview(null);
+      setCandidateSheetPreviewLoading(false);
+      setCandidateSheetPreviewMessage("");
+      return;
+    }
+    void loadCandidateSheetPreview({ silent: true });
+  }, [order?.id, hasUnresolvedCandidateEvidenceChoice, activeEditorRows.length, ocrSheetLoading, ocrSheetLoadSettled]);
   const workflowStateLabel = describeWorkflowState(workflowStateCode);
   const step1CriticalDecisions = criticalDecisions.filter((decision) => {
     const decisionType = String(decision?.decision_type || "").trim().toLowerCase();
@@ -5998,13 +8716,7 @@ const loadOcrPages = async () => {
   const unresolvedCriticalDecisionCount = criticalDecisions.length;
   const semanticShellOnly = workflowStateCode === "semantic_shell_only";
   const rerunInProgressState = workflowStateCode === "rerun_in_progress";
-  const showNewEvidenceChoice =
-    workflowStateCode === "new_evidence_available" &&
-    Boolean(workflowCandidateEvidenceRunId) &&
-    !currentSheetAcceptedForCandidate;
-  const keepingCurrentDraftChoice =
-    workflowStateCode === "new_evidence_available" &&
-    currentSheetAcceptedForCandidate;
+  const showNewEvidenceChoice = hasUnresolvedCandidateEvidenceChoice;
   const workflowSupportText = (() => {
     if (unresolvedCriticalDecisionCount > 0) {
       return `未確定の候補が ${unresolvedCriticalDecisionCount} 件あります。先に候補を選んでください。`;
@@ -6023,6 +8735,13 @@ const loadOcrPages = async () => {
       workflowApplyGate?.can_confirm != null ||
       workflowBlockers.length > 0 ||
       workflowWarnings.length > 0);
+  const effectiveApplyBlockers = dedupeStrings([
+    ...(workflowGateAvailable ? workflowBlockers : []),
+    ...ocrSheetApplyBlockers,
+    ...(!hasWorkflowState && Array.isArray(order?.ocr_apply_blockers)
+      ? order.ocr_apply_blockers.map((item) => String(item || "").trim()).filter(Boolean)
+      : []),
+  ]);
   const effectiveConfirmBlockers = dedupeStrings([
     ...(workflowGateAvailable ? workflowBlockers : []),
     ...ocrSheetConfirmBlockers,
@@ -6082,11 +8801,44 @@ const loadOcrPages = async () => {
     .map((item) => describeReviewBlocker(item))
     .filter(Boolean)
     .join(" / ");
+  const workflowCandidateResolution = order?.candidate_resolution || order?.workflow_state?.candidate_resolution || null;
+  const unresolvedLayoutResolutionDetails = Array.isArray(workflowCandidateResolution?.gate_summary?.details)
+    ? workflowCandidateResolution.gate_summary.details
+        .filter((item) => {
+          const decisionType = String(item?.decision_type || "").trim().toLowerCase();
+          const status = String(item?.status || "").trim().toLowerCase();
+          return (
+            (decisionType === "template" || decisionType === "column_mapping" || decisionType === "quantity") &&
+            (status === "choice_required" || status === "blocked") &&
+            !item?.suppressed
+          );
+        })
+        .map((item) => describeReviewBlocker(`${String(item?.decision_type || "").trim()}_${String(item?.status || "").trim() === "choice_required" ? "choice_required" : "unresolved"}`))
+        .filter(Boolean)
+    : [];
+  const ocrSheetProjectionMessage = (() => {
+    const payloadMessage = String(ocrSheetProjection?.reason_message || "").trim();
+    if (payloadMessage) return payloadMessage;
+    if (ocrSheetWarnings.includes("sheet_payload_mapping_blocked_unresolved_template")) {
+      return describeReviewBlocker("sheet_payload_mapping_blocked_unresolved_template");
+    }
+    if (ocrSheetWarnings.includes("sheet_payload_mapping_low_confidence")) {
+      return describeReviewBlocker("sheet_payload_mapping_low_confidence");
+    }
+    if (ocrSheetSource === "weekly_menu" && unresolvedLayoutResolutionDetails.length) {
+      return `OCR数量を週次メニューシートへ投影していません: ${unresolvedLayoutResolutionDetails.join(" / ")}`;
+    }
+    return "";
+  })();
   const ocrReparseBlockedHint = (() => {
+    const outcome = explicitTerminalReparseOutcome;
+    if (!outcome) return "";
+    const error = String(outcome.reasonCode || "").trim();
+    if (outcome.kind === "rejected") {
+      return describeReparseRejectedReason(error || "draft_ready_blocked");
+    }
     const status = String(order?.ocr_status || "").trim().toLowerCase();
-    const error = String(order?.ocr_error || "").trim();
-    if (!error) return "";
-    if (status !== "failed" && status !== "empty") return "";
+    if (!error && status !== "failed" && status !== "empty" && status !== "stalled") return "";
     if (isReparseStaleTimeoutError(error)) {
       return "LLM補完再解析が30分以上進まず停止扱いになりました。OCR結果は残っているため、必要なら再解析をやり直してください。";
     }
@@ -6107,6 +8859,23 @@ const loadOcrPages = async () => {
     }
     return "";
   })();
+  const blockedMenuMonthId = extractWeekMonthId(
+    order?.persisted_week_value
+      || order?.week_value
+      || order?.week
+      || "",
+  );
+  const editorBlockedReasons = Array.from(
+    new Set(
+      [
+        ...effectiveApplyBlockers,
+        ...effectiveConfirmBlockers,
+        ...(ocrSheetWarnings.includes("sheet_contract_invalid") ? ["sheet_contract_invalid"] : []),
+      ]
+        .map((item) => describeReviewBlocker(item))
+        .filter(Boolean),
+    ),
+  );
   const ocrReviewStripBadges = (() => {
     const labels: string[] = [];
     if (effectiveSheetReviewLabel) labels.push(effectiveSheetReviewLabel);
@@ -6130,13 +8899,17 @@ const loadOcrPages = async () => {
     currentOrder: OrderDetail | null | undefined,
     currentFacilityDraft: string,
     currentWeekDraft: string,
+    currentCustomWeekRangeStart: string,
+    currentCustomWeekRangeEnd: string,
   ) => {
     const persistedFacilityValue = (currentOrder?.facility || "").trim();
     const selectedFacilityValue = currentFacilityDraft.trim();
-    const persistedWeekValue = normalizeWeekValue(
-      currentOrder?.persisted_week_value || currentOrder?.week || "",
+    const persistedWeekValue = getCanonicalWeekSelectionSource(currentOrder);
+    const selectedWeekValue = getPendingStep1WeekSelection(
+      currentWeekDraft,
+      currentCustomWeekRangeStart,
+      currentCustomWeekRangeEnd,
     );
-    const selectedWeekValue = normalizeWeekValue(currentWeekDraft);
     const persistedConcreteWeekValue = normalizeConcreteWeekValue(persistedWeekValue);
     const selectedConcreteWeekValue = normalizeConcreteWeekValue(selectedWeekValue);
     const facilityMissingValue = !persistedFacilityValue;
@@ -6173,7 +8946,13 @@ const loadOcrPages = async () => {
       step1BlockReasons: step1BlockReasonsValue,
     };
   };
-  const step1State = computeStep1State(order, facility, weekDraft);
+  const step1State = computeStep1State(
+    order,
+    facility,
+    weekDraft,
+    customWeekRangeStart,
+    customWeekRangeEnd,
+  );
   const {
     persistedFacility,
     selectedFacility,
@@ -6187,9 +8966,9 @@ const loadOcrPages = async () => {
     step1Incomplete,
     step1BlockReasons,
   } = step1State;
-  const weekCalendarDraft = calendarDateFromWeekValue(weekDraft);
-  const monthlyMenuMonthId = extractWeekMonthId(
-    weekDraft || order?.persisted_week_value || order?.week_value || order?.week || "",
+  const hasAuthoritativeSavedSheet = Boolean(order?.ocr_has_saved_draft);
+    const monthlyMenuMonthId = extractWeekMonthId(
+    weekDraft || getCanonicalWeekSelectionSource(order),
   );
   const monthlyMenuHref = monthlyMenuMonthId ? `/menus/${monthlyMenuMonthId}` : "";
   const step1ChoiceRequired = step1CriticalDecisions.length > 0;
@@ -6238,6 +9017,15 @@ const loadOcrPages = async () => {
   const canAccessStep = (index: number) => !getStepBlockedReason(index);
   const normalizedOcrStatus = String(order?.ocr_status || "").trim().toLowerCase();
   const ocrHasEditableSheet = activeEditorRows.length > 0;
+  const ocrSheetInitialLoadPending = !ocrHasEditableSheet && (ocrSheetLoading || !ocrSheetLoadSettled);
+  const hasCanonicalSheetBlocker =
+    ocrSheetSource === "weekly_menu_blocked" || editorBlockedReasons.length > 0;
+  const showEditorBlockedPanel =
+    !ocrHasEditableSheet &&
+    (
+      hasCanonicalSheetBlocker
+      || (!ocrSheetInitialLoadPending && Boolean(ocrSheetMessage.trim()))
+    );
   const ocrNeedsDraftSave = ocrHasEditableSheet && !effectiveCanApply;
   const ocrNeedsDraftApply = effectiveConfirmBlockers.includes("draft_newer_than_lines");
   const ocrProcessingNow =
@@ -6275,7 +9063,6 @@ const loadOcrPages = async () => {
     !ocrRecoverPending &&
     !step2ChoiceRequired &&
     !semanticShellOnly &&
-    !showNewEvidenceChoice &&
     !rerunInProgressState;
   const showOcrPipelineRerunAction = !step1Incomplete;
   const activateStep2RepairStage = (nextStage: Exclude<Step2RepairStage, "">) => {
@@ -6292,7 +9079,7 @@ const loadOcrPages = async () => {
     }
   };
   const step2SuggestedRepairStage: Exclude<Step2RepairStage, ""> = (() => {
-    if (showNewEvidenceChoice || keepingCurrentDraftChoice || step2ChoiceRequired) {
+    if (step2ChoiceRequired) {
       return "candidate";
     }
     if (
@@ -6321,10 +9108,7 @@ const loadOcrPages = async () => {
   const ocrPrimaryActionHint = (() => {
     if (workflowHeadline) return workflowHeadline;
     if (showNewEvidenceChoice) {
-      return "新しいOCR候補ができました。切り替えるか、現在のシートを維持するか選んでください";
-    }
-    if (keepingCurrentDraftChoice) {
-      return "現在のシートを維持しています。必要ならあとで新しいOCR候補に切り替えられます";
+      return "新しいOCR候補があります。必要なら確認できますが、現在のシートのまま明細へ進めます";
     }
     if (rerunInProgressState) {
       return "OCRパイプラインを再実行しています。完了後に新しい候補を確認してください";
@@ -6344,6 +9128,9 @@ const loadOcrPages = async () => {
     if (showOcrRecoveryAction) {
       return "OCR土台が不完全です。先にOCR基盤を復旧してから次の操作に進んでください。";
     }
+    if (ocrSheetInitialLoadPending) {
+      return "シートを取得中です。取得後に数字を確認してください";
+    }
     if (showOcrPipelineRerunAction && !ocrHasEditableSheet) {
       return "先にOCRパイプラインを再実行してOCR基盤を更新してください。";
     }
@@ -6353,21 +9140,18 @@ const loadOcrPages = async () => {
     if (!ocrHasEditableSheet) return "まずシートを再読込して編集対象を表示してください";
     if (!effectiveCanApply) return "まずシートを保存（暫定）して内容を整えてください";
     if (effectiveConfirmBlockers.includes("draft_newer_than_lines")) {
-      return "内容を確認して「明細に反映して次へ」を押してください";
+      return `内容を確認して「${STEP2_APPLY_NEXT_LABEL}」を押してください`;
     }
     if (reviewWarningText) return "内容を確認してから明細に反映してください";
     if (effectiveCanConfirm) return "明細確認後に確定できます";
-    return "必要な数値を修正したら「明細に反映して次へ」を押してください";
+    return `必要な数値を修正したら「${STEP2_APPLY_NEXT_LABEL}」を押してください`;
   })();
   const ocrPrimaryActionNote = (() => {
     if (step1ChoiceRequired) {
       return "Step1 に戻って、施設または週の候補を先に確定してください。";
     }
     if (showNewEvidenceChoice) {
-      return "現在のシートは残したままです。新しいOCR候補に切り替えると、最新のOCR基盤からシートを作り直します。";
-    }
-    if (keepingCurrentDraftChoice) {
-      return "現在のシートで作業を続けます。切り替えが必要になったら、候補ブロックから新しいOCR候補を選べます。";
+      return "現在のシートが正解です。新しいOCR候補はプレビュー専用で保持され、必要な時だけ切り替えます。";
     }
     if (rerunInProgressState) {
       return "再実行中は現在のシートを維持したまま待機します。完了後に切り替え可否を判断してください。";
@@ -6403,13 +9187,27 @@ const loadOcrPages = async () => {
     if (effectiveConfirmedLinesRetained) return "現在の確定済み明細は保持したまま確認できます。";
     return "";
   })();
+  const workflowSummaryAction = (() => {
+    if (workflowPrimaryActionCode === "run_ocr_pipeline" || workflowPrimaryActionCode === "rerun_ocr_pipeline") {
+      return {
+        label: reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行",
+        onClick: () => void rerunOcrPipeline(),
+        disabled: reparsePending || rerunInProgressState || ocrRecoverPending,
+      };
+    }
+    if (workflowPrimaryActionCode === "recover_ocr_evidence") {
+      return {
+        label: ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧",
+        onClick: () => void recoverOcrFoundation(),
+        disabled: ocrRecoverPending || ocrProcessingNow,
+      };
+    }
+    return null;
+  })();
   const step2OutputBlockedReason = (() => {
     if (step1Incomplete) return "";
     if (step2ChoiceRequired) {
       return "Step2でOCR候補を確定してください";
-    }
-    if (showNewEvidenceChoice) {
-      return "Step2で新しいOCR候補へ切り替えるか、現在のシートを維持してください";
     }
     if (rerunInProgressState) {
       return "Step2のOCR再実行が完了するまで待ってください";
@@ -6437,6 +9235,7 @@ const loadOcrPages = async () => {
     (effectiveCanApply || effectiveConfirmBlockers.includes("draft_newer_than_lines"));
   const staleRawOcrFailureForCurrentDraft =
     currentDraftReadyForWork &&
+    !explicitTerminalReparseOutcome &&
     ["failed", "error", "empty", "stalled"].includes(normalizedOcrStatus);
   const staleRawOcrStatusMessages = (() => {
     const messages = new Set<string>();
@@ -6460,11 +9259,20 @@ const loadOcrPages = async () => {
     ocrStatusLabel = showNewEvidenceChoice ? "完了(候補あり)" : "完了";
     if (showNewEvidenceChoice) {
       ocrStatusDetail = "現在のシートは利用可能です。新しいOCR候補は別扱いで確認できます。";
-    } else if (keepingCurrentDraftChoice) {
-      ocrStatusDetail = "現在のシートを維持しています。必要ならあとで新しいOCR候補へ切り替えられます。";
     } else {
       ocrStatusDetail = "";
     }
+  }
+  if (explicitTerminalReparseOutcome && currentDraftReadyForWork) {
+    const usableDetail = showNewEvidenceChoice
+      ? "現在のシートは利用可能です。新しいOCR候補は別扱いで確認できます。"
+      : "現在のシートは利用可能です。";
+    if (explicitTerminalReparseOutcome.kind === "failed") {
+      ocrStatusLabel = showNewEvidenceChoice ? "再解析失敗(候補あり)" : "再解析失敗(現シート維持)";
+    } else {
+      ocrStatusLabel = showNewEvidenceChoice ? "再解析却下(候補あり)" : "再解析却下(現シート維持)";
+    }
+    ocrStatusDetail = [explicitTerminalReparseOutcome.detail, usableDetail].filter(Boolean).join(" ");
   }
   const step2FinishVisible = Boolean(step2WizardChoice);
   const step2FinishActionNote = (() => {
@@ -6517,14 +9325,18 @@ const loadOcrPages = async () => {
   const nextStepLabel = canStepNext ? orderSteps[activeStepIndex + 1].label : "";
   const prevStepLabel = canStepPrev ? orderSteps[activeStepIndex - 1].label : "";
   const isLastStep = activeStepIndex >= stepCount - 1;
+  const orderAlreadyConfirmed = String(order?.status || "").trim() === "確定";
   const nextStepButtonLabel = isLastStep
-    ? confirmSaving
-      ? "確定中..."
-      : "確定して注文一覧へ戻る"
+    ? orderAlreadyConfirmed
+      ? "注文一覧へ戻る"
+      : confirmSaving
+        ? "確定中..."
+        : "確定して注文一覧へ戻る"
     : canStepNext
       ? `次へ: ${nextStepLabel}`
       : "次へ";
-  const stepInteractionLocked = facilitySelectionPending || weekSelectionPending;
+  const stepInteractionLocked =
+    facilitySelectionPending || weekSelectionPending || Boolean(pendingSavedSheetContextChange);
   const goStep = async (index: number) => {
     const bounded = Math.min(Math.max(index, 0), stepCount - 1);
     const blockedReason = getStepBlockedReason(bounded);
@@ -6537,7 +9349,9 @@ const loadOcrPages = async () => {
         const refreshedStep1State = computeStep1State(
           refreshedOrder || order,
           refreshedOrder?.facility || facility,
-          normalizeWeekValue(refreshedOrder?.persisted_week_value || refreshedOrder?.week_value || refreshedOrder?.week || ""),
+          getCanonicalWeekSelectionSource(refreshedOrder),
+          customWeekRangeStart,
+          customWeekRangeEnd,
         );
         if (!getStepBlockedReason(bounded, refreshedStep1State)) {
           setActiveStep(bounded);
@@ -6634,8 +9448,34 @@ const loadOcrPages = async () => {
         <>
           <section className="panel">
             <header className="panel-header">
-              <h2>概要</h2>
-              <span className="status-pill">{order.status}</span>
+              <div>
+                <h2>概要</h2>
+                {order.is_archived ? (
+                  <p className="subtle">この注文はアーカイブ済みです。通常の注文一覧には表示されません。</p>
+                ) : null}
+              </div>
+              <div className="panel-actions">
+                <span className="status-pill">{order.status}</span>
+                {order.is_archived ? (
+                  <button
+                    className="btn ghost"
+                    type="button"
+                    onClick={() => toggleCurrentOrderArchive(false)}
+                    disabled={archiveOrderBusy}
+                  >
+                    {archiveOrderBusy ? "処理中..." : "アーカイブ解除"}
+                  </button>
+                ) : (
+                  <button
+                    className="btn ghost"
+                    type="button"
+                    onClick={() => toggleCurrentOrderArchive(true)}
+                    disabled={archiveOrderBusy}
+                  >
+                    {archiveOrderBusy ? "処理中..." : "この注文をアーカイブ"}
+                  </button>
+                )}
+              </div>
             </header>
             <div className="summary-grid summary-grid--compact">
               <div className="summary-primary-card">
@@ -6652,6 +9492,39 @@ const loadOcrPages = async () => {
                 {ocrStatusDetail ? <p className="subtle">{ocrStatusDetail}</p> : null}
               </div>
             </div>
+            {workflowHeadline || workflowStateLabel || workflowSummaryAction ? (
+              <div className="workflow-summary-card">
+                <div>
+                  <p className="field-label">作業状態</p>
+                  <p className="workflow-summary-title">
+                    {workflowHeadline || workflowStateLabel || "状態を確認してください"}
+                  </p>
+                  {workflowStateLabel && workflowHeadline && workflowStateLabel !== workflowHeadline ? (
+                    <p className="subtle">状態: {workflowStateLabel}</p>
+                  ) : null}
+                  {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
+                </div>
+                <div className="workflow-summary-actions">
+                  {workflowSummaryAction ? (
+                    <button
+                      className="btn primary workflow-summary-action-btn"
+                      type="button"
+                      onClick={workflowSummaryAction.onClick}
+                      disabled={workflowSummaryAction.disabled}
+                    >
+                      {workflowSummaryAction.label}
+                    </button>
+                  ) : null}
+                  {order?.workflow_state?.primary_action ? (
+                    <span className="ocr-review-pill ocr-review-pill--state">
+                      {describeWorkflowPrimaryAction(order.workflow_state.primary_action)}
+                    </span>
+                  ) : workflowStateLabel ? (
+                    <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <details className="summary-details">
               <summary>詳細と内部情報を表示</summary>
               <div className="summary-details-grid">
@@ -6663,9 +9536,9 @@ const loadOcrPages = async () => {
                   <div>
                     <p className="field-label">対象週</p>
                     <p className="summary-value">
-                      {formatWeekLabel(order.week_value || order.week || "", order.week_label) || "未確定"}{" "}
-                      {extractWeekMonthId(order.week_value || order.week || "")
-                        ? <Link href={`/menus/${extractWeekMonthId(order.week_value || order.week || "")}`}>メニュー編集</Link>
+                      {formatWeekLabel(getCanonicalWeekSelectionSource(order), order.week_label) || "未確定"}{" "}
+                      {extractWeekMonthId(getCanonicalWeekSelectionSource(order))
+                        ? <Link href={`/menus/${extractWeekMonthId(getCanonicalWeekSelectionSource(order))}`}>メニュー編集</Link>
                         : null}
                     </p>
                   </div>
@@ -6675,28 +9548,17 @@ const loadOcrPages = async () => {
                     {workflowHeadline ? <p className="subtle">{workflowHeadline}</p> : null}
                     {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
                   </div>
-                </div>
-                {workflowHeadline || workflowStateLabel ? (
-                  <div className="workflow-summary-card">
-                    <div>
-                      <p className="field-label">作業状態</p>
-                      <p className="workflow-summary-title">
-                        {workflowHeadline || workflowStateLabel || "状態を確認してください"}
+                  <div>
+                    <p className="field-label">アーカイブ</p>
+                    <p className="summary-value">{order.is_archived ? "アーカイブ済み" : "通常表示"}</p>
+                    {order.archived_at ? (
+                      <p className="subtle">
+                        {formatTimestamp(order.archived_at)}
+                        {order.archived_by ? ` / ${order.archived_by}` : ""}
                       </p>
-                      {workflowStateLabel && workflowHeadline && workflowStateLabel !== workflowHeadline ? (
-                        <p className="subtle">状態: {workflowStateLabel}</p>
-                      ) : null}
-                      {workflowSupportText ? <p className="subtle">{workflowSupportText}</p> : null}
-                    </div>
-                    {order?.workflow_state?.primary_action ? (
-                      <span className="ocr-review-pill ocr-review-pill--state">
-                        {describeWorkflowPrimaryAction(order.workflow_state.primary_action)}
-                      </span>
-                    ) : workflowStateLabel ? (
-                      <span className="ocr-review-pill ocr-review-pill--state">{workflowStateLabel}</span>
                     ) : null}
                   </div>
-                ) : null}
+                </div>
               </div>
               <div className="summary-details-stack">
                 <details className="prompt-panel">
@@ -6883,6 +9745,68 @@ const loadOcrPages = async () => {
             {actionMessage && <p className="message">{actionMessage}</p>}
           </section>
 
+          {pendingSavedSheetContextChange ? (
+            <div className="sheet-context-dialog-backdrop" role="presentation">
+              <div
+                className="sheet-context-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="sheet-context-dialog-title"
+              >
+                <p className="field-label">保存済みシートあり</p>
+                <h3 id="sheet-context-dialog-title">施設または週を変更します</h3>
+                <p className="subtle">
+                  保存済みシートが正解です。新しい施設/週の骨格へ切り替える方法を選んでください。
+                </p>
+                <div className="sheet-context-dialog-summary">
+                  <div className="sheet-context-dialog-row">
+                    <span>施設</span>
+                    <strong>{persistedFacility || "-"}</strong>
+                    <span className="sheet-context-dialog-arrow">→</span>
+                    <strong>{pendingSavedSheetContextChange.facility || "-"}</strong>
+                  </div>
+                  <div className="sheet-context-dialog-row">
+                    <span>週</span>
+                    <strong>{formatWeekLabel(persistedWeek) || persistedWeek || "-"}</strong>
+                    <span className="sheet-context-dialog-arrow">→</span>
+                    <strong>
+                      {formatWeekLabel(pendingSavedSheetContextChange.week) || pendingSavedSheetContextChange.week || "-"}
+                    </strong>
+                  </div>
+                </div>
+                <p className="subtle">
+                  骨格は新しい施設/週の週次メニューへ切り替えます。選べるのは、数量を引き継ぐか空白へ戻すかだけです。
+                </p>
+                <div className="sheet-context-dialog-actions">
+                  <button
+                    className="btn primary"
+                    type="button"
+                    onClick={() => void applySavedSheetContextChange("keep")}
+                    disabled={Boolean(savedSheetContextChangeApplying)}
+                  >
+                    {savedSheetContextChangeApplying === "keep" ? "切替中..." : "数字を保持して切替"}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    type="button"
+                    onClick={() => void applySavedSheetContextChange("clear")}
+                    disabled={Boolean(savedSheetContextChangeApplying)}
+                  >
+                    {savedSheetContextChangeApplying === "clear" ? "切替中..." : "数字をクリアして切替"}
+                  </button>
+                  <button
+                    className="btn secondary"
+                    type="button"
+                    onClick={() => setPendingSavedSheetContextChange(null)}
+                    disabled={Boolean(savedSheetContextChangeApplying)}
+                  >
+                    キャンセル
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           <section className="panel step-panel">
             <header className="panel-header">
               <div>
@@ -6957,12 +9881,12 @@ const loadOcrPages = async () => {
                 <div className="summary-actions">
                   <label className="field">
                     <span className="field-label">施設 (Step1 必須)</span>
-                    <select
-                      className="input"
-                      value={facility}
-                      onChange={(e) => setFacility(e.target.value)}
-                      disabled={facilityOptionsLoading}
-                    >
+                      <select
+                        className="input"
+                        value={facility}
+                        onChange={(e) => setFacility(e.target.value)}
+                        disabled={facilityOptionsLoading || step1Saving}
+                      >
                       <option value="">施設を選択</option>
                       {facility && !facilityOptions.some((opt) => opt.id === facility) ? (
                         <option value={facility}>{facility} (未登録)</option>
@@ -6981,49 +9905,68 @@ const loadOcrPages = async () => {
                   </label>
                   <label className="field">
                     <span className="field-label">週 (Step1 必須)</span>
-                    {weekOptions.length ? (
-                      <select
-                        className="input"
-                        value={weekDraft}
-                        onChange={(e) => setWeekDraft(e.target.value)}
-                        disabled={weekOptionsLoading}
-                      >
-                        <option value="">週を選択</option>
-                        {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
-                          <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
-                        ) : null}
-                        {weekOptions.map((option) => (
-                          <option key={option.week_id} value={option.week_id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <>
-                        <input
-                          className="input"
-                          type="date"
-                          value={weekCalendarDraft}
-                          onChange={(e) => setWeekDraft(deriveWeekValueFromCalendarDate(e.target.value))}
-                        />
-                        <span className="subtle">
-                          候補週がまだ無いため、日付を選ぶとその日を含む週で設定します。
-                        </span>
-                        {weekDraft ? <span className="subtle">設定予定: {formatWeekLabel(weekDraft) || weekDraft}</span> : null}
-                      </>
-                    )}
+                    <select
+                      className="input"
+                      value={weekDraft}
+                      onChange={(e) => setWeekDraft(e.target.value)}
+                      disabled={weekOptionsLoading || step1Saving}
+                    >
+                      <option value="">週を選択</option>
+                      {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
+                        <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
+                      ) : null}
+                      {weekOptions.map((option) => (
+                        <option key={option.week_id} value={option.week_id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                     {weekOptionsError ? (
                       <span className="subtle">{weekOptionsError}</span>
                     ) : weekOptionsLoading ? (
                       <span className="subtle">週候補を取得中...</span>
-                    ) : weekOptions.length ? (
-                      <span className="subtle">メニュー期間から選択できます。</span>
                     ) : (
-                      <span className="subtle">候補がないため、カレンダーから週を選択できます。</span>
+                      <span className="subtle">日曜から土曜の固定週を表示します。</span>
                     )}
+                    <div className="step1-week-range">
+                      <span className="subtle">例外時だけ範囲指定します。</span>
+                      <div className="summary-actions">
+                        <input
+                          className="input"
+                          type="date"
+                          value={customWeekRangeStart}
+                          onChange={(e) => setCustomWeekRangeStart(e.target.value)}
+                          disabled={step1Saving}
+                        />
+                        <input
+                          className="input"
+                          type="date"
+                          value={customWeekRangeEnd}
+                          onChange={(e) => setCustomWeekRangeEnd(e.target.value)}
+                          disabled={step1Saving}
+                        />
+                        <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={step1Saving}>
+                          例外範囲を設定
+                        </button>
+                      </div>
+                      {getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd) ? (
+                        <span className="subtle">
+                          設定予定: {
+                            formatWeekLabel(
+                              getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd),
+                            )
+                            || getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd)
+                          }
+                        </span>
+                      ) : null}
+                    </div>
                   </label>
-                  <button className="btn" onClick={updateStep1} disabled={!canSaveStep1}>
-                    {facilitySelectionPending || weekSelectionPending || step1Incomplete ? "設定を保存" : "設定済み"}
+                  <button className="btn" onClick={updateStep1} disabled={!canSaveStep1 || step1Saving}>
+                    {step1Saving
+                      ? "設定中..."
+                      : facilitySelectionPending || weekSelectionPending || step1Incomplete
+                        ? "設定を保存"
+                        : "設定済み"}
                   </button>
                 </div>
                 {step1Incomplete ? (
@@ -7102,8 +10045,12 @@ const loadOcrPages = async () => {
                       <p className="subtle">OCRオーバーレイとシートを左右で比較しながら、そのままシートを修正します。</p>
                     </div>
                     <div className="panel-actions">
-                      <button className="btn ghost" type="button" onClick={loadOcrPages} disabled={ocrPagesLoading}>
-                        {ocrPagesLoading ? "取得中..." : "OCRページを更新"}
+                      <button
+                        className="btn ghost"
+                        type="button"
+                        onClick={() => void loadOcrPages({ force: true })}
+                      >
+                        {ocrPagesLoading ? "再取得中..." : "OCRページを更新"}
                       </button>
                     </div>
                   </header>
@@ -7146,6 +10093,57 @@ const loadOcrPages = async () => {
                           「OCR基盤を復旧」は、OCRの基盤(生データ/構造化表/ページ参照)を再構築し、手入力前の作業土台を戻します。
                         </p>
                       ) : null}
+                      {!step1Incomplete ? (
+                        <div className="ocr-flow-branch-actions">
+                          {showNewEvidenceChoice ? (
+                            <button
+                              className="btn primary"
+                              type="button"
+                              onClick={() => void switchDraftToLatestEvidence()}
+                              disabled={switchEvidencePending || keepCurrentPending || reparsePending || rerunInProgressState || ocrRecoverPending}
+                            >
+                              {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
+                            </button>
+                          ) : null}
+                          {showNewEvidenceChoice ? (
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => void keepCurrentDraft()}
+                              disabled={switchEvidencePending || keepCurrentPending}
+                            >
+                              {keepCurrentPending ? "維持を記録中..." : "現状を維持"}
+                            </button>
+                          ) : null}
+                          {(ocrPagesUnavailable || overlayUnavailableMode || (!hasUsableOverlayPreview && !ocrPagesLoading)) ? (
+                            <button
+                              className="btn ghost"
+                              type="button"
+                              onClick={() => void loadOcrPages({ force: true })}
+                            >
+                              OCR表示を再取得
+                            </button>
+                          ) : null}
+                          <button
+                            className="btn primary"
+                            type="button"
+                            onClick={() => void rerunOcrPipeline()}
+                            disabled={reparsePending || rerunInProgressState || ocrRecoverPending}
+                          >
+                            {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
+                          </button>
+                          {(showOcrRecoveryAction || ocrHardRecoveryMode) ? (
+                            <button
+                              className="btn"
+                              type="button"
+                              onClick={() => void recoverOcrFoundation()}
+                              disabled={ocrRecoverPending || ocrProcessingNow}
+                            >
+                              {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   {ocrPagesMessage ? <p className="subtle">{ocrPagesMessage}</p> : null}
@@ -7182,7 +10180,12 @@ const loadOcrPages = async () => {
                       警告: OCR テーブルを暫定ソースとして表示しています。内容を確認してから保存・反映してください。
                     </p>
                   ) : null}
-                  <div className="ocr-workspace">
+                  {ocrSheetProjectionMessage ? (
+                    <div className="warning-banner">
+                      <p>数量投影の状態: {ocrSheetProjectionMessage}</p>
+                    </div>
+                  ) : null}
+                  <div className={`ocr-workspace ${ocrWorkspaceLayoutMode === "vertical" ? "ocr-workspace--vertical" : ""}`}>
                     <div className="ocr-workspace-tools">
                       <div className="ocr-edit">
                         <div className="ocr-edit-header">
@@ -7190,6 +10193,50 @@ const loadOcrPages = async () => {
                             <p className="subtle">編集対象: シートテンプレート</p>
                             <h3 className="ocr-edit-title">左を見ながら、右のシートの数字だけを確認します。</h3>
                             <p className="subtle">いま必要な操作だけを下の分岐に沿って進めてください。</p>
+                          </div>
+                          <div className="ocr-editor-mode-switch">
+                            <span className="subtle">表示配置</span>
+                            <div className="preview-mode-toggle" role="tablist" aria-label="ocr workspace layout">
+                              <button
+                                className={`btn ghost ${ocrWorkspaceLayoutMode === "horizontal" ? "active" : ""}`}
+                                type="button"
+                                onClick={() => setOcrWorkspaceLayoutMode("horizontal")}
+                                aria-pressed={ocrWorkspaceLayoutMode === "horizontal"}
+                              >
+                                左右
+                              </button>
+                              <button
+                                className={`btn ghost ${ocrWorkspaceLayoutMode === "vertical" ? "active" : ""}`}
+                                type="button"
+                                onClick={() => setOcrWorkspaceLayoutMode("vertical")}
+                                aria-pressed={ocrWorkspaceLayoutMode === "vertical"}
+                              >
+                                上下
+                              </button>
+                            </div>
+                          </div>
+                          <div className="ocr-editor-mode-switch">
+                            <span className="subtle">数量割当</span>
+                            <div className="preview-mode-toggle" role="tablist" aria-label="quantity assignment strategy">
+                              <button
+                                className={`btn ghost ${quantityAssignmentStrategy === "legacy" ? "active" : ""}`}
+                                type="button"
+                                onClick={() => switchQuantityAssignmentStrategy("legacy")}
+                                aria-pressed={quantityAssignmentStrategy === "legacy"}
+                                disabled={ocrSheetLoading}
+                              >
+                                旧方式
+                              </button>
+                              <button
+                                className={`btn ghost ${quantityAssignmentStrategy === "hakodate" ? "active" : ""}`}
+                                type="button"
+                                onClick={() => switchQuantityAssignmentStrategy("hakodate")}
+                                aria-pressed={quantityAssignmentStrategy === "hakodate"}
+                                disabled={ocrSheetLoading}
+                              >
+                                箱館方式
+                              </button>
+                            </div>
                           </div>
                         </div>
                         {ocrSheetMessage ? <p className="subtle">{ocrSheetMessage}</p> : null}
@@ -7231,45 +10278,64 @@ const loadOcrPages = async () => {
                           </div>
                           <div className={`ocr-flow-branches ocr-flow-branches--wizard ${step2WizardChoice === "no" ? "has-repair-panel" : ""}`}>
                             <div className="ocr-flow-rail">
-                              <div className="ocr-flow-question-card">
-                                <div>
-                                  <p className="ocr-flow-branch-label">選択 1</p>
-                                  <h4>数字は正しい？</h4>
-                                  <p className="subtle">
-                                    左のプレビューを見ながら、右のシートの数量が合っているかだけを決めます。
-                                  </p>
-                                </div>
-                                <div className="ocr-flow-choice-grid">
-                                  <button
-                                    className={`ocr-flow-choice-button ${step2WizardChoice === "yes" ? "active" : ""}`}
-                                    type="button"
-                                    onClick={() => {
-                                      if (workflowCandidateEvidenceRunId) {
-                                        setKeptCurrentCandidateEvidenceId(workflowCandidateEvidenceRunId);
-                                      }
-                                      setStep2WizardChoice("yes");
-                                      setStep2RepairStage("");
-                                      if (workflowCandidateEvidenceRunId) {
-                                        setActionMessage("現在のシートを維持して進みます。必要ならあとで新しいOCR候補へ切り替えられます。");
-                                      }
-                                    }}
-                                  >
-                                    <span className="ocr-flow-choice-title">はい / 修正済み</span>
-                                    <span className="ocr-flow-choice-note">
-                                      {workflowCandidateEvidenceRunId ? "今のシートを維持して進む" : "そのまま明細へ反映する"}
-                                    </span>
-                                  </button>
-                                  <button
-                                    className={`ocr-flow-choice-button ${step2WizardChoice === "no" ? "active" : ""}`}
-                                    type="button"
-                                    onClick={() => {
-                                      setStep2WizardChoice("no");
-                                      activateStep2RepairStage(step2SuggestedRepairStage);
-                                    }}
-                                  >
-                                    <span className="ocr-flow-choice-title">いいえ / 迷う</span>
-                                    <span className="ocr-flow-choice-note">次の手段を選んで整える</span>
-                                  </button>
+                              <div className="ocr-flow-question-card ocr-flow-question-card--compact">
+                                <div className="ocr-flow-question-main">
+                                  <div className="ocr-flow-question-copy">
+                                    <p className="ocr-flow-branch-label">選択 1</p>
+                                    <h4>数字は正しい？</h4>
+                                    <p className="subtle">
+                                      左のプレビューを見ながら、右のシートの数量が合っているかだけを決めます。
+                                    </p>
+                                  </div>
+                                  <div className="ocr-flow-choice-grid ocr-flow-choice-grid--compact">
+                                    <button
+                                      className={`ocr-flow-choice-button ${step2WizardChoice === "yes" ? "active" : ""}`}
+                                      type="button"
+                                      onClick={() => {
+                                        if (workflowCandidateEvidenceRunId) {
+                                          void keepCurrentDraft();
+                                          return;
+                                        }
+                                        setStep2WizardChoice("yes");
+                                        setStep2RepairStage("");
+                                      }}
+                                    >
+                                      <span className="ocr-flow-choice-title">はい / 修正済み</span>
+                                      <span className="ocr-flow-choice-note">
+                                        {workflowCandidateEvidenceRunId ? "今のシートを維持して進む" : "そのまま明細へ反映する"}
+                                      </span>
+                                    </button>
+                                    <button
+                                      className={`ocr-flow-choice-button ${step2WizardChoice === "no" ? "active" : ""}`}
+                                      type="button"
+                                      onClick={() => {
+                                        setStep2WizardChoice("no");
+                                        activateStep2RepairStage(step2SuggestedRepairStage);
+                                      }}
+                                    >
+                                      <span className="ocr-flow-choice-title">いいえ / 迷う</span>
+                                      <span className="ocr-flow-choice-note">次の手段を選んで整える</span>
+                                    </button>
+                                    <div className="ocr-flow-choice-select-card">
+                                      <label htmlFor="expanded-cell-copy-mode" className="ocr-flow-choice-title">
+                                        拡大セル
+                                      </label>
+                                      <select
+                                        id="expanded-cell-copy-mode"
+                                        className="input"
+                                        value={expandedCellCopyMode}
+                                        onChange={(event) => void handleExpandedCellCopyModeChange(event.target.value as ExpandedCellCopyMode)}
+                                        disabled={expandedCellCopySaving || !facility.trim()}
+                                      >
+                                        <option value="disabled">無効</option>
+                                        <option value="enabled">有効にする</option>
+                                        <option value="persisted">この施設で永続化して有効化する</option>
+                                      </select>
+                                      <p className="ocr-flow-choice-note">
+                                        同じ日付・区分で数字が1つだけあるとき、同じ区分の空欄へコピーします。
+                                      </p>
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
                               {step2FinishVisible ? (
@@ -7286,7 +10352,7 @@ const loadOcrPages = async () => {
                                       onClick={() => void completeStep2AndMoveToDetails()}
                                       disabled={!canAttemptApplyOcrSheet || !ocrHasEditableSheet || ocrProcessingNow}
                                     >
-                                      {ocrTableSaving ? "保存中..." : "修正完了 / 保存して明細に反映"}
+                                      {ocrTableSaving ? "保存中..." : STEP2_APPLY_NEXT_LABEL}
                                     </button>
                                     <button
                                       className="btn ghost"
@@ -7376,7 +10442,7 @@ const loadOcrPages = async () => {
                                       <button
                                         className={saveSheetButtonClassName}
                                         type="button"
-                                        onClick={saveOcrSheetExact}
+                                        onClick={() => void saveOcrSheetExact()}
                                         disabled={ocrTableSaving || !canSaveDraftSheet}
                                       >
                                         {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
@@ -7465,19 +10531,21 @@ const loadOcrPages = async () => {
                                           <button
                                             className="btn ghost"
                                             type="button"
-                                            onClick={keepCurrentDraft}
-                                            disabled={switchEvidencePending}
+                                            onClick={() => void keepCurrentDraft()}
+                                            disabled={switchEvidencePending || keepCurrentPending}
                                           >
-                                            今のシートを維持
+                                            {keepCurrentPending ? "維持を記録中..." : "今のシートを維持"}
                                           </button>
                                         </div>
-                                      </div>
-                                    ) : keepingCurrentDraftChoice ? (
-                                      <div className="ocr-evidence-switch-card ocr-evidence-switch-card--muted">
-                                        <p className="ocr-evidence-switch-title">現在のシートを維持中です</p>
-                                        <p className="subtle">
-                                          新しい OCR 候補は保持しています。必要になったら切り替えを再度選べます。
-                                        </p>
+                                        {candidateSheetPreviewLoading ? (
+                                          <p className="subtle ocr-remediation-empty">候補シートを取得中...</p>
+                                        ) : (
+                                          renderReadonlySheetPreview(candidateSheetPreview, {
+                                            title: "候補シートのプレビュー",
+                                            note: "切り替える前に、最新 OCR 候補のシート内容をここで確認できます。",
+                                            emptyMessage: candidateSheetPreviewMessage,
+                                          })
+                                        )}
                                       </div>
                                     ) : null}
                                     {renderCriticalDecisionPanel(step2CriticalDecisions, {
@@ -7649,6 +10717,28 @@ const loadOcrPages = async () => {
                                 {reviewWarningText ? <li>{reviewWarningText}</li> : null}
                                 {ocrReparseBlockedHint ? <li>{ocrReparseBlockedHint}</li> : null}
                               </ul>
+                              {!step1Incomplete ? (
+                                <div className="ocr-flow-branch-actions">
+                                  <button
+                                    className="btn primary"
+                                    type="button"
+                                    onClick={() => void rerunOcrPipeline()}
+                                    disabled={reparsePending || rerunInProgressState || ocrRecoverPending}
+                                  >
+                                    {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
+                                  </button>
+                                  {(showOcrRecoveryAction || ocrHardRecoveryMode) ? (
+                                    <button
+                                      className="btn"
+                                      type="button"
+                                      onClick={() => void recoverOcrFoundation()}
+                                      disabled={ocrRecoverPending || ocrProcessingNow}
+                                    >
+                                      {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>
@@ -7714,50 +10804,10 @@ const loadOcrPages = async () => {
                                 >
                                   1行下へ
                                 </button>
-                                <label className="ocr-shift-field">
-                                  <span>入替元列</span>
-                                  <select
-                                    className="input"
-                                    value={ocrSwapLeftColumn}
-                                    onChange={(e) => setOcrSwapLeftColumn(e.target.value)}
-                                    disabled={!ocrSheetQuantityColumnOptions.length || ocrTableSaving}
-                                  >
-                                    <option value="">数量列</option>
-                                    {ocrSheetQuantityColumnOptions.map((option) => (
-                                      <option key={`ocr-swap-left-${option.value}`} value={option.value}>
-                                        {option.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                                <label className="ocr-shift-field">
-                                  <span>入替先列</span>
-                                  <select
-                                    className="input"
-                                    value={ocrSwapRightColumn}
-                                    onChange={(e) => setOcrSwapRightColumn(e.target.value)}
-                                    disabled={!ocrSheetQuantityColumnOptions.length || ocrTableSaving}
-                                  >
-                                    <option value="">数量列</option>
-                                    {ocrSheetQuantityColumnOptions.map((option) => (
-                                      <option key={`ocr-swap-right-${option.value}`} value={option.value}>
-                                        {option.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  onClick={applySelectedOcrTableQuantityColumnSwap}
-                                  disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
-                                >
-                                  数量列を入替
-                                </button>
-                                <span className="subtle">日付・区分・メニューは固定し、数量列だけ動かします。</span>
+                                <span className="subtle">数量列の入替は上のシートツールから操作してください。</span>
                               </div>
                             ) : (
-                              <p className="subtle">現在は基盤復旧待ちのため、数量シフト操作は停止しています。</p>
+                              <p className="subtle">現在は基盤復旧待ちのため、列シフト/入替操作は停止しています。</p>
                             )}
                             {ocrHistoryMessage ? <p className="subtle">{ocrHistoryMessage}</p> : null}
                             {ocrHistoryLatest ? (
@@ -7853,7 +10903,10 @@ const loadOcrPages = async () => {
                                 <button
                                   className={`btn ghost ${ocrPreviewMode === "overlay" ? "active" : ""}`}
                                   type="button"
-                                  onClick={() => setOcrPreviewMode("overlay")}
+                                  onClick={() => {
+                                    ocrPreviewForcedFallbackRef.current = false;
+                                    setOcrPreviewMode("overlay");
+                                  }}
                                   aria-pressed={ocrPreviewMode === "overlay"}
                                 >
                                   OCR
@@ -7861,7 +10914,10 @@ const loadOcrPages = async () => {
                                 <button
                                   className={`btn ghost ${ocrPreviewMode === "original" ? "active" : ""}`}
                                   type="button"
-                                  onClick={() => setOcrPreviewMode("original")}
+                                  onClick={() => {
+                                    ocrPreviewForcedFallbackRef.current = false;
+                                    setOcrPreviewMode("original");
+                                  }}
                                   aria-pressed={ocrPreviewMode === "original"}
                                 >
                                   原本PDF
@@ -7912,6 +10968,20 @@ const loadOcrPages = async () => {
                                     }}
                                   />
                                 ) : null}
+                                {focusedOverlayMarker ? (
+                                  <div
+                                    className="ocr-overlay-row-marker"
+                                    data-testid="ocr-overlay-row-marker"
+                                    data-overlay-page={focusedOverlayMarker.pageIndex ?? focusedOverlayMarker.pageArrayIndex + 1}
+                                    data-overlay-row={focusedOverlayMarker.localRowIndex + 1}
+                                    data-marker-side={focusedOverlayMarker.side}
+                                    data-match-reason={focusedOverlayMarker.matchReason}
+                                    style={{
+                                      left: `${focusedOverlayMarker.left}px`,
+                                      top: `${focusedOverlayMarker.top}px`,
+                                    }}
+                                  />
+                                ) : null}
                               </div>
                             ) : pdfUrl ? (
                               <iframe
@@ -7956,9 +11026,32 @@ const loadOcrPages = async () => {
                                   }}
                                 />
                               ) : null}
+                              {focusedOverlayMarker ? (
+                                <div
+                                  className="ocr-overlay-row-marker"
+                                  data-testid="ocr-overlay-row-marker"
+                                  data-overlay-page={focusedOverlayMarker.pageIndex ?? focusedOverlayMarker.pageArrayIndex + 1}
+                                  data-overlay-row={focusedOverlayMarker.localRowIndex + 1}
+                                  data-marker-side={focusedOverlayMarker.side}
+                                  data-match-reason={focusedOverlayMarker.matchReason}
+                                  style={{
+                                    left: `${focusedOverlayMarker.left}px`,
+                                    top: `${focusedOverlayMarker.top}px`,
+                                  }}
+                                />
+                              ) : null}
                             </div>
                           ) : (
-                            <div className="preview-placeholder">{ocrOverlayPlaceholder}</div>
+                            <div className="preview-placeholder">
+                              <div>{ocrPagesLoading ? "OCRページを取得中..." : ocrOverlayPlaceholder}</div>
+                              <button
+                                className="btn ghost"
+                                type="button"
+                                onClick={() => void loadOcrPages({ force: true })}
+                              >
+                                OCR表示を再取得
+                              </button>
+                            </div>
                           )}
                         </div>
                         {!shouldShowOriginalPdfPreview && usingSyntheticOverlay ? (
@@ -8018,18 +11111,230 @@ const loadOcrPages = async () => {
                           <button
                             className="btn primary"
                             type="button"
-                            onClick={saveOcrSheetExact}
+                            onClick={() => void saveOcrSheetExact()}
                             disabled={ocrTableSaving || !canSaveDraftSheet}
                           >
                             {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
                           </button>
                         </div>
-                        {activeEditorRows.length ? (
-                          <div className="ocr-sheet-wrap">
-                            <table className="ocr-sheet-table">
-                              <colgroup>
-                                <col style={{ width: `${OCR_SHEET_ROW_INDEX_WIDTH}px` }} />
-                                {ocrSheetColumnSpecs.map((spec, idx) => (
+	                        {activeEditorRows.length ? (
+	                          <>
+		                            <div className="ocr-sheet-toolbar">
+		                              <div className="ocr-sheet-toolbar-actions">
+		                                <button
+		                                  className="btn ghost"
+		                                  type="button"
+		                                  onClick={() => selectAllOcrSheetCells()}
+		                                  disabled={!activeEditorRows.length}
+		                                >
+		                                  全選択
+		                                </button>
+		                                <button
+		                                  className="btn ghost"
+		                                  type="button"
+		                                  onClick={() => void copyOcrSheetSelection()}
+	                                  disabled={!ocrSheetSelectionBounds}
+	                                >
+	                                  コピー
+	                                </button>
+	                                <button
+	                                  className="btn ghost"
+	                                  type="button"
+	                                  onClick={() => void cutOcrSheetSelection()}
+	                                  disabled={!ocrSheetSelectionBounds}
+	                                >
+	                                  切り取り
+	                                </button>
+	                                <button
+	                                  className="btn ghost"
+	                                  type="button"
+	                                  onClick={() => void pasteOcrSheetSelection()}
+	                                  disabled={!focusedSheetCell || !ocrSheetClipboardReady}
+	                                >
+	                                  貼り付け
+	                                </button>
+		                                <button
+		                                  className="btn ghost"
+		                                  type="button"
+		                                  onClick={() => fillOcrSheetSelectionDown()}
+		                                  disabled={!ocrSheetSelectionBounds || ocrSheetSelectionBounds.rowCount < 2}
+		                                >
+		                                  下へコピー
+		                                </button>
+		                                <button
+		                                  className="btn ghost"
+		                                  type="button"
+		                                  onClick={() => fillOcrSheetSelectionRight()}
+		                                  disabled={!ocrSheetSelectionBounds || ocrSheetSelectionBounds.cellCount < 2}
+		                                >
+		                                  右へコピー
+		                                </button>
+		                                <button
+		                                  className="btn ghost"
+		                                  type="button"
+		                                  onClick={() => clearOcrSheetSelectionContents()}
+		                                  disabled={!ocrSheetSelectionBounds}
+		                                >
+		                                  クリア
+		                                </button>
+		                              </div>
+		                              <p className="subtle">
+		                                Tab/Shift+Tab: 上下移動 / Enter: 上下移動 / Shift+矢印: 範囲選択 / Ctrl/Cmd+A: 全選択 / Ctrl/Cmd+D: 下へコピー / Ctrl/Cmd+R: 右へコピー / Delete: クリア
+		                              </p>
+		                            </div>
+                                {!ocrHardRecoveryMode ? (
+                                  <div className="ocr-shift-toolbar ocr-shift-toolbar--visible">
+                                    <span className="ocr-shift-label">数量列の入替</span>
+                                    <label className="ocr-shift-field">
+                                      <span>入替元数量列</span>
+                                      <select
+                                        aria-label="入替元数量列"
+                                        className="input"
+                                        ref={ocrSwapLeftColumnRef}
+                                        value={ocrSwapLeftColumn}
+                                        onChange={(e) => setOcrSwapLeftColumn(e.target.value)}
+                                        disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
+                                      >
+                                        <option value="">数量列</option>
+                                        {ocrSheetQuantityColumnOptions.map((option) => (
+                                          <option key={`ocr-qty-swap-left-${option.value}`} value={option.value}>
+                                            {option.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                    <label className="ocr-shift-field">
+                                      <span>入替先数量列</span>
+                                      <select
+                                        aria-label="入替先数量列"
+                                        className="input"
+                                        ref={ocrSwapRightColumnRef}
+                                        value={ocrSwapRightColumn}
+                                        onChange={(e) => setOcrSwapRightColumn(e.target.value)}
+                                        disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
+                                      >
+                                        <option value="">数量列</option>
+                                        {ocrSheetQuantityColumnOptions.map((option) => (
+                                          <option key={`ocr-qty-swap-right-${option.value}`} value={option.value}>
+                                            {option.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                    <button
+                                      className="btn ghost"
+                                      type="button"
+                                      onClick={applySelectedOcrSheetColumnSwap}
+                                      disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
+                                    >
+                                      数量列を入替
+                                    </button>
+                                    <span className="subtle">
+                                      {ocrSheetQuantityColumnOptions.length >= 2
+                                        ? "数量列の数字だけを入れ替えます。列名と列意味は固定です。"
+                                        : "数量列が2つ以上あるときに使えます。"}
+                                    </span>
+                                  </div>
+                                ) : null}
+                                <div className="ocr-column-fill-toolbar">
+                                  <span className="ocr-shift-label">数量列一括入力</span>
+                                  <label className="ocr-shift-field">
+                                    <span>対象列</span>
+                                    <select
+                                      aria-label="数量列一括入力の対象列"
+                                      className="input"
+                                      value={ocrSheetColumnFillTarget}
+                                      onChange={(e) => setOcrSheetColumnFillTarget(e.target.value)}
+                                      disabled={!ocrSheetBulkFillColumnOptions.length || ocrTableSaving}
+                                    >
+                                      <option value="">数量列</option>
+                                      {ocrSheetBulkFillColumnOptions.map((option) => (
+                                        <option key={`ocr-qty-fill-${option.value}`} value={option.value}>
+                                          {option.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label className="ocr-shift-field">
+                                    <span>入力値</span>
+                                    <input
+                                      aria-label="数量列一括入力の値"
+                                      className="input"
+                                      inputMode="numeric"
+                                      value={ocrSheetColumnFillValue}
+                                      onChange={(e) => setOcrSheetColumnFillValue(e.target.value)}
+                                      onKeyDown={(event) => {
+                                        if (event.key !== "Enter") return;
+                                        event.preventDefault();
+                                        applySelectedOcrSheetColumnFill();
+                                      }}
+                                      disabled={!ocrSheetBulkFillColumnOptions.length || ocrTableSaving}
+                                      placeholder="数字"
+                                    />
+                                  </label>
+                                  <button
+                                    className="btn ghost"
+                                    type="button"
+                                    onClick={applySelectedOcrSheetColumnFill}
+                                    disabled={
+                                      !ocrSheetBulkFillColumnOptions.length
+                                      || !ocrSheetColumnFillTarget
+                                      || !String(ocrSheetColumnFillValue || "").trim()
+                                      || !ocrSheetRows.length
+                                      || ocrTableSaving
+                                    }
+                                  >
+                                    列全体へ入力
+                                  </button>
+                                  <span className="subtle">
+                                    数量列の全行を同じ数字で上書きします。既存値が入っていてもそのまま更新します。
+                                  </span>
+                                </div>
+                                <div className="ocr-confidence-toolbar">
+                                  <span className="ocr-shift-label">OCR信頼度表示</span>
+                                  <label className="ocr-shift-field">
+                                    <span>表示閾値</span>
+                                    <select
+                                      aria-label="OCR信頼度表示閾値"
+                                      className="input"
+                                      value={ocrConfidenceDisplayMode}
+                                      onChange={(e) =>
+                                        setOcrConfidenceDisplayMode(e.target.value as OcrConfidenceDisplayMode)}
+                                    >
+                                      <option value="strict">厳格表示</option>
+                                      <option value="assisted">補助表示</option>
+                                      <option value="suggestion">提案表示</option>
+                                    </select>
+                                  </label>
+                                  <button
+                                    className="btn ghost"
+                                    type="button"
+                                    onClick={applyVisibleOcrOverlaySuggestions}
+                                    disabled={ocrHardRecoveryMode || ocrTableSaving || ocrSheetVisibleOverlayCount < 1}
+                                  >
+                                    表示中提案を採用
+                                  </button>
+                                  <span
+                                    className="subtle"
+                                    data-testid="ocr-sheet-overlay-summary"
+                                    data-raw-count={ocrSheetRawNumericCount}
+                                    data-accepted-count={ocrSheetAcceptedCount}
+                                    data-deterministic-count={ocrSheetDeterministicCandidateCount}
+                                    data-weak-count={ocrSheetWeakCandidateCount}
+                                    data-unresolved-count={ocrSheetUnresolvedCount}
+                                    data-visible-count={ocrSheetVisibleCellCount}
+                                    data-visible-overlay-count={ocrSheetVisibleOverlayCount}
+                                  >
+                                    {ocrSheetRawNumericCount > 0 || ocrSheetAcceptedCount > 0
+                                      ? `${ocrSheetConfidenceModeDescription} (${ocrSheetConfidenceLegendText})`
+                                      : "OCR由来の confidence/provenance は未表示です。"}
+                                  </span>
+                                </div>
+	                            <div className="ocr-sheet-wrap">
+	                              <table className="ocr-sheet-table">
+	                              <colgroup>
+	                                <col style={{ width: `${OCR_SHEET_ROW_INDEX_WIDTH}px` }} />
+	                                {ocrSheetColumnSpecs.map((spec, idx) => (
                                   <col
                                     key={`ocr-sheet-col-${idx}`}
                                     className={spec.className}
@@ -8079,27 +11384,121 @@ const loadOcrPages = async () => {
                                       {rowIdx + 1}
                                     </th>
                                     {ocrSheetHeaders.map((_, cellIdx) => (
+                                      (() => {
+                                        const selected = isOcrSheetCellWithinSelection(ocrSheetSelection, rowIdx, cellIdx);
+                                        const isSelectionAnchor =
+                                          ocrSheetSelection?.anchorRowIndex === rowIdx &&
+                                          ocrSheetSelection?.anchorCellIndex === cellIdx;
+                                        const isDropTarget =
+                                          ocrSheetDropTarget?.rowIndex === rowIdx &&
+                                          ocrSheetDropTarget?.cellIndex === cellIdx;
+                                        const confidenceTier = normalizeOcrCellConfidenceTier(
+                                          ocrSheetCellConfidenceRows[rowIdx]?.[cellIdx],
+                                        );
+                                        const provenance = String(
+                                          ocrSheetCellProvenanceRows[rowIdx]?.[cellIdx] || "",
+                                        ).trim();
+                                        const overlayItem = ocrSheetVisibleOverlayCellMap.get(`${rowIdx}:${cellIdx}`);
+                                        const overlayValue =
+                                          !String(row[cellIdx] ?? "").trim() && overlayItem
+                                            ? String(overlayItem.value ?? "").trim()
+                                            : "";
+                                        const overlayClassification = normalizeOcrNumericCellClassification(
+                                          overlayItem?.classification,
+                                        );
+                                        const belowConfidenceThreshold =
+                                          Boolean(confidenceTier)
+                                          && !confidenceTierVisibleInMode(confidenceTier, ocrConfidenceDisplayMode);
+                                        const cellTitle = [
+                                          confidenceTier ? `confidence: ${confidenceTier}` : "",
+                                          provenance ? `provenance: ${provenance}` : "",
+                                          overlayClassification ? `overlay: ${overlayClassification}` : "",
+                                          overlayItem?.placement_basis
+                                            ? `overlay_basis: ${overlayItem.placement_basis}`
+                                            : "",
+                                        ]
+                                          .filter(Boolean)
+                                          .join("\n");
+                                        return (
                                       <td
                                         key={`ocr-sheet-cell-${rowIdx}-${cellIdx}`}
-                                        className={`${ocrSheetColumnSpecs[cellIdx]?.className || ""} ${ocrSheetStickyColumnOffsets[cellIdx] != null ? "ocr-sheet-sticky-left-cell" : ""}`}
+                                        className={[
+                                          ocrSheetColumnSpecs[cellIdx]?.className || "",
+                                          ocrSheetStickyColumnOffsets[cellIdx] != null ? "ocr-sheet-sticky-left-cell" : "",
+                                          confidenceTier ? `ocr-sheet-cell-confidence-${confidenceTier}` : "",
+                                          belowConfidenceThreshold ? "ocr-sheet-cell-below-threshold" : "",
+                                          overlayClassification ? `ocr-sheet-cell-overlay-${overlayClassification}` : "",
+                                          selected ? "ocr-sheet-cell-selected" : "",
+                                          isSelectionAnchor ? "ocr-sheet-cell-anchor" : "",
+                                          isDropTarget ? "ocr-sheet-cell-drop-target" : "",
+                                        ]
+                                          .filter(Boolean)
+                                          .join(" ")}
+                                        title={cellTitle || undefined}
                                         style={
                                           ocrSheetStickyColumnOffsets[cellIdx] != null
                                             ? { left: `${ocrSheetStickyColumnOffsets[cellIdx]}px` }
                                             : undefined
                                         }
+                                        onMouseEnter={() => handleOcrSheetCellMouseEnter(rowIdx, cellIdx)}
+                                        onDragOver={(event) => handleOcrSheetSelectionDragOver(event, rowIdx, cellIdx)}
+                                        onDrop={(event) => handleOcrSheetSelectionDrop(event, rowIdx, cellIdx)}
                                       >
-                                        <input
-                                          className={`input ocr-sheet-input ${ocrSheetColumnSpecs[cellIdx]?.className || ""}`}
-                                          value={row[cellIdx] ?? ""}
-                                          onFocus={() => focusOcrSheetRow(rowIdx)}
-                                          onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
-                                        />
+                                        <div className="ocr-sheet-input-wrap">
+                                          {overlayValue ? (
+                                            <span
+                                              className={`ocr-sheet-input-overlay ocr-sheet-input-overlay-${overlayClassification || "suggestion"}`}
+                                              data-testid="ocr-sheet-overlay-value"
+                                              data-overlay-classification={overlayClassification || undefined}
+                                              data-overlay-row={rowIdx + 1}
+                                              data-overlay-col={cellIdx + 1}
+                                            >
+                                              {overlayValue}
+                                            </span>
+                                          ) : null}
+                                          <input
+                                            className={`input ocr-sheet-input ${ocrSheetColumnSpecs[cellIdx]?.className || ""} ${overlayValue ? "ocr-sheet-input-has-overlay" : ""}`}
+                                            ref={(element) => {
+                                              ocrSheetCellRefs.current[`${rowIdx}:${cellIdx}`] = element;
+                                            }}
+                                            data-confidence-tier={confidenceTier || undefined}
+                                            data-confidence-visible={confidenceTier ? String(!belowConfidenceThreshold) : undefined}
+                                            data-provenance={provenance || undefined}
+                                            data-overlay-classification={overlayClassification || undefined}
+                                            value={row[cellIdx] ?? ""}
+                                            draggable={Boolean(ocrSheetSelectionBounds && selected)}
+	                                            onMouseDown={(event) => handleOcrSheetCellMouseDown(event, rowIdx, cellIdx)}
+	                                            onFocus={() => handleOcrSheetCellFocus(rowIdx, cellIdx)}
+	                                            onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
+	                                            onKeyDown={(event) => handleOcrSheetCellKeyDown(event, rowIdx, cellIdx)}
+	                                            onPaste={(event) => void handleOcrSheetCellPaste(event, rowIdx, cellIdx)}
+	                                            onDragStart={(event) => handleOcrSheetSelectionDragStart(event, rowIdx, cellIdx)}
+	                                            onDragEnd={handleOcrSheetSelectionDragEnd}
+	                                          />
+                                        </div>
                                       </td>
+                                        );
+                                      })()
                                     ))}
                                     <td className="ocr-sheet-action-cell">
                                       <div className="ocr-row-actions">
                                         <button
-                                          className="btn ghost"
+                                          className="btn ghost ocr-row-action-btn"
+                                          type="button"
+                                          aria-label="提案採用"
+                                          title="提案採用"
+                                          onFocus={() => focusOcrSheetRow(rowIdx)}
+                                          onClick={() => applyVisibleOcrOverlaySuggestionsForRow(rowIdx)}
+                                          disabled={
+                                            ocrHardRecoveryMode
+                                            || ocrTableSaving
+                                            || (ocrSheetVisibleOverlayItemsByRow.get(rowIdx)?.length || 0) < 1
+                                          }
+                                        >
+                                          採用
+                                        </button>
+                                        <button
+                                          className="btn ghost ocr-row-action-btn"
                                           type="button"
                                           onFocus={() => focusOcrSheetRow(rowIdx)}
                                           onClick={() => duplicateOcrTableRow(rowIdx)}
@@ -8108,7 +11507,7 @@ const loadOcrPages = async () => {
                                           複製
                                         </button>
                                         <button
-                                          className="btn ghost"
+                                          className="btn ghost ocr-row-action-btn"
                                           type="button"
                                           onFocus={() => focusOcrSheetRow(rowIdx)}
                                           onClick={() => removeOcrTableRow(rowIdx)}
@@ -8121,8 +11520,33 @@ const loadOcrPages = async () => {
                                   </tr>
                                 ))}
                               </tbody>
-                            </table>
+	                              </table>
+	                            </div>
+	                          </>
+	                        ) : showEditorBlockedPanel ? (
+                          <div className="warning-banner">
+                            <p className="critical-alert-title">編集可能な正解シートをまだ作れません</p>
+                            <p className="subtle">
+                              OCR ではなく canonical menu を基準にシートを作るため、必要なメニュー設定が無い間はここで止めています。
+                            </p>
+                            {ocrSheetMessage.trim() ? <p>{ocrSheetMessage}</p> : null}
+                            {editorBlockedReasons.length ? (
+                              <ul className="critical-alert-list">
+                                {editorBlockedReasons.map((reason) => (
+                                  <li key={reason}>{reason}</li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            {blockedMenuMonthId ? (
+                              <div className="ocr-flow-branch-actions">
+                                <Link className="btn ghost" href={`/menus/${blockedMenuMonthId}`}>
+                                  月次メニューを確認
+                                </Link>
+                              </div>
+                            ) : null}
                           </div>
+                        ) : ocrSheetInitialLoadPending ? (
+                          <p className="subtle">シートを取得中です。表示されるまでそのまま待ってください。</p>
                         ) : (
                           <p className="subtle">編集できる表がありません。</p>
                         )}
@@ -8429,6 +11853,13 @@ const loadOcrPages = async () => {
                                             disabled={idx >= facilityTemplateColumnDraft.length - 1}
                                           >
                                             次と入替
+                                          </button>
+                                          <button
+                                            className="btn ghost danger"
+                                            type="button"
+                                            onClick={() => deleteFacilityTemplateColumn(idx)}
+                                          >
+                                            削除
                                           </button>
                                         </div>
                                       </td>
@@ -8770,9 +12201,9 @@ const loadOcrPages = async () => {
                   onClick={() => {
                     void confirm();
                   }}
-                  disabled={confirmSaving || !effectiveCanConfirm}
+                  disabled={orderAlreadyConfirmed || confirmSaving || !effectiveCanConfirm}
                 >
-                  {confirmSaving ? "確定中..." : "確定"}
+                  {orderAlreadyConfirmed ? "確定済み" : confirmSaving ? "確定中..." : "確定"}
                 </button>
               </div>
             </header>
@@ -8981,7 +12412,13 @@ const loadOcrPages = async () => {
               className="btn primary"
               type="button"
               onClick={() => void goNextStep()}
-              disabled={isLastStep ? confirmSaving || trainingSampleSaving || !effectiveCanConfirm : !canStepNext}
+              disabled={
+                isLastStep
+                  ? orderAlreadyConfirmed
+                    ? confirmSaving || trainingSampleSaving
+                    : confirmSaving || trainingSampleSaving || !effectiveCanConfirm
+                  : !canStepNext
+              }
             >
               {nextStepButtonLabel}
             </button>
@@ -9350,6 +12787,7 @@ const loadOcrPages = async () => {
         }
 
         .workflow-summary-card {
+          margin-top: 10px;
           padding: 12px 14px;
           border-radius: 12px;
           background: #f4f7f6;
@@ -9365,6 +12803,17 @@ const loadOcrPages = async () => {
           font-size: 14px;
           font-weight: 700;
           color: #21302d;
+        }
+
+        .workflow-summary-actions {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 8px;
+        }
+
+        .workflow-summary-action-btn {
+          white-space: nowrap;
         }
 
         .summary-details {
@@ -9418,6 +12867,66 @@ const loadOcrPages = async () => {
           border-radius: 10px;
           background: #f0f4f2;
           font-size: 13px;
+        }
+
+        .sheet-context-dialog-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(18, 24, 22, 0.38);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+          z-index: 1200;
+        }
+
+        .sheet-context-dialog {
+          width: min(560px, 100%);
+          border-radius: 16px;
+          background: #fffdf8;
+          border: 1px solid rgba(25, 32, 30, 0.14);
+          box-shadow: 0 20px 50px rgba(18, 24, 22, 0.18);
+          padding: 18px;
+        }
+
+        .sheet-context-dialog h3 {
+          margin: 4px 0 10px;
+          font-size: 20px;
+          color: #21302d;
+        }
+
+        .sheet-context-dialog-summary {
+          margin-top: 12px;
+          padding: 12px;
+          border-radius: 12px;
+          background: #f6f3ea;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          display: grid;
+          gap: 10px;
+        }
+
+        .sheet-context-dialog-row {
+          display: grid;
+          grid-template-columns: 56px minmax(0, 1fr) 24px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          font-size: 13px;
+        }
+
+        .sheet-context-dialog-row strong {
+          word-break: break-word;
+        }
+
+        .sheet-context-dialog-arrow {
+          text-align: center;
+          color: #5f6d69;
+        }
+
+        .sheet-context-dialog-actions {
+          margin-top: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
         }
 
         .warning-banner {
@@ -9611,6 +13120,30 @@ const loadOcrPages = async () => {
           transition: top 120ms ease, height 120ms ease;
         }
 
+        .ocr-overlay-row-marker {
+          position: absolute;
+          width: 14px;
+          height: 14px;
+          border-radius: 999px;
+          background: rgba(193, 83, 28, 0.98);
+          border: 2px solid rgba(255, 255, 255, 0.9);
+          box-shadow: 0 3px 12px rgba(193, 83, 28, 0.28);
+          pointer-events: none;
+          transform: translate(-50%, -50%);
+          z-index: 4;
+        }
+
+        .ocr-overlay-row-marker::after {
+          content: "";
+          position: absolute;
+          left: 100%;
+          top: 50%;
+          transform: translateY(-50%);
+          border-top: 5px solid transparent;
+          border-bottom: 5px solid transparent;
+          border-left: 8px solid rgba(193, 83, 28, 0.98);
+        }
+
         .ocr-overlay-text {
           display: block;
           padding: 2px 4px;
@@ -9703,8 +13236,16 @@ const loadOcrPages = async () => {
           align-items: start;
         }
 
+        .ocr-workspace--vertical {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
         .ocr-workspace-tools {
           grid-column: 1 / -1;
+        }
+
+        .ocr-workspace--vertical .ocr-workspace-tools {
+          grid-column: auto;
         }
 
         .ocr-workspace-preview,
@@ -10266,6 +13807,25 @@ const loadOcrPages = async () => {
           gap: 10px;
         }
 
+        .ocr-flow-question-card--compact {
+          display: block;
+        }
+
+        .ocr-flow-question-main {
+          display: grid;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .ocr-flow-question-copy {
+          display: grid;
+          gap: 4px;
+        }
+
+        .ocr-flow-question-copy h4 {
+          margin: 0;
+        }
+
         .ocr-flow-finish-card {
           background: linear-gradient(135deg, #f7f0e1 0%, #fff9ef 100%);
           border-color: rgba(31, 42, 42, 0.16);
@@ -10299,8 +13859,14 @@ const loadOcrPages = async () => {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
+        .ocr-flow-choice-grid--compact {
+          align-items: stretch;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
         .ocr-flow-choice-button,
-        .ocr-flow-subchoice {
+        .ocr-flow-subchoice,
+        .ocr-flow-choice-select-card {
           border: 1px solid rgba(24, 42, 40, 0.12);
           background: #f8fbfa;
           color: #243431;
@@ -10310,6 +13876,11 @@ const loadOcrPages = async () => {
           display: flex;
           flex-direction: column;
           gap: 3px;
+          min-height: 100%;
+        }
+
+        .ocr-flow-choice-button,
+        .ocr-flow-subchoice {
           cursor: pointer;
         }
 
@@ -10328,6 +13899,12 @@ const loadOcrPages = async () => {
         .ocr-flow-choice-note {
           font-size: 11px;
           color: #556168;
+        }
+
+        .ocr-flow-choice-select-card .input {
+          width: 100%;
+          margin-top: 2px;
+          margin-bottom: 2px;
         }
 
         .ocr-flow-subchoices {
@@ -10528,6 +14105,10 @@ const loadOcrPages = async () => {
           .ocr-flow-subchoices {
             grid-template-columns: minmax(0, 1fr);
           }
+
+          .ocr-flow-choice-grid--compact {
+            grid-template-columns: 1fr;
+          }
         }
 
         .ocr-review-pill {
@@ -10585,6 +14166,18 @@ const loadOcrPages = async () => {
           background: #f9fbfa;
         }
 
+        .ocr-column-fill-toolbar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 10px;
+          padding: 8px 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 10px;
+          background: #f9fbfa;
+        }
+
         .ocr-shift-label {
           font-size: 12px;
           font-weight: 700;
@@ -10603,6 +14196,24 @@ const loadOcrPages = async () => {
           width: 72px;
           padding: 6px 8px;
           font-size: 12px;
+        }
+
+        .ocr-shift-field select {
+          min-width: 128px;
+          padding: 6px 8px;
+          font-size: 12px;
+        }
+
+        .ocr-confidence-toolbar {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 10px;
+          padding: 8px 10px;
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 10px;
+          background: #fbfcfb;
         }
 
         .ocr-history-summary {
@@ -10654,7 +14265,19 @@ const loadOcrPages = async () => {
 
         .ocr-row-actions {
           display: flex;
-          gap: 6px;
+          gap: 4px;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .ocr-row-action-btn {
+          flex: 0 0 auto;
+          min-width: 0;
+          padding: 4px 6px;
+          min-height: 26px;
+          line-height: 1.1;
+          font-size: 11px;
+          white-space: nowrap;
         }
 
         .ocr-edit-table th,
@@ -10675,6 +14298,21 @@ const loadOcrPages = async () => {
           border-radius: 12px;
           background: #ffffff;
           max-height: 70vh;
+        }
+
+        .ocr-sheet-toolbar {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+
+        .ocr-sheet-toolbar-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
         }
 
         .ocr-sheet-table {
@@ -10733,6 +14371,85 @@ const loadOcrPages = async () => {
           box-shadow: 1px 0 0 rgba(25, 32, 30, 0.08);
         }
 
+        .ocr-sheet-cell-selected {
+          box-shadow: inset 0 0 0 2px rgba(193, 83, 28, 0.24);
+          background: rgba(193, 83, 28, 0.08) !important;
+        }
+
+        .ocr-sheet-cell-anchor {
+          box-shadow: inset 0 0 0 2px rgba(193, 83, 28, 0.48);
+        }
+
+        .ocr-sheet-cell-drop-target {
+          box-shadow: inset 0 0 0 2px rgba(45, 102, 84, 0.48);
+        }
+
+        .ocr-sheet-cell-confidence-high {
+          background: rgba(39, 126, 85, 0.08);
+        }
+
+        .ocr-sheet-cell-confidence-medium {
+          background: rgba(203, 142, 20, 0.1);
+        }
+
+        .ocr-sheet-cell-confidence-low {
+          background: rgba(170, 78, 56, 0.1);
+        }
+
+        .ocr-sheet-cell-overlay-deterministic_candidate {
+          box-shadow: inset 0 0 0 1px rgba(203, 142, 20, 0.18);
+        }
+
+        .ocr-sheet-cell-overlay-weak_candidate {
+          box-shadow: inset 0 0 0 1px rgba(170, 78, 56, 0.18);
+        }
+
+        .ocr-sheet-cell-below-threshold .ocr-sheet-input {
+          color: rgba(31, 42, 42, 0.58);
+          background-image: linear-gradient(
+            135deg,
+            rgba(31, 42, 42, 0.04) 25%,
+            transparent 25%,
+            transparent 50%,
+            rgba(31, 42, 42, 0.04) 50%,
+            rgba(31, 42, 42, 0.04) 75%,
+            transparent 75%,
+            transparent
+          );
+          background-size: 10px 10px;
+        }
+
+        .ocr-sheet-input-wrap {
+          position: relative;
+        }
+
+        .ocr-sheet-input-overlay {
+          position: absolute;
+          inset: 50% auto auto 10px;
+          transform: translateY(-50%);
+          pointer-events: none;
+          font-size: 13px;
+          font-weight: 600;
+          letter-spacing: 0.01em;
+          z-index: 1;
+          max-width: calc(100% - 20px);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .ocr-sheet-input-overlay-deterministic_candidate {
+          color: #99691a;
+        }
+
+        .ocr-sheet-input-overlay-weak_candidate {
+          color: #8a4633;
+        }
+
+        .ocr-sheet-input-has-overlay {
+          background-color: transparent;
+        }
+
         .ocr-sheet-input {
           border: none;
           border-radius: 0;
@@ -10742,6 +14459,16 @@ const loadOcrPages = async () => {
           background: transparent;
           padding: 8px;
           font-size: 12px;
+        }
+
+        .ocr-sheet-cell-selected .ocr-sheet-input {
+          cursor: move;
+        }
+
+        .ocr-sheet-preview-cell {
+          padding: 8px;
+          min-width: 96px;
+          white-space: pre-wrap;
         }
 
         .ocr-sheet-col-date,
@@ -10768,6 +14495,7 @@ const loadOcrPages = async () => {
 
         .ocr-sheet-action-cell {
           min-width: 132px;
+          white-space: nowrap;
         }
 
         .ocr-sheet-row.ocr-sheet-row-date-a td,

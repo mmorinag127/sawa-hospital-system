@@ -75,14 +75,17 @@ const inferBaseUrl = () => {
     return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   }
   const origin = window.location.origin;
-  if (origin.includes("web-prod")) {
+  if (origin.includes("web-prod") || origin.includes("web-stg") || origin.includes(".run.app")) {
     return "/api";
   }
   const envBase = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (envBase && envBase !== "/api") {
+  const allowDirectBrowserApi = process.env.NEXT_PUBLIC_ALLOW_DIRECT_BROWSER_API === "1";
+  const isLocalOrigin =
+    origin.includes("localhost") || origin.includes("127.0.0.1") || origin.includes("[::1]");
+  if (allowDirectBrowserApi && envBase && envBase !== "/api" && isLocalOrigin) {
     return envBase;
   }
-  if (origin.includes("web-dev")) {
+  if (allowDirectBrowserApi && origin.includes("web-dev") && isLocalOrigin) {
     return origin.replace("web-dev", "worker-dev");
   }
   return "/api";

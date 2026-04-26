@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from src.services import ocr_evidence_service, position_column_mapping_service
+from src.services import candidate_resolution_service, ocr_evidence_service, position_column_mapping_service
 
 
 _RECOVERABLE_BLOCKING_WARNINGS = {
@@ -32,6 +33,24 @@ _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES = {
 _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES = {
     "ocr_evidence_recovery_required",
 }
+_STALE_AUTHORITATIVE_SHEET_SUPPRESSED_ISSUES = {
+    "sheet_ocr_review_required",
+    "sheet_payload_mapping_low_confidence",
+    "sheet_order_lines_unmapped_fallback_payload",
+    "column_mapping_review_required",
+    "quantity_review_required",
+    "numeric_trust_low",
+}
+_HUMAN_REVIEW_GATE_WARNINGS = {
+    "column_mapping_review_required",
+    "quantity_review_required",
+    "numeric_trust_low",
+    "ocr_review_required",
+}
+_RAW_SHEET_HUMAN_REVIEW_WARNINGS = {
+    "sheet_ocr_review_required",
+}
+_GENERIC_FIELD_PATTERN = re.compile(r"col\d+")
 
 
 def _dedupe_tokens(items: list[str] | None) -> list[str]:
@@ -50,6 +69,18 @@ def source_uses_saved_sheet(source: str | None) -> bool:
     return normalized.startswith("draft_sheet") or normalized.startswith("edited_sheet")
 
 
+def sheet_fields_are_semantic(fields: list[Any] | None) -> bool:
+    normalized_fields = [
+        str(field or "").strip()
+        for field in (fields or [])
+        if str(field or "").strip()
+    ]
+    return bool(normalized_fields) and not all(
+        _GENERIC_FIELD_PATTERN.fullmatch(token)
+        for token in normalized_fields
+    )
+
+
 def canonical_sheet_source(
     source: str | None,
     *,
@@ -61,11 +92,74 @@ def canonical_sheet_source(
     return normalized
 
 
+def authoritative_sheet_suppresses_stale_evidence_issues(
+    *,
+    source: str | None,
+    rows: list[Any] | None,
+    has_semantic_fields: bool = False,
+    clean_saved_draft: bool = False,
+    authoritative_persisted_draft: bool = False,
+    base_evidence_run_id: str | None = None,
+    active_evidence_run_id: str | None = None,
+) -> bool:
+    if clean_saved_draft:
+        return True
+    if not authoritative_persisted_draft:
+        return False
+    if not has_semantic_fields:
+        return False
+    if not isinstance(rows, list) or len(rows) <= 0:
+        return False
+    normalized_source = str(source or "").strip()
+    if source_uses_saved_sheet(normalized_source):
+        return True
+    normalized_base_evidence_run_id = str(base_evidence_run_id or "").strip() or None
+    normalized_active_evidence_run_id = str(active_evidence_run_id or "").strip() or None
+    if not normalized_base_evidence_run_id:
+        return True
+    if (
+        normalized_active_evidence_run_id
+        and normalized_base_evidence_run_id != normalized_active_evidence_run_id
+    ):
+        return True
+    return False
+
+
+def _sheet_has_materialized_quantity_values(
+    *,
+    fields: list[Any] | None,
+    rows: list[Any] | None,
+) -> bool:
+    normalized_fields = [
+        str(field or "").strip()
+        for field in (fields or [])
+        if str(field or "").strip()
+    ]
+    if not normalized_fields or not isinstance(rows, list) or not rows:
+        return False
+    quantity_indexes = [
+        idx for idx, field in enumerate(normalized_fields) if field.startswith("qty.")
+    ]
+    if not quantity_indexes:
+        return False
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for idx in quantity_indexes:
+            if idx >= len(row):
+                continue
+            value = str(row[idx] or "").strip()
+            if value and re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+                return True
+    return False
+
+
 def _stale_issue_suppressions(
     *,
     source: str | None,
     clean_saved_draft: bool = False,
     position_fallback_semantics_ready: bool = False,
+    stale_authoritative_sheet: bool = False,
 ) -> set[str]:
     suppressed: set[str] = set()
     if clean_saved_draft:
@@ -75,6 +169,10 @@ def _stale_issue_suppressions(
         suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
         if source_uses_saved_sheet(source):
             suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
+    if stale_authoritative_sheet:
+        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
+        suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
+        suppressed |= _STALE_AUTHORITATIVE_SHEET_SUPPRESSED_ISSUES
     return suppressed
 
 
@@ -84,11 +182,13 @@ def filter_stale_issue_tokens(
     source: str | None,
     clean_saved_draft: bool = False,
     position_fallback_semantics_ready: bool = False,
+    stale_authoritative_sheet: bool = False,
 ) -> list[str]:
     suppressed = _stale_issue_suppressions(
         source=source,
         clean_saved_draft=clean_saved_draft,
         position_fallback_semantics_ready=position_fallback_semantics_ready,
+        stale_authoritative_sheet=stale_authoritative_sheet,
     )
     filtered: list[str] = []
     for item in tokens or []:
@@ -97,6 +197,57 @@ def filter_stale_issue_tokens(
             continue
         filtered.append(token)
     return _dedupe_tokens(filtered)
+
+
+def gate_requires_human_review(
+    *,
+    apply_warnings: list[str] | None = None,
+    confirm_warnings: list[str] | None = None,
+) -> bool:
+    warning_tokens = {
+        str(item or "").strip()
+        for item in list(apply_warnings or []) + list(confirm_warnings or [])
+        if str(item or "").strip()
+    }
+    return bool(warning_tokens & _HUMAN_REVIEW_GATE_WARNINGS)
+
+
+def raw_sheet_requires_human_review(warnings: list[str] | None) -> bool:
+    warning_tokens = {
+        str(item or "").strip()
+        for item in (warnings or [])
+        if str(item or "").strip()
+    }
+    return bool(warning_tokens & _RAW_SHEET_HUMAN_REVIEW_WARNINGS)
+
+
+def gate_can_apply(
+    *,
+    apply_blockers: list[str] | None,
+    apply_warnings: list[str] | None = None,
+    confirm_warnings: list[str] | None = None,
+) -> bool:
+    return not _dedupe_tokens(apply_blockers) and not gate_requires_human_review(
+        apply_warnings=apply_warnings,
+        confirm_warnings=confirm_warnings,
+    )
+
+
+def gate_can_confirm(
+    *,
+    confirm_blockers: list[str] | None,
+    confirm_warnings: list[str] | None = None,
+    apply_warnings: list[str] | None = None,
+) -> bool:
+    deduped_confirm_warnings = _dedupe_tokens(confirm_warnings)
+    return (
+        not _dedupe_tokens(confirm_blockers)
+        and "recovery_recommended" not in deduped_confirm_warnings
+        and not gate_requires_human_review(
+            apply_warnings=apply_warnings,
+            confirm_warnings=deduped_confirm_warnings,
+        )
+    )
 
 
 def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
@@ -130,6 +281,157 @@ def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
     return len(blockers) == 0 and len(warnings) == 0
 
 
+def resolve_current_sheet_state(
+    current_sheet_context: dict[str, Any] | None,
+    draft_sheet: dict[str, Any] | None,
+) -> dict[str, Any]:
+    context = current_sheet_context if isinstance(current_sheet_context, dict) else {}
+    draft_record = (
+        context.get("draft_record")
+        if isinstance(context.get("draft_record"), dict)
+        else draft_sheet
+        if isinstance(draft_sheet, dict)
+        else None
+    )
+    draft_payload = (
+        context.get("draft_payload")
+        if isinstance(context.get("draft_payload"), dict)
+        else (
+            draft_record.get("draft_sheet_json")
+            if isinstance(draft_record, dict) and isinstance(draft_record.get("draft_sheet_json"), dict)
+            else draft_record
+            if isinstance(draft_record, dict)
+            else None
+        )
+    )
+    fields = (
+        list(context.get("fields") or [])
+        if isinstance(context.get("fields"), list)
+        else list(draft_payload.get("fields") or [])
+        if isinstance(draft_payload, dict)
+        else []
+    )
+    rows = (
+        context.get("rows")
+        if isinstance(context.get("rows"), list)
+        else draft_payload.get("rows")
+        if isinstance(draft_payload, dict) and isinstance(draft_payload.get("rows"), list)
+        else None
+    )
+    has_semantic_fields = (
+        bool(context.get("has_semantic_fields"))
+        if context
+        else sheet_fields_are_semantic(fields)
+    )
+    has_persisted_draft = (
+        bool(context.get("has_persisted_draft"))
+        if context
+        else bool(isinstance(draft_record, dict) and str(draft_record.get("id") or "").strip())
+    )
+    raw_source = (
+        str(context.get("source") or "").strip()
+        or str((draft_payload or {}).get("source") or "").strip()
+        or str((draft_record or {}).get("draft_state") or "").strip()
+        or "draft"
+    )
+    source = (
+        raw_source
+        if context
+        else canonical_sheet_source(
+            raw_source,
+            has_persisted_draft=bool(
+                has_persisted_draft
+                and has_semantic_fields
+                and isinstance(rows, list)
+                and len(rows) > 0
+            ),
+        )
+    )
+    blockers = (
+        [str(item).strip() for item in (context.get("blockers") or []) if str(item).strip()]
+        if context
+        else _dedupe_tokens(
+            [
+                *[
+                    str(item).strip()
+                    for item in ((draft_record or {}).get("blockers_json") or [])
+                    if str(item).strip()
+                ],
+                *[
+                    str(item).strip()
+                    for item in ((draft_payload or {}).get("blockers") or [])
+                    if str(item).strip()
+                ],
+            ]
+        )
+    )
+    warnings = (
+        [str(item).strip() for item in (context.get("warnings") or []) if str(item).strip()]
+        if context
+        else _dedupe_tokens(
+            [
+                *[
+                    str(item).strip()
+                    for item in ((draft_record or {}).get("warnings_json") or [])
+                    if str(item).strip()
+                ],
+                *[
+                    str(item).strip()
+                    for item in ((draft_payload or {}).get("warnings") or [])
+                    if str(item).strip()
+                ],
+            ]
+        )
+    )
+    clean_saved_draft = (
+        bool(context.get("clean_saved_draft"))
+        if context
+        else has_clean_saved_draft(draft_record)
+    )
+    authoritative_persisted_draft = (
+        bool(context.get("authoritative_persisted_draft"))
+        if context and "authoritative_persisted_draft" in context
+        else bool(
+            has_persisted_draft
+            and has_semantic_fields
+            and isinstance(rows, list)
+            and len(rows) > 0
+        )
+    )
+    return {
+        "draft_record": draft_record,
+        "draft_payload": draft_payload,
+        "fields": fields,
+        "rows": rows,
+        "has_semantic_fields": has_semantic_fields,
+        "has_persisted_draft": has_persisted_draft,
+        "source": source,
+        "raw_source": raw_source,
+        "blockers": blockers,
+        "warnings": warnings,
+        "clean_saved_draft": clean_saved_draft,
+        "authoritative_persisted_draft": authoritative_persisted_draft,
+        "resolved_week_id": (
+            str(context.get("resolved_week_id") or "").strip()
+            if context
+            else str((draft_payload or {}).get("resolved_week_id") or (draft_payload or {}).get("week_id") or "").strip()
+        )
+        or None,
+        "base_evidence_run_id": (
+            str(context.get("base_evidence_run_id") or "").strip()
+            if context
+            else str((draft_record or {}).get("base_evidence_run_id") or (draft_payload or {}).get("base_evidence_run_id") or "").strip()
+        )
+        or None,
+        "facility_id": (
+            str(context.get("facility_id") or "").strip()
+            if context
+            else str((draft_payload or {}).get("facility_id") or "").strip()
+        )
+        or None,
+    }
+
+
 def evaluate_sheet_gate(
     *,
     rows: list[Any] | None,
@@ -142,23 +444,40 @@ def evaluate_sheet_gate(
     reparse_status: str | None = None,
     clean_saved_draft: bool = False,
     position_fallback_semantics_ready: bool = False,
+    authoritative_persisted_draft: bool = False,
+    base_evidence_run_id: str | None = None,
+    active_evidence_run_id: str | None = None,
 ) -> dict[str, list[str]]:
     apply_blockers: list[str] = []
     confirm_blockers: list[str] = []
     confirm_warnings: list[str] = []
+    stale_authoritative_sheet = authoritative_sheet_suppresses_stale_evidence_issues(
+        source=source,
+        rows=rows,
+        has_semantic_fields=has_semantic_fields,
+        clean_saved_draft=clean_saved_draft,
+        authoritative_persisted_draft=authoritative_persisted_draft,
+        base_evidence_run_id=base_evidence_run_id,
+        active_evidence_run_id=active_evidence_run_id,
+    )
+    effective_position_fallback_semantics_ready = bool(
+        position_fallback_semantics_ready and not authoritative_persisted_draft
+    )
 
     normalized_source = str(source or "").strip()
     normalized_blockers = filter_stale_issue_tokens(
         blockers,
         source=normalized_source,
         clean_saved_draft=clean_saved_draft,
-        position_fallback_semantics_ready=position_fallback_semantics_ready,
+        position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
+        stale_authoritative_sheet=stale_authoritative_sheet,
     )
     normalized_warnings = filter_stale_issue_tokens(
         warnings,
         source=normalized_source,
         clean_saved_draft=clean_saved_draft,
-        position_fallback_semantics_ready=position_fallback_semantics_ready,
+        position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
+        stale_authoritative_sheet=stale_authoritative_sheet,
     )
     normalized_reparse_status = str(reparse_status or "").strip().lower()
     bypass_monthly_menu_object_block = _semantic_sheet_can_bypass_monthly_menu_object_block(
@@ -207,19 +526,23 @@ def evaluate_sheet_gate_from_context(
     auto_apply_blocked: bool = False,
     reparse_status: str | None = None,
     position_fallback_semantics_ready: bool = False,
+    active_evidence_run_id: str | None = None,
 ) -> dict[str, list[str]]:
-    context = current_sheet_context if isinstance(current_sheet_context, dict) else {}
+    state = resolve_current_sheet_state(current_sheet_context, None)
     return evaluate_sheet_gate(
-        rows=context.get("rows") if isinstance(context.get("rows"), list) else None,
-        source=str(context.get("source") or "").strip() or None,
-        has_semantic_fields=bool(context.get("has_semantic_fields")),
-        blockers=[str(item).strip() for item in (context.get("blockers") or []) if str(item).strip()],
-        warnings=[str(item).strip() for item in (context.get("warnings") or []) if str(item).strip()],
+        rows=state.get("rows") if isinstance(state.get("rows"), list) else None,
+        source=str(state.get("source") or "").strip() or None,
+        has_semantic_fields=bool(state.get("has_semantic_fields")),
+        blockers=[str(item).strip() for item in (state.get("blockers") or []) if str(item).strip()],
+        warnings=[str(item).strip() for item in (state.get("warnings") or []) if str(item).strip()],
         draft_newer_than_lines=draft_newer_than_lines,
         auto_apply_blocked=auto_apply_blocked,
         reparse_status=reparse_status,
-        clean_saved_draft=bool(context.get("clean_saved_draft")),
+        clean_saved_draft=bool(state.get("clean_saved_draft")),
         position_fallback_semantics_ready=position_fallback_semantics_ready,
+        authoritative_persisted_draft=bool(state.get("authoritative_persisted_draft")),
+        base_evidence_run_id=str(state.get("base_evidence_run_id") or "").strip() or None,
+        active_evidence_run_id=str(active_evidence_run_id or "").strip() or None,
     )
 
 
@@ -262,18 +585,55 @@ def evaluate_apply_gate(
     apply_warnings: list[str] = []
     confirm_warnings: list[str] = []
 
-    facility = str((order_payload or {}).get("facility") or "").strip()
-    week = str((order_payload or {}).get("week_value") or (order_payload or {}).get("week") or "").strip()
-    context = current_sheet_context if isinstance(current_sheet_context, dict) else {}
-    clean_saved_draft = bool(context.get("clean_saved_draft")) if context else has_clean_saved_draft(draft_sheet)
+    sheet_state = resolve_current_sheet_state(current_sheet_context, draft_sheet)
+    facility = (
+        str(sheet_state.get("facility_id") or "").strip()
+        or str((order_payload or {}).get("facility") or "").strip()
+    )
+    week = (
+        str(sheet_state.get("resolved_week_id") or "").strip()
+        or str((order_payload or {}).get("week_value") or (order_payload or {}).get("week") or "").strip()
+    )
+    clean_saved_draft = bool(sheet_state.get("clean_saved_draft"))
     evidence_payload = (evidence_run or {}).get("payload_json") if isinstance(evidence_run, dict) else None
+    rows = sheet_state.get("rows") if isinstance(sheet_state.get("rows"), list) else None
+    fields = sheet_state.get("fields") if isinstance(sheet_state.get("fields"), list) else None
+    source = str(sheet_state.get("source") or "").strip()
+    sheet_warnings = [
+        str(item).strip()
+        for item in (sheet_state.get("warnings") or [])
+        if str(item).strip()
+    ]
+    has_semantic_fields = bool(sheet_state.get("has_semantic_fields"))
+    authoritative_persisted_draft = bool(sheet_state.get("authoritative_persisted_draft"))
+    base_evidence_run_id = str(sheet_state.get("base_evidence_run_id") or "").strip() or None
+    active_evidence_run_id = str((evidence_run or {}).get("id") or "").strip() or None
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
+    stale_authoritative_sheet = authoritative_sheet_suppresses_stale_evidence_issues(
+        source=source,
+        rows=rows,
+        has_semantic_fields=has_semantic_fields,
+        clean_saved_draft=clean_saved_draft,
+        authoritative_persisted_draft=authoritative_persisted_draft,
+        base_evidence_run_id=base_evidence_run_id,
+        active_evidence_run_id=active_evidence_run_id,
+    )
+    current_sheet_has_quantities = _sheet_has_materialized_quantity_values(
+        fields=fields,
+        rows=rows,
+    )
+    effective_position_fallback_semantics_ready = bool(
+        (position_fallback_semantics_ready or current_sheet_has_quantities)
+        and not authoritative_persisted_draft
+    )
     position_fallback_clears_numeric_warning = bool(
-        position_fallback_semantics_ready
+        effective_position_fallback_semantics_ready
         and not ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence_payload)
     )
+    if stale_authoritative_sheet:
+        position_fallback_clears_numeric_warning = True
 
     if not facility:
         apply_blockers.append("facility_missing")
@@ -285,31 +645,43 @@ def evaluate_apply_gate(
     capabilities = (evidence_run or {}).get("capabilities_json") if isinstance(evidence_run, dict) else {}
     quantity_selected_via_user_choice = False
     if isinstance(capabilities, dict):
-        if not capabilities.get("step2_view_ready"):
+        if not capabilities.get("step2_view_ready") and not authoritative_persisted_draft:
             apply_blockers.append("evidence_view_unavailable")
             confirm_blockers.append("evidence_view_unavailable")
-        if not capabilities.get("step2_edit_ready"):
+        if not capabilities.get("step2_edit_ready") and not authoritative_persisted_draft:
             apply_blockers.append("evidence_edit_unavailable")
             confirm_blockers.append("evidence_edit_unavailable")
-        if capabilities.get("semantic_shell_only") and not clean_saved_draft and not position_fallback_semantics_ready:
+        if (
+            capabilities.get("semantic_shell_only")
+            and not clean_saved_draft
+            and not authoritative_persisted_draft
+            and not effective_position_fallback_semantics_ready
+        ):
             apply_blockers.append("semantic_shell_only")
             confirm_blockers.append("semantic_shell_only")
-        if capabilities.get("recovery_required") and not clean_saved_draft:
+        if capabilities.get("recovery_required") and not clean_saved_draft and not authoritative_persisted_draft:
             apply_warnings.append("recovery_recommended")
             confirm_warnings.append("recovery_recommended")
 
     resolutions = (candidate_resolution or {}).get("resolutions") if isinstance(candidate_resolution, dict) else {}
     if isinstance(resolutions, dict):
-        for decision_type, resolution in resolutions.items():
-            if not isinstance(resolution, dict):
-                continue
-            suppress_layout_resolution = clean_saved_draft and decision_type in _LAYOUT_RESOLUTION_TYPES
-            if resolution.get("requires_user_choice") and not suppress_layout_resolution:
-                apply_blockers.append(f"{decision_type}_choice_required")
-                confirm_blockers.append(f"{decision_type}_choice_required")
-            if resolution.get("blocked") and not resolution.get("resolved_value") and not suppress_layout_resolution:
-                apply_blockers.append(f"{decision_type}_unresolved")
-                confirm_blockers.append(f"{decision_type}_unresolved")
+        suppressed_decision_types = set()
+        if str(sheet_state.get("facility_id") or "").strip():
+            suppressed_decision_types.add("facility")
+        if str(sheet_state.get("resolved_week_id") or "").strip():
+            suppressed_decision_types.add("week")
+        if clean_saved_draft or authoritative_persisted_draft:
+            suppressed_decision_types |= _LAYOUT_RESOLUTION_TYPES
+        gate_summary = candidate_resolution_service.summarize_resolution_gate(
+            resolutions,
+            suppress_decision_types=suppressed_decision_types,
+        )
+        for decision_type in gate_summary.get("choice_required_types") or []:
+            apply_blockers.append(f"{decision_type}_choice_required")
+            confirm_blockers.append(f"{decision_type}_choice_required")
+        for decision_type in gate_summary.get("blocked_types") or []:
+            apply_blockers.append(f"{decision_type}_unresolved")
+            confirm_blockers.append(f"{decision_type}_unresolved")
         column_mapping = resolutions.get("column_mapping") if isinstance(resolutions.get("column_mapping"), dict) else None
         quantity = resolutions.get("quantity") if isinstance(resolutions.get("quantity"), dict) else None
         quantity_selected_via_user_choice = bool(isinstance(quantity, dict) and quantity.get("selected_via_user_choice"))
@@ -318,6 +690,7 @@ def evaluate_apply_gate(
             and column_mapping.get("attention_required")
             and not column_mapping.get("selected_via_user_choice")
             and not clean_saved_draft
+            and not authoritative_persisted_draft
         ):
             apply_warnings.append("column_mapping_review_required")
             confirm_warnings.append("column_mapping_review_required")
@@ -325,6 +698,8 @@ def evaluate_apply_gate(
             isinstance(column_mapping, dict)
             and column_mapping.get("partial_quantity_mapping")
             and not clean_saved_draft
+            and not authoritative_persisted_draft
+            and not current_sheet_has_quantities
         ):
             apply_blockers.append("sheet_quantity_column_unmapped")
             confirm_blockers.append("sheet_quantity_column_unmapped")
@@ -333,6 +708,7 @@ def evaluate_apply_gate(
             and quantity.get("attention_required")
             and not quantity.get("selected_via_user_choice")
             and not clean_saved_draft
+            and not authoritative_persisted_draft
         ):
             apply_warnings.append("quantity_review_required")
             confirm_warnings.append("quantity_review_required")
@@ -345,35 +721,18 @@ def evaluate_apply_gate(
     ):
         apply_warnings.append("numeric_trust_low")
         confirm_warnings.append("numeric_trust_low")
-
-    draft_payload = (
-        context.get("draft_payload")
-        if isinstance(context.get("draft_payload"), dict)
-        else (
-            draft_sheet.get("draft_sheet_json")
-            if isinstance(draft_sheet, dict) and isinstance(draft_sheet.get("draft_sheet_json"), dict)
-            else draft_sheet
-        )
-    )
-    rows = context.get("rows") if isinstance(context.get("rows"), list) else (draft_payload.get("rows") if isinstance(draft_payload, dict) else None)
     if not isinstance(rows, list) or len(rows) <= 0:
         apply_blockers.append("draft_rows_empty")
         confirm_blockers.append("draft_rows_empty")
-
-    source = (
-        str(context.get("source") or "").strip()
-        if context
-        else canonical_sheet_source(
-            (draft_payload or {}).get("source"),
-            has_persisted_draft=isinstance(draft_sheet, dict) and bool(str(draft_sheet.get("id") or "").strip()),
-        )
-    )
-    has_semantic_fields = bool(context.get("has_semantic_fields")) if context else False
     bypass_monthly_menu_object_block = _semantic_sheet_can_bypass_monthly_menu_object_block(
         rows=rows,
         has_semantic_fields=has_semantic_fields,
     )
     for menu_blocker in _menu_context_blockers(menu_context):
+        if authoritative_persisted_draft:
+            apply_warnings.append(menu_blocker)
+            confirm_warnings.append(menu_blocker)
+            continue
         if menu_blocker == "monthly_menu_object_missing" and bypass_monthly_menu_object_block:
             apply_warnings.append(menu_blocker)
             confirm_warnings.append(menu_blocker)
@@ -390,7 +749,8 @@ def evaluate_apply_gate(
                 sheet_gate.get("apply_blockers") or [],
                 source=source,
                 clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
+                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
+                stale_authoritative_sheet=stale_authoritative_sheet,
             )
         )
         confirm_blockers.extend(
@@ -398,7 +758,8 @@ def evaluate_apply_gate(
                 sheet_gate.get("confirm_blockers") or [],
                 source=source,
                 clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
+                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
+                stale_authoritative_sheet=stale_authoritative_sheet,
             )
         )
         confirm_warnings.extend(
@@ -406,7 +767,8 @@ def evaluate_apply_gate(
                 sheet_gate.get("confirm_warnings") or [],
                 source=source,
                 clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
+                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
+                stale_authoritative_sheet=stale_authoritative_sheet,
             )
         )
 
@@ -417,11 +779,24 @@ def evaluate_apply_gate(
     deduped_blockers = _dedupe_tokens(deduped_apply_blockers + deduped_confirm_blockers)
     deduped_warnings = _dedupe_tokens(deduped_apply_warnings + deduped_confirm_warnings)
 
-    can_apply = not deduped_apply_blockers
-    can_confirm = not deduped_confirm_blockers and "recovery_recommended" not in deduped_confirm_warnings
+    requires_human_review = gate_requires_human_review(
+        apply_warnings=deduped_apply_warnings,
+        confirm_warnings=deduped_confirm_warnings,
+    )
+    can_apply = gate_can_apply(
+        apply_blockers=deduped_apply_blockers,
+        apply_warnings=deduped_apply_warnings,
+        confirm_warnings=deduped_confirm_warnings,
+    )
+    can_confirm = gate_can_confirm(
+        confirm_blockers=deduped_confirm_blockers,
+        confirm_warnings=deduped_confirm_warnings,
+        apply_warnings=deduped_apply_warnings,
+    )
     return {
         "can_apply": can_apply,
         "can_confirm": can_confirm,
+        "requires_human_review": requires_human_review,
         "blockers": deduped_blockers,
         "warnings": deduped_warnings,
         "apply_blockers": deduped_apply_blockers,

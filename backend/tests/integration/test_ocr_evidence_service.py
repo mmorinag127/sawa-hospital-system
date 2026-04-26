@@ -12,7 +12,7 @@ sys.path.append(str(ROOT))
 import src.api.orders as orders_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
-from src.services import ocr_evidence_service, order_service, template_resolution_service  # noqa: E402
+from src.services import draft_sheet_service, ocr_evidence_service, order_service, template_resolution_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
 
@@ -176,14 +176,64 @@ def test_get_draft_sheet_endpoint_builds_initial_draft_from_evidence():
     assert payload["order_id"] == order["id"]
     assert payload["id"] is None
     draft_json = payload["draft_sheet_json"]
-    assert draft_json["source"] == "ocr_evidence"
+    assert draft_json["source"] == "ocr_table+ocr_payload"
+    assert draft_json["fields"][:3] == ["date_mmdd", "daypart", "menu"]
+    assert all(not str(field or "").startswith("col") for field in draft_json["fields"])
     assert draft_json["rows"][0][0] == "03/22"
     assert draft_json["rows"][0][3] == "5"
-    assert payload["source"] == "ocr_evidence"
+    assert payload["source"] == "ocr_table+ocr_payload"
     assert payload["rows"][0][0] == "03/22"
     assert payload["rows"][0][3] == "5"
     assert isinstance(payload.get("workflow_state"), dict)
     assert isinstance(payload.get("evidence_capabilities"), dict)
+
+
+def test_get_draft_sheet_endpoint_prefers_semantic_shell_over_raw_evidence_when_recovery_warning_remains(monkeypatch):
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _seed_order("msg-draft-endpoint-semantic-shell")
+
+    monkeypatch.setattr(
+        order_service,
+        "get_latest_sheet_draft",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        order_service,
+        "get_ocr_sheet",
+        lambda _order_id, **_kwargs: (
+            {
+                "source": "weekly_menu",
+                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+                "header": ["日付", "区分", "メニュー", "常食"],
+                "rows": [["03/22", "朝", "Menu A", ""]],
+                "row_ids": ["semantic-1"],
+                "warnings": ["ocr_evidence_recovery_required", "sheet_ocr_review_required"],
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        draft_sheet_service,
+        "build_sheet_draft_from_evidence",
+        lambda _order_id: {
+            "order_id": _order_id,
+            "source": "ocr_evidence",
+            "fields": ["col1", "col2", "col3", "col4"],
+            "header": ["日付", "区分", "メニュー", "数量"],
+            "rows": [["03/22", "朝", "Menu A", "9"]],
+            "row_ids": ["raw-1"],
+        },
+    )
+
+    res = client.get(f"/orders/{order['id']}/draft-sheet")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["source"] == "weekly_menu"
+    assert payload["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    assert payload["rows"] == [["03/22", "朝", "Menu A", ""]]
+    assert payload["draft_sheet_json"]["source"] == "weekly_menu"
 
 
 def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkeypatch):

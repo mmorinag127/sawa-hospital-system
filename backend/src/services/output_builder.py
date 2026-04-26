@@ -832,24 +832,33 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
 
 def build_order_lines_for_outputs(order: dict) -> list[dict]:
     facility_id = order.get("facility")
-    month_id = (
-        order_service._to_sheet_month_id(order.get("week_value"))  # noqa: SLF001
-        or order_service._to_sheet_month_id(order.get("persisted_week_value"))  # noqa: SLF001
-        or order_service._to_sheet_month_id(order.get("week"))  # noqa: SLF001
-        or order_service._to_sheet_month_id(order.get("week_code"))  # noqa: SLF001
+    week_value = (
+        str(order.get("stored_week_value") or "").strip()
+        or str(order.get("week_value") or "").strip()
+        or str(order.get("persisted_week_value") or "").strip()
+        or str(order.get("week") or "").strip()
+        or str(order.get("week_code") or "").strip()
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
-    raw_lines = _apply_garnish_lines(order.get("lines", []))
-    menu_entries = (
-        menu_service.get_menu_entries_for_facility(month_id, facility_id) if month_id else []
-    )
+    raw_lines = order.get("lines", [])
+    if order_service._expanded_cell_same_daypart_copy_enabled(facility_config):  # noqa: SLF001
+        order_id = order.get("id")
+        if order_id:
+            materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
+            candidate_lines = (
+                materialization_candidate.get("lines")
+                if isinstance(materialization_candidate, dict)
+                and not materialization_candidate.get("error")
+                else None
+            )
+            if isinstance(candidate_lines, list) and candidate_lines:
+                raw_lines = candidate_lines
+    raw_lines = order_service._apply_change_override_priority_to_lines(raw_lines)  # noqa: SLF001
+    raw_lines = _apply_garnish_lines(raw_lines)
+    menu_entries = order_service._collect_menu_entries_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
     raw_lines = _apply_menu_entry_overrides(raw_lines, menu_entries)
-    menu_items = (
-        menu_service.get_menu_items_for_facility(month_id, facility_id) if month_id else []
-    )
-    menu_entries = (
-        menu_service.get_menu_entries_for_facility(month_id, facility_id) if month_id else []
-    )
+    menu_items = order_service._collect_menu_items_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
+    menu_entries = order_service._collect_menu_entries_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
     snapshot = get_order_menu_snapshot(order.get("id"))
     snapshot_items = snapshot.get("menu_items") if isinstance(snapshot, dict) else None
     if snapshot_items:
@@ -1144,6 +1153,73 @@ def _split_bags_by_max(bags: list[dict]) -> list[dict]:
             split.append(next_bag)
             remaining -= chunk
     return split
+
+
+def _serialize_bag_payload_rows(rows: list[dict]) -> list[dict]:
+    payload = [
+        {
+            "date": bag.get("date").isoformat() if bag.get("date") else None,
+            "daypart": bag.get("daypart"),
+            "menu_name": bag.get("menu_name"),
+            "menu_category": bag.get("menu_category"),
+            "diet_type": bag.get("diet_type"),
+            "area_id": bag.get("area_id"),
+            "bag_type": bag.get("bag_type"),
+            "quantity": bag.get("quantity"),
+        }
+        for bag in rows
+    ]
+    payload.sort(
+        key=lambda row: (
+            row.get("date") or "",
+            row.get("daypart") or "",
+            row.get("menu_name") or "",
+            row.get("diet_type") or "",
+            row.get("area_id") or "",
+            row.get("bag_type") or "",
+        )
+    )
+    return payload
+
+
+def build_bag_rows_for_outputs(
+    order: dict,
+    *,
+    order_lines: list[dict] | None = None,
+    facility_config: dict | None = None,
+) -> list[dict]:
+    facility_id = order.get("facility")
+    resolved_facility_config = facility_config
+    if not resolved_facility_config and facility_id:
+        resolved_facility_config = config_service.get_facility_config(facility_id)
+    if not resolved_facility_config:
+        logger.warning("Facility config missing", facility_id=facility_id)
+        resolved_facility_config = {}
+
+    packaging_policy = resolved_facility_config.get("packaging_policy", {})
+    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+
+    resolved_lines = order_lines if isinstance(order_lines, list) else build_order_lines_for_outputs(order)
+    order_for_outputs = {**order, "lines": resolved_lines}
+
+    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+    bag_types = _resolve_bag_types(resolved_facility_config)
+    return _assign_bag_type_for_bags(bags, bag_types)
+
+
+def build_bag_payload_for_outputs(
+    order: dict,
+    *,
+    order_lines: list[dict] | None = None,
+    facility_config: dict | None = None,
+) -> list[dict]:
+    return _serialize_bag_payload_rows(
+        build_bag_rows_for_outputs(
+            order,
+            order_lines=order_lines,
+            facility_config=facility_config,
+        )
+    )
 
 
 def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | None) -> dict:
@@ -1547,6 +1623,15 @@ def _sum_quantity_map(quantity_map: dict[str, Any], keys: tuple[str, ...]) -> fl
 def _generic_quantity_total(quantity_map: dict[str, Any], diet_key: str | None) -> float | None:
     normalized_diet = _normalize_diet_key(diet_key)
     if normalized_diet == "regular":
+        override_qty = (
+            _parse_ocr_quantity(quantity_map.get("change_2_x"))
+            if "change_2_x" in quantity_map
+            else None
+        )
+        if override_qty is None and "change_1_x" in quantity_map:
+            override_qty = _parse_ocr_quantity(quantity_map.get("change_1_x"))
+        if override_qty is not None:
+            return override_qty
         return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x", "staff_x", "daycare_x"))
     if normalized_diet == "regular_bag":
         return _sum_quantity_map(quantity_map, ("regular_bag_x",))
@@ -2995,16 +3080,8 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
     if not facility_config:
         logger.warning("Facility config missing", facility_id=facility_id)
         facility_config = {}
-
-    packaging_policy = facility_config.get("packaging_policy", {})
-    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
-
     order_lines = build_order_lines_for_outputs(order)
-    order_for_outputs = {**order, "lines": order_lines}
-
-    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
-    bag_types = _resolve_bag_types(facility_config)
-    bags = _assign_bag_type_for_bags(bags, bag_types)
+    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config)
     payload = []
 
     with session_scope() as session:
@@ -3024,27 +3101,5 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
                     quantity=bag.get("quantity"),
                 )
             )
-            payload.append(
-                {
-                    "id": bag_id,
-                    "date": bag.get("date").isoformat() if bag.get("date") else None,
-                    "daypart": bag.get("daypart"),
-                    "menu_name": bag.get("menu_name"),
-                    "diet_type": bag.get("diet_type"),
-                    "area_id": bag.get("area_id"),
-                    "bag_type": bag.get("bag_type"),
-                    "quantity": bag.get("quantity"),
-                }
-            )
-
-    payload.sort(
-        key=lambda row: (
-            row.get("date") or "",
-            row.get("daypart") or "",
-            row.get("menu_name") or "",
-            row.get("diet_type") or "",
-            row.get("area_id") or "",
-            row.get("bag_type") or "",
-        )
-    )
+            payload.append({"id": bag_id, **_serialize_bag_payload_rows([bag])[0]})
     return {"order_id": order_id, "generated": bool(payload), "bags": payload}

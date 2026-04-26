@@ -14,6 +14,32 @@ type UploadResponse = {
   source_kind?: string;
   order_id?: string;
   existing_order_id?: string;
+  intake_decision?: string;
+  existing_order_preview?: {
+    match_reason?: string | null;
+    order_id?: string | null;
+    facility_code?: string | null;
+    week_code?: string | null;
+    week_label?: string | null;
+    status?: string | null;
+    line_count?: number | null;
+    existing_document?: {
+      id?: string | null;
+      message_id?: string | null;
+      received_at?: string | null;
+    } | null;
+    prior_document?: {
+      id?: string | null;
+      message_id?: string | null;
+      received_at?: string | null;
+    } | null;
+    incoming_document?: {
+      message_id?: string | null;
+      received_at?: string | null;
+    } | null;
+    will_supersede?: boolean | null;
+    superseded_document_count?: number | null;
+  } | null;
   count?: number;
   items?: Array<
     UploadResponse & {
@@ -43,6 +69,31 @@ type UploadedPdfRow = {
   week_hint?: string | null;
   current_order_id?: string | null;
   current_document_id?: string | null;
+  linked_order?: {
+    id?: string | null;
+    status?: string | null;
+    facility_code?: string | null;
+    week_code?: string | null;
+    message_id?: string | null;
+    received_at?: string | null;
+    current_document_id?: string | null;
+    superseded_document_count?: number | null;
+    line_count?: number | null;
+  } | null;
+  supersede_summary?: {
+    has_prior_document?: boolean | null;
+    superseded_document_count?: number | null;
+    current_document?: {
+      id?: string | null;
+      message_id?: string | null;
+      received_at?: string | null;
+    } | null;
+    prior_document?: {
+      id?: string | null;
+      message_id?: string | null;
+      received_at?: string | null;
+    } | null;
+  } | null;
   lease_expires_at?: string | null;
 };
 
@@ -212,6 +263,8 @@ export default function PdfUploadPage() {
       setMessage(
         payload?.error
           ? payload.error
+          : payload?.existing_order_preview
+          ? "同じ施設・同じ週の既存注文に取り込みます。対象注文と差し替え内容を確認してください。"
           : payload?.duplicate_blocked
           ? "同じPDFは既に取り込まれています。該当注文を開いて確認してください。"
           : orderHint
@@ -381,9 +434,42 @@ export default function PdfUploadPage() {
             <div className="result">
               <div>受付ID: {primaryResult.message_id || "-"}</div>
               <div>登録日時: {primaryResult.received_at || "-"}</div>
-              <div>重複判定: {primaryResult.duplicate_blocked ? "既存あり" : "新規受付"}</div>
+              <div>
+                取込方針:{" "}
+                {primaryResult.existing_order_preview
+                  ? "既存注文を更新"
+                  : primaryResult.duplicate_blocked
+                  ? "同一PDFのため再利用"
+                  : "新規受付"}
+              </div>
               <div>対象注文ID: {primaryResult.order_id || primaryResult.existing_order_id || "-"}</div>
             </div>
+            {primaryResult.existing_order_preview ? (
+              <div className="warning-banner">
+                <p>
+                  同じ施設・同じ週の既存注文を更新します。対象注文:{" "}
+                  {primaryResult.existing_order_preview.order_id || "-"} / 施設:{" "}
+                  {primaryResult.existing_order_preview.facility_code || "-"} / 週:{" "}
+                  {primaryResult.existing_order_preview.week_label ||
+                    primaryResult.existing_order_preview.week_code ||
+                    "-"}
+                </p>
+                <p>
+                  現在の注文文書: {primaryResult.existing_order_preview.existing_document?.message_id || "-"} /{" "}
+                  {formatTimestamp(primaryResult.existing_order_preview.existing_document?.received_at)}
+                </p>
+                <p>
+                  新しい取込文書: {primaryResult.existing_order_preview.incoming_document?.message_id || "-"} /{" "}
+                  {formatTimestamp(primaryResult.existing_order_preview.incoming_document?.received_at)}
+                </p>
+                {primaryResult.existing_order_preview.prior_document ? (
+                  <p>
+                    直前の差し替え履歴: {primaryResult.existing_order_preview.prior_document.message_id || "-"} /{" "}
+                    {formatTimestamp(primaryResult.existing_order_preview.prior_document.received_at)}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             <div className="next-steps">
               <p className="field-label">次にすること</p>
               {primaryResult.order_id || primaryResult.existing_order_id ? (
@@ -426,6 +512,8 @@ export default function PdfUploadPage() {
                   <div>order_id: {primaryResult.order_id || "-"}</div>
                   <div>existing_order_id: {primaryResult.existing_order_id || "-"}</div>
                   <div>duplicate_blocked: {primaryResult.duplicate_blocked ? "true" : "false"}</div>
+                  <div>intake_decision: {primaryResult.intake_decision || "-"}</div>
+                  <div>existing_order_preview.order_id: {primaryResult.existing_order_preview?.order_id || "-"}</div>
                 </div>
               </details>
             </div>
@@ -449,7 +537,14 @@ export default function PdfUploadPage() {
                     <div className="result-card-body">
                       <div>受付ID: {item.message_id || "-"}</div>
                       <div>対象注文ID: {orderId || "-"}</div>
-                      <div>{item.error || (item.duplicate_blocked ? "既存注文を確認してください。" : "注文一覧または注文詳細から確認できます。")}</div>
+                      <div>
+                        {item.error ||
+                          (item.existing_order_preview
+                            ? "同じ施設・同じ週の既存注文を更新します。"
+                            : item.duplicate_blocked
+                            ? "既存注文を確認してください。"
+                            : "注文一覧または注文詳細から確認できます。")}
+                      </div>
                     </div>
                     <div className="actions">
                       {orderId ? (
@@ -518,6 +613,7 @@ export default function PdfUploadPage() {
               const retryDisabled = !uploadedPdfCanRetry(row);
               const orderId = String(row.current_order_id || "").trim();
               const processingActive = uploadedPdfActiveProcessing(row);
+              const linkedOrderId = String(row.linked_order?.id || orderId || "").trim();
               return (
                 <article key={row.id} className="history-card">
                   <div className="history-card-head">
@@ -538,8 +634,27 @@ export default function PdfUploadPage() {
                     </span>
                     <span>施設ヒント: {row.facility_hint || "-"}</span>
                     <span>週ヒント: {row.week_hint || "-"}</span>
-                    <span>対象注文ID: {orderId || "-"}</span>
+                    <span>対象注文ID: {linkedOrderId || "-"}</span>
                   </div>
+                  {row.linked_order ? (
+                    <div className="result" style={{ marginTop: 12 }}>
+                      <div>反映先注文: {row.linked_order.id || "-"}</div>
+                      <div>
+                        施設/週: {row.linked_order.facility_code || "-"} / {row.linked_order.week_code || "-"}
+                      </div>
+                      <div>注文状態: {row.linked_order.status || "-"}</div>
+                      <div>
+                        現行文書: {row.supersede_summary?.current_document?.message_id || "-"} /{" "}
+                        {formatTimestamp(row.supersede_summary?.current_document?.received_at)}
+                      </div>
+                      {row.supersede_summary?.has_prior_document ? (
+                        <div>
+                          直前文書: {row.supersede_summary?.prior_document?.message_id || "-"} /{" "}
+                          {formatTimestamp(row.supersede_summary?.prior_document?.received_at)}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {row.last_error_message ? (
                     <p className="history-error">
                       エラー: {row.last_error_message}
@@ -549,8 +664,8 @@ export default function PdfUploadPage() {
                     <p className="history-hint">現在処理中のため、処理が止まった時だけ再処理に戻してください。</p>
                   ) : null}
                   <div className="actions">
-                    {orderId ? (
-                      <Link href={`/orders/${orderId}`} className="btn secondary">
+                    {linkedOrderId ? (
+                      <Link href={`/orders/${linkedOrderId}`} className="btn secondary">
                         注文詳細を開く
                       </Link>
                     ) : row.message_id ? (
@@ -747,6 +862,19 @@ export default function PdfUploadPage() {
           border: 1px solid rgba(72, 102, 84, 0.12);
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 13px;
+        }
+        .warning-banner {
+          margin-top: 16px;
+          display: grid;
+          gap: 8px;
+          padding: 14px 16px;
+          border-radius: 14px;
+          background: #fff6e7;
+          border: 1px solid rgba(156, 106, 16, 0.2);
+          color: #5c4315;
+        }
+        .warning-banner p {
+          margin: 0;
         }
         .file-list {
           display: flex;

@@ -7,7 +7,11 @@ from sqlalchemy import select, update, func, desc
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
-from src.services.ocr_job_service import get_job_stale_at, is_job_stale
+from src.services.ocr_job_service import (
+    get_job_stale_at,
+    is_job_recoverable,
+    is_job_stale,
+)
 
 
 def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +307,8 @@ def summarize_backlog_metrics() -> dict[str, Any]:
         ).all()
         counts = {status: int(count) for status, count in rows if status}
         active_count = counts.get("running", 0) + counts.get("pending", 0)
+        awaiting_output_count = counts.get("awaiting_output", 0)
+        recovering_count = counts.get("recovering", 0)
         oldest_active_at = session.execute(
             select(func.min(OcrJob.created_at)).where(OcrJob.status.in_(["running", "pending"]))
         ).scalar_one_or_none()
@@ -328,6 +334,8 @@ def summarize_backlog_metrics() -> dict[str, Any]:
                 "status": job.status,
                 "metrics": job.metrics,
                 "updated_at": job.updated_at,
+                "error_message": job.error_message,
+                "output_reference": job.output_reference,
             }
             for job in (
                 session.execute(
@@ -337,6 +345,28 @@ def summarize_backlog_metrics() -> dict[str, Any]:
                 .all()
             )
         ]
+        recoverable_jobs = [
+            {
+                "id": job.id,
+                "status": job.status,
+                "metrics": job.metrics,
+                "updated_at": job.updated_at,
+                "error_message": job.error_message,
+                "output_reference": job.output_reference,
+            }
+            for job in (
+                session.execute(
+                    select(OcrJob).where(
+                        OcrJob.status.in_(["awaiting_output", "recovering", "failed", "error", "running", "pending"])
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        ]
+    recoverable_jobs = [job for job in recoverable_jobs if is_job_recoverable(job)]
+    active_jobs = [job for job in active_jobs if not is_job_recoverable(job)]
+    active_count = len(active_jobs)
     stale_jobs = [job for job in active_jobs if is_job_stale(job)]
     stale_oldest_seconds = None
     if stale_jobs:
@@ -368,6 +398,9 @@ def summarize_backlog_metrics() -> dict[str, Any]:
             "active_count": active_count,
             "running_count": counts.get("running", 0),
             "pending_count": counts.get("pending", 0),
+            "awaiting_output_count": awaiting_output_count,
+            "recovering_count": recovering_count,
+            "recoverable_count": len(recoverable_jobs),
             "failed_count": counts.get("failed", 0),
             "done_count": counts.get("done", 0),
             "completed_count": counts.get("completed", 0),

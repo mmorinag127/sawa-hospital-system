@@ -82,3 +82,38 @@ def test_menu_edit_updates_item():
     assert fetched_cleared["category"] is None
     assert fetched_cleared["bag_max_qty"] is None
     assert fetched_cleared["bag_max_unit"] is None
+
+
+def test_menu_edit_normalizes_japanese_unit_inputs():
+    with session_scope() as session:
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+    menu_service.create_menu("2025-12", b"menu\nMenuA\n", "file.csv")
+    item = menu_service.create_item_stub("2025-12", "白身魚のフライ")
+    changed = menu_service.update_item(
+        "2025-12",
+        item["id"],
+        {
+            "unit_type": "切",
+            "qty_per_serving": 1,
+            "bag_max_qty": 30,
+            "bag_max_unit": "個",
+        },
+    )
+    assert changed
+
+    fetched = menu_service.get_item(item["id"])
+    assert fetched["unit_type"] == "cut"
+    assert fetched["qty_per_serving"] == 1
+    assert fetched["bag_max_unit"] == "count"
+
+    with session_scope() as session:
+        row = session.get(MonthlyMenuItem, item["id"])
+        assert row is not None
+        master = session.get(MenuMaster, row.menu_master_id)
+        assert master is not None
+        assert master.unit_type == "cut"
+        assert master.qty_per_serving == 1
+        assert master.bag_max_unit == "count"

@@ -184,6 +184,15 @@ const formatQuantity = (value?: number | null) => {
   return Number(value).toLocaleString("ja-JP");
 };
 
+const formatBagOrderRef = (value: NonNullable<DailyBagBreakdown["order_refs"]>[number]) => {
+  const parts = [
+    value.facility_label || value.order_id || "注文",
+    value.area_id ? `${value.area_id}` : "",
+    value.quantity != null && !Number.isNaN(value.quantity) ? `${formatQuantity(value.quantity)}食` : "",
+  ].filter(Boolean);
+  return parts.join(" / ");
+};
+
 const extractFilename = (value?: string | null) => {
   if (!value) return "";
   const match = value.match(/filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i);
@@ -742,7 +751,7 @@ export default function DailyDeliveryNotesPage() {
     const timestamp = new Date().toLocaleString("ja-JP");
     setMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
     try {
-      const res = await apiClient.get(path, { responseType: "blob" });
+      const res = await apiClient.get(path, { responseType: "blob", timeout: 0 });
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
       const filename = extractFilename(contentDisposition) || "output";
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
@@ -776,6 +785,7 @@ export default function DailyDeliveryNotesPage() {
       const res = await apiClient.get("/outputs/daily-bundle", {
         params: { date, bundle_type: bundleType, status: status || undefined },
         responseType: "blob",
+        timeout: 0,
       });
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
@@ -1028,10 +1038,29 @@ export default function DailyDeliveryNotesPage() {
                                           {(bagTypeGroup.breakdowns || []).map((breakdown, index) => (
                                             <div
                                               key={`${bagTypeGroup.bag_type}-${breakdown.amount_label}-${index}`}
-                                              className="bag-breakdown-row"
+                                              className="bag-breakdown-entry"
                                             >
-                                              <span>{breakdown.amount_label || "計算不可"}</span>
-                                              <strong>x {breakdown.count || 0}</strong>
+                                              <div className="bag-breakdown-row">
+                                                <span>{breakdown.amount_label || "計算不可"}</span>
+                                                <strong>x {breakdown.count || 0}</strong>
+                                              </div>
+                                              {(breakdown.order_refs || []).length ? (
+                                                <div className="bag-breakdown-refs">
+                                                  {(breakdown.order_refs || []).map((orderRef, orderIndex) => (
+                                                    <div
+                                                      key={`${orderRef.order_id || "order"}-${orderIndex}`}
+                                                      className="bag-breakdown-ref"
+                                                    >
+                                                      <span>{formatBagOrderRef(orderRef)}</span>
+                                                      {orderRef.order_id ? (
+                                                        <Link href={`/orders/${orderRef.order_id}`} className="link">
+                                                          詳細
+                                                        </Link>
+                                                      ) : null}
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              ) : null}
                                             </div>
                                           ))}
                                         </div>
@@ -1655,13 +1684,33 @@ export default function DailyDeliveryNotesPage() {
           border-top: 1px solid rgba(25, 32, 30, 0.06);
         }
 
+        .bag-breakdown-entry {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding-top: 8px;
+        }
+
         .bag-breakdown-row {
           display: flex;
           justify-content: space-between;
           gap: 12px;
           font-size: 12px;
           color: #51615c;
-          padding-top: 8px;
+        }
+
+        .bag-breakdown-refs {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .bag-breakdown-ref {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          font-size: 12px;
+          color: #758680;
         }
 
         .override-modal-backdrop {

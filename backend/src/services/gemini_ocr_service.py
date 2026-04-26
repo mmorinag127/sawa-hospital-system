@@ -11,6 +11,11 @@ import urllib.request
 from typing import Any
 
 from src.services.pdf_render import render_pdf_to_png_bytes
+from src.services.template_field_schema_service import (
+    build_header_by_field,
+    classify_aux_header_semantic,
+    derive_row_fields_from_columns,
+)
 
 _DEFAULT_ROW_FIELDS = ["date_mmdd", "daypart", "menu", "remarks"]
 _FULLWIDTH_TRANSLATION = str.maketrans(
@@ -34,15 +39,21 @@ _FULLWIDTH_TRANSLATION = str.maketrans(
 
 
 def _row_fields(template: dict) -> list[str]:
+    derived = derive_row_fields_from_columns(template.get("columns"))
+    if bool(template.get("columns_authoritative")) and derived:
+        return derived
     fields = template.get("main_ocr_row_fields")
-    if not isinstance(fields, list) or not fields:
-        return list(_DEFAULT_ROW_FIELDS)
-    normalized: list[str] = []
-    for field in fields:
-        text = str(field or "").strip()
-        if text:
-            normalized.append(text)
-    return normalized or list(_DEFAULT_ROW_FIELDS)
+    if isinstance(fields, list):
+        normalized: list[str] = []
+        for field in fields:
+            text = str(field or "").strip()
+            if text:
+                normalized.append(text)
+        if normalized:
+            return normalized
+    if derived:
+        return derived
+    return list(_DEFAULT_ROW_FIELDS)
 
 
 def _is_qty_field(field: str) -> bool:
@@ -56,6 +67,33 @@ def _is_date_field(field: str) -> bool:
 
 def _is_daypart_field(field: str) -> bool:
     return field in {"daypart", "meal", "time"}
+
+
+def _is_aux_field(field: str) -> bool:
+    return field.startswith("aux.")
+
+
+def _is_remarks_field(field: str) -> bool:
+    return field in {"remarks", "note"}
+
+
+def _full_table_patch_fields(row_fields: list[str]) -> list[str]:
+    return [
+        field
+        for field in row_fields
+        if _is_qty_field(field) or _is_aux_field(field) or _is_remarks_field(field)
+    ]
+
+
+def _row_has_field(row: dict[str, Any], field: str) -> bool:
+    if field in row:
+        return True
+    current: Any = row
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current.get(part)
+    return True
 
 
 def _normalize_digits_text(value: str) -> str:
@@ -100,12 +138,14 @@ def _normalize_date_text(value: str) -> str:
     return ""
 
 
-def _normalize_row_cell(field: str, value: object) -> str:
+def _normalize_row_cell(field: str, value: object, *, full_table_mode: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     if _is_qty_field(field):
         return _normalize_digits_text(text)
+    if full_table_mode:
+        return text
     if _is_daypart_field(field):
         return _normalize_daypart_text(text)
     if _is_date_field(field):
@@ -126,6 +166,24 @@ def _quantity_only_mode(template: dict[str, Any]) -> bool:
     return _as_bool(template.get("llm_quantity_only_mode"), default=False)
 
 
+def _full_table_mode(template: dict[str, Any]) -> bool:
+    return _as_bool(template.get("llm_full_table_mode"), default=False)
+
+
+def _resolve_timeout_seconds(template: dict[str, Any]) -> float:
+    configured = template.get("gemini_ocr_timeout_seconds")
+    if configured is not None:
+        return float(configured)
+    if _full_table_mode(template):
+        return float(
+            os.getenv(
+                "GEMINI_OCR_FULL_TABLE_TIMEOUT_SECONDS",
+                os.getenv("GEMINI_OCR_TIMEOUT_SECONDS", "240"),
+            )
+        )
+    return float(os.getenv("GEMINI_OCR_TIMEOUT_SECONDS", "90"))
+
+
 def _quantity_fields(row_fields: list[str]) -> list[str]:
     return [field for field in row_fields if _is_qty_field(field)]
 
@@ -135,6 +193,7 @@ def _normalize_rows(
     row_fields: list[str],
     *,
     quantity_only_mode: bool,
+    full_table_mode: bool,
 ) -> list[dict[str, str]]:
     if not isinstance(rows, list):
         return []
@@ -145,18 +204,27 @@ def _normalize_rows(
             continue
         normalized_row: dict[str, str] = {}
         non_empty = False
-        target_fields = qty_fields if quantity_only_mode and qty_fields else row_fields
+        if quantity_only_mode and qty_fields:
+            target_fields = qty_fields
+        elif full_table_mode:
+            target_fields = _full_table_patch_fields(row_fields)
+        else:
+            target_fields = row_fields
         for field in target_fields:
-            cell = _normalize_row_cell(field, row.get(field))
+            if full_table_mode and not _row_has_field(row, field):
+                continue
+            cell = _normalize_row_cell(field, row.get(field), full_table_mode=full_table_mode)
             normalized_row[field] = cell
             if cell:
                 non_empty = True
-        if quantity_only_mode:
+        if quantity_only_mode or full_table_mode:
             row_index = _normalize_row_index(row.get("row_index"))
             if row_index:
                 normalized_row["row_index"] = row_index
                 non_empty = True
-        if non_empty:
+            elif full_table_mode:
+                continue
+        if non_empty or (full_table_mode and not quantity_only_mode):
             normalized.append(normalized_row)
     return normalized
 
@@ -166,6 +234,7 @@ def _normalize_payload(
     *,
     row_fields: list[str],
     quantity_only_mode: bool,
+    full_table_mode: bool,
 ) -> dict[str, Any]:
     normalized = dict(payload)
 
@@ -186,7 +255,22 @@ def _normalize_payload(
         normalized.get("rows"),
         row_fields,
         quantity_only_mode=quantity_only_mode,
+        full_table_mode=full_table_mode,
     )
+    if full_table_mode:
+        returned_row_indexes: list[int] = []
+        for row in normalized["rows"]:
+            if not isinstance(row, dict):
+                continue
+            row_index = _normalize_row_index(row.get("row_index"))
+            if not row_index:
+                continue
+            try:
+                returned_row_indexes.append(int(row_index))
+            except Exception:
+                continue
+        if returned_row_indexes:
+            normalized["_ocr_returned_row_indexes"] = sorted(set(returned_row_indexes))
     return normalized
 
 
@@ -224,12 +308,33 @@ def _get_model(template: dict) -> str:
     return model
 
 
+def _model_requires_thinking_mode(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return "gemini-2.5-pro" in normalized
+
+
+def _resolve_thinking_budget(template: dict[str, Any], model: str) -> int | None:
+    configured = template.get("gemini_ocr_thinking_budget")
+    if configured is None:
+        env_value = os.getenv("GEMINI_OCR_THINKING_BUDGET", "").strip()
+        configured = env_value or None
+    if configured is not None:
+        return _safe_int(configured, 0)
+    if _model_requires_thinking_mode(model):
+        return 512
+    return 0
+
+
 def _build_prompt(template: dict) -> str:
     fields = _row_fields(template)
     quantity_only_mode = _quantity_only_mode(template)
+    full_table_mode = _full_table_mode(template)
     qty_fields = _quantity_fields(fields)
+    patch_fields = _full_table_patch_fields(fields)
     field_list = ", ".join(fields)
     qty_field_list = ", ".join(qty_fields)
+    patch_field_list = ", ".join(patch_fields)
+    header_by_field = build_header_by_field(template.get("columns"))
     custom = str(template.get("gemini_ocr_prompt") or "").strip()
     if quantity_only_mode and qty_fields:
         base_prompt = (
@@ -252,6 +357,57 @@ def _build_prompt(template: dict) -> str:
             "- Apply copying/inference only within the clearly indicated range.\n"
             "- Do not output date/daypart/menu fields in rows.\n"
             "- Skip headers, legends, totals, page numbers, and notes outside table body.\n"
+            "- Do not add extra keys.\n"
+            "- Do not output markdown, code fences, or explanations."
+        )
+    elif full_table_mode:
+        field_rules: list[str] = []
+        for field in patch_fields:
+            header = str(header_by_field.get(field) or field).strip()
+            if _is_qty_field(field):
+                field_rules.append(
+                    f"- {field} ({header}) is a quantity field. Copy only the digits visible in that exact quantity column. Never move helper/total numbers into this field."
+                )
+            elif _is_aux_field(field):
+                semantic = classify_aux_header_semantic(header)
+                if semantic == "block_total":
+                    field_rules.append(
+                        f"- {field} ({header}) is a display-only helper/total column. Copy the visible helper/total text only into this field. Never move it into qty.* or remarks."
+                    )
+                elif semantic == "slot_label":
+                    field_rules.append(
+                        f"- {field} ({header}) is a display-only slot/category label column. Return only normalized labels such as 主, 主Ａ, 主Ｂ, 副①, or 副② when clearly supported by the fax cell. Leave it empty when the mark is noisy or unreadable."
+                    )
+                else:
+                    field_rules.append(
+                        f"- {field} ({header}) is display-only auxiliary text. Copy the visible text exactly. Never reinterpret it as quantity or remarks."
+                    )
+            elif _is_remarks_field(field):
+                field_rules.append(
+                    f"- {field} ({header}) comes only from the actual notes/remarks cell. Do not move side legends, diet markers, or helper annotations into this field."
+                )
+        base_prompt = (
+            "You are an OCR parser for Japanese fax order forms.\n"
+            "Extract sparse current-sheet-aligned cell patches and return strict JSON.\n"
+            "Return ONLY one JSON object with this exact shape:\n"
+            '{"facility_name": string, "date_strings": string[], "rows": object[]}.\n'
+            "facility_name must be empty string when unreadable.\n"
+            "Each row object in rows must include row_index and may include only these patch fields:\n"
+            f"row_index, {patch_field_list}\n"
+            "Rules:\n"
+            "- row_index is the zero-based structural row index from the current sheet/baseline.\n"
+            "- Every returned row object must include row_index.\n"
+            "- Return only rows that need a patch; omit unchanged rows.\n"
+            "- Inside a returned row, omit unchanged fields.\n"
+            "- To explicitly clear a cell, include that field with empty string.\n"
+            "- Do not output structural anchor fields such as date_mmdd, daypart, or menu; those are owned by the current sheet.\n"
+            "- Do not emit unanchored rows.\n"
+            "- Skip header rows, legends, date-only separators, totals-only lines, page numbers, and notes outside the table body.\n"
+            "- Copy only text visible in the same aligned row/cell.\n"
+            "- For display-only helper cells, keep them empty when unreadable instead of guessing.\n"
+            "- For quantity fields only, if handwriting is unreadable you may infer from nearby recognized quantities when continuity is clear; otherwise keep empty string.\n"
+            "- Quantity fields (qty.*) must be digits only ([0-9]+), otherwise empty string.\n"
+            f"{chr(10).join(field_rules)}\n"
             "- Do not add extra keys.\n"
             "- Do not output markdown, code fences, or explanations."
         )
@@ -297,12 +453,28 @@ def _build_response_schema(template: dict) -> dict[str, Any]:
     fields = _row_fields(template)
     quantity_only_mode = _quantity_only_mode(template)
     qty_fields = _quantity_fields(fields)
-    target_fields = qty_fields if quantity_only_mode and qty_fields else fields
+    full_table_mode = _full_table_mode(template)
+    if quantity_only_mode and qty_fields:
+        target_fields = qty_fields
+    elif full_table_mode:
+        target_fields = _full_table_patch_fields(fields)
+    else:
+        target_fields = fields
+    header_by_field = build_header_by_field(template.get("columns"))
     row_properties: dict[str, Any] = {}
     for field in target_fields:
         key = field
         if key.startswith("qty."):
             description = "Meal quantity as digits only. Empty string when unreadable."
+        elif _is_aux_field(key):
+            header = str(header_by_field.get(key) or key).strip()
+            semantic = classify_aux_header_semantic(header)
+            if semantic == "block_total":
+                description = "Display-only helper or total cell text. Never use this field for meal quantity."
+            elif semantic == "slot_label":
+                description = "Display-only slot or category label. Return only normalized labels such as 主, 主Ａ, 主Ｂ, 副①, or 副②."
+            else:
+                description = "Display-only auxiliary cell text. Never use this field for meal quantity or remarks."
         elif key in {"date_mmdd", "date"} or key.startswith("date"):
             description = "Date in M/D format when visible."
         elif key in {"daypart", "meal", "time"}:
@@ -310,7 +482,7 @@ def _build_response_schema(template: dict) -> dict[str, Any]:
         elif key in {"menu", "menu_name"}:
             description = "Menu name text exactly as shown."
         elif key in {"remarks", "note"}:
-            description = "Optional notes text."
+            description = "Notes text from the actual notes/remarks cell only."
         else:
             description = "Cell text as string."
         row_properties[key] = {
@@ -323,6 +495,12 @@ def _build_response_schema(template: dict) -> dict[str, Any]:
             "description": "Zero-based table body row index.",
         }
         required_fields = ["row_index", *target_fields]
+    elif full_table_mode:
+        row_properties["row_index"] = {
+            "type": "integer",
+            "description": "Zero-based structural row index from the current sheet/baseline.",
+        }
+        required_fields = ["row_index"]
     else:
         required_fields = [field for field in target_fields]
     return {
@@ -512,12 +690,25 @@ def _extract_usage_tokens(payload: dict[str, Any]) -> dict[str, int]:
 
 def _build_request_body(
     *,
+    model: str,
+    template: dict[str, Any],
     system_prompt: str,
     user_prompt: str,
     image_b64: str,
     schema: dict[str, Any],
     max_tokens: int,
 ) -> dict[str, Any]:
+    generation_config: dict[str, Any] = {
+        "temperature": 0,
+        "maxOutputTokens": max_tokens,
+        "responseMimeType": "application/json",
+        "responseSchema": schema,
+    }
+    thinking_budget = _resolve_thinking_budget(template, model)
+    if thinking_budget is not None:
+        generation_config["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+        }
     return {
         "system_instruction": {
             "parts": [{"text": system_prompt}],
@@ -535,12 +726,7 @@ def _build_request_body(
                 ]
             }
         ],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": max_tokens,
-            "responseMimeType": "application/json",
-            "responseSchema": schema,
-        },
+        "generationConfig": generation_config,
     }
 
 
@@ -562,18 +748,38 @@ def _request_gemini_json(
             response_raw = response.read().decode("utf-8")
     except (TimeoutError, socket.timeout) as exc:
         raise RuntimeError(f"Gemini OCR timeout after {timeout:.0f}s") from exc
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            raw_detail = exc.read().decode("utf-8")
+        except Exception:  # noqa: BLE001
+            raw_detail = ""
+        if raw_detail:
+            try:
+                parsed = json.loads(raw_detail)
+            except Exception:  # noqa: BLE001
+                parsed = None
+            if isinstance(parsed, dict):
+                error_payload = parsed.get("error")
+                if isinstance(error_payload, dict):
+                    status = str(error_payload.get("status") or "").strip()
+                    message = str(error_payload.get("message") or "").strip()
+                    code = error_payload.get("code")
+                    if message:
+                        detail = f"Gemini OCR HTTP {code or exc.code}"
+                        if status:
+                            detail += f" {status}"
+                        detail += f": {message}"
+            if not detail:
+                detail = f"Gemini OCR HTTP {exc.code}: {raw_detail}"
+        else:
+            detail = f"Gemini OCR HTTP {exc.code}: {exc}"
+        raise RuntimeError(detail) from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", None)
         if isinstance(reason, (TimeoutError, socket.timeout)):
             raise RuntimeError(f"Gemini OCR timeout after {timeout:.0f}s") from exc
         raise RuntimeError(f"Gemini OCR request failed: {exc}") from exc
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8")
-        except Exception:  # noqa: BLE001
-            detail = str(exc)
-        raise RuntimeError(f"Gemini OCR HTTP {exc.code}: {detail}") from exc
     return json.loads(response_raw)
 
 
@@ -588,7 +794,7 @@ def run_gemini_ocr(
     model = _get_model(template)
     page = max(int(template.get("page", 1)) - 1, 0) + 1
     resolution = int(template.get("gemini_ocr_resolution") or template.get("main_ocr_resolution") or 300)
-    timeout = float(template.get("gemini_ocr_timeout_seconds") or os.getenv("GEMINI_OCR_TIMEOUT_SECONDS", "90"))
+    timeout = _resolve_timeout_seconds(template)
     max_tokens = int(template.get("gemini_ocr_max_tokens") or os.getenv("GEMINI_OCR_MAX_TOKENS", "12000"))
     retry_on_truncation = _as_bool(
         template.get("gemini_ocr_retry_on_truncation")
@@ -604,6 +810,7 @@ def run_gemini_ocr(
     if retry_max_tokens < max_tokens:
         retry_max_tokens = max_tokens
     quantity_only_mode = _quantity_only_mode(template)
+    full_table_mode = _full_table_mode(template)
     system_prompt = _build_prompt(template)
     user_prompt = _build_user_prompt(template)
     schema = _build_response_schema(template)
@@ -619,6 +826,8 @@ def run_gemini_ocr(
     recovered_truncated_json = False
     for attempt in range(1, 3):
         body = _build_request_body(
+            model=model,
+            template=template,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_b64=image_b64,
@@ -662,6 +871,7 @@ def run_gemini_ocr(
         parsed,
         row_fields=row_fields,
         quantity_only_mode=quantity_only_mode,
+        full_table_mode=full_table_mode,
     )
     parsed.setdefault("facility_name", None)
     parsed.setdefault("date_strings", [])
@@ -681,11 +891,15 @@ def run_gemini_ocr(
         "retry_applied": bool(len(attempts) > 1),
         "recovered_truncated_json": bool(recovered_truncated_json),
         "quantity_only_mode": bool(quantity_only_mode),
+        "full_table_mode": bool(full_table_mode),
     }
     if attempts:
         debug_payload["attempts"] = attempts
     if isinstance(last_attempt.get("usage"), dict):
         debug_payload["usage"] = last_attempt["usage"]
+    returned_row_indexes = parsed.get("_ocr_returned_row_indexes")
+    if isinstance(returned_row_indexes, list) and returned_row_indexes:
+        debug_payload["returned_row_indexes"] = returned_row_indexes
     parsed["_ocr_raw_text"] = text
     parsed["_ocr_debug"] = debug_payload
     return parsed

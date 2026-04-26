@@ -10,6 +10,7 @@ sys.path.append(str(ROOT))
 import src.api.orders as orders_api  # noqa: E402
 from src.main import app  # noqa: E402
 from src.services import order_service  # noqa: E402
+from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -264,6 +265,67 @@ def test_switch_draft_sheet_evidence_endpoint_maps_results(monkeypatch) -> None:
     assert missing.status_code == 404
 
 
+def test_candidate_draft_sheet_preview_endpoint_maps_results(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-candidate-preview-001")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_candidate_draft_preview",
+        lambda *_args, **_kwargs: (
+            {
+                "id": None,
+                "order_id": order["id"],
+                "base_evidence_run_id": "EVD002",
+                "draft_sheet_json": {
+                    "source": "weekly_menu",
+                    "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                    "header": ["日付", "区分", "メニュー", "常食2F"],
+                    "rows": [["03/22", "朝", "Menu A", "8"]],
+                    "row_ids": ["row-1"],
+                },
+                "draft_state": "draft_ready",
+                "blockers_json": [],
+                "warnings_json": [],
+                "latest_patch_candidate_id": None,
+                "edited_by": None,
+                "edited_at": None,
+                "created_at": None,
+            },
+            None,
+        ),
+    )
+    ok = client.get(f"/orders/{order['id']}/draft-sheet/candidate-preview")
+    assert ok.status_code == 200
+    assert ok.json()["base_evidence_run_id"] == "EVD002"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_candidate_draft_preview",
+        lambda *_args, **_kwargs: (None, "candidate_preview_unavailable"),
+    )
+    conflict = client.get(f"/orders/{order['id']}/draft-sheet/candidate-preview")
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error"] == "candidate_preview_unavailable"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_candidate_draft_preview",
+        lambda *_args, **_kwargs: (None, "template_unresolved"),
+    )
+    blocked = client.get(f"/orders/{order['id']}/draft-sheet/candidate-preview")
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["error"] == "template_unresolved"
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_candidate_draft_preview",
+        lambda *_args, **_kwargs: (None, "candidate_not_found"),
+    )
+    missing = client.get(f"/orders/{order['id']}/draft-sheet/candidate-preview")
+    assert missing.status_code == 404
+
+
 def test_ocr_rerun_endpoint_enqueues_pipeline_candidate(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-workflow-api-rerun-001")
@@ -285,6 +347,57 @@ def test_ocr_rerun_endpoint_enqueues_pipeline_candidate(monkeypatch) -> None:
     assert body["mode"] == "pipeline_rerun"
     assert called["order_id"] == order["id"]
     assert called["stale_action"] == "retry"
+
+
+def test_ocr_rerun_endpoint_heals_active_job_when_workflow_is_terminal(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-rerun-terminal-heal")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        error_message=None,
+        metrics={
+            "request_mode": "ocr_rerun",
+            "processing_stage": "ocr_pipeline",
+            "result_state": "processing",
+        },
+    )
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda order_id, refresh=False: {
+            "order_id": order_id,
+            "state": "rerun_failed_keep_current",
+            "ocr_last_reparse_error": "ocr_pipeline_failed:SystemExit(1)",
+            "ocr_processing_stage": "ocr_pipeline",
+            "ocr_result_state": "hard_failed",
+            "ocr_reparse_status": "hard_failed",
+            "reparse_state": {
+                "status": "hard_failed",
+                "processing_stage": "ocr_pipeline",
+                "result_state": "hard_failed",
+                "error_message": "ocr_pipeline_failed:SystemExit(1)",
+            },
+        },
+    )
+    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", lambda *_args, **_kwargs: None)
+
+    res = client.post(f"/orders/{order['id']}/ocr-rerun")
+
+    assert res.status_code == 202
+    body = res.json()
+    assert body["accepted"] is True
+    assert body["mode"] == "pipeline_rerun"
+    healed_job = get_job(job_id)
+    assert healed_job is not None
+    assert healed_job["status"] == "running"
+    metrics = healed_job.get("metrics") or {}
+    assert metrics["request_mode"] == "ocr_rerun"
+    assert metrics["processing_stage"] == "queued"
+    assert metrics["result_state"] == "processing"
 
 
 def test_confirm_endpoint_blocks_on_weekly_menu_missing(monkeypatch) -> None:
@@ -530,3 +643,79 @@ def test_apply_endpoint_ignores_draft_rows_empty_when_request_rows_exist(monkeyp
 
     assert res.status_code == 200
     assert apply_called["value"] is True
+
+
+def test_apply_endpoint_returns_conflict_for_materialization_guard_errors(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-materialization-guard")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda order_id, refresh=False: {
+            "order_id": order_id,
+            "state": "draft_ready",
+            "headline": "下書きを確認してください",
+            "apply_gate": {
+                "can_apply": True,
+                "can_confirm": True,
+                "blockers": [],
+                "warnings": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "apply_submitted_ocr_sheet",
+        lambda *_args, **_kwargs: (None, "draft_materialization_mismatch"),
+    )
+
+    res = client.post(
+        f"/orders/{order['id']}/ocr-apply",
+        json={
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+        },
+    )
+
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["error"] == "draft_materialization_mismatch"
+
+
+def test_apply_endpoint_returns_conflict_for_draft_materialization_mismatch(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order("msg-workflow-api-008")
+
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda order_id, refresh=False: {
+            "order_id": order_id,
+            "state": "draft_ready",
+            "headline": "下書きを確認してください",
+            "apply_gate": {
+                "can_apply": True,
+                "can_confirm": True,
+                "blockers": [],
+                "warnings": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "apply_submitted_ocr_sheet",
+        lambda *_args, **_kwargs: (None, "draft_materialization_mismatch"),
+    )
+
+    res = client.post(
+        f"/orders/{order['id']}/ocr-apply",
+        json={
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "3"]],
+        },
+    )
+
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["error"] == "draft_materialization_mismatch"

@@ -10,6 +10,8 @@ from src.models.order_critical_decision import OrderCriticalDecision
 
 Base.metadata.create_all(bind=engine)
 
+INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE = "_candidate_evidence_ack"
+
 
 def _serialize_decision(item: OrderCriticalDecision) -> dict[str, Any]:
     candidate_set = item.candidate_set_json if isinstance(item.candidate_set_json, dict) else {}
@@ -23,6 +25,10 @@ def _serialize_decision(item: OrderCriticalDecision) -> dict[str, Any]:
         "selected_by": item.selected_by,
         "selected_at": item.selected_at.isoformat() if isinstance(item.selected_at, datetime) else None,
     }
+
+
+def is_internal_decision_type(decision_type: str | None) -> bool:
+    return str(decision_type or "").strip() == INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE
 
 
 def list_decisions(order_id: str) -> list[dict[str, Any]]:
@@ -89,6 +95,8 @@ def sync_pending_decisions(
         )
         preserved: dict[str, dict[str, Any]] = {}
         for row in existing_rows:
+            if is_internal_decision_type(row.decision_type) and row.decision_type not in desired:
+                continue
             current_candidate_set = row.candidate_set_json if isinstance(row.candidate_set_json, dict) else {}
             preserved[row.decision_type] = {
                 "id": row.id,
@@ -139,6 +147,53 @@ def sync_pending_decisions(
             .all()
         )
         return [_serialize_decision(row) for row in rows]
+
+
+def acknowledge_candidate_evidence(
+    order_id: str,
+    candidate_evidence_run_id: str,
+    *,
+    selected_by: str | None = None,
+) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    normalized_candidate_id = str(candidate_evidence_run_id or "").strip()
+    if not normalized_order_id or not normalized_candidate_id:
+        return None
+    with session_scope() as session:
+        row = (
+            session.query(OrderCriticalDecision)
+            .filter(
+                OrderCriticalDecision.order_id == normalized_order_id,
+                OrderCriticalDecision.decision_type == INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE,
+            )
+            .order_by(OrderCriticalDecision.selected_at.desc(), OrderCriticalDecision.id.desc())
+            .first()
+        )
+        if not row:
+            row = OrderCriticalDecision(
+                id=f"OCD{uuid4().hex[:12]}",
+                order_id=normalized_order_id,
+                decision_type=INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE,
+                candidate_set_json={},
+            )
+            session.add(row)
+        row.candidate_set_json = {"base_evidence_run_id": normalized_candidate_id}
+        row.selected_value = normalized_candidate_id
+        row.selected_by = str(selected_by or "").strip() or None
+        row.selected_at = datetime.utcnow()
+        session.flush()
+        return _serialize_decision(row)
+
+
+def get_acknowledged_candidate_evidence_run_id(order_id: str) -> str | None:
+    decision = get_acknowledged_candidate_evidence_decision(order_id)
+    if not isinstance(decision, dict):
+        return None
+    return str(decision.get("selected_value") or "").strip() or None
+
+
+def get_acknowledged_candidate_evidence_decision(order_id: str) -> dict[str, Any] | None:
+    return get_latest_decision(order_id, INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE)
 
 
 def choose_decision(

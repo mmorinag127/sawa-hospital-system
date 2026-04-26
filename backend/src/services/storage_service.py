@@ -1,11 +1,14 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 import os
 from pathlib import Path
+import threading
 from typing import Union
 from urllib.parse import urlparse
 import json
 
 StoragePath = Union[str, Path]
+_GCS_CLIENT_LOCAL = threading.local()
 
 
 class StorageService:
@@ -44,14 +47,88 @@ def load_bytes_from_uri(uri: str) -> bytes:
     raise ValueError(f"unsupported storage uri: {uri}")
 
 
-def save_bytes_to_gcs(bucket: str, object_path: str, data: bytes, content_type: str | None = None) -> str:
+@lru_cache(maxsize=1)
+def _import_google_cloud_storage():
     try:
         from google.cloud import storage  # type: ignore
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ValueError("google-cloud-storage is not installed") from exc
+    return storage
+
+
+def _get_thread_gcs_client():
+    client = getattr(_GCS_CLIENT_LOCAL, "client", None)
+    if client is not None:
+        return client
+    storage = _import_google_cloud_storage()
+    client = storage.Client()
+    _GCS_CLIENT_LOCAL.client = client
+    return client
+
+
+def _thread_local_signing_service_account_email(credentials) -> str | None:
+    service_account_email = getattr(_GCS_CLIENT_LOCAL, "signing_service_account_email", None)
+    if service_account_email:
+        return service_account_email
+    service_account_email = getattr(credentials, "service_account_email", None)
+    if not service_account_email:
+        service_account_email = (
+            os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
+            or os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+        )
+    _GCS_CLIENT_LOCAL.signing_service_account_email = service_account_email
+    return service_account_email
+
+
+def _credentials_need_refresh(credentials) -> bool:
+    if credentials is None:
+        return True
+    token = getattr(credentials, "token", None)
+    if not token:
+        return True
+    if not getattr(credentials, "valid", False):
+        return True
+    expiry = getattr(credentials, "expiry", None)
+    if expiry is None:
+        return False
+    try:
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= (datetime.now(timezone.utc) + timedelta(minutes=5))
+    except Exception:
+        return False
+
+
+def _get_thread_gcs_signing_credentials():
+    credentials = getattr(_GCS_CLIENT_LOCAL, "signing_credentials", None)
+    if credentials is None:
+        import google.auth
+
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        _GCS_CLIENT_LOCAL.signing_credentials = credentials
+    if _credentials_need_refresh(credentials):
+        from google.auth.transport.requests import Request as AuthRequest
+
+        credentials.refresh(AuthRequest())
+    service_account_email = _thread_local_signing_service_account_email(credentials)
+    if not service_account_email or not getattr(credentials, "token", None):
+        raise ValueError("missing service account email or access token for signed URL")
+    return credentials, service_account_email
+
+
+def save_bytes_to_gcs(
+    bucket: str,
+    object_path: str,
+    data: bytes,
+    content_type: str | None = None,
+    *,
+    client=None,
+) -> str:
     if not bucket or not object_path:
         raise ValueError("bucket and object_path are required")
-    client = storage.Client()
+    client = client or _get_thread_gcs_client()
     blob = client.bucket(bucket).blob(object_path)
     blob.upload_from_string(data, content_type=content_type)
     return f"gs://{bucket}/{object_path}"
@@ -59,26 +136,12 @@ def save_bytes_to_gcs(bucket: str, object_path: str, data: bytes, content_type: 
 
 def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 3600) -> str:
     try:
-        from google.cloud import storage  # type: ignore
-        import google.auth
-        from google.auth.transport.requests import Request as AuthRequest
+        _import_google_cloud_storage()
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ValueError("google-cloud-storage is not installed") from exc
-    client = storage.Client()
+    client = _get_thread_gcs_client()
     blob = client.bucket(bucket).blob(object_path)
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    if not credentials.valid:
-        credentials.refresh(AuthRequest())
-    service_account_email = getattr(credentials, "service_account_email", None)
-    if not service_account_email:
-        service_account_email = (
-            os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
-            or os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-        )
-    if not service_account_email or not credentials.token:
-        raise ValueError("missing service account email or access token for signed URL")
+    credentials, service_account_email = _get_thread_gcs_signing_credentials()
     return blob.generate_signed_url(
         version="v4",
         expiration=timedelta(seconds=expires_in_seconds),

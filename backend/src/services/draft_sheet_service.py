@@ -9,6 +9,7 @@ from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.services import ocr_sheet_revision_service
+from src.services import order_current_state_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -192,7 +193,9 @@ def persist_sheet_draft(
         )
         session.add(draft)
         session.flush()
-        return _serialize_draft(draft)
+        serialized = _serialize_draft(draft)
+    order_current_state_service.delete_current_state(normalized_order_id)
+    return serialized
 
 
 def get_latest_sheet_draft(order_id: str) -> dict[str, Any] | None:
@@ -215,49 +218,21 @@ def build_initial_sheet_draft(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    # Current-sheet ownership lives in order_service. If an authoritative saved
+    # draft already exists, return that exact saved sheet; otherwise delegate the
+    # no-draft bootstrap to the canonical sheet builder.
+    from src.services import order_service
+
     latest_draft = get_latest_sheet_draft(normalized_order_id)
-    if isinstance(latest_draft, dict):
-        draft_json = latest_draft.get("draft_sheet_json")
-        if isinstance(draft_json, dict):
-            return draft_json
-
-    with session_scope() as session:
-        cache = session.get(OrderOcrCache, normalized_order_id)
-        payload = cache.payload if cache and isinstance(cache.payload, dict) else None
-        if isinstance(payload, dict) and isinstance(payload.get("_edited_ocr"), dict):
-            edited_sheet = _build_sheet_from_payload(
-                order_id=normalized_order_id,
-                payload=payload,
-                source="legacy_cache",
-                base_evidence_run_id=None,
-            )
-            if isinstance(edited_sheet, dict):
-                return edited_sheet
-
-        evidence = (
-            session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
-            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
-            .first()
+    if order_service._draft_record_is_authoritative_current_sheet(latest_draft):
+        draft_payload = (
+            latest_draft.get("draft_sheet_json")
+            if isinstance(latest_draft.get("draft_sheet_json"), dict)
+            else latest_draft
         )
-        if evidence and isinstance(evidence.payload_json, dict):
-            sheet = _build_sheet_from_payload(
-                order_id=normalized_order_id,
-                payload=evidence.payload_json,
-                source="ocr_evidence",
-                base_evidence_run_id=evidence.id,
-            )
-            if isinstance(sheet, dict):
-                return sheet
-
-        if isinstance(payload, dict):
-            return _build_sheet_from_payload(
-                order_id=normalized_order_id,
-                payload=payload,
-                source="legacy_cache",
-                base_evidence_run_id=None,
-            )
-    return None
+        if isinstance(draft_payload, dict):
+            return dict(draft_payload)
+    return order_service.build_initial_sheet_draft(normalized_order_id)
 
 
 def build_sheet_draft_from_evidence(

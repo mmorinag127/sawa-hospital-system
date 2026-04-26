@@ -96,7 +96,11 @@ def _row_bounds(table: dict[str, Any]) -> dict[int, list[float]]:
     return bounds
 
 
-def _infer_quantity_subgrid(table: dict[str, Any]) -> dict[str, Any] | None:
+def _infer_quantity_subgrid(
+    table: dict[str, Any],
+    *,
+    template: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     rows = [list(row) for row in (table.get("rows") or []) if isinstance(row, list)]
     col_count = int(table.get("col_count") or 0)
     row_count = int(table.get("row_count") or 0)
@@ -121,21 +125,28 @@ def _infer_quantity_subgrid(table: dict[str, Any]) -> dict[str, Any] | None:
                 numeric_hits += 1
         menu_scores.append((col_index, menu_hits, numeric_hits))
     menu_col_index = max(menu_scores, key=lambda item: (item[1], -item[2]))[0]
-    quantity_start_col_index: int | None = None
-    for col_index in range(menu_col_index + 1, col_count):
-        header_text = " ".join(
-            _clean_cell_text(row[col_index])
-            for row in header_rows
-            if col_index < len(row) and _clean_cell_text(row[col_index])
-        )
-        numeric_hits = sum(
-            1
-            for row in sampled_rows
-            if col_index < len(row) and _looks_like_numeric_text(row[col_index])
-        )
-        if header_text or numeric_hits >= 2:
-            quantity_start_col_index = col_index
-            break
+    template_quantity_source_indexes = fax_extractor._template_explicit_quantity_source_indexes(
+        template,
+        observed_width=col_count,
+    )
+    quantity_start_col_index: int | None = (
+        min(template_quantity_source_indexes) if template_quantity_source_indexes else None
+    )
+    if quantity_start_col_index is None:
+        for col_index in range(menu_col_index + 1, col_count):
+            header_text = " ".join(
+                _clean_cell_text(row[col_index])
+                for row in header_rows
+                if col_index < len(row) and _clean_cell_text(row[col_index])
+            )
+            numeric_hits = sum(
+                1
+                for row in sampled_rows
+                if col_index < len(row) and _looks_like_numeric_text(row[col_index])
+            )
+            if header_text or numeric_hits >= 2:
+                quantity_start_col_index = col_index
+                break
     if quantity_start_col_index is None:
         return None
     return {
@@ -143,7 +154,11 @@ def _infer_quantity_subgrid(table: dict[str, Any]) -> dict[str, Any] | None:
         "menu_col_index": menu_col_index,
         "quantity_start_col_index": quantity_start_col_index,
         "row_count": max(0, row_count - body_start_row),
-        "quantity_col_count": max(0, col_count - quantity_start_col_index),
+        "quantity_col_count": (
+            len(template_quantity_source_indexes)
+            if template_quantity_source_indexes
+            else max(0, col_count - quantity_start_col_index)
+        ),
     }
 
 
@@ -172,7 +187,122 @@ def _strict_template_semantics_ready(payload: dict[str, Any] | None) -> bool:
     )
 
 
-def _position_fallback_already_ready(payload: dict[str, Any] | None) -> bool:
+def _resolved_position_fallback_source_indexes(
+    resolution: dict[str, Any] | None,
+) -> list[int]:
+    if not isinstance(resolution, dict):
+        return []
+    resolved_value = str(
+        resolution.get("resolved_value")
+        or resolution.get("resolved_column_mapping_id")
+        or ""
+    ).strip()
+    if not resolved_value:
+        return []
+    indexes: list[int] = []
+    for token in resolved_value.split("|"):
+        source_col_index, _separator, _field = token.partition(":")
+        try:
+            indexes.append(int(source_col_index))
+        except Exception:
+            continue
+    return indexes
+
+
+def _payload_observed_width(payload: dict[str, Any] | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    max_width = 0
+    for table in fax_extractor._collect_structured_tables(payload):
+        if not isinstance(table, dict):
+            continue
+        matrix = _normalize_matrix(table)
+        if not matrix:
+            continue
+        max_width = max(max_width, max((len(row) for row in matrix), default=0))
+    return max_width or None
+
+
+def _payload_uses_position_normalized_evidence(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    artifacts = payload.get("page_correction_artifacts")
+    if isinstance(artifacts, dict) and bool(artifacts.get("position_normalized")):
+        return True
+    correction = payload.get("page_correction")
+    return bool(isinstance(correction, dict) and correction.get("applied"))
+
+
+def _position_fallback_matches_template_contract(
+    payload: dict[str, Any] | None,
+    template: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return False
+    if str(resolution.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
+        return False
+    mapped_source_indexes = _resolved_position_fallback_source_indexes(resolution)
+    if not mapped_source_indexes:
+        return False
+    if not isinstance(template, dict):
+        return True
+    observed_width = _payload_observed_width(payload)
+    aux_source_indexes = set(
+        fax_extractor._template_explicit_source_indexes_for_roles(
+            template,
+            roles={"aux"},
+            observed_width=observed_width,
+        )
+    )
+    if any(source_col_index in aux_source_indexes for source_col_index in mapped_source_indexes):
+        return False
+    quantity_source_indexes = fax_extractor._template_explicit_quantity_source_indexes(
+        template,
+        observed_width=observed_width,
+    )
+    if not quantity_source_indexes:
+        return True
+    if (
+        not bool(resolution.get("partial_quantity_mapping"))
+        and _payload_uses_position_normalized_evidence(payload)
+    ):
+        return len(mapped_source_indexes) == len(quantity_source_indexes)
+    if bool(resolution.get("partial_quantity_mapping")):
+        return set(mapped_source_indexes).issubset(set(quantity_source_indexes))
+    return list(mapped_source_indexes) == list(quantity_source_indexes)
+
+
+def _invalidated_position_fallback_resolution(payload: dict[str, Any]) -> dict[str, Any]:
+    resolution = payload.get("column_mapping_resolution")
+    next_resolution = dict(resolution) if isinstance(resolution, dict) else {}
+    next_resolution["resolved_value"] = None
+    next_resolution["resolved_column_mapping_id"] = None
+    next_resolution["blocked"] = True
+    next_resolution["requires_user_choice"] = False
+    next_resolution["partial_quantity_mapping"] = False
+    next_resolution["blocked_reasons"] = ["column_mapping_contract_mismatch"]
+    next_resolution["decision_source"] = _POSITION_FALLBACK_SOURCE
+    next_resolution["confidence"] = 0.0
+    return next_resolution
+
+
+def _payload_has_position_fallback_resolution(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return False
+    return str(resolution.get("decision_source") or "").strip() == _POSITION_FALLBACK_SOURCE
+
+
+def _position_fallback_already_ready(
+    payload: dict[str, Any] | None,
+    *,
+    template: dict[str, Any] | None = None,
+) -> bool:
     if not isinstance(payload, dict):
         return False
     resolution = payload.get("column_mapping_resolution")
@@ -184,6 +314,7 @@ def _position_fallback_already_ready(payload: dict[str, Any] | None) -> bool:
         str(resolution.get("resolved_value") or resolution.get("resolved_column_mapping_id") or "").strip()
         and str(resolution.get("decision_source") or "").strip() == _POSITION_FALLBACK_SOURCE
         and not _existing_position_fallback_requires_choice(payload)
+        and _position_fallback_matches_template_contract(payload, template)
     )
 
 
@@ -387,6 +518,7 @@ def _header_quantity_pairs_from_range(
     fields: list[str],
     lower_bound: int,
     upper_bound: int,
+    allowed_source_indexes: set[int] | None = None,
 ) -> list[tuple[int, str]]:
     header = _merged_header_for_matrix(matrix, fields)
     if not header:
@@ -398,6 +530,8 @@ def _header_quantity_pairs_from_range(
     mapped_by_field: dict[str, int] = {}
     change_candidate_cols: list[int] = []
     for source_col_index in range(lower_bound, upper_bound):
+        if allowed_source_indexes is not None and source_col_index not in allowed_source_indexes:
+            continue
         header_text = str(header[source_col_index] or "").strip()
         if not header_text:
             continue
@@ -438,6 +572,7 @@ def _augment_quantity_pairs_from_header(
     fields: list[str],
     mapped_indexes: dict[int, int],
     quantity_pairs: list[tuple[int, str]],
+    allowed_source_indexes: set[int] | None = None,
 ) -> list[tuple[int, str]]:
     header = _merged_header_for_matrix(matrix, fields)
     if not header:
@@ -462,11 +597,14 @@ def _augment_quantity_pairs_from_header(
         (source_col_index, field)
         for source_col_index, field in quantity_pairs
         if lower_bound <= source_col_index < upper_bound
+        and (allowed_source_indexes is None or source_col_index in allowed_source_indexes)
     ]
     mapped_by_field = {field: src_idx for src_idx, field in filtered_pairs}
 
     change_candidate_cols: list[int] = []
     for source_col_index in range(lower_bound, upper_bound):
+        if allowed_source_indexes is not None and source_col_index not in allowed_source_indexes:
+            continue
         if source_col_index in {item[0] for item in filtered_pairs}:
             continue
         header_text = str(header[source_col_index] or "").strip()
@@ -500,6 +638,26 @@ def _augment_quantity_pairs_from_header(
         existing_sources.add(source_col_index)
     augmented_pairs.sort(key=lambda item: item[0])
     return augmented_pairs
+
+
+def _filter_quantity_pairs_to_allowed_sources(
+    quantity_pairs: list[tuple[int, str]],
+    allowed_source_indexes: set[int] | None,
+) -> list[tuple[int, str]]:
+    if not allowed_source_indexes:
+        return list(quantity_pairs)
+    filtered: list[tuple[int, str]] = []
+    seen_fields: set[str] = set()
+    seen_sources: set[int] = set()
+    for source_col_index, field in quantity_pairs:
+        if source_col_index not in allowed_source_indexes:
+            continue
+        if source_col_index in seen_sources or field in seen_fields:
+            continue
+        filtered.append((source_col_index, field))
+        seen_sources.add(source_col_index)
+        seen_fields.add(field)
+    return filtered
 
 
 def _source_column_has_numeric_signal(
@@ -637,6 +795,7 @@ def _position_candidate_for_table(
     table_payload: dict[str, Any],
     matrix: list[list[str]],
     template: dict[str, Any],
+    prefer_observed_header_fill: bool = False,
 ) -> dict[str, Any] | None:
     resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
     mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
@@ -648,12 +807,30 @@ def _position_candidate_for_table(
     mapped_indexes = mapping_meta.get("mapped_indexes")
     if not isinstance(fields, list) or not isinstance(mapped_indexes, dict):
         return None
+    observed_width = max((len(row) for row in matrix), default=0)
+    template_quantity_source_indexes = fax_extractor._template_explicit_quantity_source_indexes(
+        template,
+        observed_width=observed_width,
+    )
+    strict_template_quantity_alignment = fax_extractor._template_requires_strict_quantity_source_alignment(
+        template,
+        observed_width=observed_width,
+    )
+    if (
+        strict_template_quantity_alignment
+        and not template_quantity_source_indexes
+    ):
+        return None
+    allowed_quantity_source_indexes = (
+        set(template_quantity_source_indexes) if template_quantity_source_indexes else None
+    )
 
     quantity_dest_indexes = {
         idx for idx, field in enumerate(fields) if _is_quantity_field(field)
     }
     if not quantity_dest_indexes:
         return None
+    quantity_fields = [fields[idx] for idx in sorted(quantity_dest_indexes)]
 
     quantity_pairs: list[tuple[int, str]] = []
     mapped_structural_fields: set[str] = set()
@@ -673,35 +850,53 @@ def _position_candidate_for_table(
         elif field in {"date_mmdd", "date", "daypart", "menu", "menu_name"}:
             mapped_structural_fields.add(field)
 
-    subgrid = _infer_quantity_subgrid(table_payload)
-    quantity_fields = [fields[idx] for idx in sorted(quantity_dest_indexes)]
-    quantity_pairs = _augment_quantity_pairs_from_header(
-        matrix=matrix,
-        fields=fields,
-        mapped_indexes=mapped_indexes,
-        quantity_pairs=quantity_pairs,
-    )
-    semantic_quantity_pairs = list(quantity_pairs)
-    if subgrid:
-        lower_bound = int(subgrid["quantity_start_col_index"])
-        upper_bound = len(matrix[0]) if matrix else lower_bound
-        header_quantity_pairs = _header_quantity_pairs_from_range(
+    subgrid = _infer_quantity_subgrid(table_payload, template=template)
+    if strict_template_quantity_alignment and template_quantity_source_indexes:
+        quantity_pairs = list(zip(template_quantity_source_indexes, quantity_fields))
+        semantic_quantity_pairs = list(quantity_pairs)
+    else:
+        quantity_pairs = _augment_quantity_pairs_from_header(
             matrix=matrix,
             fields=fields,
-            lower_bound=lower_bound,
-            upper_bound=upper_bound,
+            mapped_indexes=mapped_indexes,
+            quantity_pairs=quantity_pairs,
         )
-        if header_quantity_pairs:
-            semantic_quantity_pairs = header_quantity_pairs
-        sequential_source_indexes = [
-            source_col_index
-            for source_col_index in range(lower_bound, upper_bound)
-            if _source_column_has_numeric_signal(
+        semantic_quantity_pairs = list(quantity_pairs)
+    if subgrid:
+        lower_bound = int(subgrid["quantity_start_col_index"])
+        upper_bound = (
+            len(matrix[0]) if prefer_observed_header_fill and matrix
+            else max(template_quantity_source_indexes) + 1
+            if template_quantity_source_indexes
+            else len(matrix[0]) if matrix else lower_bound
+        )
+        if not (strict_template_quantity_alignment and template_quantity_source_indexes):
+            header_quantity_pairs = _header_quantity_pairs_from_range(
                 matrix=matrix,
-                body_start_row=int(subgrid.get("body_start_row") or 0),
-                source_col_index=source_col_index,
+                fields=fields,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
             )
-        ]
+            if header_quantity_pairs:
+                semantic_quantity_pairs = header_quantity_pairs
+        sequential_source_candidates = (
+            list(template_quantity_source_indexes)
+            if strict_template_quantity_alignment and template_quantity_source_indexes
+            else list(range(lower_bound, upper_bound))
+        )
+        sequential_source_indexes = (
+            list(sequential_source_candidates)
+            if strict_template_quantity_alignment and template_quantity_source_indexes
+            else [
+                source_col_index
+                for source_col_index in sequential_source_candidates
+                if _source_column_has_numeric_signal(
+                    matrix=matrix,
+                    body_start_row=int(subgrid.get("body_start_row") or 0),
+                    source_col_index=source_col_index,
+                )
+            ]
+        )
         sequential_quantity_pairs = [
             (source_col_index, field)
             for source_col_index, field in zip(sequential_source_indexes, quantity_fields)
@@ -726,10 +921,22 @@ def _position_candidate_for_table(
             if remaining_fields:
                 header = _merged_header_for_matrix(matrix, fields)
                 header_fill_start = max(semantic_sources) + 1 if semantic_sources else lower_bound
+                header_fill_candidates = (
+                    list(range(header_fill_start, min(upper_bound, len(header))))
+                    if prefer_observed_header_fill
+                    else [
+                        source_col_index
+                        for source_col_index in template_quantity_source_indexes
+                        if source_col_index >= header_fill_start
+                    ]
+                    if template_quantity_source_indexes
+                    else list(range(header_fill_start, min(upper_bound, len(header))))
+                )
                 header_fill_sources = [
                     source_col_index
-                    for source_col_index in range(header_fill_start, min(upper_bound, len(header)))
-                    if source_col_index not in mapped_sources
+                    for source_col_index in header_fill_candidates
+                    if source_col_index < len(header)
+                    and source_col_index not in mapped_sources
                     and bool(str(header[source_col_index] or "").strip())
                 ]
                 for source_col_index, field in zip(header_fill_sources, remaining_fields):
@@ -809,7 +1016,7 @@ def build_position_fallback_artifacts(
 ) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or not isinstance(template, dict):
         return None
-    if _strict_template_semantics_ready(payload) or _position_fallback_already_ready(payload):
+    if _strict_template_semantics_ready(payload) or _position_fallback_already_ready(payload, template=template):
         return None
     row_fields = _row_fields(template)
     if not row_fields:
@@ -832,6 +1039,8 @@ def build_position_fallback_artifacts(
     if not structured_tables:
         return None
 
+    prefer_observed_header_fill = _payload_uses_position_normalized_evidence(payload)
+
     candidate_rows: list[dict[str, Any]] = []
     for table_payload in structured_tables:
         if not isinstance(table_payload, dict):
@@ -843,6 +1052,7 @@ def build_position_fallback_artifacts(
             table_payload=table_payload,
             matrix=matrix,
             template=template,
+            prefer_observed_header_fill=prefer_observed_header_fill,
         )
         if not isinstance(candidate_row, dict):
             continue
@@ -947,7 +1157,15 @@ def augment_payload_with_position_fallback(
         template_id=template_id,
     )
     if not isinstance(artifacts, dict):
-        return payload
+        if not _payload_has_position_fallback_resolution(payload):
+            return payload
+        if _position_fallback_matches_template_contract(payload, template):
+            return payload
+        augmented = copy.deepcopy(payload)
+        augmented["column_mapping_resolution"] = _invalidated_position_fallback_resolution(payload)
+        augmented["column_mapping_candidates"] = []
+        augmented["quantity_subgrid_passes"] = None
+        return augmented
 
     augmented = copy.deepcopy(payload)
     existing_template_resolution = augmented.get("template_resolution")
@@ -1025,8 +1243,12 @@ def candidate_resolution_uses_position_fallback(candidate_resolution: dict[str, 
     return True
 
 
-def payload_uses_ready_position_fallback(payload: dict[str, Any] | None) -> bool:
-    if not _position_fallback_already_ready(payload):
+def payload_uses_ready_position_fallback(
+    payload: dict[str, Any] | None,
+    *,
+    template: dict[str, Any] | None = None,
+) -> bool:
+    if not _position_fallback_already_ready(payload, template=template):
         return False
     resolution = payload.get("template_resolution") if isinstance(payload, dict) else None
     if not isinstance(resolution, dict):

@@ -106,6 +106,119 @@ Examples:
 - prod worker was deployed from a local clean-copy image while branch still pointed to an older commit
 - a later OCR fix from clean HEAD would have rolled back shipping/order-form changes already live in prod
 
+### 8. Refresh-policy divergence
+
+The same draft was read through different refresh policies depending on the endpoint.
+
+Examples:
+- `draft-sheet` used semantic refresh, but `workflow-state` loaded the raw saved draft
+- fixing stale rows in `ocr-sheet` did not clear stale blockers in `workflow-state`
+- forcing semantic refresh everywhere then rewrote clean operator drafts during internal post-save refresh
+
+## Additional non-negotiable rules from the March 26 regressions
+
+11. Separate read-time refresh from write-time refresh
+- A user-facing read path may refresh a stale blocked draft from semantic truth.
+- A post-save internal refresh must not silently rebuild a clean operator-authored draft.
+- If these two policies differ, they must be different code paths or different explicit modes.
+
+12. Do not mix raw draft readers with canonical refresh readers on the same visible flow
+- If `draft-sheet`, `ocr-sheet`, and `workflow-state` represent the same current draft, they must agree on whether semantic refresh has already been applied.
+- A direct read from `draft_sheet_service.get_latest_sheet_draft()` is not interchangeable with a canonical helper that refreshes stale semantic state.
+
+13. Add same-order endpoint parity tests for stale-draft fixes
+- If a bug is visible in one of `workflow-state`, `draft-sheet`, or `ocr-sheet`, add a regression that proves the same saved draft behaves consistently across the affected endpoints/helpers.
+
+14. Clean drafts and stale drafts require opposite merge policies
+- Clean operator-authored drafts: preserve unmatched rows and warnings authored as part of the draft.
+- Stale blocked auto drafts: prune unmatched stale rows and clear blockers that became false after semantic refresh.
+
+15. No-op refreshes must not churn draft identity
+- If semantic refresh produces no material change, it must not persist a new draft ID just to reshuffle warnings.
+- LLM patch baselines and candidate lineage depend on this.
+
+## Core regression invariants
+
+These invariants are stricter than individual symptom fixes. If any of them fail, the incident is not closed.
+
+### 1. Visible truth source is singular
+
+- Freeze the exact current-editor source before editing.
+- For Step2 issues, identify which endpoint actually feeds the visible sheet and treat that as the canonical owner for the incident.
+- Do not accept helper output, alternate endpoints, or internal refresh payloads as proof until they match the visible source.
+
+### 2. Saved-draft and no-saved-draft paths are different systems
+
+- Always split investigation and testing into `saved draft present` and `saved draft missing`.
+- `saved draft present` path:
+  - prefer the persisted semantic draft
+  - do not silently rebuild from raw OCR unless the user explicitly triggers recovery
+- `saved draft missing` path:
+  - bootstrap through semantic construction first
+  - if semantic shell exists, a warning alone must not force raw-fallback
+
+### 3. Three-surface parity is required
+
+- `draft-sheet`, `ocr-sheet`, and `workflow-state` must be compared on the same order and same snapshot.
+- Minimum parity tuple:
+  - source
+  - fields / row_count
+  - blockers / warnings
+  - apply-readiness
+- A mismatch across these surfaces blocks closure.
+
+### 4. Current and candidate evidence are separate by default
+
+- `current` means the operator-visible active draft/order state.
+- `candidate` means rerun/reparse output that may be adopted later.
+- Candidate success is not a fix until the current editor explicitly keeps or switches state and the visible Step2 sheet reflects that choice.
+
+### 5. Current editor must never be generic raw sheet when semantic exists
+
+- `col1`, `col2`, `col3`, ... are not acceptable current-editor fields if a semantic shell is available.
+- Low confidence may keep blockers active, but it does not justify silently downgrading the visible editor to generic raw OCR.
+- If semantic mapping is incomplete, prefer structured review / choice UI over generic fallback.
+
+## Operational guardrails for rerun / repair
+
+- If new OCR arrives while the current draft is clean, prefer continuity of the current draft until the user explicitly switches.
+- Persist draft source transitions and blocker reasons so read paths can explain which path won.
+- Do not allow silent recovery or refresh to change row or column semantics without explicit user intent or an explicit recovery mode.
+
+## Exact-order live verification
+
+- For each production-visible OCR incident, verify the exact reported order before and after the fix.
+- Record at minimum:
+  - `draft-sheet`: source, fields, row_count
+  - `ocr-sheet`: source, blockers, warnings, can_apply
+  - `workflow-state`: state, apply_gate, candidate/active evidence IDs
+- If the user reports a UI symptom, verify the same UI path, not only backend helper output.
+
+16. Freeze the visible Step2 truth path before root-cause claims
+- For Step2 bugs, identify the exact chain:
+  - page surface
+  - endpoint
+  - saved-draft present vs missing
+  - bootstrap helper
+  - fallback condition
+- Do not accept `/ocr-sheet` or helper output as proof if the screen is actually driven by `/draft-sheet`.
+
+17. Treat `draft-sheet`, `ocr-sheet`, and `workflow-state` as one parity tuple
+- For the same order and same moment, these three surfaces must be checked together.
+- A fix is incomplete if only one of the three is correct.
+
+18. Do not show generic raw columns in the current editor
+- `col1`, `col2`, `col3`, ... may exist as debug or recovery representations.
+- They must not be used as the user-facing current Step2 sheet if a semantic shell exists.
+
+19. Saved revision history must not overwrite the current draft by default
+- History is for comparison and recovery.
+- It is not allowed to silently rebase stale saved revisions onto the current editor path without an explicit compatibility rule and regression coverage.
+
+20. Auto-refresh must preserve surface parity
+- If `/orders/{id}` is auto-refreshed, the UI must also refresh or invalidate the current draft/history state that can change Step2 behavior.
+- A refresh that updates `workflow_state` but leaves `draft-sheet` or saved revision refs stale is a process failure, not a cosmetic issue.
+
 ## Skills created from these mistakes
 
 ### 1. `sawa-ocr-implementation-guardrails`
@@ -149,3 +262,28 @@ For deploy work where prod may be ahead of git, also enforce this rule explicitl
 1. identify the actual deploy source currently in prod
 2. integrate that source into branch history or a dedicated integration tree
 3. only then stack the next fix
+
+## Operational changes required by the March 28 review
+
+The current process must be tightened in four specific ways:
+
+1. Worker deploy gates must validate exact-order parity, not only `ocr-sheet` quality
+- At minimum, the target order must be checked across:
+  - `/draft-sheet`
+  - `/ocr-sheet`
+  - `/workflow-state`
+- Fail deploy if the current editor is generic raw columns or if the three surfaces disagree on apply readiness.
+
+2. Web deploy verification must include the same user-visible order surface
+- For UI-only fixes, do not stop at root/login and proxy health.
+- Verify the exact order page or equivalent UI contract for the changed flow.
+
+3. Regression suites must include the no-saved-draft bootstrap path
+- Required fixture shape:
+  - saved draft missing
+  - semantic shell present
+  - recovery warning present
+  - current editor must stay semantic
+
+4. Candidate/current state changes require an explicit end-to-end test
+- Any flow that keeps current, switches candidate, or suppresses stale failure banners must have a UI/API parity regression, not only backend tests.

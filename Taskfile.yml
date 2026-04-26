@@ -15,6 +15,12 @@ vars:
   YOMITOKU_TEST_DEVICE: "cpu"
   PROD_WEB_URL: "https://web-prod-avlnzjjrca-dt.a.run.app"
   PROD_WORKER_URL: "https://worker-prod-avlnzjjrca-dt.a.run.app"
+  STG_PROJECT_ID: "sawahospitalsystem"
+  STG_REGION: "asia-northeast2"
+  STG_WEB_SERVICE: "web-stg"
+  STG_WORKER_SERVICE: "worker-stg"
+  STG_TERRAFORM_DIR: "infra/terraform/envs/stg"
+  WORKTREE_ROOT: "/Users/mmorinag/Sawa/2025.12/worktrees"
 
 tasks:
   backend_setup:
@@ -292,18 +298,69 @@ tasks:
       WEB_URL: "{{.PROD_WEB_URL}}"
       WORKER_URL: "{{.PROD_WORKER_URL}}"
     cmds:
-      - 'WEB_URL="{{.PROD_WEB_URL}}" WORKER_URL="{{.PROD_WORKER_URL}}" OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" STRICT_OCR_QUALITY="1" ./scripts/predeploy_prod_checks.sh'
+      - 'WEB_URL="{{.PROD_WEB_URL}}" WORKER_URL="{{.PROD_WORKER_URL}}" OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" STRICT_OCR_QUALITY="1" ./scripts/predeploy_env_checks.sh'
+
+  predeploy_stg_checks:
+    desc: Run staging readiness checks (non-strict OCR quality by default).
+    env:
+      WEB_SERVICE: "{{.STG_WEB_SERVICE}}"
+      WORKER_SERVICE: "{{.STG_WORKER_SERVICE}}"
+    cmds:
+      - 'PROJECT_ID="{{.STG_PROJECT_ID}}" REGION="{{.STG_REGION}}" WEB_SERVICE="{{.STG_WEB_SERVICE}}" WORKER_SERVICE="{{.STG_WORKER_SERVICE}}" OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}" CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}" ALLOW_BASIC_ONLY_AUTH="1" ./scripts/predeploy_env_checks.sh'
+
+  prepare_prod_web_source:
+    desc: Create a fresh clean deploy copy for web-prod and record its path.
+    cmds:
+      - >-
+        deploy_dir="$(WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-prod-web}" ./scripts/prepare_web_deploy_source.sh "${WEB_DEPLOY_LABEL:-prod-web}")";
+        echo "$deploy_dir" | tee last_frontend_deploy_dir.txt
+
+  prepare_stg_web_source:
+    desc: Create a fresh clean deploy copy for web-stg and record its path.
+    cmds:
+      - >-
+        deploy_dir="$(WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-stg-web}" ./scripts/prepare_web_deploy_source.sh "${WEB_DEPLOY_LABEL:-stg-web}")";
+        echo "$deploy_dir" | tee last_frontend_deploy_dir.txt
 
   deploy_prod_web:
-    desc: Build and deploy web-prod only if predeploy checks pass (Cloud Build).
+    desc: Build and deploy web-prod only if predeploy checks pass; accepts optional ORDER_ID for exact-order current-state parity smoke.
     env:
       WEB_URL: "{{.PROD_WEB_URL}}"
       WORKER_URL: "{{.PROD_WORKER_URL}}"
     cmds:
-      - 'WEB_URL="{{.PROD_WEB_URL}}" WORKER_URL="{{.PROD_WORKER_URL}}" OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" STRICT_OCR_QUALITY="1" ./scripts/deploy_prod_web.sh'
+      - >-
+        deploy_dir="$(WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-prod-web}" ./scripts/prepare_web_deploy_source.sh "${WEB_DEPLOY_LABEL:-prod-web}")";
+        echo "$deploy_dir" > last_frontend_deploy_dir.txt;
+        WEB_URL="{{.PROD_WEB_URL}}" WORKER_URL="{{.PROD_WORKER_URL}}"
+        FRONTEND_DIR="$deploy_dir"
+        WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-prod-web}"
+        ORDER_ID="${ORDER_ID:-}"
+        OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
+        STRICT_OCR_QUALITY="1"
+        ./scripts/deploy_prod_web.sh
+
+  deploy_stg_web:
+    desc: Build and deploy web-stg using the generic env-aware web deploy script; accepts optional ORDER_ID for exact-order parity smoke.
+    env:
+      WEB_SERVICE: "{{.STG_WEB_SERVICE}}"
+      WORKER_SERVICE: "{{.STG_WORKER_SERVICE}}"
+    cmds:
+      - >-
+        deploy_dir="$(WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-stg-web}" ./scripts/prepare_web_deploy_source.sh "${WEB_DEPLOY_LABEL:-stg-web}")";
+        echo "$deploy_dir" > last_frontend_deploy_dir.txt;
+        PROJECT_ID="{{.STG_PROJECT_ID}}" REGION="{{.STG_REGION}}"
+        WEB_SERVICE="{{.STG_WEB_SERVICE}}" WORKER_SERVICE="{{.STG_WORKER_SERVICE}}"
+        FRONTEND_DIR="$deploy_dir"
+        WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-stg-web}"
+        ORDER_ID="${ORDER_ID:-}"
+        OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
+        STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
+        ALLOW_BASIC_ONLY_AUTH="1"
+        TAG_PREFIX="stg-frontend"
+        ./scripts/deploy_web_with_checks.sh
 
   deploy_prod_worker:
-    desc: Deploy worker-prod with mandatory regression + OCR sheet quality gates.
+    desc: Deploy worker-prod with mandatory regression, OCR sheet quality, and exact-order Step2 parity gates.
     env:
       WEB_URL: "{{.PROD_WEB_URL}}"
     cmds:
@@ -316,3 +373,118 @@ tasks:
         OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
         WEB_URL="{{.PROD_WEB_URL}}"
         ./scripts/deploy_worker_prod_with_checks.sh "$image" "${ORDER_ID}"
+
+  deploy_stg_worker:
+    desc: Deploy worker-stg with local regression and non-strict staging gates by default.
+    env:
+      WEB_SERVICE: "{{.STG_WEB_SERVICE}}"
+    cmds:
+      - >-
+        image="${IMAGE:-$(cat last_backend_image.txt)}";
+        if [ -z "${ORDER_ID:-}" ]; then
+          echo "ORDER_ID is required. example: ORDER_ID=ORDb266d5d9 task deploy_stg_worker";
+          exit 1;
+        fi;
+        PROJECT_ID="{{.STG_PROJECT_ID}}" REGION="{{.STG_REGION}}"
+        SERVICE="{{.STG_WORKER_SERVICE}}"
+        WEB_SERVICE="{{.STG_WEB_SERVICE}}"
+        OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
+        STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-0}"
+        STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
+        CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}"
+        ALLOW_BASIC_ONLY_AUTH="1"
+        ./scripts/deploy_worker_prod_with_checks.sh "$image" "${ORDER_ID}"
+
+  infra_stg_init:
+    desc: Init stg Terraform with backend.hcl and either credentials file or gcloud access token.
+    dir: "{{.STG_TERRAFORM_DIR}}"
+    cmds:
+      - >-
+        if [ ! -f backend.hcl ]; then
+          echo "Missing infra/terraform/envs/stg/backend.hcl. Copy backend.hcl.example first.";
+          exit 1;
+        fi;
+        creds="${TF_GOOGLE_CREDENTIALS:-${GOOGLE_APPLICATION_CREDENTIALS:-}}";
+        if [ -n "$creds" ]; then
+          GOOGLE_APPLICATION_CREDENTIALS="$creds" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu init -backend-config=backend.hcl -input=false;
+        else
+          token="$(gcloud auth print-access-token)";
+          GOOGLE_OAUTH_ACCESS_TOKEN="$token" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu init -backend-config=backend.hcl -input=false;
+        fi
+
+  infra_stg_plan:
+    desc: Plan stg Terraform with the current tfvars.
+    dir: "{{.STG_TERRAFORM_DIR}}"
+    deps:
+      - infra_stg_init
+    cmds:
+      - >-
+        creds="${TF_GOOGLE_CREDENTIALS:-${GOOGLE_APPLICATION_CREDENTIALS:-}}";
+        if [ -n "$creds" ]; then
+          GOOGLE_APPLICATION_CREDENTIALS="$creds" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu plan -input=false -lock=false -no-color -var-file=terraform.tfvars;
+        else
+          token="$(gcloud auth print-access-token)";
+          GOOGLE_OAUTH_ACCESS_TOKEN="$token" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu plan -input=false -lock=false -no-color -var-file=terraform.tfvars;
+        fi
+
+  infra_stg_apply:
+    desc: Apply stg Terraform with the current tfvars.
+    dir: "{{.STG_TERRAFORM_DIR}}"
+    deps:
+      - infra_stg_init
+    cmds:
+      - >-
+        creds="${TF_GOOGLE_CREDENTIALS:-${GOOGLE_APPLICATION_CREDENTIALS:-}}";
+        if [ -n "$creds" ]; then
+          GOOGLE_APPLICATION_CREDENTIALS="$creds" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu apply -input=false -auto-approve -var-file=terraform.tfvars;
+        else
+          token="$(gcloud auth print-access-token)";
+          GOOGLE_OAUTH_ACCESS_TOKEN="$token" \
+          GOOGLE_CLOUD_QUOTA_PROJECT="{{.STG_PROJECT_ID}}" \
+          CLOUDSDK_CORE_PROJECT="{{.STG_PROJECT_ID}}" \
+          tofu apply -input=false -auto-approve -var-file=terraform.tfvars;
+        fi
+
+  worktree_add_feature:
+    desc: Create a dedicated feature worktree. Example FEATURE=shipping-history-grid task worktree_add_feature
+    cmds:
+      - >-
+        if [ -z "${FEATURE:-}" ]; then
+          echo "FEATURE is required. example: FEATURE=shipping-history-grid task worktree_add_feature";
+          exit 1;
+        fi;
+        WORKTREE_ROOT="{{.WORKTREE_ROOT}}"
+        BRANCH_PREFIX="${BRANCH_PREFIX:-codex}"
+        BASE_REF="${BASE_REF:-$(git rev-parse --abbrev-ref HEAD)}"
+        ./scripts/create_feature_worktree.sh "${FEATURE}"
+
+  ops_script_check:
+    desc: Syntax-check release/worktree helper scripts.
+    cmds:
+      - 'bash -n ./scripts/create_feature_worktree.sh'
+      - 'bash -n ./scripts/test_create_feature_worktree.sh'
+      - 'bash -n ./scripts/predeploy_env_checks.sh'
+      - 'bash -n ./scripts/predeploy_prod_checks.sh'
+      - 'bash -n ./scripts/deploy_web_with_checks.sh'
+      - 'bash -n ./scripts/deploy_prod_web.sh'
+      - 'bash -n ./scripts/deploy_worker_prod_with_checks.sh'
+
+  ops_script_test:
+    desc: Run lightweight script tests for workflow helpers.
+    cmds:
+      - './scripts/test_create_feature_worktree.sh'

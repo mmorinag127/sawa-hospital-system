@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -12,6 +13,8 @@ import numpy as np
 from PIL import Image
 
 from app.pdf_render import render_pdf_to_page_images
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PageResult:
@@ -351,6 +354,11 @@ def _get_analyzer(device: str, visualize: bool):
     _ANALYZER = DocumentAnalyzer(configs=configs, device=device, visualize=visualize)
     _ANALYZER_KEY = key
     return _ANALYZER
+
+
+def prewarm_analyzer(*, device: str, visualize: bool) -> None:
+    logger.info("Prewarming yomitoku analyzer device=%s visualize=%s", device, visualize)
+    _get_analyzer(device, visualize)
 
 
 def _save_pdf(images_bgr: Iterable[np.ndarray]) -> bytes:

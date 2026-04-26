@@ -10,6 +10,11 @@ export type MarkdownBlock =
 type OcrPreviewPage = {
   page_index?: number | null;
   markdown_text?: string | null;
+  tables?: {
+    rows?: string[][];
+    row_count?: number | null;
+    col_count?: number | null;
+  }[];
 };
 
 type NormalizeDietTypeToken = (value?: string | null) => string;
@@ -207,6 +212,25 @@ const parseMarkdownBlocks = (markdown: string): MarkdownBlock[] => {
 };
 
 export const extractTableFromPage = (page?: OcrPreviewPage | null) => {
+  const structuredTables = Array.isArray(page?.tables) ? page.tables : [];
+  for (const table of structuredTables) {
+    const rows = Array.isArray(table?.rows)
+      ? table.rows
+          .filter((row): row is string[] => Array.isArray(row))
+          .map((row) => row.map((cell) => String(cell ?? "").trim()))
+      : [];
+    if (rows.length >= 2) {
+      let header = rows[0];
+      let dataRows = rows.slice(1);
+      if (header.length && dataRows.length && isSubheaderRow(dataRows[0])) {
+        header = mergeHeaderRows(header, dataRows[0]);
+        dataRows = dataRows.slice(1);
+      }
+      if (dataRows.length) {
+        return { header, rows: dataRows };
+      }
+    }
+  }
   if (!page?.markdown_text) return null;
   const blocks = parseMarkdownBlocks(page.markdown_text);
   const table = blocks.find(

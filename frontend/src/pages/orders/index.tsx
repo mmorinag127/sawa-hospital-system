@@ -208,6 +208,7 @@ export default function OrdersPage() {
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isHydratingRuntime, setIsHydratingRuntime] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
   const [archiveNotice, setArchiveNotice] = useState<string>("");
   const [archiveError, setArchiveError] = useState<string>("");
@@ -244,15 +245,43 @@ export default function OrdersPage() {
   useEffect(() => {
     let cancelled = false;
     const params = statusFilter
-      ? { status: statusFilter, include_ocr: false, include_archived: showArchived }
-      : { include_ocr: false, include_archived: showArchived };
+      ? { status: statusFilter, include_ocr: false, include_archived: showArchived, include_runtime: false }
+      : { include_ocr: false, include_archived: showArchived, include_runtime: false };
     setIsLoading(true);
     setLoadError("");
+    setIsHydratingRuntime(false);
     apiClient
       .get("/orders", { params })
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
-        setOrders(res.data.orders || []);
+        const baseOrders = res.data.orders || [];
+        setOrders(baseOrders);
+        setIsLoading(false);
+        setIsHydratingRuntime(true);
+        try {
+          const runtimeParams = statusFilter
+            ? { status: statusFilter, include_ocr: false, include_archived: showArchived }
+            : { include_ocr: false, include_archived: showArchived };
+          const runtimeRes = await apiClient.get("/orders", { params: runtimeParams });
+          if (cancelled) return;
+          const runtimeOrders = Array.isArray(runtimeRes.data?.orders) ? runtimeRes.data.orders : [];
+          const runtimeById = new Map<string, Order>();
+          runtimeOrders.forEach((runtimeOrder: Order) => {
+            const orderId = String(runtimeOrder.id || "").trim();
+            if (orderId) runtimeById.set(orderId, runtimeOrder);
+          });
+          setOrders((prev) =>
+            prev.map((order) => {
+              const orderId = String(order.id || "").trim();
+              const runtimeOrder = runtimeById.get(orderId);
+              return runtimeOrder ? { ...order, ...runtimeOrder } : order;
+            }),
+          );
+        } catch {
+          if (cancelled) return;
+        } finally {
+          if (!cancelled) setIsHydratingRuntime(false);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -262,6 +291,7 @@ export default function OrdersPage() {
           err?.message ||
           "注文データの取得に失敗しました。";
         setLoadError(String(detail));
+        setIsHydratingRuntime(false);
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -916,7 +946,10 @@ export default function OrdersPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>フィルタ</h2>
-          <span className="badge">合計 {filteredOrders.length} 件</span>
+          <span className="badge">
+            合計 {filteredOrders.length} 件
+            {isHydratingRuntime ? " / 補足情報を取得中" : ""}
+          </span>
         </header>
         <div className="filters">
           <label className="field">

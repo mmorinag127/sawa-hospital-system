@@ -4,6 +4,7 @@ from typing import Any
 from datetime import datetime
 import json
 import os
+import socket
 import time
 import threading
 from loguru import logger
@@ -52,10 +53,72 @@ def _get_pipeline_url() -> str | None:
     return url or None
 
 
+def _normalize_target_audience(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _get_pipeline_target_audience(url: str | None) -> str | None:
+    explicit = os.getenv("OCR_PIPELINE_TARGET_AUDIENCE", "").strip()
+    if explicit:
+        return explicit
+    return _normalize_target_audience(url)
+
+
+def _fetch_pipeline_identity_token(audience: str) -> str:
+    try:
+        from google.auth.transport.requests import Request as AuthRequest  # type: ignore
+        from google.oauth2 import id_token  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("google-auth is required for OCR pipeline identity tokens") from exc
+    return str(id_token.fetch_id_token(AuthRequest(), audience))
+
+
+def _build_pipeline_request_headers(url: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    audience = _get_pipeline_target_audience(url)
+    if not audience:
+        return headers
+    headers["Authorization"] = f"Bearer {_fetch_pipeline_identity_token(audience)}"
+    return headers
+
+
 _PIPELINE_SEMAPHORE: threading.BoundedSemaphore | None = None
 _PIPELINE_MAX: int | None = None
 _PIPELINE_LOCK = threading.Lock()
 _PIPELINE_INFLIGHT = 0
+
+
+class OCRPipelineOutputPendingError(TimeoutError):
+    def __init__(
+        self,
+        *,
+        input_reference: str | None,
+        output_reference: str | None,
+        timeout_seconds: int,
+    ) -> None:
+        self.input_reference = input_reference
+        self.output_reference = output_reference
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"OCR pipeline output not found within {timeout_seconds}s: {output_reference}")
+
+
+class OCRPipelineTriggerFailedError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        input_reference: str | None,
+        output_reference: str | None,
+        error_message: str,
+    ) -> None:
+        self.input_reference = input_reference
+        self.output_reference = output_reference
+        self.error_message = error_message
+        super().__init__(error_message)
 
 
 def _get_pipeline_semaphore() -> threading.BoundedSemaphore | None:
@@ -90,10 +153,23 @@ def get_pipeline_runtime_status() -> dict[str, Any]:
     return {
         "max_inflight": max_inflight,
         "inflight": _PIPELINE_INFLIGHT,
-        "request_timeout_seconds": _get_request_timeout(),
+        "request_timeout_seconds": _get_request_timeout(wait_for_output=True),
+        "trigger_timeout_seconds": _get_request_timeout(wait_for_output=False),
         "timeout_seconds": int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600")),
         "poll_interval_seconds": float(os.getenv("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0")),
     }
+
+
+def is_ocr_pipeline_output_pending(payload: dict[str, object] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    stage = str(payload.get("stage") or "").strip().lower()
+    if status in {"running", "pending", "queued"}:
+        return True
+    if stage in {"upload", "running"}:
+        return True
+    return False
 
 
 def get_pipeline_config() -> dict[str, Any]:
@@ -138,12 +214,15 @@ def _get_prefix(env_name: str, fallback: str) -> str:
     return prefix
 
 
-def _get_request_timeout() -> float:
-    raw = os.getenv("OCR_PIPELINE_REQUEST_TIMEOUT_SECONDS", "600")
+def _get_request_timeout(*, wait_for_output: bool) -> float:
+    raw = os.getenv(
+        "OCR_PIPELINE_REQUEST_TIMEOUT_SECONDS" if wait_for_output else "OCR_PIPELINE_TRIGGER_TIMEOUT_SECONDS",
+        "600" if wait_for_output else "15",
+    )
     try:
         return float(raw)
     except ValueError:
-        return 600.0
+        return 600.0 if wait_for_output else 15.0
 
 
 def _get_output_read_timeout() -> float:
@@ -349,46 +428,76 @@ def run_ocr_pipeline(
                 generation,
             )
 
+        output_name = f"{output_prefix}{os.path.basename(input_name)}.json"
+        output_reference = f"gs://{bucket}/{output_name}"
+        input_reference = f"gs://{bucket}/{input_name}"
+
         payload = {"bucket": bucket, "name": input_name}
         if generation:
             payload["generation"] = generation
 
         url = _get_pipeline_url()
-        if url and wait_for_output:
+        request_state_saved = False
+        trigger_error_message: str | None = None
+        trigger_error_is_terminal = False
+        if url:
+            try:
+                save_pipeline_request(job_id, input_reference)
+                request_state_saved = True
+            except Exception:  # noqa: BLE001
+                logger.warning("OCR pipeline state save (request) failed")
             logger.info("OCR pipeline request POST url=%s", url)
             req = Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=_build_pipeline_request_headers(url),
                 method="POST",
             )
             try:
-                save_pipeline_request(job_id, f"gs://{bucket}/{input_name}")
-            except Exception:  # noqa: BLE001
-                logger.warning("OCR pipeline state save (request) failed")
-            try:
-                with urlopen(req, timeout=_get_request_timeout()) as resp:
+                # Keep the trigger request short-lived. OCR completion is tracked via
+                # the output object, not by holding the HTTP request open.
+                with urlopen(req, timeout=_get_request_timeout(wait_for_output=False)) as resp:
                     resp.read()
                 logger.info("OCR pipeline request POST done url=%s", url)
             except HTTPError as exc:
                 raw = exc.read().decode("utf-8", errors="ignore")
-                raise RuntimeError(f"OCR pipeline HTTP {exc.code}: {raw}") from exc
+                trigger_error_message = f"OCR pipeline HTTP {exc.code}: {raw}"
+                trigger_error_is_terminal = 400 <= int(exc.code) < 500
             except URLError as exc:
-                raise RuntimeError(f"OCR pipeline request failed: {exc}") from exc
-        elif url:
-            logger.info("OCR pipeline request skipped (async) url=%s", url)
+                trigger_error_message = f"OCR pipeline request failed: {exc}"
+            except (TimeoutError, socket.timeout) as exc:
+                trigger_error_message = f"OCR pipeline request timeout: {exc}"
+            if trigger_error_message:
+                logger.warning(
+                    "OCR pipeline request transport failed; relying on output reconciliation bucket=%s input=%s error=%s",
+                    bucket,
+                    input_name,
+                    trigger_error_message,
+                )
+                if wait_for_output and trigger_error_is_terminal:
+                    save_pipeline_error(job_id, trigger_error_message)
+                    raise OCRPipelineTriggerFailedError(
+                        input_reference=input_reference,
+                        output_reference=output_reference,
+                        error_message=trigger_error_message,
+                    )
         else:
             logger.info("OCR pipeline request skipped (OCR_PIPELINE_URL not set)")
 
-        output_name = f"{output_prefix}{os.path.basename(input_name)}.json"
-        output_reference = f"gs://{bucket}/{output_name}"
-        input_reference = f"gs://{bucket}/{input_name}"
+        if wait_for_output and not request_state_saved:
+            try:
+                save_pipeline_request(job_id, input_reference)
+            except Exception:  # noqa: BLE001
+                logger.warning("OCR pipeline state save (request) failed")
         if not wait_for_output:
-            return {
+            response = {
                 "status": "running",
                 "output_reference": output_reference,
                 "input_reference": input_reference,
             }
+            if trigger_error_message:
+                response["trigger_error"] = trigger_error_message
+            return response
         timeout_seconds = int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
         poll_interval = float(os.getenv("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0"))
         logger.info(
@@ -398,20 +507,31 @@ def run_ocr_pipeline(
             timeout_seconds,
             poll_interval,
         )
-        output = _wait_for_output(
-            bucket=bucket,
-            object_name=output_name,
-            timeout_seconds=timeout_seconds,
-            poll_interval=poll_interval,
-        )
+        try:
+            output = _wait_for_output(
+                bucket=bucket,
+                object_name=output_name,
+                timeout_seconds=timeout_seconds,
+                poll_interval=poll_interval,
+            )
+        except TimeoutError as exc:
+            raise OCRPipelineOutputPendingError(
+                input_reference=input_reference,
+                output_reference=output_reference,
+                timeout_seconds=timeout_seconds,
+            ) from exc
         try:
             save_pipeline_success(job_id, output_reference)
         except Exception:  # noqa: BLE001
             logger.warning("OCR pipeline state save (success) failed")
+        if trigger_error_message and isinstance(output, dict):
+            output = dict(output)
+            output.setdefault("trigger_error", trigger_error_message)
         return output
     except Exception as exc:  # noqa: BLE001
         try:
-            save_pipeline_error(job_id, str(exc))
+            if not isinstance(exc, OCRPipelineTriggerFailedError):
+                save_pipeline_error(job_id, str(exc))
         except Exception:  # noqa: BLE001
             logger.warning("OCR pipeline state save (error) failed")
         raise

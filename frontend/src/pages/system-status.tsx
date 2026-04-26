@@ -35,6 +35,34 @@ type SystemStatus = {
     wait_strategy?: string | null;
     sync_wait_supported?: boolean;
     sync_wait_note?: string | null;
+    inflight?: number | null;
+    max_inflight?: number | null;
+  };
+  uploaded_pdfs?: {
+    total?: number;
+    pending_count?: number;
+    processing_count?: number;
+    retry_wait_count?: number;
+    completed_count?: number;
+    manual_review_count?: number;
+    stale_lease_count?: number;
+    retry_ready_count?: number;
+    eligible_backlog_count?: number;
+    oldest_ready_at?: string | null;
+    oldest_ready_seconds?: number | null;
+  };
+  ingest_jobs?: {
+    total?: number;
+    pending_count?: number;
+    error_count?: number;
+    processing_count?: number;
+    done_count?: number;
+    stale_processing_count?: number;
+    eligible_backlog_count?: number;
+    oldest_pending_at?: string | null;
+    oldest_pending_seconds?: number | null;
+    oldest_processing_at?: string | null;
+    oldest_processing_seconds?: number | null;
   };
   db_quota?: {
     resource?: string;
@@ -146,6 +174,15 @@ const formatQualityGate = (value?: string | null) => {
   return value || "未取得";
 };
 
+const formatDuration = (value?: number | null) => {
+  if (value == null || Number.isNaN(value)) return "未取得";
+  const total = Math.max(Math.floor(value), 0);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours > 0) return `${hours}時間${minutes}分`;
+  return `${minutes}分`;
+};
+
 export default function SystemStatusPage() {
   const { isAdmin } = useCurrentUserRole();
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -244,6 +281,18 @@ export default function SystemStatusPage() {
   const ocrQuality = status?.ocr_reparse_quality;
   const qualityGateStatus = (ocrQuality?.gate?.status || "").toLowerCase();
   const qualityProviders = ocrQuality?.providers || [];
+  const uploadedPdfs = status?.uploaded_pdfs;
+  const ingestJobs = status?.ingest_jobs;
+  const ocrBacklogSeverity =
+    (uploadedPdfs?.manual_review_count || 0) > 0 || (ingestJobs?.error_count || 0) > 0
+      ? "error"
+      : (uploadedPdfs?.eligible_backlog_count || 0) > 0 ||
+          (uploadedPdfs?.processing_count || 0) > 0 ||
+          (ingestJobs?.stale_processing_count || 0) > 0
+        ? "warn"
+        : "ok";
+  const ocrBacklogLabel =
+    ocrBacklogSeverity === "error" ? "要介入" : ocrBacklogSeverity === "warn" ? "滞留あり" : "正常";
 
   return (
     <main className="system-page">
@@ -283,13 +332,36 @@ export default function SystemStatusPage() {
           <p className="meta">許可されたクライアントID: {(status?.oauth_config?.google_client_ids || []).join(", ") || "未取得"}</p>
           <p className="meta">Googleログインで利用します。</p>
         </article>
-        <article className="card">
+        <article className="card card-wide ocr-card">
           <h2>OCR パイプライン</h2>
-          <p className="value">
-            {status?.ocr_pipeline?.configured
-              ? formatStatus(status?.ocr_pipeline?.status)
-              : "未設定"}
-          </p>
+          <div className="ocr-card-top">
+            <div className="ocr-card-status">
+              <p className="value">
+                {status?.ocr_pipeline?.configured
+                  ? formatStatus(status?.ocr_pipeline?.status)
+                  : "未設定"}
+              </p>
+              <p className={`ocr-backlog-badge ${ocrBacklogSeverity}`}>{ocrBacklogLabel}</p>
+            </div>
+            <div className="ocr-queue-summary" aria-label="OCR滞留サマリ">
+              <div className="ocr-queue-summary-block">
+                <p className="ocr-queue-summary-label">uploaded</p>
+                <p className="ocr-queue-summary-value">
+                  {uploadedPdfs?.pending_count ?? "未取得"} / {uploadedPdfs?.processing_count ?? "未取得"} /{" "}
+                  {uploadedPdfs?.completed_count ?? "未取得"}
+                </p>
+                <p className="ocr-queue-summary-help">未処理 / 処理中 / 完了</p>
+              </div>
+              <div className="ocr-queue-summary-block">
+                <p className="ocr-queue-summary-label">ingest</p>
+                <p className="ocr-queue-summary-value">
+                  {ingestJobs?.pending_count ?? "未取得"} / {ingestJobs?.processing_count ?? "未取得"} /{" "}
+                  {ingestJobs?.stale_processing_count ?? "未取得"}
+                </p>
+                <p className="ocr-queue-summary-help">未処理 / 処理中 / stale</p>
+              </div>
+            </div>
+          </div>
           <p className="meta">最終成功: {formatDate(status?.ocr_pipeline?.last_success_at)}</p>
           <p className="meta">最終失敗: {formatDate(status?.ocr_pipeline?.last_error_at)}</p>
           {status?.ocr_pipeline?.last_error && (
@@ -306,6 +378,18 @@ export default function SystemStatusPage() {
           <p className="meta">
             sync_wait={status?.ocr_pipeline?.sync_wait_supported ? "OK" : "利用条件あり"} / http_trigger=
             {status?.ocr_pipeline?.http_trigger_enabled ? "ON" : "OFF"}
+          </p>
+          <p className="meta">
+            inflight={status?.ocr_pipeline?.inflight ?? "未取得"} / max=
+            {status?.ocr_pipeline?.max_inflight ?? "未取得"}
+          </p>
+          <p className="meta">
+            uploaded backlog={uploadedPdfs?.eligible_backlog_count ?? "未取得"} / ingest backlog=
+            {ingestJobs?.eligible_backlog_count ?? "未取得"}
+          </p>
+          <p className="meta">
+            oldest backlog: {formatDate(uploadedPdfs?.oldest_ready_at)} / 経過=
+            {formatDuration(uploadedPdfs?.oldest_ready_seconds)}
           </p>
           {status?.ocr_pipeline?.sync_wait_note ? (
             <p className="meta warn">{status.ocr_pipeline.sync_wait_note}</p>
@@ -465,6 +549,11 @@ export default function SystemStatusPage() {
       </section>
 
       <style jsx>{`
+        :global(body) {
+          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
+          color: #1f2a2a;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
+        }
         .system-page {
           min-height: 100vh;
           padding: 48px 6vw 80px;
@@ -505,6 +594,9 @@ export default function SystemStatusPage() {
           box-shadow: 0 10px 30px rgba(27, 35, 33, 0.08);
           border: 1px solid rgba(25, 32, 30, 0.1);
         }
+        .card-wide {
+          grid-column: span 2;
+        }
         .value {
           font-size: 20px;
           font-weight: 700;
@@ -517,6 +609,63 @@ export default function SystemStatusPage() {
         .meta.warn {
           color: #b94014;
         }
+        .ocr-card-top {
+          display: grid;
+          gap: 12px;
+          grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
+          align-items: start;
+          margin: 10px 0 14px;
+        }
+        .ocr-card-status {
+          display: grid;
+          gap: 8px;
+          align-content: start;
+        }
+        .ocr-backlog-badge {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 700;
+          color: #5a6a66;
+        }
+        .ocr-backlog-badge.warning,
+        .ocr-backlog-badge.warn {
+          color: #b77700;
+        }
+        .ocr-backlog-badge.critical,
+        .ocr-backlog-badge.error {
+          color: #b94014;
+        }
+        .ocr-queue-summary {
+          display: grid;
+          gap: 10px;
+          grid-template-columns: repeat(2, minmax(180px, 1fr));
+          margin: 0;
+        }
+        .ocr-queue-summary-block {
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          background: #f6f8f7;
+          padding: 12px 14px;
+        }
+        .ocr-queue-summary-label {
+          margin: 0 0 4px;
+          font-size: 11px;
+          color: #5a6a66;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          font-weight: 700;
+        }
+        .ocr-queue-summary-value {
+          margin: 0;
+          font-size: 22px;
+          font-weight: 700;
+          color: #1f2a2a;
+        }
+        .ocr-queue-summary-help {
+          margin: 4px 0 0;
+          font-size: 12px;
+          color: #5a6a66;
+        }
         .panel {
           background: #ffffff;
           border-radius: 18px;
@@ -528,7 +677,13 @@ export default function SystemStatusPage() {
         .quota-level.warning {
           color: #b77700;
         }
+        .quota-level.warn {
+          color: #b77700;
+        }
         .quota-level.critical {
+          color: #b94014;
+        }
+        .quota-level.error {
           color: #b94014;
         }
         .quality-gate.pass {
@@ -629,6 +784,17 @@ export default function SystemStatusPage() {
           font-size: 12px;
           white-space: pre-wrap;
           border: 1px solid rgba(25, 32, 30, 0.08);
+        }
+        @media (max-width: 980px) {
+          .card-wide {
+            grid-column: auto;
+          }
+          .ocr-card-top {
+            grid-template-columns: 1fr;
+          }
+          .ocr-queue-summary {
+            grid-template-columns: 1fr;
+          }
         }
       `}</style>
     </main>

@@ -14,6 +14,7 @@ from src.services.fax_parser import parse_order_lines  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.menu import MonthlyMenu, MonthlyMenuEntry  # noqa: E402
+from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 
 
 def _canonical_row_for_week(week_id: str) -> tuple[str, str, str]:
@@ -87,6 +88,232 @@ def _patch_first_pass_payload(monkeypatch, payload: dict) -> None:
         "_load_existing_first_pass_payload_for_reparse",
         lambda *_args, **_kwargs: payload,
     )
+
+
+def test_reparse_order_records_explicit_failed_llm_reparse_when_no_lines_survive(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-lines-empty.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-lines-empty-reparse",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 1, 8, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": "2026-01-08",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 2,
+            }
+            ],
+        )
+    current_date = "2026-01-08"
+    current_daypart = "昼"
+    current_menu = "Menu A"
+    current_mmdd = datetime.fromisoformat(current_date).strftime("%m/%d")
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[current_mmdd, current_daypart, current_menu, "9"]]),
+    )
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[current_date],
+            table_rows=[[current_mmdd, current_daypart, current_menu, ""]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "finish_reason": "STOP"},
+        )
+
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", lambda *args, **kwargs: [])
+    monkeypatch.setattr(order_service, "rows_from_markdown", lambda *args, **kwargs: [])
+    monkeypatch.setattr(order_service, "_build_sheet_lines_from_ocr_payload", lambda **kwargs: [])
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=False)
+
+    assert updated is None
+    assert error == "lines_empty"
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert job.get("error_message") == "lines_empty"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("request_mode") == "llm_reparse"
+    assert metrics.get("processing_stage") == "line_parse"
+    assert metrics.get("result_state") == "hard_failed"
+    assert metrics.get("error") == "lines_empty"
+    assert metrics.get("confirmed_lines_retained") is True
+
+    cached = order_service._load_order_ocr_cache(order["id"])  # noqa: SLF001
+    debug = cached.get("_reparse_debug") if isinstance(cached, dict) else {}
+    assert debug.get("provider") == "gemini"
+    assert debug.get("reject_reasons") == ["lines_empty"]
+
+
+def test_reparse_order_preserves_detailed_gemini_http_failure_without_cached_fallback(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-http-failure.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-http-failure",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 1, 8, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": "2026-01-08",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "bag_type": "standard",
+                "quantity_original": 2,
+            }
+        ],
+    )
+    current_mmdd = "01/08"
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[current_mmdd, "昼", "Menu A", "9"]]),
+    )
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+
+    detailed_error = (
+        "Gemini OCR HTTP 400 INVALID_ARGUMENT: "
+        "Budget 0 is invalid. This model only works in thinking mode."
+    )
+
+    def _raise_main_ocr(*_args, **_kwargs):
+        raise RuntimeError(detailed_error)
+
+    cached_probe = {"called": False}
+
+    def _fake_cached_ocr(_message_id: str):
+        cached_probe["called"] = True
+        return {
+            "date_strings": ["2026-01-08"],
+            "table_rows": [[current_mmdd, "昼", "Menu A", "9"]],
+            "tokens": [{"text": "9"}],
+        }
+
+    monkeypatch.setattr(order_service, "extract_fax_data", _raise_main_ocr)
+    monkeypatch.setattr(order_service, "_load_cached_ocr", _fake_cached_ocr)
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    expected_error = f"main_ocr_failed:gemini:{detailed_error}"
+    assert updated is None
+    assert error == expected_error
+    assert cached_probe["called"] is False
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert job.get("error_message") == expected_error
+    metrics = job.get("metrics") or {}
+    assert metrics.get("request_mode") == "llm_reparse"
+    assert metrics.get("requested_provider") == "gemini"
+    assert metrics.get("processing_stage") == "inference"
+    assert metrics.get("result_state") == "hard_failed"
+    assert metrics.get("error") == expected_error
+    assert metrics.get("upstream_error_detail") == detailed_error
+
+
+def test_load_existing_first_pass_payload_for_reparse_rejects_stale_aux_schema(monkeypatch):
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    stale_payload = _make_first_pass_payload(
+        rows=[["04/26", "昼", "Menu A", "1", "2", "3", "4", "5", "6", "7", "note"]]
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_get_ocr_output_without_legacy_edits",
+        lambda *_args, **_kwargs: (stale_payload, None),
+    )
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda *_args, **_kwargs: stale_payload)
+
+    reused = order_service._load_existing_first_pass_payload_for_reparse(
+        "ORD-test-stale-first-pass",
+        template=template,
+    )
+
+    assert reused is None
+
+
+def test_load_existing_first_pass_payload_for_reparse_accepts_matching_aux_schema(monkeypatch):
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    matching_payload = _make_first_pass_payload(
+        rows=[["04/26", "昼", "主", "Menu A", "7", "1", "2", "3", "4", "5", "6", "7", "note"]]
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_get_ocr_output_without_legacy_edits",
+        lambda *_args, **_kwargs: (matching_payload, None),
+    )
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda *_args, **_kwargs: matching_payload)
+
+    reused = order_service._load_existing_first_pass_payload_for_reparse(
+        "ORD-test-matching-first-pass",
+        template=template,
+    )
+
+    assert isinstance(reused, dict)
+    assert reused.get("_template_field_schema", {}).get("field_count") == 13
+
+
+def test_merge_legacy_first_pass_payload_ignores_cached_rows_when_schema_mismatches():
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    active_payload = {"status": "ready"}
+    active_run = {"schema_version": "v1_legacy"}
+    stale_cached_payload = _make_first_pass_payload(
+        rows=[["04/26", "昼", "Menu A", "1", "2", "3", "4", "5", "6", "7", "note"]]
+    )
+    merged = order_service._merge_legacy_first_pass_payload(
+        active_payload,
+        active_run,
+        stale_cached_payload,
+        template=template,
+    )
+
+    assert merged == active_payload
+
+    matching_cached_payload = _make_first_pass_payload(
+        rows=[["04/26", "昼", "主", "Menu A", "7", "1", "2", "3", "4", "5", "6", "7", "note"]]
+    )
+    merged_matching = order_service._merge_legacy_first_pass_payload(
+        active_payload,
+        active_run,
+        matching_cached_payload,
+        template=template,
+    )
+
+    assert merged_matching is not active_payload
+    assert merged_matching.get("rows") == matching_cached_payload.get("rows")
+
+
+def test_extract_first_pass_rows_prefers_raw_body_rows_when_header_is_generic():
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    payload = _make_first_pass_payload([[canonical_mmdd, canonical_daypart, canonical_menu, "2"]])
+    template = config_service.get_facility_config("FAC00001").get("fax_template")
+
+    rows = order_service._extract_first_pass_rows_from_payload(payload, template)
+
+    assert rows == [[canonical_mmdd, canonical_daypart, canonical_menu, "2"]]
 
 
 def test_ingest_to_reparse_flow(monkeypatch, tmp_path):
@@ -289,12 +516,12 @@ def test_reparse_order_sets_job_metrics_changed_even_when_counts_match(monkeypat
 
 
 
-def test_reparse_order_llm_truncated_uses_pipeline_rows(monkeypatch, tmp_path):
+def test_reparse_order_llm_full_table_truncated_blocks_without_pipeline_rescue(monkeypatch, tmp_path):
     order_service.clear_all()
-    pdf_path = tmp_path / "sample-gemini-truncated.pdf"
+    pdf_path = tmp_path / "sample-gemini-full-table-truncated-retain.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
     payload = IngestEmailPayload(
-        message_id="msg-gemini-truncated-001",
+        message_id="msg-gemini-full-table-truncated-retain-001",
         pdf_uri=str(pdf_path),
         received_at=datetime(2026, 2, 15, 9, 0, 0),
         facility_hint="FAC00001",
@@ -303,6 +530,16 @@ def test_reparse_order_llm_truncated_uses_pipeline_rows(monkeypatch, tmp_path):
     order = order_service.create_order_from_ingest(payload, lines=[])
     canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
     canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            [canonical_mmdd, canonical_daypart, canonical_menu, "5"],
+            [canonical_mmdd, "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "source": "weekly_menu+payload_row",
+    }
 
     parse_inputs: list[list[list[str]]] = []
 
@@ -319,63 +556,183 @@ def test_reparse_order_llm_truncated_uses_pipeline_rows(monkeypatch, tmp_path):
         return FaxExtractedData(
             facility_name="Test Facility",
             date_strings=[canonical_date],
-            table_rows=[[canonical_mmdd, canonical_menu, "20"]],
+            table_rows=[
+                [canonical_mmdd, canonical_daypart, canonical_menu, "20"],
+                [canonical_mmdd, "昼", "Menu B", ""],
+            ],
             tokens=[],
             grid=None,
             ocr_provider="gemini",
-            raw_text=f'{{"rows":[{{"date_mmdd":"{canonical_mmdd}"}}]}}',
+            raw_text=f'{{"rows":[{{"row_index":0,"date_mmdd":"{canonical_mmdd}"}}]}}',
             provider_debug={
                 "provider": "gemini",
+                "model": "gemini-2.5-pro",
                 "finish_reason": "MAX_TOKENS",
                 "recovered_truncated_json": True,
+                "full_table_mode": True,
+                "returned_row_indexes": [0, 1],
             },
         )
 
     def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
         parse_inputs.append([list(item) for item in (rows or [])])
-        if not rows:
-            return []
-        raw_qty = str(rows[0][2] if len(rows[0]) > 2 else "")
-        qty = 20 if raw_qty == "20" else 9
-        return [
-            {
-                "date": canonical_date,
-                "daypart": canonical_daypart,
-                "menu_name": canonical_menu,
-                "diet_type": "regular",
-                "area_id": "2F",
-                "bag_type": "standard",
-                "quantity_original": qty,
-                "source_row_index": 0,
-            }
-        ]
+        parsed: list[dict[str, object]] = []
+        for row_index, row in enumerate(rows):
+            qty = row[3] if len(row) > 3 else ""
+            if not str(qty).strip():
+                continue
+            parsed.append(
+                {
+                    "date": canonical_date,
+                    "daypart": row[1],
+                    "menu_name": row[2],
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "bag_type": "standard",
+                    "quantity_original": int(qty),
+                    "source_row_index": row_index,
+                }
+            )
+        return parsed
 
     monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
     monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
     monkeypatch.setattr(order_service, "rows_from_markdown", _fake_rows_from_markdown)
     monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
     monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **_kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 2)
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "9"]]),
+    )
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
-    assert error is None
-    assert updated is not None
-    assert updated["lines"]
-    assert updated["lines"][0]["quantity_original"] == 9
-    assert parse_inputs
-    assert parse_inputs[0][0][2] == "9"
+
+    assert updated is None
+    assert error == "llm_full_table_truncated_output"
+    assert parse_inputs == []
 
     job = get_job(f"OCR-{order['id']}")
     assert job is not None
-    assert job.get("status") == "done"
     metrics = job.get("metrics") or {}
-    assert metrics.get("provider") == "gemini"
-    assert metrics.get("requested_provider") == "gemini"
     assert metrics.get("finish_reason") == "MAX_TOKENS"
     assert metrics.get("truncated_output") is True
-    assert metrics.get("rows_replaced_with_pipeline") is True
-    assert metrics.get("quality_track") == "llm_reparse"
-    assert metrics.get("reparse_origin") == "llm_assist"
-    assert metrics.get("feedback_retry_depth") == 0
+    assert metrics.get("error") == "llm_full_table_truncated_output"
+    assert metrics.get("rows_replaced_with_pipeline") is False
+
+
+def test_reparse_order_llm_full_table_truncated_empty_rows_blocks_without_pipeline_rescue(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-full-table-truncated-empty.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-full-table-truncated-empty-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            [canonical_mmdd, canonical_daypart, canonical_menu, "5"],
+            [canonical_mmdd, "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "source": "weekly_menu+payload_row",
+    }
+
+    parse_inputs: list[list[list[str]]] = []
+
+    def _fake_pipeline(**_kwargs):
+        return "file://pipeline-output.json"
+
+    def _fake_load_pipeline_output_with_retry(_ref, retries=0, delay=0.0, wait_seconds_override=None, **_kwargs):  # noqa: ARG001
+        return {"table_raw": "|x|y|z|"}
+
+    def _fake_rows_from_markdown(markdown, template):  # noqa: ARG001
+        return [[canonical_mmdd, canonical_menu, "9"]]
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            raw_text='{"rows":[]}',
+            provider_debug={
+                "provider": "gemini",
+                "model": "gemini-2.5-pro",
+                "finish_reason": "MAX_TOKENS",
+                "recovered_truncated_json": True,
+                "full_table_mode": True,
+                "returned_row_indexes": [],
+            },
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        parse_inputs.append([list(item) for item in (rows or [])])
+        return []
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
+    monkeypatch.setattr(order_service, "rows_from_markdown", _fake_rows_from_markdown)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **_kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 2)
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "9"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "llm_full_table_truncated_output"
+    assert parse_inputs == []
+
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("error") == "llm_full_table_truncated_output"
+    assert metrics.get("finish_reason") == "MAX_TOKENS"
+    assert metrics.get("truncated_output") is True
+    assert metrics.get("rows_replaced_with_pipeline") is False
 
 
 def test_reparse_order_quantity_only_rows_merge_without_provider_flag(monkeypatch, tmp_path):
@@ -714,6 +1071,403 @@ def test_build_reparse_quantity_rules_marks_llm_rows_as_body_only():
     assert rules["allow_blank_structure_rows"] is True
     assert rules["rows_are_body_only"] is True
     assert rules["strict_numeric_quantity_cell"] is True
+
+
+def test_build_sheet_lines_from_ocr_payload_treats_first_pass_rows_as_body_only(monkeypatch):
+    template = {
+        "header_rows": 2,
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+        ],
+    }
+    first_pass_rows = [
+        ["04/26", "朝", "Menu A", "11"],
+        ["04/26", "朝", "Menu B", "12"],
+        ["04/26", "昼", "Menu C", "13"],
+        ["04/26", "夕", "Menu D", "14"],
+    ]
+
+    monkeypatch.setattr(
+        order_service,
+        "_extract_first_pass_rows_from_payload",
+        lambda *_args, **_kwargs: [list(row) for row in first_pass_rows],
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_extract_sheet_rows_from_payload",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_collect_sheet_dates_from_payload",
+        lambda *_args, **_kwargs: {date(2026, 4, 26)},
+    )
+
+    lines = order_service._build_sheet_lines_from_ocr_payload(
+        payload={},
+        template=template,
+        received_at=datetime(2026, 4, 26, 9, 0, 0),
+        week_id=None,
+        facility_id="FAC00006",
+        quantity_rules={
+            "zero_as_empty": False,
+            "strict_numeric_quantity_cell": True,
+        },
+    )
+
+    assert [line["menu_name"] for line in lines] == ["Menu A", "Menu B", "Menu C", "Menu D"]
+    assert [int(line["quantity_original"]) for line in lines] == [11, 12, 13, 14]
+    assert [line["source_row_index"] for line in lines] == [0, 1, 2, 3]
+
+
+def test_canonicalize_sheet_daypart_rows_keeps_blank_continuations_but_does_not_collapse_unsupported_blocks():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    rows = [
+        ["04/26", "朝", "Menu A", "11"],
+        ["", "", "Menu B", "12"],
+        ["", "タ", "Menu C", "13"],
+        ["", "夕", "Menu D", "14"],
+    ]
+
+    normalized = order_service._canonicalize_sheet_daypart_rows(rows=rows, fields=fields)
+
+    assert [row[1] for row in normalized] == ["朝", "朝", "昼", "夕"]
+
+
+def test_canonicalize_sheet_daypart_rows_leaves_unsupported_block_unresolved_without_later_anchor():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    rows = [
+        ["04/26", "朝", "Menu A", "11"],
+        ["", "タ", "Menu B", "12"],
+    ]
+
+    normalized = order_service._canonicalize_sheet_daypart_rows(rows=rows, fields=fields)
+
+    assert [row[1] for row in normalized] == ["朝", "タ"]
+
+
+def test_build_sheet_quantity_cell_metadata_rows_marks_exact_and_ordered_placements():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.soft_x"]
+    quantity_index = {
+        ("regular", "x"): 3,
+        ("soft", "x"): 4,
+    }
+    rows = [
+        {"values": ["04/26", "朝", "Menu A", "11", ""]},
+        {"values": ["04/26", "昼", "Menu B", "12", "2"]},
+        {"values": ["04/26", "夕", "Menu C", "", ""]},
+    ]
+
+    confidence_rows, provenance_rows = order_service._build_sheet_quantity_cell_metadata_rows(
+        rows=rows,
+        fields=fields,
+        quantity_index=quantity_index,
+        mapped_mode="raw_ocr_block",
+        quantity_value_source="ocr_payload",
+        shell_projection_stats={
+            "exact_target_row_indexes": [0],
+            "ordered_target_row_indexes": [1],
+        },
+    )
+
+    assert confidence_rows == [
+        ["", "", "", "high", ""],
+        ["", "", "", "medium", "medium"],
+        ["", "", "", "", ""],
+    ]
+    assert provenance_rows == [
+        ["", "", "", "ocr_payload_exact", ""],
+        ["", "", "", "ocr_payload_ordered", "ocr_payload_ordered"],
+        ["", "", "", "", ""],
+    ]
+
+
+def test_build_weekly_menu_numeric_cell_items_classifies_accepted_and_deterministic_candidates():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.soft_x"]
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "diet_type": "soft", "area_id": "X"},
+        ],
+    }
+    rows = [
+        {
+            "values": ["04/26", "朝", "Menu A", "11", ""],
+            "identity": ("2026-04-26", "朝", "menua"),
+        },
+        {
+            "values": ["04/26", "昼", "Menu B", "", ""],
+            "identity": ("2026-04-26", "昼", "menub"),
+        },
+    ]
+    payload_rows = [
+        ["04/26", "朝", "Menu A", "11", ""],
+        ["", "タ", "Menu B", "12", "2"],
+    ]
+
+    items, summary = order_service._build_weekly_menu_numeric_cell_items(
+        rows=rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        template=template,
+        shell_projection_stats={
+            "accepted_payload_mappings": [
+                {"payload_row_index": 0, "target_row_index": 0, "mapping_type": "exact"},
+            ],
+        },
+    )
+
+    assert summary == {
+        "raw_ocr_numeric_count": 3,
+        "accepted_count": 1,
+        "deterministic_candidate_count": 2,
+        "weak_candidate_count": 0,
+        "unresolved_count": 0,
+    }
+    assert [item["classification"] for item in items] == [
+        "accepted",
+        "deterministic_candidate",
+        "deterministic_candidate",
+    ]
+    assert [item.get("target_row_index") for item in items] == [0, 1, 1]
+    assert [item.get("target_col_index") for item in items] == [3, 3, 4]
+
+
+def test_build_weekly_menu_numeric_cell_items_accepts_current_identity_matches_without_shell_projection_stats():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.soft_x"]
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "diet_type": "soft", "area_id": "X"},
+        ],
+    }
+    rows = [
+        {
+            "values": ["04/26", "朝", "Menu A", "11", ""],
+            "identity": ("2026-04-26", "朝", "menua"),
+        },
+        {
+            "values": ["04/26", "昼", "Menu B", "", ""],
+            "identity": ("2026-04-26", "昼", "menub"),
+        },
+    ]
+    payload_rows = [
+        ["04/26", "朝", "Menu A", "11", ""],
+        ["", "タ", "Menu B", "12", "2"],
+    ]
+
+    items, summary = order_service._build_weekly_menu_numeric_cell_items(
+        rows=rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        template=template,
+        shell_projection_stats={},
+    )
+
+    assert summary == {
+        "raw_ocr_numeric_count": 3,
+        "accepted_count": 1,
+        "deterministic_candidate_count": 2,
+        "weak_candidate_count": 0,
+        "unresolved_count": 0,
+    }
+    assert [item["classification"] for item in items] == [
+        "accepted",
+        "deterministic_candidate",
+        "deterministic_candidate",
+    ]
+    assert [item["placement_basis"] for item in items] == [
+        "identity_current_match",
+        "date_menu_unique",
+        "date_menu_unique",
+    ]
+    assert [item.get("target_row_index") for item in items] == [0, 1, 1]
+    assert [item.get("target_col_index") for item in items] == [3, 3, 4]
+
+
+def test_build_weekly_menu_numeric_cell_items_supplements_accepted_cells_from_current_sheet_provenance():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.soft_x"]
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "diet_type": "soft", "area_id": "X"},
+        ],
+    }
+    rows = [
+        {
+            "values": ["04/26", "朝", "Menu A", "11", ""],
+            "identity": ("2026-04-26", "朝", "menua"),
+        },
+        {
+            "values": ["04/26", "昼", "Menu B", "12", ""],
+            "identity": ("2026-04-26", "昼", "menub"),
+        },
+    ]
+    payload_rows = [
+        ["04/26", "朝", "Menu A", "11", ""],
+        ["", "タ", "Menu B", "", ""],
+    ]
+    cell_provenance_rows = [
+        ["", "", "", "ocr_payload_exact", ""],
+        ["", "", "", "ocr_payload_identity", ""],
+    ]
+
+    items, summary = order_service._build_weekly_menu_numeric_cell_items(
+        rows=rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        template=template,
+        shell_projection_stats={
+            "accepted_payload_mappings": [
+                {"payload_row_index": 0, "target_row_index": 0, "mapping_type": "exact"},
+            ],
+        },
+        cell_provenance_rows=cell_provenance_rows,
+    )
+
+    assert summary == {
+        "raw_ocr_numeric_count": 2,
+        "accepted_count": 2,
+        "deterministic_candidate_count": 0,
+        "weak_candidate_count": 0,
+        "unresolved_count": 0,
+    }
+    assert [item["classification"] for item in items] == ["accepted", "accepted"]
+    assert [item.get("target_row_index") for item in items] == [0, 1]
+    assert [item.get("target_col_index") for item in items] == [3, 3]
+    assert [item["placement_basis"] for item in items] == [
+        "weekly_menu_exact",
+        "identity_current_match",
+    ]
+    assert [item["read_basis"] for item in items] == [
+        "direct_payload_numeric_cell",
+        "current_sheet_ocr_provenance",
+    ]
+
+
+def test_build_weekly_menu_numeric_cell_items_marks_unresolved_when_target_not_proven():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+        ],
+    }
+    rows = [
+        {
+            "values": ["04/26", "朝", "Menu B", "", ""],
+            "identity": ("04/26", "朝", "menub"),
+        },
+        {
+            "values": ["04/26", "昼", "Menu B", "", ""],
+            "identity": ("04/26", "昼", "menub"),
+        },
+    ]
+    payload_rows = [["04/26", "タ", "Menu B", "12"]]
+
+    items, summary = order_service._build_weekly_menu_numeric_cell_items(
+        rows=rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        template=template,
+        shell_projection_stats={},
+    )
+
+    assert summary == {
+        "raw_ocr_numeric_count": 1,
+        "accepted_count": 0,
+        "deterministic_candidate_count": 0,
+        "weak_candidate_count": 0,
+        "unresolved_count": 1,
+    }
+    assert items == [
+        {
+            "classification": "unresolved",
+            "value": "12",
+            "confidence_tier": "low",
+            "placement_basis": "unresolved",
+            "read_basis": "direct_payload_numeric_cell",
+            "source_row_index": 0,
+            "source_col_index": 3,
+            "date_key": "04/26",
+            "daypart_key": "タ",
+            "menu_key": "menub",
+            "reason": "target_not_proven",
+        }
+    ]
+
+
+def test_build_weekly_menu_numeric_cell_items_marks_weak_candidates_for_unique_blank_cell():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+        ],
+    }
+    rows = [
+        {
+            "values": ["04/26", "朝", "Menu A", "11"],
+            "identity": ("04/26", "朝", "menua"),
+        },
+        {
+            "values": ["04/26", "昼", "Menu B", ""],
+            "identity": ("04/26", "昼", "menub"),
+        },
+        {
+            "values": ["04/26", "夕", "Menu C", "13"],
+            "identity": ("04/26", "夕", "menuc"),
+        },
+    ]
+    payload_rows = [["04/26", "タ", "", "12"]]
+
+    items, summary = order_service._build_weekly_menu_numeric_cell_items(
+        rows=rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        template=template,
+        shell_projection_stats={},
+    )
+
+    assert summary == {
+        "raw_ocr_numeric_count": 1,
+        "accepted_count": 0,
+        "deterministic_candidate_count": 0,
+        "weak_candidate_count": 1,
+        "unresolved_count": 0,
+    }
+    assert items == [
+        {
+            "classification": "weak_candidate",
+            "value": "12",
+            "confidence_tier": "low",
+            "placement_basis": "date_group_blank_unique",
+            "read_basis": "direct_payload_numeric_cell",
+            "source_row_index": 0,
+            "source_col_index": 3,
+            "target_row_index": 1,
+            "target_col_index": 3,
+            "date_key": "04/26",
+            "daypart_key": "タ",
+            "menu_key": "",
+        }
+    ]
 
 
 def test_validate_reparse_lines_against_weekly_menu_accepts_body_only_blank_anchor_rows():
@@ -2805,6 +3559,272 @@ def test_build_llm_assist_prompt_includes_date_block_layout_rules():
     assert "trailing_blank_run_after_filled_rows" in prompt
 
 
+def test_build_llm_assist_prompt_includes_daypart_category_alias_rules():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "", ""],
+            ["04/26", "朝", "Menu B", "", ""],
+            ["04/26", "昼", "Menu C", "", ""],
+            ["04/26", "昼", "Menu D", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3", "row-4"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["04/26", "朝", "Menu A", "", ""],
+            ["04/26", "朝", "Menu B", "", ""],
+            ["04/26", "昼", "Menu C", "", ""],
+            ["04/26", "昼", "Menu D", "", ""],
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["04/26", "主", "Menu A", "67", ""],
+            ["04/26", "副", "Menu B", "", ""],
+            ["04/26", "VE", "Menu C", "72", ""],
+            ["04/26", "タ", "Menu D", "", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "The current sheet's canonical daypart blocks are 朝/昼/夕." in prompt
+    assert "Fax-side 区分/category tokens may be aliases, sublabels, continuation marks, OCR noise, or blanks" in prompt
+    assert "主, 副, 汁, タ, VE, MO, 品, A/B, single letters, and blank cells" in prompt
+    assert "A change in fax-side 区分/category token alone is not enough to move a row into another canonical block." in prompt
+
+
+def test_build_llm_assist_prompt_includes_blank_noisy_daypart_anchor_rules():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["04/27", "朝", "Menu A", "", ""],
+            ["04/27", "朝", "Menu B", "", ""],
+            ["04/27", "昼", "Menu C", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2", "row-3"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["04/27", "朝", "Menu A", "", ""],
+            ["04/27", "朝", "Menu B", "", ""],
+            ["04/27", "昼", "Menu C", "", ""],
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["04/27", "", "Menu A", "70", ""],
+            ["04/27", "m", "Menu B", "", ""],
+            ["04/27", "", "Menu C", "72", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "When fax-side 区分/category tokens are blank, noisy, or facility-specific" in prompt
+    assert "anchor rows by current-sheet order, neighboring menu names, and quantity continuity inside the same canonical block." in prompt
+    assert "Prefer the current-sheet 朝/昼/夕 block unless the fax explicitly shows a different canonical boundary." in prompt
+
+
+def test_build_llm_assist_prompt_keeps_remarks_immutable_when_blank():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "rows": [
+            ["04/27", "昼", "Menu A", "", ""],
+            ["04/27", "昼", "Menu B", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "baseline_source": "sheet",
+        "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "structure_rows": [
+            ["04/27", "昼", "Menu A", "", ""],
+            ["04/27", "昼", "Menu B", "", ""],
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["04/27", "主", "Menu A", "105", "肉4"],
+            ["04/27", "副", "Menu B", "105", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert (
+        "Return sparse row patches only." in prompt
+    )
+    assert (
+        "Display-only helper cells include operator-configured helper columns "
+        "such as 合計 or 副区分; keep them in their own columns and never reinterpret "
+        "them as qty.* targets." in prompt
+    )
+    assert "Do not return structural anchor fields such as date/daypart/menu" in prompt
+    assert "Block-level helper columns such as 合計 belong to the whole date/daypart block" in prompt
+    assert "Do not create new remarks from side notes, allergy notes, prohibited-diet annotations, or margin text" in prompt
+    assert "Do not move fax-side side notes or forbidden-diet annotations into the remarks column" in prompt
+
+
+def test_build_llm_assist_prompt_ignores_extra_fax_numeric_columns_and_left_shift():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "remarks",
+        ],
+        "rows": [
+            ["04/29", "昼", "Menu A", "", "", "", "", ""],
+            ["04/29", "昼", "Menu B", "", "", "", "", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "baseline_source": "sheet",
+        "structure_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "remarks",
+        ],
+        "structure_rows": [
+            ["04/29", "昼", "Menu A", "", "", "", "", ""],
+            ["04/29", "昼", "Menu B", "", "", "", "", ""],
+        ],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["04/29", "主", "Menu A", "105", "105", "58", "34", "肉4"],
+            ["04/29", "副", "Menu B", "105", "105", "67", "38", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "Fax-side numeric columns with no clear target header match" in prompt
+    assert "must be ignored rather than shifted into the nearest target column." in prompt
+    assert "Never shift a contiguous run of quantities left or right just to populate more target columns." in prompt
+    assert "fill only those supported targets and leave the remaining target columns blank." in prompt
+
+
+def test_build_llm_assist_prompt_maps_only_explicit_singular_side_note_labels():
+    template = {
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "remarks",
+        ],
+    }
+    baseline = {
+        "fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "remarks",
+        ],
+        "rows": [["04/30", "夕", "Menu A", "", "", "", ""]],
+        "row_ids": ["row-1"],
+        "baseline_source": "sheet",
+        "structure_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "remarks",
+        ],
+        "structure_rows": [["04/30", "夕", "Menu A", "", "", "", ""]],
+    }
+
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template=template,
+        pipeline_output=None,
+        llm_assist=True,
+        baseline=baseline,
+        first_pass_rows_override=[
+            ["04/30", "夕", "Menu A", "肉1", "魚2", "鶏魚1", ""],
+        ],
+    )
+
+    assert prompt is not None
+    assert "For labeled side-note counts such as 肉4, 魚5, or 揚げ物6, map the number only to the semantically matching target column" in prompt
+    assert "If a side-note label is compound, facility-specific, or has no clear target qty.* column, do not force it into the nearest quantity column." in prompt
+
+
 def test_build_llm_assist_prompt_prefers_structural_rows_for_blank_anchor_preservation():
     template = {
         "main_ocr_row_fields": [
@@ -3457,6 +4477,50 @@ def test_augment_llm_reparse_audit_with_structural_feedback_uses_majority_leadin
     assert 17 in dense_fill_rows
 
 
+def test_build_deterministic_llm_reparse_feedback_adds_structural_and_row_count_issues():
+    template = {
+        "columns": [
+            {"index": 0, "role": "date"},
+            {"index": 1, "role": "daypart"},
+            {"index": 2, "role": "menu_name"},
+            {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": "2F"},
+        ],
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+    }
+
+    feedback = order_service._build_deterministic_llm_reparse_feedback(
+        candidate_rows=[
+            ["04/26", "朝", "Menu A", "9"],
+            ["04/26", "朝", "Menu B", "5"],
+            ["04/26", "昼", "Menu C", "7"],
+        ],
+        template=template,
+        baseline_fields=["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        baseline_rows=[
+            ["04/26", "朝", "Menu A", ""],
+            ["04/26", "朝", "Menu B", "5"],
+            ["04/26", "昼", "Menu C", ""],
+        ],
+        reference_rows=[
+            ["04/26", "朝", "Menu A", ""],
+            ["04/26", "朝", "Menu B", "5"],
+        ],
+        expected_row_count=4,
+    )
+
+    assert feedback is not None
+    assert feedback["provider"] == "deterministic"
+    assert feedback["status"] == "fail"
+    issue_codes = {
+        str(item.get("issue_code"))
+        for item in (feedback.get("issues") or [])
+        if isinstance(item, dict)
+    }
+    assert "row_count_shortfall" in issue_codes
+    assert "missing_blank_anchor_rows" in issue_codes
+    assert "unexpected_dense_fill" in issue_codes
+
+
 def test_realign_quantity_only_rows_to_structural_blank_anchors_rotates_block_fill_into_blank_anchors():
     template = {
         "columns": [
@@ -3882,7 +4946,7 @@ def test_resolve_reparse_llm_baseline_prefers_current_sheet_rows(monkeypatch):
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda order_id: (
+        lambda order_id, **_kwargs: (
             {
                 "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
                 "rows": [
@@ -3932,7 +4996,7 @@ def test_resolve_reparse_llm_baseline_prefers_full_structure_when_current_sheet_
     monkeypatch.setattr(
         order_service,
         "get_ocr_sheet",
-        lambda order_id: (
+        lambda order_id, **_kwargs: (
             {
                 "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
                 "rows": [
@@ -4147,6 +5211,13 @@ def test_reparse_order_llm_assist_ignores_cached_order_rows_when_first_pass_rows
     order = order_service.create_order_from_ingest(payload, lines=[])
     canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
     canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [[canonical_mmdd, canonical_daypart, canonical_menu, ""]],
+        "row_ids": ["row-1"],
+        "source": "weekly_menu+payload_row",
+    }
     audit_candidates: list[list[list[str]]] = []
 
     def _fake_pipeline(**_kwargs):
@@ -4207,6 +5278,7 @@ def test_reparse_order_llm_assist_ignores_cached_order_rows_when_first_pass_rows
     monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
     monkeypatch.setattr(order_service, "_load_order_ocr_cache", _fake_load_order_ocr_cache)
     monkeypatch.setattr(order_service, "get_ocr_output", lambda order_id, *, persist_cache=False: (None, "ocr_output_invalid"))
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
     monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
     monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
     monkeypatch.setattr(order_service, "_run_llm_reparse_audit", _fake_audit)
@@ -4386,8 +5458,8 @@ def test_build_quantity_only_repair_prompts_include_evaluator_feedback_and_struc
     assert "Do not compress blank rows out of the output" in system_prompt
     assert "re-check every date/daypart block for the same pattern" in system_prompt
     assert "Existing quantities in the current sheet may be stale" in system_prompt
-    assert "Return the full structural rows from the current sheet" in system_prompt
-    assert "Copy date/daypart/menu cells from the current sheet exactly" in system_prompt
+    assert "Return sparse row patches only." in system_prompt
+    assert "Do not return structural anchor fields such as date/daypart/menu" in system_prompt
     assert "Evaluator feedback from previous OCR draft" in user_prompt
     assert "missing_blank_anchor_rows" in user_prompt
 
@@ -4511,6 +5583,14 @@ def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecif
     )
     order = order_service.create_order_from_ingest(payload, lines=[])
     canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [[canonical_mmdd, canonical_daypart, canonical_menu, ""]],
+        "row_ids": ["row-1"],
+        "source": "weekly_menu+payload_row",
+    }
     provider_calls: list[str] = []
 
     def _fake_pipeline(**_kwargs):
@@ -4535,11 +5615,11 @@ def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecif
         return FaxExtractedData(
             facility_name="Test Facility",
             date_strings=["2026/02/15"],
-            table_rows=[["02/15", canonical_daypart, canonical_menu, "7"]],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
             tokens=[],
             grid=None,
             ocr_provider=provider,
-            provider_debug={"provider": provider, "quantity_only_mode": True},
+            provider_debug={"provider": provider, "full_table_mode": True},
         )
 
     def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
@@ -4558,6 +5638,7 @@ def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecif
 
     monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
     monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
     monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
     monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
     monkeypatch.setattr(order_service, "_has_gemini_api_key", lambda: True)
@@ -4573,6 +5654,130 @@ def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecif
     assert job is not None
     metrics = job.get("metrics") or {}
     assert metrics.get("provider") == "gemini"
+
+
+def test_reparse_order_llm_assist_rejects_sparse_quantity_only_rows_when_full_table_anchor_required(
+    monkeypatch,
+    tmp_path,
+):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-assist-sparse-rows-rejected.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-assist-sparse-rows-rejected-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [[canonical_mmdd, canonical_daypart, canonical_menu, ""]],
+        "row_ids": ["row-1"],
+        "source": "weekly_menu+payload_row",
+    }
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "extract_fax_data",
+        lambda *_args, **_kwargs: FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[["7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "quantity_only_mode": True},
+        ),
+    )
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **_kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "llm_full_table_structural_drift"
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "done"
+    assert (job.get("metrics") or {}).get("error") == "llm_full_table_structural_drift"
+
+
+def test_reparse_order_llm_assist_blocks_provider_fallback_pipeline(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-assist-provider-fallback-blocked.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-assist-provider-fallback-blocked-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [[canonical_mmdd, canonical_daypart, canonical_menu, ""]],
+        "row_ids": ["row-1"],
+        "source": "weekly_menu+payload_row",
+    }
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "extract_fax_data",
+        lambda *_args, **_kwargs: FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini_fallback_pipeline",
+            provider_debug={
+                "provider": "gemini_fallback_pipeline",
+                "fallback_reason": "Gemini OCR timeout after 240s",
+            },
+        ),
+    )
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "llm_provider_fallback_pipeline"
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert (job.get("metrics") or {}).get("error") == "llm_provider_fallback_pipeline"
+    assert (job.get("metrics") or {}).get("actual_provider") == "gemini_fallback_pipeline"
 
 
 def test_reparse_order_with_yomitoku_rows_runs_evaluator_before_llm_inference(monkeypatch, tmp_path):
@@ -6520,6 +7725,698 @@ def test_reparse_order_rejects_when_llm_audit_fails(monkeypatch, tmp_path):
     assert latest.get("draft_from_reparse_reject") is True
 
 
+def test_publish_applied_reparse_revision_supersedes_stale_reject_candidate_and_preserves_aux_display():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+    diet_key, area_key = order_service._quantity_meta_from_field(quantity_fields[0])
+    assert diet_key and area_key
+
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": canonical_date,
+                "daypart": canonical_daypart,
+                "menu_name": canonical_menu,
+                "diet_type": diet_key,
+                "area_id": area_key,
+                "bag_type": "standard",
+                "quantity_original": 5,
+            }
+        ],
+    )
+
+    def _build_row(*, aux_total: str, qty_value: str) -> list[str]:
+        row = [""] * len(fields)
+        row[fields.index("date_mmdd")] = canonical_mmdd
+        row[fields.index("daypart")] = canonical_daypart
+        menu_field = "menu" if "menu" in fields else "menu_name"
+        row[fields.index(menu_field)] = canonical_menu
+        row[fields.index(aux_fields[0])] = "主"
+        row[fields.index(aux_fields[1])] = aux_total
+        row[fields.index(quantity_fields[0])] = qty_value
+        return row
+
+    stale_rows = [_build_row(aux_total="5", qty_value="5")]
+    stale_row_ids = ["draft-1"]
+    stale_digest = order_service._sheet_digest(
+        fields=fields,
+        header=header,
+        rows_payload=stale_rows,
+        row_ids=stale_row_ids,
+    )
+    order_service._append_edited_ocr_revision(
+        order_id=order["id"],
+        ui_mode="sheet",
+        fields=fields,
+        header=header,
+        rows_payload=stale_rows,
+        row_ids=stale_row_ids,
+        before_digest=stale_digest,
+        after_digest=stale_digest,
+        revision_meta={
+            "sheet_save_only": True,
+            "sheet_save_mode": "draft_candidate",
+            "review_state": "auto_apply_blocked",
+            "draft_from_reparse_reject": True,
+            "raw_output_override": order_service._build_revision_raw_output_override(
+                fields=fields,
+                header=header,
+                rows=stale_rows,
+                template=template,
+                provider="gemini",
+            ),
+        },
+    )
+
+    applied_line = {
+        "id": "line-applied-1",
+        "date": canonical_date,
+        "daypart": canonical_daypart,
+        "menu_name": canonical_menu,
+        "diet_type": diet_key,
+        "area_id": area_key,
+        "bag_type": "standard",
+        "quantity_original": 70,
+    }
+    applied_ocr_rows = [_build_row(aux_total="70", qty_value="70")]
+
+    contaminated_current_rows = [_build_row(aux_total="70", qty_value="")]
+
+    order_service._publish_applied_reparse_revision(
+        order_id=order["id"],
+        template=template,
+        previous_sheet_context={
+            "fields": fields,
+            "header": header,
+            "rows": stale_rows,
+            "row_ids": stale_row_ids,
+        },
+        current_sheet_context={
+            "fields": fields,
+            "header": header,
+            "rows": contaminated_current_rows,
+            "row_ids": ["row-1"],
+        },
+        ocr_rows=applied_ocr_rows,
+        provider="gemini",
+        llm_assist=True,
+        warning_reasons=[],
+    )
+
+    cached_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    latest = ((cached_payload.get("_edited_ocr") or {}).get("latest") or {})
+    assert latest.get("sheet_save_mode") == "applied"
+    assert latest.get("reparse_applied") is True
+    assert latest.get("draft_from_reparse_reject") in {None, False}
+    assert latest.get("row_count") == 1
+    assert latest.get("rows", [])[0][fields.index(aux_fields[1])] == "70"
+    assert latest.get("rows", [])[0][fields.index(quantity_fields[0])] == "70"
+
+
+def test_publish_applied_reparse_revision_is_idempotent_for_same_applied_sheet():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-002",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+    diet_key, area_key = order_service._quantity_meta_from_field(quantity_fields[0])
+    assert diet_key and area_key
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    ocr_row = [""] * len(fields)
+    ocr_row[fields.index("date_mmdd")] = canonical_mmdd
+    ocr_row[fields.index("daypart")] = canonical_daypart
+    menu_field = "menu" if "menu" in fields else "menu_name"
+    ocr_row[fields.index(menu_field)] = canonical_menu
+    ocr_row[fields.index(aux_fields[0])] = "主"
+    ocr_row[fields.index(aux_fields[1])] = "70"
+    ocr_row[fields.index(quantity_fields[0])] = "70"
+    applied_lines = [
+        {
+            "id": "line-applied-2",
+            "date": canonical_date,
+            "daypart": canonical_daypart,
+            "menu_name": canonical_menu,
+            "diet_type": diet_key,
+            "area_id": area_key,
+            "bag_type": "standard",
+            "quantity_original": 70,
+        }
+    ]
+
+    order_service._publish_applied_reparse_revision(
+        order_id=order["id"],
+        template=template,
+        previous_sheet_context={
+            "fields": fields,
+            "header": order_service._sheet_header_from_template(fields, template),
+            "rows": [],
+            "row_ids": [],
+        },
+        current_sheet_context={
+            "fields": fields,
+            "header": order_service._sheet_header_from_template(fields, template),
+            "rows": [ocr_row],
+            "row_ids": ["row-1"],
+        },
+        ocr_rows=[ocr_row],
+        provider="gemini",
+        llm_assist=True,
+        warning_reasons=[],
+    )
+    first_history, first_error = order_service.get_ocr_edit_history(order["id"])
+    assert first_error is None
+    first_count = len(first_history.get("revisions") or [])
+
+    order_service._publish_applied_reparse_revision(
+        order_id=order["id"],
+        template=template,
+        previous_sheet_context={
+            "fields": fields,
+            "header": order_service._sheet_header_from_template(fields, template),
+            "rows": [],
+            "row_ids": [],
+        },
+        current_sheet_context={
+            "fields": fields,
+            "header": order_service._sheet_header_from_template(fields, template),
+            "rows": [ocr_row],
+            "row_ids": ["row-1"],
+        },
+        ocr_rows=[ocr_row],
+        provider="gemini",
+        llm_assist=True,
+        warning_reasons=[],
+    )
+    second_history, second_error = order_service.get_ocr_edit_history(order["id"])
+    assert second_error is None
+    second_count = len(second_history.get("revisions") or [])
+    assert second_count == first_count
+    assert (second_history.get("latest") or {}).get("sheet_save_mode") == "applied"
+
+
+def test_publish_applied_reparse_revision_refreshes_authoritative_raw_output_for_latest_sync():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-authoritative-raw-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    def _row(*, menu_name: str, daypart: str, qty_value: str) -> list[str]:
+        row = [""] * len(fields)
+        row[fields.index("date_mmdd")] = "02/15"
+        row[fields.index("daypart")] = daypart
+        menu_field = "menu" if "menu" in fields else "menu_name"
+        row[fields.index(menu_field)] = menu_name
+        row[fields.index(aux_fields[0])] = "主"
+        row[fields.index(quantity_fields[0])] = qty_value
+        return row
+
+    current_rows = [
+        _row(menu_name="Menu A", daypart="朝", qty_value="70"),
+        _row(menu_name="Menu B", daypart="朝", qty_value="70"),
+        _row(menu_name="Menu C", daypart="昼", qty_value="105"),
+        _row(menu_name="Menu D", daypart="昼", qty_value="105"),
+        _row(menu_name="Menu E", daypart="昼", qty_value="105"),
+    ]
+    current_sheet_context = {
+        "fields": fields,
+        "header": header,
+        "rows": current_rows,
+        "row_ids": [f"row-{idx + 1}" for idx in range(len(current_rows))],
+    }
+
+    total_idx = fields.index(aux_fields[1])
+    authoritative_rows = [list(row) for row in current_rows]
+    for row_index, total in enumerate(["70", "70", "105", "105", "105"]):
+        authoritative_rows[row_index][total_idx] = total
+    stale_rows = [list(row) for row in current_rows]
+    stale_rows[0][total_idx] = "70"
+
+    authoritative_payload = order_service._build_revision_raw_output_override(
+        fields=fields,
+        header=header,
+        rows=authoritative_rows,
+        template=template,
+        provider="gemini",
+    )
+    stale_raw_output = order_service._build_revision_raw_output_override(
+        fields=fields,
+        header=header,
+        rows=stale_rows,
+        template=template,
+        provider="gemini",
+    )
+    authoritative_payload["_edited_ocr"] = {
+        "raw_output": stale_raw_output,
+    }
+    order_service._save_order_ocr_cache(order["id"], authoritative_payload)
+
+    order_service._publish_applied_reparse_revision(
+        order_id=order["id"],
+        template=template,
+        previous_sheet_context={
+            "fields": fields,
+            "header": header,
+            "rows": stale_rows,
+            "row_ids": [f"stale-{idx + 1}" for idx in range(len(stale_rows))],
+        },
+        current_sheet_context=current_sheet_context,
+        ocr_rows=current_rows,
+        raw_output_payload=authoritative_payload,
+        provider="gemini",
+        llm_assist=True,
+        warning_reasons=[],
+    )
+
+    cached_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    refreshed_raw_output = ((cached_payload.get("_edited_ocr") or {}).get("raw_output") or {})
+    refreshed_rows = refreshed_raw_output.get("rows") or []
+    assert len(refreshed_rows) == 5
+    assert [row[total_idx] for row in refreshed_rows] == ["70", "70", "105", "105", "105"]
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(order_service, "get_current_sheet_context", lambda *_args, **_kwargs: current_sheet_context)
+    synced_payload, changed = order_service._sync_edited_ocr_latest_from_canonical_revision(
+        order_id=order["id"],
+        payload=cached_payload,
+        template=template,
+    )
+    monkeypatch.undo()
+    assert changed is False
+    latest = (((synced_payload or {}).get("_edited_ocr") or {}).get("latest") or {})
+    assert latest.get("sheet_save_mode") == "applied"
+    assert latest.get("reparse_applied") is True
+    assert latest.get("row_count") == 5
+    assert [row[total_idx] for row in (latest.get("rows") or [])[:2]] == ["70", "70"]
+
+
+def test_sync_edited_ocr_latest_from_canonical_revision_overrides_stale_cached_latest():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-003",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+    diet_key, area_key = order_service._quantity_meta_from_field(quantity_fields[0])
+    assert diet_key and area_key
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    def _row(*, aux_total: str, qty_value: str) -> list[str]:
+        row = [""] * len(fields)
+        row[fields.index("date_mmdd")] = canonical_mmdd
+        row[fields.index("daypart")] = canonical_daypart
+        menu_field = "menu" if "menu" in fields else "menu_name"
+        row[fields.index(menu_field)] = canonical_menu
+        row[fields.index(aux_fields[0])] = "主"
+        row[fields.index(aux_fields[1])] = aux_total
+        row[fields.index(quantity_fields[0])] = qty_value
+        return row
+
+    stale_rows = [_row(aux_total="5", qty_value="5")]
+    authoritative_payload = order_service._build_revision_raw_output_override(
+        fields=fields,
+        header=header,
+        rows=[_row(aux_total="70", qty_value="70")],
+        template=template,
+        provider="gemini",
+    )
+    order_service._save_order_ocr_cache(order["id"], authoritative_payload)
+    stale_digest = order_service._sheet_digest(
+        fields=fields,
+        header=header,
+        rows_payload=stale_rows,
+        row_ids=["draft-1"],
+    )
+    order_service._append_edited_ocr_revision(
+        order_id=order["id"],
+        ui_mode="sheet",
+        fields=fields,
+        header=header,
+        rows_payload=stale_rows,
+        row_ids=["draft-1"],
+        before_digest=stale_digest,
+        after_digest=stale_digest,
+        revision_meta={
+            "sheet_save_only": True,
+            "sheet_save_mode": "draft_candidate",
+            "review_state": "auto_apply_blocked",
+            "draft_from_reparse_reject": True,
+            "raw_output_override": order_service._build_revision_raw_output_override(
+                fields=fields,
+                header=header,
+                rows=stale_rows,
+                template=template,
+                provider="gemini",
+            ),
+        },
+    )
+
+    order_service._publish_applied_reparse_revision(
+        order_id=order["id"],
+        template=template,
+        previous_sheet_context={
+            "fields": fields,
+            "header": header,
+            "rows": stale_rows,
+            "row_ids": ["draft-1"],
+        },
+        current_sheet_context={
+            "fields": fields,
+            "header": header,
+            "rows": [_row(aux_total="70", qty_value="70")],
+            "row_ids": ["row-1"],
+        },
+        ocr_rows=[_row(aux_total="70", qty_value="70")],
+        raw_output_payload=authoritative_payload,
+        provider="gemini",
+        llm_assist=True,
+        warning_reasons=[],
+    )
+
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        assert cache is not None
+        payload_json = dict(cache.payload or {})
+        edited = dict(payload_json.get("_edited_ocr") or {})
+        stale_latest = {
+            "revision_id": "OCRREV-stale-cached",
+            "edited_at": "2026-02-15T00:00:00",
+            "ui_mode": "sheet",
+            "fields": fields,
+            "header": header,
+            "row_ids": ["draft-1"],
+            "rows": stale_rows,
+            "row_count": 1,
+            "before_digest": stale_digest,
+            "after_digest": stale_digest,
+            "changed": False,
+            "sheet_save_only": True,
+            "sheet_save_mode": "draft_candidate",
+            "review_state": "auto_apply_blocked",
+            "draft_from_reparse_reject": True,
+            "markdown": order_service._build_markdown_table_string(header, stale_rows),
+        }
+        edited["latest"] = stale_latest
+        edited["revisions"] = [stale_latest]
+        payload_json["_edited_ocr"] = edited
+        cache.payload = payload_json
+
+    stale_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    latest_before = ((stale_payload.get("_edited_ocr") or {}).get("latest") or {})
+    assert latest_before.get("sheet_save_mode") == "draft_candidate"
+
+    current_sheet_context = {
+        "fields": fields,
+        "header": header,
+        "rows": [_row(aux_total="70", qty_value="70")],
+        "row_ids": ["row-1"],
+    }
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(order_service, "get_current_sheet_context", lambda *_args, **_kwargs: current_sheet_context)
+    synced_payload, changed = order_service._sync_edited_ocr_latest_from_canonical_revision(
+        order_id=order["id"],
+        payload=stale_payload,
+        template=template,
+    )
+    monkeypatch.undo()
+    assert changed is True
+    latest_after = (((synced_payload or {}).get("_edited_ocr") or {}).get("latest") or {})
+    assert latest_after.get("sheet_save_mode") == "applied"
+    assert latest_after.get("reparse_applied") is True
+    assert latest_after.get("rows", [])[0][fields.index(aux_fields[1])] == "70"
+
+
+def test_sync_edited_ocr_latest_from_canonical_revision_refreshes_raw_output_when_latest_already_matches():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-raw-refresh-001",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+    order = order_service.create_order_from_ingest(payload, lines=[])
+
+    def _row(*, aux_total: str, qty_value: str) -> list[str]:
+        row = [""] * len(fields)
+        row[fields.index("date_mmdd")] = "02/15"
+        row[fields.index("daypart")] = "朝"
+        menu_field = "menu" if "menu" in fields else "menu_name"
+        row[fields.index(menu_field)] = "Menu A"
+        row[fields.index(aux_fields[0])] = "主"
+        row[fields.index(aux_fields[1])] = aux_total
+        row[fields.index(quantity_fields[0])] = qty_value
+        return row
+
+    applied_row = _row(aux_total="70", qty_value="70")
+    authoritative_payload = order_service._build_revision_raw_output_override(
+        fields=fields,
+        header=header,
+        rows=[applied_row],
+        template=template,
+        provider="gemini",
+    )
+    order_service._save_order_ocr_cache(order["id"], authoritative_payload)
+
+    stale_raw_output = order_service._build_revision_raw_output_override(
+        fields=fields,
+        header=header,
+        rows=[_row(aux_total="5", qty_value="70")],
+        template=template,
+        provider="gemini",
+    )
+    applied_digest = order_service._sheet_digest(
+        fields=fields,
+        header=header,
+        rows_payload=[applied_row],
+        row_ids=["row-1"],
+    )
+    order_service._append_edited_ocr_revision(
+        order_id=order["id"],
+        ui_mode="sheet",
+        fields=fields,
+        header=header,
+        rows_payload=[applied_row],
+        row_ids=["row-1"],
+        before_digest=applied_digest,
+        after_digest=applied_digest,
+        revision_meta={
+            "sheet_save_only": False,
+            "sheet_save_mode": "applied",
+            "review_state": "applied",
+            "reparse_applied": True,
+            "provider": "gemini",
+            "raw_output_override": stale_raw_output,
+        },
+    )
+
+    cached_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    raw_before = (((cached_payload.get("_edited_ocr") or {}).get("raw_output") or {}).get("rows") or [])
+    assert raw_before[0][fields.index(aux_fields[1])] == "5"
+
+    current_sheet_context = {
+        "fields": fields,
+        "header": header,
+        "rows": [applied_row],
+        "row_ids": ["row-1"],
+    }
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(order_service, "get_current_sheet_context", lambda *_args, **_kwargs: current_sheet_context)
+    synced_payload, changed = order_service._sync_edited_ocr_latest_from_canonical_revision(
+        order_id=order["id"],
+        payload=cached_payload,
+        template=template,
+    )
+    monkeypatch.undo()
+
+    assert changed is True
+    raw_after = (((synced_payload or {}).get("_edited_ocr") or {}).get("raw_output") or {}).get("rows") or []
+    assert raw_after[0][fields.index(aux_fields[1])] == "70"
+    latest_after = (((synced_payload or {}).get("_edited_ocr") or {}).get("latest") or {})
+    assert latest_after.get("rows", [])[0][fields.index(aux_fields[1])] == "70"
+
+
+def test_sync_edited_ocr_latest_from_canonical_revision_keeps_applied_revision_rows_immutable():
+    order_service.clear_all()
+    payload = IngestEmailPayload(
+        message_id="msg-reparse-applied-revision-004",
+        pdf_uri="file://dummy.pdf",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00004",
+        week_hint="2026-02",
+    )
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._row_fields_from_template(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    quantity_fields = [field for field in fields if field.startswith("qty.")]
+    aux_fields = [field for field in fields if field.startswith("aux.")]
+    menu_field = "menu" if "menu" in fields else "menu_name"
+    assert quantity_fields
+    assert len(aux_fields) >= 2
+
+    order = order_service.create_order_from_ingest(
+        payload,
+        lines=[
+            {
+                "date": "2026-02-01",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 70,
+            },
+            {
+                "date": "2026-02-01",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "no_fish",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 3,
+            },
+            {
+                "date": "2026-02-01",
+                "daypart": "昼",
+                "menu_name": "Menu A",
+                "diet_type": "no_fried",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 6,
+            },
+        ],
+    )
+    order_service._invalidate_current_sheet_state_after_order_lines_write(order["id"])
+    current_sheet_context = order_service.get_current_sheet_context(
+        order["id"],
+        refresh_draft_from_semantic=True,
+        upgrade_generic_from_sheet=True,
+        backfill_from_revision=False,
+    )
+
+    expanded_rows = []
+    for aux_total, qty_regular, qty_no_fish, qty_no_fried in [
+        ("70", "70", "", ""),
+        ("", "", "3", ""),
+        ("", "", "", "6"),
+    ]:
+        row = [""] * len(fields)
+        row[fields.index("date_mmdd")] = "02/01"
+        row[fields.index("daypart")] = "昼"
+        row[fields.index(menu_field)] = "Menu A"
+        row[fields.index(aux_fields[0])] = "主"
+        row[fields.index(aux_fields[1])] = aux_total
+        row[fields.index("qty.regular_x")] = qty_regular
+        row[fields.index("qty.no_fish_x")] = qty_no_fish
+        row[fields.index("qty.no_fried_x")] = qty_no_fried
+        expanded_rows.append(row)
+
+    expanded_digest = order_service._sheet_digest(
+        fields=fields,
+        header=header,
+        rows_payload=expanded_rows,
+        row_ids=["row-1", "row-2", "row-3"],
+    )
+    order_service._append_edited_ocr_revision(
+        order_id=order["id"],
+        ui_mode="sheet",
+        fields=fields,
+        header=header,
+        rows_payload=expanded_rows,
+        row_ids=["row-1", "row-2", "row-3"],
+        before_digest=expanded_digest,
+        after_digest=expanded_digest,
+        revision_meta={
+            "sheet_save_only": False,
+            "sheet_save_mode": "applied",
+            "review_state": "applied",
+            "reparse_applied": True,
+            "provider": "gemini",
+            "raw_output_override": order_service._build_revision_raw_output_override(
+                fields=fields,
+                header=header,
+                rows=expanded_rows,
+                template=template,
+                provider="gemini",
+            ),
+        },
+    )
+
+    payload_with_revision = order_service.get_cached_ocr_payload(order["id"]) or {}
+    synced_payload, changed = order_service._sync_edited_ocr_latest_from_canonical_revision(
+        order_id=order["id"],
+        payload=payload_with_revision,
+        template=template,
+    )
+    assert changed is True
+    latest = (((synced_payload or {}).get("_edited_ocr") or {}).get("latest") or {})
+    assert latest.get("sheet_save_mode") == "applied"
+    assert latest.get("reparse_applied") is True
+    assert latest.get("row_count") == 3
+    latest_rows = latest.get("rows") or []
+    assert [row[fields.index(aux_fields[1])] for row in latest_rows] == ["70", "", ""]
+    assert [row[fields.index("qty.regular_x")] for row in latest_rows] == ["70", "", ""]
+    assert [row[fields.index("qty.no_fish_x")] for row in latest_rows] == ["", "3", ""]
+    assert [row[fields.index("qty.no_fried_x")] for row in latest_rows] == ["", "", "6"]
+
+
 def test_resolve_llm_audit_provider_defaults_to_cross_model(monkeypatch):
     monkeypatch.delenv("OCR_REPARSE_AUDIT_PROVIDER", raising=False)
     assert (
@@ -6982,6 +8879,54 @@ def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructio
     assert "Primary goal: verify quantity digits before changing structure." in prompt
 
 
+def test_build_llm_assist_prompt_includes_merged_cell_span_preset_instructions():
+    prompt = order_service._build_llm_assist_prompt(
+        provider="gemini",
+        template={"gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
+        pipeline_output={
+            "pages": [
+                {
+                    "page_index": 1,
+                    "tables": [
+                        {
+                            "table_id": "p1_t1",
+                            "rows": [
+                                ["日付", "区分", "メニュー", "常食", "糖尿"],
+                                ["03/22", "朝", "Menu A", "5", ""],
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "cell_issues": [
+                {
+                    "table_id": "p1_t1",
+                    "page_index": 1,
+                    "row_index": 1,
+                    "col_index": 3,
+                    "issue_code": "merged_numeric_cell",
+                    "row_span": 2,
+                    "col_span": 1,
+                    "text": "5",
+                }
+            ],
+        },
+        llm_assist=True,
+        prompt_preset="merged_cell_quantity_spans",
+        baseline={
+            "fields": ["date_mmdd", "daypart", "menu_name", "regular__x", "diabetes__x"],
+            "rows": [["03/22", "朝", "Menu A", "", ""]],
+            "structure_fields": ["date_mmdd", "daypart", "menu_name", "regular__x", "diabetes__x"],
+            "structure_rows": [["03/22", "朝", "Menu A", "", ""]],
+        },
+    )
+
+    assert isinstance(prompt, str)
+    assert "Operator-selected focus preset" in prompt
+    assert "resolve quantity cells that visually span multiple menu rows" in prompt
+    assert "Never carry a merged quantity across a date boundary" in prompt
+
+
 def test_build_llm_review_prompt_includes_baseline_tables_and_cell_issues():
     template = {
         "main_ocr_row_fields": [
@@ -7105,6 +9050,35 @@ def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_missing(m
     assert meta["used"] == "raw"
     assert meta["fallback_reason"] == "corrected_pdf_unavailable_in_backend_cache"
     assert captured_uris == ["gs://bucket/raw.pdf"]
+
+
+def test_resolve_llm_review_pdf_bytes_falls_back_to_ocr_pdf_when_corrected_missing(monkeypatch):
+    captured_uris: list[str] = []
+
+    def _fake_load_bytes(uri: str) -> bytes:
+        captured_uris.append(uri)
+        if uri == "gs://bucket/ocr.pdf":
+            return b"%PDF-ocr\n%EOF\n"
+        raise AssertionError(f"unexpected uri: {uri}")
+
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
+
+    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
+        document_uri="gs://bucket/raw.pdf",
+        payload={
+            "combined": {
+                "ocr_pdf": "gs://bucket/ocr.pdf",
+            }
+        },
+        requested_variant="corrected",
+    )
+
+    assert pdf_bytes == b"%PDF-ocr\n%EOF\n"
+    assert meta["requested"] == "corrected"
+    assert meta["used"] == "ocr"
+    assert meta["fallback_reason"] == "corrected_pdf_unavailable_in_backend_cache"
+    assert meta["ocr_pdf"] == "gs://bucket/ocr.pdf"
+    assert captured_uris == ["gs://bucket/ocr.pdf"]
 
 
 def test_extract_corrected_pdf_uri_from_nested_review_payload():
@@ -7297,7 +9271,7 @@ def test_reparse_order_llm_path_uses_rescued_first_pass_payload_and_corrected_pd
     assert job["metrics"]["pipeline_run_skipped"] is True
 
 
-def test_reparse_order_llm_path_fast_fails_when_first_pass_ocr_missing(monkeypatch, tmp_path):
+def test_reparse_order_llm_path_marks_awaiting_output_when_fresh_first_pass_output_is_still_pending(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-gemini-missing-first-pass.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -7312,8 +9286,6 @@ def test_reparse_order_llm_path_fast_fails_when_first_pass_ocr_missing(monkeypat
 
     pipeline_calls: list[dict] = []
     wait_calls: list[tuple[str | None, float | None]] = []
-    get_ocr_output_calls: list[bool] = []
-
     def _fake_pipeline(**kwargs):
         pipeline_calls.append(kwargs)
         return "file://pipeline-output.json"
@@ -7322,29 +9294,111 @@ def test_reparse_order_llm_path_fast_fails_when_first_pass_ocr_missing(monkeypat
         wait_calls.append((_ref, wait_seconds_override))
         return None
 
-    def _fake_get_ocr_output(order_id: str, *, persist_cache: bool = True):
-        assert order_id == order["id"]
-        get_ocr_output_calls.append(persist_cache)
-        return None, "ocr_output_not_found"
-
+    monkeypatch.setattr(order_service, "_load_existing_first_pass_payload_for_reparse", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
     monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _fake_load_pipeline_output_with_retry)
-    monkeypatch.setattr(order_service, "get_ocr_output", _fake_get_ocr_output)
+    monkeypatch.setattr(
+        order_service,
+        "run_ocr_pipeline",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            order_service.OCRPipelineOutputPendingError(
+                input_reference="file://reparse-input.pdf",
+                output_reference="file://pipeline-output.json",
+                timeout_seconds=600,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_get_ocr_output_without_legacy_edits",
+        lambda *_args, **_kwargs: (None, "ocr_output_not_found"),
+    )
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
 
-    assert updated is None
-    assert error == "first_pass_ocr_missing"
-    assert len(pipeline_calls) == 1
-    assert len(wait_calls) == 1
-    assert wait_calls[0][1] == 20.0
-    assert get_ocr_output_calls
+    assert error is None
+    assert updated == {"status": "running", "output_reference": "file://pipeline-output.json"}
+    assert pipeline_calls == []
+    assert wait_calls == []
     job = get_job(f"OCR-{order['id']}")
     assert job is not None
-    assert job["status"] == "failed"
-    assert job["metrics"]["processing_stage"] == "first_pass_missing"
-    assert job["metrics"]["result_state"] == "hard_failed"
-    assert job["error_message"] == "first_pass_ocr_missing"
+    assert job["status"] == "awaiting_output"
+    assert job["metrics"]["processing_stage"] == "ocr_pipeline"
+    assert job["metrics"]["result_state"] == "awaiting_output"
+    assert job["metrics"]["error"] == "ocr_output_pending"
+    assert job["metrics"]["output_reference"] == "file://pipeline-output.json"
+    assert job["metrics"]["first_pass_wait_seconds"] == 600.0
+    assert job["metrics"]["reused_first_pass"] is False
+    assert job["error_message"] == "ocr_output_pending"
+
+
+def test_reconcile_completed_llm_reparse_resumes_from_completed_first_pass_output(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-gemini-awaiting-output-reconcile.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-gemini-awaiting-output-reconcile-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 16, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    output_path = tmp_path / "completed-first-pass.json"
+    output_path.write_text(
+        (
+            '{"status":"done","table_raw":"|02/16|朝|Menu A|2|",'
+            '"rows":[["02/16","朝","Menu A","2"]],'
+            '"table_rows":[["02/16","朝","Menu A","2"]],'
+            '"tables":[{"rows":[["02/16","朝","Menu A","2"]]}],'
+            '"pages":[{"tables":[{"rows":[["02/16","朝","Menu A","2"]]}]}]}'
+        ),
+        encoding="utf-8",
+    )
+
+    job_id = f"OCR-{order['id']}"
+    order_service.create_job(job_id, input_reference=order["document"], status="awaiting_output")
+    order_service.update_job(
+        job_id,
+        status="awaiting_output",
+        output_reference=f"file://{output_path}",
+        error_message="ocr_output_pending",
+        metrics={
+            "request_mode": "llm_reparse",
+            "reparse_ocr_prompt": "custom prompt",
+            "reparse_prompt_preset": "operator-tuned",
+            "reparse_requested_provider": "gemini",
+            "reparse_ocr_model": "gemini-2.5-pro",
+            "reparse_llm_assist": True,
+            "processing_stage": "ocr_pipeline",
+            "result_state": "awaiting_output",
+            "output_reference": f"file://{output_path}",
+            "order_id": order["id"],
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_reparse(order_id, **kwargs):
+        captured["order_id"] = order_id
+        captured.update(kwargs)
+        return {"status": "running"}, None
+
+    monkeypatch.setattr(order_service, "reparse_order", _fake_reparse)
+
+    assert order_service.reconcile_completed_ocr_job(job_id) is True
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_prompt"] == "custom prompt"
+    assert captured["prompt_preset"] == "operator-tuned"
+    assert captured["ocr_provider"] == "gemini"
+    assert captured["ocr_model"] == "gemini-2.5-pro"
+    assert captured["llm_assist"] is True
+    assert captured["resume_first_pass_output_reference"] == f"file://{output_path}"
+    assert isinstance(captured["resume_first_pass_payload"], dict)
+    job = get_job(job_id)
+    assert job is not None
+    assert job["status"] == "recovering"
+    assert job["metrics"]["result_state"] == "recovering"
 
 
 def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeypatch, tmp_path):
@@ -7778,3 +9832,899 @@ def test_apply_llm_review_overwrites_rejects_invalid_targets_and_weak_evidence()
         "missing_evidence",
     } <= reject_reasons
     assert result["needs_more_review"] is True
+
+
+def test_validate_and_merge_reparse_full_table_candidate_accepts_quantity_only_diffs():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "5"],
+            ["04/26", "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["04/26", "朝", "Menu A", "11"],
+            ["04/26", "昼", "Menu B", ""],
+        ],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/26", "朝", "Menu A", "11"],
+        ["04/26", "昼", "Menu B", ""],
+    ]
+    assert (result.get("detail") or {}).get("quantity_change_count") == 1
+
+
+def test_validate_and_merge_reparse_full_table_candidate_ignores_shell_owned_remarks_drift():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+        "rows": [["04/26", "朝", "Menu A", "5", ""]],
+        "row_ids": ["row-1"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[["04/26", "朝", "Menu A", "11", "肉4"]],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [["04/26", "朝", "Menu A", "11", ""]]
+    detail = result.get("detail") or {}
+    assert detail.get("quantity_change_count") == 1
+    assert detail.get("ignored_shell_drift_count") == 1
+    assert detail.get("ignored_shell_drift_cells")[0]["field"] == "remarks"
+
+
+def test_validate_and_merge_reparse_full_table_candidate_ignores_display_only_aux_drift():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4", "qty.regular_x", "remarks"],
+        "header": ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"],
+        "rows": [["04/26", "昼", "主", "Menu A", "12", "10", ""]],
+        "row_ids": ["row-1"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[["04/26", "昼", "副", "Menu A", "13", "11", ""]],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [["04/26", "昼", "主", "Menu A", "12", "11", ""]]
+    detail = result.get("detail") or {}
+    assert detail.get("quantity_change_count") == 1
+    assert detail.get("ignored_shell_drift_count") == 2
+    assert {item["field"] for item in detail.get("ignored_shell_drift_cells") or []} == {"aux.col_2", "aux.col_4"}
+
+
+def test_canonicalize_block_helper_display_rows_reanchors_total_to_first_row_of_each_block():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+        ["04/26", "昼", "", "サワラの揚げ浸し", "", "105", ""],
+        ["04/26", "昼", "", "小松菜のお浸し", "105", "105", ""],
+    ]
+
+    resolved_rows, stats = order_service._canonicalize_block_helper_display_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+    )
+
+    assert [row[4] for row in resolved_rows] == ["70", "70", "105", "105"]
+    assert [row[3] for row in resolved_rows] == [
+        "大豆のトマト煮",
+        "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ",
+        "サワラの揚げ浸し",
+        "小松菜のお浸し",
+    ]
+    assert stats.get("helper_reanchor_count") == 2
+    assert stats.get("helper_conflict_count") == 0
+
+
+def test_validate_and_merge_reparse_full_table_candidate_rejects_conflicting_block_total_helper_values():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4", "qty.regular_x", "remarks"],
+        "header": ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"],
+        "rows": [
+            ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+            ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "", "70", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+            ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "71", "70", ""],
+        ],
+    )
+
+    assert merged_rows == []
+    assert result["error"] == "llm_full_table_helper_column_conflict"
+    detail = result.get("detail") or {}
+    assert detail.get("helper_conflict_count") == 1
+    conflict = (detail.get("helper_conflicts") or [])[0]
+    assert conflict.get("field") == "aux.col_4"
+    assert conflict.get("values") == ["70", "71"]
+
+
+def test_validate_and_merge_reparse_full_table_candidate_merges_block_total_helper_from_candidate():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4", "qty.regular_x", "remarks"],
+        "header": ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"],
+        "rows": [
+            ["04/27", "朝", "", "じゃが芋の煮物", "", "70", ""],
+            ["04/27", "朝", "", "チンゲン菜のお浸し", "", "70", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["04/27", "朝", "", "じゃが芋の煮物", "70", "70", ""],
+            ["04/27", "朝", "", "チンゲン菜のお浸し", "70", "70", ""],
+        ],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/27", "朝", "", "じゃが芋の煮物", "70", "70", ""],
+        ["04/27", "朝", "", "チンゲン菜のお浸し", "70", "70", ""],
+    ]
+    detail = result.get("detail") or {}
+    assert detail.get("display_change_count") == 2
+    assert (detail.get("display_changes") or [])[0]["field"] == "aux.col_4"
+
+
+def test_validate_and_merge_reparse_full_table_candidate_merges_aux_display_fields_from_candidate():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4", "qty.regular_x", "remarks"],
+        "header": ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"],
+        "rows": [
+            ["04/30", "昼", "", "豚肉と大根の生姜煮", "", "67", ""],
+            ["04/30", "昼", "", "玉子の甘酢あん", "", "66", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["04/30", "昼", "#A", "豚肉と大根の生姜煮", "102", "67", ""],
+            ["04/30", "昼", "副", "玉子の甘酢あん", "102", "66", ""],
+        ],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/30", "昼", "#A", "豚肉と大根の生姜煮", "102", "67", ""],
+        ["04/30", "昼", "副", "玉子の甘酢あん", "102", "66", ""],
+    ]
+    detail = result.get("detail") or {}
+    assert detail.get("display_change_count") == 4
+
+
+def test_project_payload_display_cells_onto_sheet_row_lists_reanchors_block_total_before_projection():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    current_rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "", "70", ""],
+    ]
+    payload_rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+
+    projected_rows, stats = order_service._project_payload_display_cells_onto_sheet_row_lists(
+        rows=current_rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert projected_rows == [
+        ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+    assert any(int(value or 0) > 0 for value in stats.values())
+
+
+def test_overlay_payload_aux_cells_onto_sheet_rows_clears_stale_block_total_on_non_anchor_rows():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    rows = [
+        {"values": ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""]},
+        {"values": ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""]},
+    ]
+    payload_rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+
+    overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert [row.get("values", [])[4] for row in overlaid] == ["70", "70"]
+
+
+def test_project_payload_display_cells_onto_sheet_row_lists_clears_stale_block_total_on_non_anchor_rows():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    current_rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+    payload_rows = [
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+
+    projected_rows, stats = order_service._project_payload_display_cells_onto_sheet_row_lists(
+        rows=current_rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert projected_rows == [
+        ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+    assert any(int(value or 0) > 0 for value in stats.values())
+
+
+def test_project_payload_quantities_onto_sheet_row_lists_maps_first_row_in_strict_raw_mode():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "qty.daycare_x",
+    ]
+    current_rows = [
+        ["04/26", "朝", "主", "鶏じゃが", "67", "", ""],
+    ]
+    payload_rows = [
+        ["04/26", "朝", "主", "鶏じゃが", "67", "66", ""],
+    ]
+
+    projected_rows, stats = order_service._project_payload_quantities_onto_sheet_row_lists(
+        rows=current_rows,
+        fields=fields,
+        payload_rows=payload_rows,
+        strict_raw_ocr_only=True,
+    )
+
+    assert projected_rows == [["04/26", "朝", "主", "鶏じゃが", "67", "66", ""]]
+    assert stats["exact"] == 1
+
+
+def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_structured_segments():
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._get_row_fields(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    rows = [
+        {"values": ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "67", "", "5", "", "", "", "", ""]},
+        {"values": ["", "", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""]},
+        {"values": ["", "", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""]},
+    ]
+    payload_rows = [
+        ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "67", "", "5", "", "", "", "", ""],
+        ["", "", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""],
+        ["", "", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""],
+    ]
+
+    overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+        raw_payload={"tables": []},
+        template=template,
+    )
+
+    assert [row.get("values", [])[4] for row in overlaid] == ["72", "72", "72"]
+
+
+def test_build_rows_from_menu_entries_populates_slot_label_from_weekly_menu_category():
+    template = config_service.get_facility_config("FAC00004").get("fax_template")
+    fields = order_service._get_row_fields(template)
+    header = order_service._sheet_header_from_template(fields, template)
+    field_index = {field: idx for idx, field in enumerate(fields)}
+
+    rows, source = order_service._build_rows_from_menu_entries(
+        entries=[
+            {
+                "menu_name": "大豆のトマト煮",
+                "menu_date": date(2026, 4, 26),
+                "daypart_key": "朝",
+                "category": "主菜",
+                "slot_index": 0,
+                "order": 0,
+            },
+            {
+                "menu_name": "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ",
+                "menu_date": date(2026, 4, 26),
+                "daypart_key": "朝",
+                "category": "副菜",
+                "slot_index": 1,
+                "order": 1,
+            },
+        ],
+        fields=fields,
+        field_index=field_index,
+        header=header,
+        line_dates=set(),
+        source="weekly_menu",
+        payload_dates=None,
+        payload_row_count=0,
+        scope_anchor_date=None,
+    )
+
+    assert source == "weekly_menu"
+    assert [row.get("values", [])[:5] for row in rows] == [
+        ["04/26", "朝", "主", "大豆のトマト煮", ""],
+        ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", ""],
+    ]
+
+
+def test_overlay_payload_aux_cells_onto_sheet_rows_preserves_canonical_slot_label_when_payload_is_invalid():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    rows = [
+        {"values": ["04/26", "朝", "主", "大豆のトマト煮", "70", "70", ""]},
+        {"values": ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""]},
+    ]
+    payload_rows = [
+        ["04/26", "朝", "器", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "2012", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+
+    overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert [row.get("values", [])[2] for row in overlaid] == ["主", "副①"]
+
+
+def test_overlay_payload_aux_cells_onto_sheet_rows_accepts_valid_slot_label_when_canonical_is_blank():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    rows = [
+        {"values": ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""]},
+        {"values": ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""]},
+    ]
+    payload_rows = [
+        ["04/26", "朝", "主A", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "副2", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
+    ]
+
+    overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert [row.get("values", [])[2] for row in overlaid] == ["主Ａ", "副②"]
+
+
+def test_overlay_payload_aux_cells_onto_sheet_rows_clears_invalid_slot_label_without_canonical_source():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "備考"]
+    rows = [
+        {"values": ["04/26", "朝", "WID", "大豆のトマト煮", "70", "70", ""]},
+    ]
+    payload_rows = [
+        ["04/26", "朝", "2012", "大豆のトマト煮", "70", "70", ""],
+    ]
+
+    overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
+        rows=rows,
+        fields=fields,
+        header=header,
+        payload_rows=payload_rows,
+    )
+
+    assert [row.get("values", [])[2] for row in overlaid] == [""]
+
+
+def test_validate_and_merge_reparse_full_table_candidate_rejects_structural_anchor_drift():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["04/26", "朝", "Menu A", "5"]],
+        "row_ids": ["row-1"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[["04/26", "朝", "Wrong Menu", "11"]],
+    )
+
+    assert merged_rows == []
+    assert result["error"] == "llm_full_table_structural_drift"
+    detail = result.get("detail") or {}
+    assert detail.get("structural_drift_count") == 1
+    assert detail.get("structural_drift_cells")[0]["field"] == "menu"
+
+
+def test_validate_and_merge_reparse_full_table_candidate_rejects_row_count_mismatch():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "5"],
+            ["04/26", "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[["04/26", "朝", "Menu A", "11"]],
+    )
+
+    assert merged_rows == []
+    assert result["error"] == "llm_full_table_row_count_mismatch"
+    assert (result.get("detail") or {}).get("row_count_expected") == 2
+    assert (result.get("detail") or {}).get("row_count_actual") == 1
+
+
+def test_validate_and_merge_reparse_full_table_candidate_preserves_unreturned_row_indexes():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "5"],
+            ["04/26", "昼", "Menu B", "9"],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["04/26", "朝", "Menu A", "11"],
+            ["", "", "", ""],
+        ],
+        candidate_returned_row_indexes=[0],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/26", "朝", "Menu A", "11"],
+        ["04/26", "昼", "Menu B", "9"],
+    ]
+    assert (result.get("detail") or {}).get("returned_row_indexes") == [0]
+
+
+def test_validate_and_merge_reparse_full_table_candidate_preserves_unreturned_fields_in_sparse_patch_mode():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "aux.col_4", "qty.regular_x", "qty.daycare_x"],
+        "header": ["日付", "区分", "メニュー", "合計", "常食", "通所"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "", "5", "2"],
+            ["04/26", "昼", "Menu B", "", "9", "4"],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["", "", "", "70", "11", ""],
+            ["", "", "", "", "", ""],
+        ],
+        candidate_returned_row_indexes=[0],
+        candidate_returned_field_map={0: {"aux.col_4", "qty.regular_x"}},
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/26", "朝", "Menu A", "70", "11", "2"],
+        ["04/26", "昼", "Menu B", "", "9", "4"],
+    ]
+    assert (result.get("detail") or {}).get("returned_row_fields") == {
+        "0": ["aux.col_4", "qty.regular_x"],
+    }
+
+
+def test_validate_and_merge_reparse_full_table_candidate_resets_omitted_quantities_to_authoritative_rows():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "aux.col_4", "qty.regular_x", "qty.daycare_x"],
+        "header": ["日付", "区分", "メニュー", "合計", "常食", "通所"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "", "5", "2"],
+            ["04/26", "昼", "Menu B", "", "9", "4"],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+    authoritative_rows = [
+        ["04/26", "朝", "Menu A", "70", "11", ""],
+        ["04/26", "昼", "Menu B", "", "9", "7"],
+    ]
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["", "", "", "70", "11", ""],
+            ["", "", "", "", "", ""],
+        ],
+        candidate_returned_row_indexes=[0],
+        candidate_returned_field_map={0: {"aux.col_4", "qty.regular_x"}},
+        authoritative_quantity_rows=authoritative_rows,
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/26", "朝", "Menu A", "70", "11", ""],
+        ["04/26", "昼", "Menu B", "", "9", "7"],
+    ]
+    detail = result.get("detail") or {}
+    assert detail.get("authoritative_quantity_reset_count") == 3
+    assert any(cell.get("field") == "qty.daycare_x" for cell in (detail.get("authoritative_quantity_resets") or []))
+
+
+def test_validate_and_merge_reparse_full_table_candidate_blanks_omitted_quantities_when_authoritative_rows_unavailable():
+    baseline = {
+        "baseline_source": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "aux.col_4", "qty.regular_x", "qty.daycare_x"],
+        "header": ["日付", "区分", "メニュー", "合計", "常食", "通所"],
+        "rows": [
+            ["04/26", "朝", "Menu A", "", "5", "2"],
+            ["04/26", "昼", "Menu B", "", "9", "4"],
+        ],
+        "row_ids": ["row-1", "row-2"],
+    }
+
+    merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
+        baseline=baseline,
+        candidate_rows=[
+            ["", "", "", "70", "11", ""],
+            ["", "", "", "", "", ""],
+        ],
+        candidate_returned_row_indexes=[0],
+        candidate_returned_field_map={0: {"aux.col_4", "qty.regular_x"}},
+        authoritative_quantity_rows=[],
+    )
+
+    assert result["error"] is None
+    assert merged_rows == [
+        ["04/26", "朝", "Menu A", "70", "11", ""],
+        ["04/26", "昼", "Menu B", "", "", ""],
+    ]
+    detail = result.get("detail") or {}
+    assert detail.get("authoritative_quantity_reset_count") == 4
+
+
+def test_reparse_order_llm_assist_uses_current_sheet_full_table_anchor(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-full-table-anchor.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-full-table-anchor-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            [canonical_mmdd, canonical_daypart, canonical_menu, "5"],
+            [canonical_mmdd, "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "source": "weekly_menu+payload_row",
+    }
+    captured_template: dict[str, object] = {}
+    parsed_rows_capture: list[list[str]] = []
+
+    def _fake_pipeline(**_kwargs):
+        return None
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        captured_template["llm_full_table_mode"] = template.get("llm_full_table_mode")
+        captured_template["llm_quantity_only_mode"] = template.get("llm_quantity_only_mode")
+        captured_template["llm_full_table_expected_row_count"] = template.get("llm_full_table_expected_row_count")
+        captured_template["prompt"] = str(template.get("gemini_ocr_prompt") or "")
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[
+                [canonical_mmdd, canonical_daypart, canonical_menu, "11"],
+                [canonical_mmdd, "昼", "Menu B", ""],
+            ],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-pro", "full_table_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        parsed_rows_capture[:] = [list(row) for row in rows if isinstance(row, list)]
+        parsed: list[dict[str, object]] = []
+        for row_index, row in enumerate(rows):
+            qty = row[3] if len(row) > 3 else ""
+            if not str(qty).strip():
+                continue
+            parsed.append(
+                {
+                    "date": canonical_date,
+                    "daypart": row[1],
+                    "menu_name": row[2],
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "bag_type": "standard",
+                    "quantity_original": int(qty),
+                    "source_row_index": row_index,
+                }
+            )
+        return parsed
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", _fake_pipeline)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **_kwargs: {
+            "status": "pass",
+            "issues": [],
+            "issue_count": 0,
+            "blocking_issues": [],
+            "blocking_issue_count": 0,
+        },
+    )
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 2)
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "9"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert captured_template["llm_full_table_mode"] is True
+    assert captured_template["llm_quantity_only_mode"] is None
+    assert captured_template["llm_full_table_expected_row_count"] == 2
+    assert "Current sheet markdown anchor" in str(captured_template["prompt"] or "")
+    assert parsed_rows_capture == [
+        [canonical_mmdd, canonical_daypart, canonical_menu, "11"],
+        [canonical_mmdd, "昼", "Menu B", ""],
+    ]
+    assert updated["lines"][0]["quantity_original"] == 11
+
+
+def test_reparse_order_llm_assist_continues_when_optional_second_pass_audit_errors(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-full-table-audit-timeout.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-full-table-audit-timeout-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    baseline_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [
+            [canonical_mmdd, canonical_daypart, canonical_menu, "5"],
+            [canonical_mmdd, "昼", "Menu B", ""],
+        ],
+        "row_ids": ["row-1", "row-2"],
+        "source": "weekly_menu+payload_row",
+    }
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        return FaxExtractedData(
+            facility_name="Test Facility",
+            date_strings=[canonical_date],
+            table_rows=[
+                [canonical_mmdd, canonical_daypart, canonical_menu, "11"],
+                [canonical_mmdd, "昼", "Menu B", ""],
+            ],
+            tokens=[],
+            grid=None,
+            ocr_provider="gemini",
+            provider_debug={"provider": "gemini", "model": "gemini-2.5-pro", "full_table_mode": True},
+        )
+
+    def _fake_parse(rows, template, received_at, quantity_rules, default_date=None, tokens=None, grid=None, pdf_bytes=None):  # noqa: ARG001
+        parsed: list[dict[str, object]] = []
+        for row_index, row in enumerate(rows):
+            qty = row[3] if len(row) > 3 else ""
+            if not str(qty).strip():
+                continue
+            parsed.append(
+                {
+                    "date": canonical_date,
+                    "daypart": row[1],
+                    "menu_name": row[2],
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "bag_type": "standard",
+                    "quantity_original": int(qty),
+                    "source_row_index": row_index,
+                }
+            )
+        return parsed
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (dict(baseline_sheet), None))
+    monkeypatch.setattr(
+        order_service,
+        "_run_llm_reparse_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(TimeoutError("simulated optional audit timeout")),
+    )
+    monkeypatch.setattr(order_service, "_validate_reparse_lines_against_weekly_menu", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(order_service, "_build_reparse_position_menu_entries", lambda **_kwargs: [])
+    monkeypatch.setattr(order_service, "_resolve_llm_expected_row_count", lambda **_kwargs: 2)
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "9"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert error is None
+    assert updated is not None
+    assert updated["lines"][0]["quantity_original"] == 11
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    second_pass_audit = (job.get("metrics") or {}).get("llm_second_pass_audit") or {}
+    assert second_pass_audit.get("provider_switch_reason") == "optional_audit_error"
+    assert "simulated optional audit timeout" in str(second_pass_audit.get("error") or "")
+
+
+def test_reparse_order_llm_assist_blocks_when_current_sheet_baseline_missing(monkeypatch, tmp_path):
+    order_service.clear_all()
+    pdf_path = tmp_path / "sample-llm-full-table-baseline-missing.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+    payload = IngestEmailPayload(
+        message_id="msg-llm-full-table-baseline-missing-001",
+        pdf_uri=str(pdf_path),
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        facility_hint="FAC00001",
+        week_hint="2026-02",
+    )
+    order = order_service.create_order_from_ingest(payload, lines=[])
+    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
+    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    extract_called = {"value": False}
+
+    def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
+        extract_called["value"] = True
+        raise AssertionError("extract_fax_data must not run when current sheet baseline is missing")
+
+    monkeypatch.setattr(order_service, "_run_roi_ocr_pipeline", lambda **_kwargs: None)
+    monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
+    monkeypatch.setattr(order_service, "get_ocr_sheet", lambda _order_id, **_kwargs: (None, "sheet_missing"))
+    monkeypatch.setattr(
+        order_service,
+        "_build_reparse_structural_baseline",
+        lambda **_kwargs: {
+            "baseline_source": "weekly_menu_structure",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "rows": [[canonical_mmdd, canonical_daypart, canonical_menu, ""]],
+            "row_ids": ["structural-row-1"],
+        },
+    )
+    _patch_first_pass_payload(
+        monkeypatch,
+        _make_first_pass_payload(rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "9"]]),
+    )
+
+    updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
+
+    assert updated is None
+    assert error == "llm_full_table_baseline_missing"
+    assert extract_called["value"] is False
+    job = get_job(f"OCR-{order['id']}")
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert (job.get("metrics") or {}).get("error") == "llm_full_table_baseline_missing"

@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta, date as dt_date
 from urllib.error import HTTPError
 from urllib.request import urlopen
-from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Query
 from fastapi.responses import Response, JSONResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -14,8 +14,11 @@ from src.services.output_builder import rebuild_bags
 from src.services.ocr_job_service import (
     create_job as create_ocr_job,
     describe_job_state as describe_ocr_job_state,
+    get_job_request_mode,
     get_job as get_ocr_job,
+    is_order_reparse_job as is_order_reparse_ocr_job,
     get_jobs as get_ocr_jobs,
+    get_job_stale_at as get_ocr_job_stale_at,
     get_stale_minutes as get_ocr_job_stale_minutes,
     is_job_stale as is_ocr_job_stale,
     update_job as update_ocr_job,
@@ -30,6 +33,9 @@ router = APIRouter()
 RECOVERABLE_OCR_SHEET_ERRORS = {
     "week_unresolved",
     "menu_entries_missing",
+    "monthly_menu_object_missing",
+    "monthly_menu_facility_scope_missing",
+    "monthly_menu_lookup_failed",
     "sheet_fields_not_found",
     "sheet_fields_duplicate",
     "sheet_template_field_invalid",
@@ -74,68 +80,7 @@ class WeekArchiveBody(BaseModel):
 
 
 def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
-    current_sheet_context = draft_payload if isinstance(draft_payload.get("draft_record"), dict) else None
-    draft_record = (
-        current_sheet_context.get("draft_record")
-        if isinstance(current_sheet_context, dict)
-        else draft_payload
-    )
-    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
-    evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
-    if not isinstance(evidence, dict):
-        evidence_run_id = str((draft_record or {}).get("base_evidence_run_id") or "").strip()
-        if evidence_run_id:
-            evidence = order_service.get_ocr_evidence_run(evidence_run_id)
-    draft_json = (
-        current_sheet_context.get("draft_payload")
-        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("draft_payload"), dict)
-        else (draft_record.get("draft_sheet_json") if isinstance(draft_record.get("draft_sheet_json"), dict) else {})
-    )
-    warnings = [
-        str(item).strip()
-        for item in (
-            list(draft_json.get("warnings") or [])
-            + list(draft_record.get("warnings_json") or [])
-        )
-        if str(item).strip()
-    ]
-    deduped_warnings: list[str] = []
-    for item in warnings:
-        if item not in deduped_warnings:
-            deduped_warnings.append(item)
-    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else None
-    return {
-        **draft_record,
-        "fields": list(draft_json.get("fields") or []),
-        "header": list(draft_json.get("header") or []),
-        "rows": list(draft_json.get("rows") or []),
-        "row_ids": list(draft_json.get("row_ids") or []),
-        "source": str(draft_json.get("source") or draft_record.get("draft_state") or "draft").strip() or "draft",
-        "resolved_week_id": str(draft_json.get("resolved_week_id") or draft_json.get("week_id") or "").strip() or None,
-        "menu_diagnostics": dict(draft_json.get("menu_diagnostics") or {}) if isinstance(draft_json.get("menu_diagnostics"), dict) else {},
-        "row_diagnostics": list(draft_json.get("row_diagnostics") or []) if isinstance(draft_json.get("row_diagnostics"), list) else [],
-        "repair_mode": str(draft_json.get("repair_mode") or "").strip() or None,
-        "repair_metadata": dict(draft_json.get("repair_metadata") or {}) if isinstance(draft_json.get("repair_metadata"), dict) else {},
-        "seed_source": str(draft_json.get("seed_source") or "").strip() or None,
-        "enrichment_source": str(draft_json.get("enrichment_source") or "").strip() or None,
-        "warnings": deduped_warnings,
-        "review_state": (
-            str((workflow or {}).get("state") or draft_record.get("draft_state") or "draft_ready").strip()
-            if isinstance(workflow, dict) or draft_record.get("draft_state")
-            else "draft_ready"
-        ),
-        "workflow_state": workflow,
-        "apply_gate": apply_gate,
-        "critical_decisions": list((workflow or {}).get("critical_decisions") or []) if isinstance(workflow, dict) else [],
-        "candidate_resolution": (workflow or {}).get("candidate_resolution") if isinstance(workflow, dict) else None,
-        "evidence_run_id": (evidence or {}).get("id") if isinstance(evidence, dict) else None,
-        "evidence_capabilities": (
-            (evidence or {}).get("capabilities_json")
-            if isinstance(evidence, dict)
-            else {}
-        ),
-        "evidence_degraded_reasons": list((evidence or {}).get("degraded_reasons_json") or []) if isinstance(evidence, dict) else [],
-    }
+    return order_service.flatten_current_sheet_payload(order_id, draft_payload)
 
 
 def _is_read_timeout_error(value: object) -> bool:
@@ -159,16 +104,29 @@ def _is_terminal_reparse_error(value: object) -> bool:
         normalized.startswith("sheet_")
         or normalized.startswith("lines_empty")
         or normalized.startswith("llm_cost_")
+        or normalized.startswith("main_ocr_failed:")
+        or normalized.startswith("first_pass_ocr_missing")
     )
 
 
-def _is_order_reparse_job(job_id: object, order_id: str) -> bool:
-    if not isinstance(job_id, str):
+def _is_order_reparse_job(job: object, order_id: str) -> bool:
+    return is_order_reparse_ocr_job(job if isinstance(job, dict) else None, order_id)
+
+
+def _should_preserve_terminal_reparse_state(job: dict | None, order_id: str) -> bool:
+    if not isinstance(job, dict) or not _is_order_reparse_job(job, order_id):
         return False
-    normalized = job_id.strip()
-    if not normalized:
+    normalized_status = str(job.get("status") or "").strip().lower()
+    if normalized_status in {"running", "pending", "awaiting_output", "recovering"}:
         return False
-    return normalized == f"OCR-{order_id}"
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    result_state = str(metrics.get("result_state") or "").strip().lower()
+    error_message = job.get("error_message")
+    return _is_terminal_reparse_error(error_message) or result_state in {
+        "hard_failed",
+        "draft_ready_blocked",
+    }
 
 
 def _derive_status_from_payload(payload: dict | None) -> str | None:
@@ -177,7 +135,7 @@ def _derive_status_from_payload(payload: dict | None) -> str | None:
     status = payload.get("status")
     if isinstance(status, str):
         normalized = status.strip().lower()
-        if normalized and normalized not in {"running", "pending"}:
+        if normalized and normalized not in {"running", "pending", "awaiting_output", "recovering"}:
             return status
     if payload.get("pages") or payload.get("table_raw") or payload.get("rows"):
         return "success"
@@ -198,7 +156,12 @@ def _has_persisted_ocr_evidence(payload: dict | None) -> bool:
 
 
 def _is_running_status(value: object) -> bool:
-    return isinstance(value, str) and value.strip().lower() in {"running", "pending"}
+    return isinstance(value, str) and value.strip().lower() in {
+        "running",
+        "pending",
+        "awaiting_output",
+        "recovering",
+    }
 
 
 def _get_ocr_stale_minutes() -> int:
@@ -213,7 +176,12 @@ def _mark_stale_order_reparse_job(order: dict, job: dict | None) -> dict | None:
     if not isinstance(job, dict):
         return job
     order_id = str(order.get("id") or "").strip()
-    if not order_id or not _is_order_reparse_job(job.get("id"), order_id):
+    if not order_id or not _is_order_reparse_job(job, order_id):
+        return job
+    if _should_preserve_terminal_reparse_state(job, order_id):
+        return job
+    normalized_status = str(job.get("status") or "").strip().lower()
+    if normalized_status not in {"running", "pending", "awaiting_output", "recovering"}:
         return job
     if not _is_job_stale(job):
         return job
@@ -256,28 +224,8 @@ def _apply_stale_ocr_status(order: dict, job: dict | None) -> dict | None:
     if not job:
         return job
     job = _mark_stale_order_reparse_job(order, job)
-    order_id = str(order.get("id") or "").strip()
-    cached_payload = (
-        order_service.get_cached_ocr_payload(order_id)
-        if order_id and _is_order_reparse_job(job.get("id"), order_id)
-        else None
-    )
-    cached_status = _derive_status_from_payload(cached_payload) if _has_persisted_ocr_evidence(cached_payload) else None
     status = (job.get("status") or order.get("ocr_status") or "").lower()
-    if status not in {"running", "pending"}:
-        if (
-            order_id
-            and _is_order_reparse_job(job.get("id"), order_id)
-            and _is_reparse_stale_timeout_error(job.get("error_message"))
-            and cached_status
-        ):
-            order["ocr_status"] = cached_status
-            order["ocr_error"] = None
-            if job.get("metrics"):
-                order["ocr_metrics"] = job.get("metrics")
-            if job.get("updated_at"):
-                order["ocr_updated_at"] = job.get("updated_at")
-            return job
+    if status not in {"running", "pending", "awaiting_output", "recovering"}:
         if job.get("status"):
             order["ocr_status"] = job.get("status")
         error_message = job.get("error_message")
@@ -303,9 +251,9 @@ def _should_prefer_cached_status(order_id: str, current_status: object, job: dic
     normalized = str(current_status or "").strip().lower()
     if not normalized:
         return True
-    if normalized in {"running", "pending", "stalled"}:
+    if normalized in {"running", "pending", "stalled", "awaiting_output", "recovering"}:
         return True
-    if normalized == "failed" and job and not _is_order_reparse_job(job.get("id"), order_id):
+    if normalized == "failed" and job and not _is_order_reparse_job(job, order_id):
         return True
     return False
 
@@ -316,7 +264,7 @@ def _apply_cached_status_override(order: dict, order_id: str, job: dict | None) 
     current_status = order.get("ocr_status")
     if not cached_status or not _should_prefer_cached_status(order_id, current_status, job):
         return job
-    if job and _is_order_reparse_job(job.get("id"), order_id):
+    if job and _is_order_reparse_job(job, order_id):
         return job
     if job:
         try:
@@ -352,11 +300,20 @@ def _attach_order_review_summary(
         return
     effective_ocr_status = order.get("ocr_status")
     effective_ocr_metrics = order.get("ocr_metrics")
-    if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job.get("id"), order_id):
+    if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job, order_id):
         if not effective_ocr_status:
             effective_ocr_status = ocr_job.get("status")
         if not effective_ocr_metrics:
             effective_ocr_metrics = ocr_job.get("metrics")
+    workflow = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else None
+    current_sheet_context = None
+    if isinstance(workflow, dict):
+        current_sheet_context = order_service.get_current_sheet_context(
+            order_id,
+            refresh_draft_from_semantic=True,
+            upgrade_generic_from_sheet=True,
+            backfill_from_revision=False,
+        )
     review = order_service.get_order_review_summary(
         order_id,
         lines_updated_at=order.get("lines_updated_at"),
@@ -364,6 +321,8 @@ def _attach_order_review_summary(
         cached_payload=cached_payload,
         ocr_metrics=effective_ocr_metrics,
         order_status=order.get("status"),
+        current_sheet_context=current_sheet_context,
+        sheet_gate=(workflow or {}).get("apply_gate") if isinstance(workflow, dict) else None,
     )
     job_state = describe_ocr_job_state(ocr_job if isinstance(ocr_job, dict) else None)
     review["ocr_reparse_health"] = str(job_state.get("status") or "idle")
@@ -371,7 +330,7 @@ def _attach_order_review_summary(
     review["ocr_reparse_stale_threshold_seconds"] = job_state.get("stale_threshold_seconds")
     review["ocr_reparse_last_job_id"] = (
         str(ocr_job.get("id") or "").strip()
-        if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job.get("id"), order_id)
+        if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job, order_id)
         else None
     )
     if not review.get("ocr_reparse_last_error_code") and isinstance(ocr_job, dict):
@@ -401,6 +360,58 @@ def _attach_order_workflow_context(order: dict, *, refresh: bool = False) -> Non
         order["critical_decisions"] = workflow["critical_decisions"]
     if isinstance(workflow.get("apply_gate"), dict):
         order["apply_gate"] = workflow["apply_gate"]
+
+
+def _apply_job_status_to_order(order: dict, job: dict | None) -> None:
+    if not isinstance(job, dict):
+        return
+    error_message = job.get("error_message")
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    metrics_error = str(metrics.get("error") or "").strip() or None
+    if job.get("status") == "failed" and _is_read_timeout_error(error_message):
+        order["ocr_status"] = "running"
+        return
+    order["ocr_status"] = job.get("status")
+    order.pop("ocr_error", None)
+    if metrics_error and _is_running_status(job.get("status")):
+        order["ocr_error"] = metrics_error
+    elif error_message:
+        order["ocr_error"] = error_message
+    if metrics:
+        order["ocr_metrics"] = metrics
+    order["ocr_updated_at"] = job.get("updated_at")
+
+
+def _align_order_ocr_readiness_with_workflow(order: dict) -> None:
+    workflow = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else None
+    if not isinstance(workflow, dict):
+        return
+    blockers = [
+        str(item or "").strip()
+        for item in (workflow.get("blockers_json") or [])
+        if str(item or "").strip()
+    ]
+    has_evidence_blocker = any(
+        code in {"evidence_view_unavailable", "evidence_edit_unavailable"}
+        for code in blockers
+    )
+    if not has_evidence_blocker:
+        return
+    reparse_state = workflow.get("reparse_state") if isinstance(workflow.get("reparse_state"), dict) else {}
+    reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
+    if reparse_status in {"running", "pending", "awaiting_output", "recovering"}:
+        return
+    order["ocr_status"] = "blocked"
+    order["ocr_error"] = "ocr_evidence_recovery_required"
+    order["ocr_processing_stage"] = "evidence_unavailable"
+    order["ocr_result_state"] = "blocked"
+    order["ocr_updated_at"] = None
+    order["ocr_metrics"] = {
+        "error": "ocr_evidence_recovery_required",
+        "processing_stage": "evidence_unavailable",
+        "result_state": "blocked",
+    }
 
 
 def _needs_list_candidate_summary(order: dict) -> bool:
@@ -453,14 +464,90 @@ def _attach_order_list_candidate_summary(
 def _is_active_order_reparse_job(job: dict | None, order_id: str) -> bool:
     if not isinstance(job, dict):
         return False
-    if not _is_order_reparse_job(job.get("id"), order_id):
+    if not _is_order_reparse_job(job, order_id):
         return False
     normalized_status = str(job.get("status") or "").strip().lower()
-    if normalized_status not in {"running", "pending"}:
+    if normalized_status not in {"running", "pending", "awaiting_output", "recovering"}:
         return False
     if _is_job_stale(job):
         return False
     return True
+
+
+def _heal_active_order_reparse_job_from_workflow(order_id: str, job: dict | None) -> dict | None:
+    if not _is_active_order_reparse_job(job, order_id):
+        return job
+    try:
+        workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Active reparse job workflow reconciliation failed",
+            order_id=order_id,
+            error=str(exc),
+        )
+        return job
+    if not isinstance(workflow, dict):
+        return get_ocr_job(f"OCR-{order_id}") or job
+    reparse_state = workflow.get("reparse_state")
+    reparse_state = reparse_state if isinstance(reparse_state, dict) else {}
+    reparse_status = str(
+        reparse_state.get("status")
+        or workflow.get("ocr_reparse_status")
+        or ""
+    ).strip().lower()
+    if reparse_status not in {"hard_failed", "done"}:
+        return get_ocr_job(f"OCR-{order_id}") or job
+    normalized_job_id = str((job or {}).get("id") or f"OCR-{order_id}").strip() or f"OCR-{order_id}"
+    metrics = (job or {}).get("metrics")
+    metrics = dict(metrics) if isinstance(metrics, dict) else {}
+    processing_stage = str(
+        reparse_state.get("processing_stage")
+        or workflow.get("ocr_processing_stage")
+        or metrics.get("processing_stage")
+        or "ocr_pipeline"
+    ).strip() or "ocr_pipeline"
+    if reparse_status == "hard_failed":
+        error_message = str(
+            workflow.get("ocr_last_reparse_error")
+            or reparse_state.get("error_message")
+            or (job or {}).get("error_message")
+            or "ocr_rerun_failed"
+        ).strip() or "ocr_rerun_failed"
+        result_state = "hard_failed"
+        terminal_status = "failed"
+    else:
+        error_message = None
+        result_state = str(
+            reparse_state.get("result_state")
+            or workflow.get("ocr_result_state")
+            or "done"
+        ).strip() or "done"
+        terminal_status = "done"
+    metrics.update(
+        {
+            "request_mode": get_job_request_mode(job) or "ocr_rerun",
+            "processing_stage": processing_stage,
+            "result_state": result_state,
+            "stage_updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    if error_message:
+        metrics["error"] = error_message
+    logger.info(
+        "Healed active reparse job from workflow terminal state",
+        order_id=order_id,
+        ocr_job_id=normalized_job_id,
+        reparse_status=reparse_status,
+        terminal_status=terminal_status,
+        error=error_message,
+    )
+    update_ocr_job(
+        normalized_job_id,
+        status=terminal_status,
+        error_message=error_message,
+        metrics=metrics,
+    )
+    return get_ocr_job(normalized_job_id)
 
 
 def _enqueue_order_reparse_job(
@@ -487,9 +574,11 @@ def _enqueue_order_reparse_job(
         raise HTTPException(status_code=404, detail="facility not found")
 
     ocr_job_id = f"OCR-{order_id}"
-    existing_job = get_ocr_job(ocr_job_id)
-    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(ocr_job_id, order_id) else None)
-    if existing_job_state.get("status") == "stalled":
+    existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
+    is_stale_reparse = bool(_is_order_reparse_job(existing_job, order_id) and _is_job_stale(existing_job))
+    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(existing_job, order_id) else None)
+    if is_stale_reparse or existing_job_state.get("status") == "stalled":
+        stale_at = get_ocr_job_stale_at(existing_job)
         if not force and stale_action == "wait":
             raise HTTPException(
                 status_code=409,
@@ -498,7 +587,11 @@ def _enqueue_order_reparse_job(
                     "message": "stale reparse requires retry or force",
                     "recoverable": True,
                     "ocr_job_id": ocr_job_id,
-                    "stale_at": existing_job_state.get("stale_at"),
+                    "stale_at": (
+                        stale_at.isoformat()
+                        if isinstance(stale_at, datetime)
+                        else existing_job_state.get("stale_at")
+                    ),
                     "stale_threshold_seconds": existing_job_state.get("stale_threshold_seconds"),
                 },
             )
@@ -522,7 +615,7 @@ def _enqueue_order_reparse_job(
     input_reference = str(order.get("document") or "")
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
-        existing_job = get_ocr_job(ocr_job_id)
+        existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
         if _is_active_order_reparse_job(existing_job, order_id):
             raise HTTPException(
                 status_code=409,
@@ -590,15 +683,18 @@ def _run_reparse_background(
             logger.warning("Reparse background failed", order_id=order_id, error=error)
     except Exception as exc:  # noqa: BLE001
         try:
-            update_ocr_job(
+            current_order = order_service.get_order_by_id(order_id)
+            retained_lines = bool(current_order.get("lines_updated_at")) if isinstance(current_order, dict) else False
+            order_service._update_reparse_job_progress(  # noqa: SLF001
                 f"OCR-{order_id}",
                 status="failed",
+                processing_stage="crashed",
+                result_state="hard_failed",
                 error_message=f"reparse_crashed:{exc}",
-                metrics={
-                    "error": str(exc),
-                    "processing_stage": "crashed",
-                    "result_state": "hard_failed",
-                    "confirmed_lines_retained": True,
+                metrics_patch={
+                    "error": "reparse_crashed",
+                    "crash_detail": str(exc),
+                    "confirmed_lines_retained": retained_lines,
                 },
             )
         except Exception:  # noqa: BLE001
@@ -649,9 +745,11 @@ def _enqueue_order_evidence_rerun(
         raise HTTPException(status_code=404, detail="facility not found")
 
     ocr_job_id = f"OCR-{order_id}"
-    existing_job = get_ocr_job(ocr_job_id)
-    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(ocr_job_id, order_id) else None)
-    if existing_job_state.get("status") == "stalled":
+    existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
+    is_stale_reparse = bool(_is_order_reparse_job(existing_job, order_id) and _is_job_stale(existing_job))
+    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(existing_job, order_id) else None)
+    if is_stale_reparse or existing_job_state.get("status") == "stalled":
+        stale_at = get_ocr_job_stale_at(existing_job)
         if stale_action == "wait":
             raise HTTPException(
                 status_code=409,
@@ -660,7 +758,11 @@ def _enqueue_order_evidence_rerun(
                     "message": "stale rerun requires retry",
                     "recoverable": True,
                     "ocr_job_id": ocr_job_id,
-                    "stale_at": existing_job_state.get("stale_at"),
+                    "stale_at": (
+                        stale_at.isoformat()
+                        if isinstance(stale_at, datetime)
+                        else existing_job_state.get("stale_at")
+                    ),
                     "stale_threshold_seconds": existing_job_state.get("stale_threshold_seconds"),
                 },
             )
@@ -679,7 +781,7 @@ def _enqueue_order_evidence_rerun(
     input_reference = str(order.get("document") or "")
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
-        existing_job = get_ocr_job(ocr_job_id)
+        existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
         if _is_active_order_reparse_job(existing_job, order_id):
             raise HTTPException(
                 status_code=409,
@@ -719,9 +821,13 @@ def list_orders(
     status: str | None = None,
     include_ocr: bool | None = None,
     include_archived: bool | None = None,
+    include_runtime: bool | None = None,
 ):
     include_archived_flag = True if include_archived is None else include_archived
     orders = order_service.list_orders(status=status, include_archived=include_archived_flag)
+    include_runtime_flag = True if include_runtime is None else include_runtime
+    if not include_runtime_flag:
+        return {"orders": orders}
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     cache_map = order_service._load_order_ocr_cache_map(order_ids)
     lightweight_mode = include_ocr is False
@@ -932,6 +1038,26 @@ def archive_orders_for_week(payload: WeekArchiveBody):
     return result
 
 
+@router.post("/{order_id}/archive", dependencies=[Depends(require_role("operator"))])
+def archive_single_order(order_id: str):
+    result, error = order_service.archive_order(order_id, archived_by="operator")
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail={"error": error})
+    if error:
+        raise HTTPException(status_code=400, detail={"error": error})
+    return result
+
+
+@router.post("/{order_id}/unarchive", dependencies=[Depends(require_role("operator"))])
+def unarchive_single_order(order_id: str):
+    result, error = order_service.unarchive_order(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail={"error": error})
+    if error:
+        raise HTTPException(status_code=400, detail={"error": error})
+    return result
+
+
 @router.post("/unarchive-week", dependencies=[Depends(require_role("operator"))])
 def unarchive_orders_for_week(payload: WeekArchiveBody):
     result, error = order_service.unarchive_orders_for_week(
@@ -952,6 +1078,7 @@ def get_order(order_id: str):
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
+    order_service.reconcile_ocr_rerun_state(order_id)
     job_id = order.get("ocr_job_id")
     job = get_ocr_job(f"OCR-{order_id}")
     if not job and job_id:
@@ -961,7 +1088,24 @@ def get_order(order_id: str):
         if isinstance(message_id, str) and message_id:
             job = get_ocr_job(f"OCR-{message_id}")
     if job:
-        if job.get("output_reference") and job.get("status") in {"running", "failed"}:
+        job_status = str(job.get("status") or "").strip().lower()
+        job_metrics = job.get("metrics")
+        job_metrics = job_metrics if isinstance(job_metrics, dict) else {}
+        preserve_terminal_reparse_state = _should_preserve_terminal_reparse_state(job, order_id)
+        job_evidence_run_id = str(job_metrics.get("evidence_run_id") or "").strip()
+        job_evidence_run = (
+            order_service.get_ocr_evidence_run(job_evidence_run_id)
+            if job_evidence_run_id
+            else None
+        )
+        latest_persisted_evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
+        needs_done_reconcile = (
+            not _is_order_reparse_job(job, order_id)
+            and job_status in {"done", "success", "completed"}
+            and not isinstance(job_evidence_run, dict)
+            and not isinstance(latest_persisted_evidence, dict)
+        )
+        if job.get("output_reference") and (job_status in {"running", "failed"} or needs_done_reconcile):
             try:
                 payload = load_bytes_from_uri(job["output_reference"])
                 parsed = json.loads(payload.decode("utf-8"))
@@ -970,37 +1114,40 @@ def get_order(order_id: str):
                 job_error = job.get("error_message")
                 should_update = bool(output_status and output_status != job.get("status"))
                 should_update = should_update or bool(job_error)
-                if job.get("status") == "running" and _is_order_reparse_job(job.get("id"), order_id):
+                should_update = should_update or needs_done_reconcile
+                if job.get("status") == "running" and _is_order_reparse_job(job, order_id):
                     # Reparse jobs keep running until post-processing/validation finishes.
                     # OCR output JSON "done" must not terminate the job early.
                     should_update = False
-                if job.get("status") == "failed" and _is_terminal_reparse_error(job_error):
+                if preserve_terminal_reparse_state:
                     should_update = False
                 if should_update:
-                    update_ocr_job(
-                        job["id"],
-                        status=output_status or job.get("status"),
-                        template_id=output_template or job.get("template_id"),
-                        error_message=parsed.get("error"),
-                        metrics=parsed.get("metrics"),
-                    )
+                    if _is_order_reparse_job(job, order_id):
+                        update_ocr_job(
+                            job["id"],
+                            status=output_status or job.get("status"),
+                            template_id=output_template or job.get("template_id"),
+                            error_message=parsed.get("error"),
+                            metrics=parsed.get("metrics"),
+                        )
+                    else:
+                        order_service.reconcile_completed_ocr_job(str(job.get("id") or ""))
                     job = get_ocr_job(job["id"]) or job
             except Exception:
                 pass
-        error_message = job.get("error_message")
-        if job.get("status") == "failed" and _is_read_timeout_error(error_message):
-            order["ocr_status"] = "running"
-        else:
-            order["ocr_status"] = job.get("status")
-            if error_message:
-                order["ocr_error"] = error_message
-            if job.get("metrics"):
-                order["ocr_metrics"] = job.get("metrics")
-            order["ocr_updated_at"] = job.get("updated_at")
+        _apply_job_status_to_order(order, job)
     job = _apply_cached_status_override(order, order_id, job)
     job = _apply_stale_ocr_status(order, job)
-    _attach_order_review_summary(order, ocr_job=job)
     _attach_order_workflow_context(order, refresh=True)
+    if job:
+        refreshed_job = get_ocr_job(str(job.get("id") or "")) or job
+        if refreshed_job is not job:
+            job = refreshed_job
+        _apply_job_status_to_order(order, job)
+        job = _apply_cached_status_override(order, order_id, job)
+        job = _apply_stale_ocr_status(order, job)
+    _align_order_ocr_readiness_with_workflow(order)
+    _attach_order_review_summary(order, ocr_job=job)
     return order
 
 
@@ -1119,6 +1266,11 @@ def get_ocr_output(order_id: str):
         raise HTTPException(status_code=404, detail="ocr output not found")
     if error == "ocr_output_pending":
         return JSONResponse(status_code=202, content={"pending": True})
+    if error == "ocr_evidence_recovery_required":
+        return JSONResponse(
+            status_code=409,
+            content={"recovery_required": True, "detail": "ocr evidence recovery required"},
+        )
     if error == "ocr_output_invalid":
         raise HTTPException(status_code=500, detail="ocr output invalid")
     return data
@@ -1153,11 +1305,114 @@ def get_ocr_evidence(order_id: str):
     return evidence
 
 
+def _attach_reparse_sheet_state(order_id: str, payload: dict) -> dict:
+    order_service.reconcile_ocr_rerun_state(order_id)
+    reparse_job = get_ocr_job(f"OCR-{order_id}")
+    reparse_state = describe_ocr_job_state(
+        reparse_job if isinstance(reparse_job, dict) and _is_order_reparse_job(reparse_job, order_id) else None
+    )
+    reparse_status = str(reparse_state.get("status") or "").strip().lower()
+    payload["reparse_health"] = reparse_state.get("status")
+    payload["reparse_stale_at"] = reparse_state.get("stale_at")
+    payload["reparse_stale_threshold_seconds"] = reparse_state.get("stale_threshold_seconds")
+    if isinstance(reparse_job, dict):
+        metrics = reparse_job.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        live_error = (
+            str(metrics.get("error") or "").strip()
+            or str(reparse_job.get("error_message") or "").strip()
+            or None
+        )
+        live_processing_stage = str(metrics.get("processing_stage") or "").strip() or None
+        live_result_state = str(metrics.get("result_state") or "").strip() or None
+        live_request_mode = get_job_request_mode(reparse_job) or None
+        if reparse_status:
+            payload["reparse_status"] = reparse_status
+        if live_error:
+            payload["reparse_error"] = live_error
+            payload["reparse_last_error_code"] = live_error
+        if live_processing_stage:
+            payload["reparse_processing_stage"] = live_processing_stage
+        if live_result_state:
+            payload["reparse_result_state"] = live_result_state
+        if live_request_mode:
+            payload["reparse_request_mode"] = live_request_mode
+    if reparse_status != "stalled":
+        return payload
+    if str(payload.get("review_state") or "").strip().lower() == "processing":
+        payload["review_state"] = "processing_stalled"
+    apply_blockers = list(payload.get("apply_blockers") or [])
+    confirm_blockers = list(payload.get("confirm_blockers") or [])
+    if "reparse_stale" not in apply_blockers:
+        apply_blockers.append("reparse_stale")
+    if "reparse_stale" not in confirm_blockers:
+        confirm_blockers.append("reparse_stale")
+    payload["apply_blockers"] = apply_blockers
+    payload["confirm_blockers"] = confirm_blockers
+    apply_details = list(payload.get("apply_blocker_details") or [])
+    confirm_details = list(payload.get("confirm_blocker_details") or [])
+    stale_detail = {
+        "code": "reparse_stale",
+        "message": "再解析ジョブが停止しているため、再実行が必要です。",
+        "severity": "blocker",
+    }
+    if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in apply_details if isinstance(item, dict)):
+        apply_details.append(stale_detail)
+    if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in confirm_details if isinstance(item, dict)):
+        confirm_details.append(stale_detail)
+    payload["apply_blocker_details"] = apply_details
+    payload["confirm_blocker_details"] = confirm_details
+    payload["can_apply"] = False
+    payload["can_confirm"] = False
+    return payload
+
+
 @router.get("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
-def get_draft_sheet(order_id: str):
+def get_draft_sheet(
+    order_id: str,
+    compact: bool = Query(default=False),
+    quantity_assignment_strategy: str | None = Query(default=None),
+    sheet_mode: str | None = Query(default=None),
+):
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
+    requested_mode = str(quantity_assignment_strategy or sheet_mode or "").strip().lower()
+    if requested_mode == "hakodate":
+        data, error = order_service.build_order_hakodate_projected_sheet(
+            order_id,
+            strategy="hakodate",
+        )
+        if error == "order_not_found":
+            raise HTTPException(status_code=404, detail="order not found")
+        if error in {"facility_missing", "document_missing", "template_unresolved", "sheet_unavailable", "assignment_unavailable"}:
+            raise HTTPException(status_code=400, detail=error)
+        if error == "facility_not_found":
+            raise HTTPException(status_code=404, detail="facility not found")
+        if error:
+            raise HTTPException(status_code=500, detail=error)
+        projected = data.get("projected_sheet") if isinstance(data, dict) else None
+        if not isinstance(projected, dict):
+            raise HTTPException(status_code=500, detail="hakodate projected sheet unavailable")
+        assignment = data.get("assignment") if isinstance(data, dict) else {}
+        metrics = data.get("metrics") if isinstance(data, dict) else {}
+        payload = dict(projected)
+        payload.update(
+            {
+                "order_id": order_id,
+                "source": "hakodate_projected_sheet",
+                "quantity_assignment_strategy": "hakodate",
+                "review_state": str((assignment or {}).get("status") or "review_required"),
+                "can_apply": False,
+                "can_confirm": False,
+                "apply_blockers": ["hakodate_projection_requires_review"],
+                "confirm_blockers": ["hakodate_projection_requires_review"],
+                "hakodate_assignment": assignment,
+                "hakodate_projection_metrics": metrics,
+                "warnings": list((projected.get("warnings") if isinstance(projected, dict) else []) or []),
+            }
+        )
+        return payload if compact else _attach_reparse_sheet_state(order_id, payload)
     current_sheet_context = order_service.get_current_sheet_context(
         order_id,
         refresh_draft_from_semantic=True,
@@ -1166,7 +1421,14 @@ def get_draft_sheet(order_id: str):
     )
     if not isinstance(current_sheet_context, dict):
         raise HTTPException(status_code=404, detail="draft sheet not found")
-    return _flatten_draft_sheet_payload(order_id, current_sheet_context)
+    payload = order_service.flatten_current_sheet_payload(
+        order_id,
+        current_sheet_context,
+        include_meta=not compact,
+    )
+    if isinstance(payload, dict):
+        return _attach_reparse_sheet_state(order_id, payload)
+    return payload
 
 
 @router.get("/{order_id}/workflow-state", dependencies=[Depends(require_role("operator"))])
@@ -1220,8 +1482,8 @@ def choose_order_critical_decision(order_id: str, decision_type: str, body: dict
 
 
 @router.get("/{order_id}/ocr-pages", dependencies=[Depends(require_role("operator"))])
-def get_ocr_pages(order_id: str):
-    data, error = order_service.get_ocr_pages(order_id)
+def get_ocr_pages(order_id: str, preview_only: bool = Query(default=False)):
+    data, error = order_service.get_ocr_pages(order_id, preview_only=preview_only)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
     if error in {"ocr_job_not_found", "ocr_output_not_found", "ocr_pages_not_found"}:
@@ -1240,43 +1502,6 @@ def get_ocr_pages(order_id: str):
 
 @router.get("/{order_id}/ocr-sheet", dependencies=[Depends(require_role("operator"))])
 def get_ocr_sheet(order_id: str):
-    def _attach_reparse_sheet_state(payload: dict) -> dict:
-        reparse_job = get_ocr_job(f"OCR-{order_id}")
-        reparse_state = describe_ocr_job_state(
-            reparse_job if isinstance(reparse_job, dict) and _is_order_reparse_job(reparse_job.get("id"), order_id) else None
-        )
-        payload["reparse_health"] = reparse_state.get("status")
-        payload["reparse_stale_at"] = reparse_state.get("stale_at")
-        payload["reparse_stale_threshold_seconds"] = reparse_state.get("stale_threshold_seconds")
-        if reparse_state.get("status") != "stalled":
-            return payload
-        if str(payload.get("review_state") or "").strip().lower() == "processing":
-            payload["review_state"] = "processing_stalled"
-        apply_blockers = list(payload.get("apply_blockers") or [])
-        confirm_blockers = list(payload.get("confirm_blockers") or [])
-        if "reparse_stale" not in apply_blockers:
-            apply_blockers.append("reparse_stale")
-        if "reparse_stale" not in confirm_blockers:
-            confirm_blockers.append("reparse_stale")
-        payload["apply_blockers"] = apply_blockers
-        payload["confirm_blockers"] = confirm_blockers
-        apply_details = list(payload.get("apply_blocker_details") or [])
-        confirm_details = list(payload.get("confirm_blocker_details") or [])
-        stale_detail = {
-            "code": "reparse_stale",
-            "message": "再解析ジョブが停止しているため、再実行が必要です。",
-            "severity": "blocker",
-        }
-        if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in apply_details if isinstance(item, dict)):
-            apply_details.append(stale_detail)
-        if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in confirm_details if isinstance(item, dict)):
-            confirm_details.append(stale_detail)
-        payload["apply_blocker_details"] = apply_details
-        payload["confirm_blocker_details"] = confirm_details
-        payload["can_apply"] = False
-        payload["can_confirm"] = False
-        return payload
-
     data, error = order_service.get_ocr_sheet(order_id)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
@@ -1285,12 +1510,12 @@ def get_ocr_sheet(order_id: str):
     if error in RECOVERABLE_OCR_SHEET_ERRORS:
         recovered, recover_error = order_service.build_recoverable_ocr_sheet_payload(order_id, error)
         if recover_error is None and isinstance(recovered, dict):
-            return _attach_reparse_sheet_state(recovered)
+            return _attach_reparse_sheet_state(order_id, recovered)
         raise HTTPException(status_code=400, detail=error)
     if error:
         raise HTTPException(status_code=500, detail="ocr sheet load failed")
     if isinstance(data, dict):
-        return _attach_reparse_sheet_state(data)
+        return _attach_reparse_sheet_state(order_id, data)
     return data
 
 
@@ -1339,6 +1564,148 @@ def detect_grid(order_id: str, body: dict | None = None):
         raise HTTPException(status_code=500, detail="document load failed")
     if error == "grid_not_found":
         raise HTTPException(status_code=404, detail=detail or {"error": "grid_not_found"})
+    return data
+
+
+@router.post("/{order_id}/hakodate-assignment", dependencies=[Depends(require_role("operator"))])
+def build_hakodate_assignment(order_id: str, body: dict | None = None):
+    strategy = None
+    grid_params = None
+    if isinstance(body, dict):
+        raw_strategy = body.get("strategy") or body.get("quantity_assignment_strategy")
+        if isinstance(raw_strategy, str):
+            strategy = raw_strategy
+        raw_params = body.get("grid_params")
+        if isinstance(raw_params, dict):
+            grid_params = raw_params
+        else:
+            grid_params = {
+                key: value
+                for key, value in body.items()
+                if isinstance(key, str) and (key.startswith("grid_") or key.startswith("hakodate_"))
+            }
+    data, error = order_service.build_order_hakodate_assignment(
+        order_id,
+        strategy=strategy,
+        grid_params=grid_params,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error in {"facility_missing", "document_missing", "template_unresolved"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error == "document_load_failed":
+        raise HTTPException(status_code=500, detail="document load failed")
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return data
+
+
+@router.post("/{order_id}/quantity-assignment-compare", dependencies=[Depends(require_role("operator"))])
+def compare_quantity_assignment(order_id: str, body: dict | None = None):
+    strategy = None
+    grid_params = None
+    if isinstance(body, dict):
+        raw_strategy = body.get("strategy") or body.get("quantity_assignment_strategy")
+        if isinstance(raw_strategy, str):
+            strategy = raw_strategy
+        raw_params = body.get("grid_params")
+        if isinstance(raw_params, dict):
+            grid_params = raw_params
+        else:
+            grid_params = {
+                key: value
+                for key, value in body.items()
+                if isinstance(key, str) and (key.startswith("grid_") or key.startswith("hakodate_"))
+            }
+    data, error = order_service.build_order_quantity_assignment_comparison(
+        order_id,
+        strategy=strategy,
+        grid_params=grid_params,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return data
+
+
+@router.post("/{order_id}/hakodate-audit-copy", dependencies=[Depends(require_role("operator"))])
+def create_hakodate_audit_copy(order_id: str):
+    data, error = order_service.clone_order_for_hakodate_audit(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return data
+
+
+@router.get("/{order_id}/hakodate-template-candidate", dependencies=[Depends(require_role("operator"))])
+def get_hakodate_template_candidate(order_id: str):
+    data, error = order_service.build_order_hakodate_template_candidate(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error in {"facility_missing", "template_unresolved"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return data
+
+
+@router.post("/{order_id}/hakodate-template-candidate/approve", dependencies=[Depends(require_role("operator"))])
+def approve_hakodate_template_candidate(order_id: str):
+    data, error = order_service.approve_order_hakodate_template_candidate(order_id)
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error in {"facility_missing", "template_unresolved", "candidate_unavailable", "candidate_signature_missing"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error == "validation_error":
+        raise HTTPException(
+            status_code=400,
+            detail=(data or {}).get("validation", {}).get("errors") or ["facility template invalid"],
+        )
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return data
+
+
+@router.post("/{order_id}/hakodate-projected-sheet", dependencies=[Depends(require_role("operator"))])
+def build_hakodate_projected_sheet(order_id: str, body: dict | None = None):
+    strategy = None
+    grid_params = None
+    if isinstance(body, dict):
+        raw_strategy = body.get("strategy") or body.get("quantity_assignment_strategy")
+        if isinstance(raw_strategy, str):
+            strategy = raw_strategy
+        raw_params = body.get("grid_params")
+        if isinstance(raw_params, dict):
+            grid_params = raw_params
+        else:
+            grid_params = {
+                key: value
+                for key, value in body.items()
+                if isinstance(key, str) and (key.startswith("grid_") or key.startswith("hakodate_"))
+            }
+    data, error = order_service.build_order_hakodate_projected_sheet(
+        order_id,
+        strategy=strategy,
+        grid_params=grid_params,
+    )
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail="order not found")
+    if error in {"facility_missing", "document_missing", "template_unresolved"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error == "facility_not_found":
+        raise HTTPException(status_code=404, detail="facility not found")
+    if error in {"sheet_unavailable", "assignment_unavailable"}:
+        raise HTTPException(status_code=400, detail=error)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
     return data
 
 
@@ -1530,9 +1897,54 @@ def switch_draft_sheet_evidence(order_id: str):
     return _flatten_draft_sheet_payload(order_id, draft)
 
 
+@router.post("/{order_id}/draft-sheet/keep-current", dependencies=[Depends(require_role("operator"))])
+def keep_current_draft_sheet(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    workflow_state, error = order_service.acknowledge_current_candidate_evidence(
+        order_id,
+        selected_by="operator",
+    )
+    if error == "candidate_not_found":
+        raise HTTPException(status_code=404, detail="candidate evidence not found")
+    if error in {"candidate_ack_failed", "workflow_refresh_failed"}:
+        raise HTTPException(status_code=500, detail="failed to keep current draft")
+    if not isinstance(workflow_state, dict):
+        raise HTTPException(status_code=500, detail="failed to keep current draft")
+    return workflow_state
+
+
+@router.get("/{order_id}/draft-sheet/candidate-preview", dependencies=[Depends(require_role("operator"))])
+def get_candidate_draft_sheet_preview(order_id: str):
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    preview, error = order_service.get_candidate_draft_preview(order_id)
+    if error == "candidate_not_found":
+        raise HTTPException(status_code=404, detail="candidate evidence not found")
+    if error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": error,
+                "message": "候補シートのプレビューをまだ表示できません。",
+            },
+        )
+    if not isinstance(preview, dict):
+        raise HTTPException(status_code=500, detail="failed to load candidate preview")
+    return preview
+
+
 @router.post("/{order_id}/draft-sheet/force-weekly-menu", dependencies=[Depends(require_role("operator"))])
-def force_draft_sheet_weekly_menu(order_id: str):
-    draft, error = order_service.force_overwrite_current_sheet_with_weekly_menu(order_id)
+def force_draft_sheet_weekly_menu(order_id: str, body: dict | None = None):
+    blank_quantities = False
+    if isinstance(body, dict) and "blank_quantities" in body:
+        blank_quantities = bool(body.get("blank_quantities"))
+    draft, error = order_service.force_overwrite_current_sheet_with_weekly_menu(
+        order_id,
+        blank_quantities=blank_quantities,
+    )
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
     if error == "facility_missing":
@@ -1666,6 +2078,7 @@ def set_facility(order_id: str, body: dict):
         fac,
         expected_current_facility=str(body.get("expected_current_facility") or "").strip() or None,
         enforce_conflict_guard="expected_current_facility" in body,
+        refresh_current_sheet=bool(body.get("refresh_current_sheet")),
     )
     if isinstance(result, tuple):
         updated, error = result
@@ -1702,6 +2115,7 @@ def set_week(order_id: str, body: dict):
             str(week),
             expected_current_week=str(body.get("expected_current_week") or "").strip() or None,
             enforce_conflict_guard="expected_current_week" in body,
+            allow_non_calendar_exception=True,
         )
         if isinstance(result, tuple):
             updated, error = result
@@ -1795,7 +2209,6 @@ def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
         revision_conflict = order_service._sheet_revision_conflict_detail(
             order_id=order_id,
             expected_revision_id=expected_revision_id,
-            payload=order_service.get_cached_ocr_payload(order_id),
         )
         if revision_conflict is not None:
             raise HTTPException(
@@ -1870,7 +2283,7 @@ def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
             },
         )
     try:
-        order = order_service.confirm_order(order_id)
+        order, postprocess_payload = order_service.confirm_order_authoritatively(order_id)
     except order_service.ConfirmMaterializationError as exc:
         raise HTTPException(
             status_code=409,
@@ -1881,6 +2294,7 @@ def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
         ) from exc
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
+    background_tasks.add_task(order_service.finalize_confirmed_order, postprocess_payload)
     background_tasks.add_task(_enqueue_outputs_after_confirm, order_id)
     return {"accepted": True}
 

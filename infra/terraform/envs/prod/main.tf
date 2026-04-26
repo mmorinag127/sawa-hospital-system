@@ -6,6 +6,7 @@ locals {
   worker_service_name       = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
   ocr_pipeline_service_name = var.ocr_pipeline_service_name != "" ? var.ocr_pipeline_service_name : "ocr-pipeline-${var.env}"
   worker_url                = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
+  deploy_service_account    = "terraform-admin@${var.project_id}.iam.gserviceaccount.com"
 }
 
 module "apis" {
@@ -74,6 +75,18 @@ module "cloudrun" {
   env             = local.env
   services        = var.cloudrun_services
   request_timeout = var.cloudrun_request_timeout
+  service_request_timeouts = {
+    "ocr-pipeline" = "3600s"
+  }
+  service_scaling = {
+    "ocr-pipeline" = {
+      min_instance_count = 0
+      max_instance_count = 30
+    }
+  }
+  service_concurrency = {
+    "ocr-pipeline" = 1
+  }
   env_vars = {
     DB_NAME                = var.db_name
     DB_USER                = var.db_user
@@ -122,6 +135,9 @@ module "cloudrun" {
       OCR_YOMITOKU_NO_FIGURE         = "false"
       OCR_YOMITOKU_FIGURE_WIDTH      = "200"
       OCR_YOMITOKU_FIGURE_DIR        = "figures"
+      GUNICORN_TIMEOUT               = "3600"
+      GUNICORN_CMD_ARGS              = "--timeout 3600"
+      OCR_PREWARM_ANALYZER           = "true"
     }
   }
   service_resources = var.cloudrun_service_resources
@@ -196,24 +212,8 @@ module "iam" {
       role   = "roles/storage.objectViewer"
     },
     {
-      member = "serviceAccount:${module.cloudrun.service_accounts["web"]}"
-      role   = "roles/secretmanager.secretAccessor"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
-      role   = "roles/secretmanager.secretAccessor"
-    },
-    {
       member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
       role   = "roles/datastore.user"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["web"]}"
-      role   = "roles/cloudsql.client"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
-      role   = "roles/cloudsql.client"
     },
     {
       member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
@@ -226,6 +226,22 @@ module "iam" {
     {
       member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
       role   = "roles/secretmanager.secretAccessor"
+    },
+    {
+      member = "serviceAccount:${local.deploy_service_account}"
+      role   = "roles/owner"
+    },
+    {
+      member = "serviceAccount:${local.deploy_service_account}"
+      role   = "roles/run.admin"
+    },
+    {
+      member = "serviceAccount:${local.deploy_service_account}"
+      role   = "roles/serviceusage.serviceUsageConsumer"
+    },
+    {
+      member = "serviceAccount:${local.deploy_service_account}"
+      role   = "roles/cloudbuild.builds.editor"
     }
   ]
   depends_on = [module.apis, module.cloudrun]
@@ -237,15 +253,29 @@ resource "google_service_account_iam_member" "worker_token_creator" {
   member             = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"
 }
 
-data "google_project" "current" {
-  project_id = var.project_id
+resource "google_service_account_iam_member" "deploy_sa_user_web" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["web"]}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.deploy_service_account}"
+}
+
+resource "google_service_account_iam_member" "deploy_sa_user_worker" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["worker"]}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.deploy_service_account}"
+}
+
+resource "google_service_account_iam_member" "deploy_sa_user_ocr_pipeline" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["ocr-pipeline"]}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.deploy_service_account}"
 }
 
 # Cloud Scheduler needs this permission to mint OIDC tokens for the worker service account.
 resource "google_service_account_iam_member" "cloudscheduler_worker_token_creator" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${module.cloudrun.service_accounts["worker"]}"
   role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+  member             = "serviceAccount:service-${var.project_number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
 }
 
 resource "google_eventarc_trigger" "ocr_pipeline_gcs" {

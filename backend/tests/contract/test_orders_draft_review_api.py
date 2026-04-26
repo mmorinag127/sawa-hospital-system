@@ -87,7 +87,15 @@ def test_get_ocr_sheet_returns_recoverable_payload_when_apply_is_blocked():
     assert payload["review_stage"] == "needs_human_review"
     assert payload["can_apply"] is False
     assert payload["can_confirm"] is False
-    assert payload["source"] in {"review_blocked", "weekly_menu", "weekly_menu+ocr_payload"}
+    assert payload["source"] in {
+        "review_blocked",
+        "weekly_menu",
+        "weekly_menu+ocr_payload",
+        "weekly_menu_blocked",
+        "ocr_table",
+        "ocr_table+payload_row",
+        "ocr_table+identity",
+    }
     blocker_codes = set(payload.get("apply_blockers") or []) | set(payload.get("confirm_blockers") or [])
     assert blocker_codes
     detail_codes = {
@@ -100,6 +108,263 @@ def test_get_ocr_sheet_returns_recoverable_payload_when_apply_is_blocked():
     assert payload["confirmed_line_count"] == 1
     assert payload["line_count_delta"] == -1
     assert payload["line_count_mismatch"] is True
+
+
+def test_order_detail_and_draft_sheet_expose_same_blocker_reason_for_missing_menu():
+    order_service.clear_all()
+    _clear_month("2199-11")
+    client = TestClient(app)
+    order = _create_seed_order(
+        "msg-draft-review-parity-missing-menu",
+        week_hint="2199-11",
+        received_at=datetime(2199, 11, 15, 9, 0, 0),
+        line_date="2199-11-15",
+    )
+
+    detail_res = client.get(f"/orders/{order['id']}")
+    assert detail_res.status_code == 200
+    detail = detail_res.json()
+    assert detail["ocr_review_state"] in {"draft_ready", "review_required"}
+    assert "monthly_menu_object_missing" in (detail["ocr_apply_blockers"] or [])
+    assert "rows_empty" in (detail["ocr_apply_blockers"] or [])
+
+    workflow_res = client.get(f"/orders/{order['id']}/workflow-state")
+    assert workflow_res.status_code == 200
+    workflow = workflow_res.json()
+    assert "monthly_menu_object_missing" in (workflow["ocr_apply_blockers"] or [])
+    assert "rows_empty" in (workflow["ocr_apply_blockers"] or [])
+
+    draft_res = client.get(f"/orders/{order['id']}/draft-sheet")
+    assert draft_res.status_code == 200
+    draft = draft_res.json()
+    assert "monthly_menu_object_missing" in (draft.get("warnings") or [])
+    assert "monthly_menu_object_missing" in (draft.get("apply_blockers") or [])
+    assert "rows_empty" in (draft.get("apply_blockers") or [])
+
+
+def test_draft_sheet_compact_payload_keeps_blockers_but_skips_heavy_meta_when_menu_missing():
+    order_service.clear_all()
+    _clear_month("2199-11")
+    client = TestClient(app)
+    order = _create_seed_order(
+        "msg-draft-review-compact-missing-menu",
+        week_hint="2199-11",
+        received_at=datetime(2199, 11, 15, 9, 0, 0),
+        line_date="2199-11-15",
+    )
+
+    res = client.get(f"/orders/{order['id']}/draft-sheet", params={"compact": 1})
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["source"] == "review_blocked"
+    assert payload["rows"] == []
+    assert "monthly_menu_object_missing" in (payload.get("warnings") or [])
+    assert "monthly_menu_object_missing" in (payload.get("blockers") or [])
+    assert "workflow_state" not in payload
+    assert "candidate_resolution" not in payload
+    assert "evidence_capabilities" not in payload
+
+
+def test_ocr_sheet_api_prefers_current_sheet_context_without_persisted_draft(monkeypatch):
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-draft-review-current-sheet-ocr-sheet")
+
+    current_sheet_payload = {
+        "order_id": order["id"],
+        "source": "weekly_menu+ocr_payload",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["02/15", "朝", "Menu A", "7"]],
+        "row_ids": ["row-current-1"],
+        "warnings": ["quantity_review_required"],
+        "menu_diagnostics": {"order_codes": []},
+        "sheet_projection": {"status": "projected"},
+        "resolved_week_id": "2026-02@2026-02-15~2026-02-21",
+    }
+    current_sheet_record = {
+        "id": None,
+        "order_id": order["id"],
+        "base_evidence_run_id": "OEVcurrent123",
+        "base_template_resolution_id": "tmpl-current",
+        "draft_sheet_json": {
+            "order_id": order["id"],
+            "source": "ocr_evidence",
+            "fields": ["col1", "col2", "col3", "col4"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [],
+            "row_ids": [],
+        },
+        "draft_state": "draft_ready",
+        "blockers_json": [],
+        "warnings_json": ["quantity_review_required"],
+    }
+    current_sheet_context = {
+        "order_id": order["id"],
+        "draft_record": current_sheet_record,
+        "draft_payload": dict(current_sheet_payload),
+        "draft_id": None,
+        "source": "weekly_menu+ocr_payload",
+        "fields": list(current_sheet_payload["fields"]),
+        "header": list(current_sheet_payload["header"]),
+        "rows": list(current_sheet_payload["rows"]),
+        "row_ids": list(current_sheet_payload["row_ids"]),
+        "warnings": ["quantity_review_required"],
+        "blockers": [],
+        "sheet_projection": {"status": "projected"},
+        "has_persisted_draft": False,
+        "clean_saved_draft": False,
+        "base_evidence_run_id": "OEVcurrent123",
+        "resolved_week_id": "2026-02@2026-02-15~2026-02-21",
+        "facility_id": "FAC00001",
+        "menu_diagnostics": {"order_codes": []},
+        "row_diagnostics": [],
+        "has_semantic_fields": True,
+    }
+
+    monkeypatch.setattr(order_service, "_evidence_only_step2_enabled", lambda: True)
+    monkeypatch.setattr(
+        order_service,
+        "_get_ocr_output_without_legacy_edits",
+        lambda _order_id, persist_cache=False: ({"metrics": {"status": "done"}}, None),
+    )
+    monkeypatch.setattr(order_service, "_augment_payload_with_candidate_resolution", lambda _order_id, payload: payload)
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_effective_sheet_template",
+        lambda **_kwargs: (
+            {"facility_id": "FAC00001"},
+            None,
+            None,
+            "template_unresolved",
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_build_sheet_fields_and_indexes",
+        lambda _template: (
+            list(current_sheet_payload["fields"]),
+            {field: idx for idx, field in enumerate(current_sheet_payload["fields"])},
+        ),
+    )
+    monkeypatch.setattr(order_service, "_validate_sheet_template_fields", lambda _fields: None)
+    monkeypatch.setattr(order_service, "_build_sheet_quantity_index", lambda _fields: {})
+    monkeypatch.setattr(
+        order_service.candidate_resolution_service,
+        "position_fallback_allowed_for_facility",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(order_service, "get_current_sheet_context", lambda *_args, **_kwargs: current_sheet_context)
+
+    res = client.get(f"/orders/{order['id']}/ocr-sheet")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["source"] == "weekly_menu+ocr_payload"
+    assert payload["rows"] == [["02/15", "朝", "Menu A", "7"]]
+    assert payload["row_ids"] == ["row-current-1"]
+    assert payload["evidence_run_id"] == "OEVcurrent123"
+    assert payload["base_evidence_run_id"] == "OEVcurrent123"
+    assert payload["ocr_job_id"] == f"OCR-{order['id']}"
+    assert payload["can_apply"] is False
+    assert payload["can_confirm"] is False
+
+
+def test_ocr_sheet_api_prefers_generic_current_sheet_context_before_recoverable_fallback(monkeypatch):
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-draft-review-current-sheet-generic")
+
+    current_sheet_payload = {
+        "order_id": order["id"],
+        "source": "ocr_evidence",
+        "fields": ["col1", "col2", "col3", "col4"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["02/15", "朝", "Menu A", "7"]],
+        "row_ids": ["row-current-1"],
+        "warnings": ["monthly_menu_object_missing"],
+        "menu_diagnostics": {"order_codes": ["monthly_menu_object_missing"]},
+        "sheet_projection": {"status": "projected"},
+        "resolved_week_id": "2026-02@2026-02-15~2026-02-21",
+    }
+    current_sheet_record = {
+        "id": None,
+        "order_id": order["id"],
+        "base_evidence_run_id": "OEVcurrent456",
+        "base_template_resolution_id": None,
+        "draft_sheet_json": dict(current_sheet_payload),
+        "draft_state": "draft_ready",
+        "blockers_json": [],
+        "warnings_json": ["monthly_menu_object_missing"],
+    }
+    current_sheet_context = {
+        "order_id": order["id"],
+        "draft_record": current_sheet_record,
+        "draft_payload": dict(current_sheet_payload),
+        "draft_id": None,
+        "source": "ocr_evidence",
+        "fields": list(current_sheet_payload["fields"]),
+        "header": list(current_sheet_payload["header"]),
+        "rows": list(current_sheet_payload["rows"]),
+        "row_ids": list(current_sheet_payload["row_ids"]),
+        "warnings": ["monthly_menu_object_missing"],
+        "blockers": [],
+        "sheet_projection": {"status": "projected"},
+        "has_persisted_draft": False,
+        "clean_saved_draft": False,
+        "base_evidence_run_id": "OEVcurrent456",
+        "resolved_week_id": "2026-02@2026-02-15~2026-02-21",
+        "facility_id": "FAC00001",
+        "menu_diagnostics": {"order_codes": ["monthly_menu_object_missing"]},
+        "row_diagnostics": [],
+        "has_semantic_fields": False,
+    }
+
+    monkeypatch.setattr(order_service, "_evidence_only_step2_enabled", lambda: True)
+    monkeypatch.setattr(
+        order_service,
+        "_get_ocr_output_without_legacy_edits",
+        lambda _order_id, persist_cache=False: ({"metrics": {"status": "done"}}, None),
+    )
+    monkeypatch.setattr(order_service, "_augment_payload_with_candidate_resolution", lambda _order_id, payload: payload)
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_effective_sheet_template",
+        lambda **_kwargs: (
+            {"facility_id": "FAC00001"},
+            {"fields": list(current_sheet_payload["fields"]), "header": list(current_sheet_payload["header"])},
+            "tmpl-current",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_build_sheet_fields_and_indexes",
+        lambda _template: (
+            list(current_sheet_payload["fields"]),
+            {field: idx for idx, field in enumerate(current_sheet_payload["fields"])},
+        ),
+    )
+    monkeypatch.setattr(order_service, "_validate_sheet_template_fields", lambda _fields: None)
+    monkeypatch.setattr(order_service, "_build_sheet_quantity_index", lambda _fields: {})
+    monkeypatch.setattr(
+        order_service.candidate_resolution_service,
+        "position_fallback_allowed_for_facility",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(order_service, "get_current_sheet_context", lambda *_args, **_kwargs: current_sheet_context)
+
+    res = client.get(f"/orders/{order['id']}/ocr-sheet")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["source"] == "ocr_evidence"
+    assert payload["rows"] == [["02/15", "朝", "Menu A", "7"]]
+    assert payload["row_ids"] == ["row-current-1"]
+    assert payload["evidence_run_id"] == "OEVcurrent456"
+    assert payload["base_evidence_run_id"] == "OEVcurrent456"
+    assert payload["ocr_job_id"] == f"OCR-{order['id']}"
 
 
 def test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_reason():
@@ -413,7 +678,8 @@ def test_confirm_returns_stale_revision_conflict_when_draft_changed_elsewhere():
         json=_sheet_payload(quantity="7", note="confirm-1", row_id="row-stale-confirm-1"),
     )
     assert first.status_code == 200
-    first_revision_id = str(first.json()["revision"]["revision_id"])
+    first_revision_id = str(order_service._current_sheet_revision_id(order_id=order["id"]))
+    assert first_revision_id
 
     second = client.post(
         f"/orders/{order['id']}/ocr-sheet-save",
@@ -424,18 +690,99 @@ def test_confirm_returns_stale_revision_conflict_when_draft_changed_elsewhere():
     )
     assert second.status_code == 200
 
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
+    current_order = order_service.get_order_by_id(order["id"])
+    assert isinstance(current_order, dict)
     stale_confirm = client.post(
         f"/orders/{order['id']}/confirm",
         json={
             "expected_revision_id": first_revision_id,
-            "expected_lines_updated_at": detail.json()["lines_updated_at"],
+            "expected_lines_updated_at": current_order["lines_updated_at"],
         },
     )
     assert stale_confirm.status_code == 409
     detail = stale_confirm.json().get("detail") or {}
     assert detail.get("error") == "stale_revision_conflict"
+
+
+def test_confirm_route_defers_post_confirm_side_effects_to_background(monkeypatch):
+    background_tasks = orders_api.BackgroundTasks()
+    order_id = "ORD-CONFIRM-ACK-001"
+    order_payload = {"id": order_id, "lines_updated_at": "2026-02-15T09:00:00Z"}
+    finalize_called = False
+
+    monkeypatch.setattr(orders_api.order_service, "get_order_by_id", lambda _order_id: dict(order_payload))
+    monkeypatch.setattr(orders_api.order_service, "_sheet_revision_conflict_detail", lambda **_kwargs: None)
+    monkeypatch.setattr(orders_api.order_service, "_lines_timestamp_conflict_detail", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_workflow_state",
+        lambda _order_id, refresh=False: {
+            "state": "apply_ready",
+            "apply_gate": {"can_confirm": True, "confirm_blockers": [], "confirm_warnings": []},
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "confirm_order_authoritatively",
+        lambda _order_id: (
+            {"id": _order_id, "status": "確定"},
+            {"order_id": _order_id, "confirmed_facility": "FAC00001", "confirmed_week": "2026-02"},
+        ),
+    )
+
+    def _mark_finalize_called(_payload):
+        nonlocal finalize_called
+        finalize_called = True
+
+    monkeypatch.setattr(orders_api.order_service, "finalize_confirmed_order", _mark_finalize_called)
+
+    res = orders_api.confirm_order(
+        order_id,
+        background_tasks,
+        {
+            "expected_revision_id": "ODR-confirm-1",
+            "expected_lines_updated_at": order_payload["lines_updated_at"],
+        },
+    )
+
+    assert res == {"accepted": True}
+    assert finalize_called is False
+    task_names = [getattr(task.func, "__name__", "") for task in background_tasks.tasks]
+    assert "_mark_finalize_called" in task_names
+    assert "_enqueue_outputs_after_confirm" in task_names
+
+
+def test_confirm_uses_authoritative_current_sheet_revision_not_stale_cached_payload():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order("msg-draft-review-confirm-authoritative-current")
+
+    save_res = client.post(
+        f"/orders/{order['id']}/ocr-sheet-save",
+        json=_sheet_payload(quantity="7", note="confirm-current", row_id="row-confirm-current-1"),
+    )
+    assert save_res.status_code == 200
+    current_order = order_service.get_order_by_id(order["id"])
+    assert isinstance(current_order, dict)
+    current_revision_id = str(order_service._current_sheet_revision_id(order_id=order["id"]))
+    assert current_revision_id
+
+    cached_payload = order_service.get_cached_ocr_payload(order["id"]) or {}
+    cached_payload["current_sheet_revision_id"] = "stale-cache-revision"
+    order_service._save_order_ocr_cache(order["id"], cached_payload)
+
+    confirm_res = client.post(
+        f"/orders/{order['id']}/confirm",
+        json={
+            "expected_revision_id": current_revision_id,
+            "expected_lines_updated_at": current_order["lines_updated_at"],
+        },
+    )
+
+    assert confirm_res.status_code == 202
+    confirmed = order_service.get_order_by_id(order["id"])
+    assert isinstance(confirmed, dict)
+    assert confirmed["status"] == "確定"
 
 
 def test_facility_and_week_updates_return_stale_conflicts():
@@ -472,6 +819,39 @@ def test_facility_and_week_updates_return_stale_conflicts():
     )
     assert stale_week.status_code == 409
     assert (stale_week.json().get("detail") or {}).get("error") == "stale_week_conflict"
+
+
+def test_week_save_conflict_guard_accepts_current_promoted_week_value():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _create_seed_order(
+        "msg-draft-review-current-promoted-week",
+        week_hint="2026-02",
+        received_at=datetime(2026, 2, 15, 9, 0, 0),
+        line_date="2026-02-15",
+    )
+
+    order_res = client.get(f"/orders/{order['id']}")
+    assert order_res.status_code == 200
+    current_order = order_res.json()
+    assert current_order["week"] == "2026-02"
+    assert current_order["week_value"] == "2026-02@2026-02-15~2026-02-21"
+    assert current_order["persisted_week_value"] == "2026-02@2026-02-15~2026-02-21"
+
+    save_res = client.post(
+        f"/orders/{order['id']}/week",
+        json={
+            "week": "2026-02@2026-02-16~2026-02-22",
+            "expected_current_week": current_order["persisted_week_value"],
+        },
+    )
+    assert save_res.status_code == 200
+
+    refreshed = client.get(f"/orders/{order['id']}")
+    assert refreshed.status_code == 200
+    payload = refreshed.json()
+    assert payload["week_value"] == "2026-02@2026-02-16~2026-02-22"
+    assert payload["persisted_week_value"] == "2026-02@2026-02-16~2026-02-22"
 
 
 def test_order_endpoints_expose_reparse_stage_and_retained_lines_for_recoverable_result():
@@ -528,6 +908,11 @@ def test_reparse_endpoint_blocks_when_reparse_job_is_already_running():
     order = _create_seed_order("msg-draft-review-reparse-running")
 
     create_job(f"OCR-{order['id']}", input_reference="file://dummy.pdf", status="running")
+    update_job(
+        f"OCR-{order['id']}",
+        status="running",
+        metrics={"request_mode": "ocr_reparse", "processing_stage": "llm_reparse", "result_state": "processing"},
+    )
 
     res = client.post(f"/orders/{order['id']}/reparse", json={"ocr_provider": "gemini"})
 
@@ -561,6 +946,7 @@ def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
         status="running",
         error_message=None,
         metrics={
+            "request_mode": "ocr_reparse",
             "processing_stage": "llm_review",
             "result_state": "running",
         },
@@ -574,6 +960,8 @@ def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
     list_res = client.get("/orders")
     assert list_res.status_code == 200
     row = next(item for item in list_res.json()["orders"] if item["id"] == order["id"])
+    assert row["ocr_status"] == "failed"
+    assert row["ocr_error"].startswith("reparse_stale_timeout>")
     assert row["ocr_review_state"] == "draft_ready"
     assert row["ocr_processing_stage"] == "stale_timeout"
     assert row["ocr_result_state"] == "draft_ready_blocked"
@@ -585,7 +973,8 @@ def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
     detail_res = client.get(f"/orders/{order['id']}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
-    assert detail["ocr_status"] == "success"
+    assert detail["ocr_status"] == "failed"
+    assert detail["ocr_error"].startswith("reparse_stale_timeout>")
     assert detail["ocr_processing_stage"] == "stale_timeout"
     assert detail["ocr_result_state"] == "draft_ready_blocked"
     assert detail["ocr_has_saved_draft"] is True
@@ -672,6 +1061,7 @@ def test_reparse_endpoint_returns_recoverable_conflict_when_stale_action_wait(mo
         f"OCR-{order['id']}",
         status="running",
         metrics={
+            "request_mode": "ocr_reparse",
             "processing_stage": "llm_reparse",
             "result_state": "processing",
             "stage_updated_at": (datetime.utcnow() - timedelta(minutes=5)).isoformat(),
@@ -702,6 +1092,7 @@ def test_stale_reparse_keeps_success_status_when_cached_ocr_evidence_exists(monk
         f"OCR-{order['id']}",
         status="running",
         metrics={
+            "request_mode": "ocr_reparse",
             "processing_stage": "inference",
             "result_state": "processing",
         },
@@ -725,8 +1116,8 @@ def test_stale_reparse_keeps_success_status_when_cached_ocr_evidence_exists(monk
     detail_res = client.get(f"/orders/{order['id']}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
-    assert detail["ocr_status"] == "done"
-    assert detail.get("ocr_error") in {None, ""}
+    assert detail["ocr_status"] == "failed"
+    assert detail["ocr_error"].startswith("reparse_stale_timeout>")
     assert detail["ocr_reparse_health"] == "hard_failed"
 
     stale_job = get_job(f"OCR-{order['id']}")

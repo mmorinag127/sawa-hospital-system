@@ -5,7 +5,12 @@ from datetime import date, datetime
 from typing import Any
 
 from src.db import Base, engine
-from src.services import config_service, position_column_mapping_service, week_candidate_service
+from src.services import (
+    config_service,
+    position_column_mapping_service,
+    sheet_week_service,
+    week_candidate_service,
+)
 
 
 Base.metadata.create_all(bind=engine)
@@ -69,6 +74,85 @@ def _confidence_value(label: str) -> float:
     if normalized == "low":
         return 0.45
     return 0.0
+
+
+def _resolution_resolved_value(resolution: dict[str, Any] | None) -> str:
+    if not isinstance(resolution, dict):
+        return ""
+    return str(
+        resolution.get("resolved_value")
+        or resolution.get("resolved_column_mapping_id")
+        or resolution.get("resolved_template_id")
+        or resolution.get("resolved_quantity_choice_id")
+        or ""
+    ).strip()
+
+
+def get_resolution_gate_state(resolution: dict[str, Any] | None) -> dict[str, Any]:
+    decision_type = str((resolution or {}).get("decision_type") or "").strip() if isinstance(resolution, dict) else ""
+    resolved_value = _resolution_resolved_value(resolution)
+    blocked_reasons = [
+        str(item).strip()
+        for item in ((resolution or {}).get("blocked_reasons") or [])
+        if str(item).strip()
+    ] if isinstance(resolution, dict) else []
+    requires_user_choice = bool((resolution or {}).get("requires_user_choice")) if isinstance(resolution, dict) else False
+    blocked_without_resolution = bool((resolution or {}).get("blocked")) and not resolved_value if isinstance(resolution, dict) else False
+    blocked = bool(blocked_without_resolution or (blocked_reasons and not resolved_value and not requires_user_choice))
+    if requires_user_choice:
+        status = "choice_required"
+    elif resolved_value:
+        status = "resolved"
+    elif blocked:
+        status = "blocked"
+    else:
+        status = "missing"
+    return {
+        "decision_type": decision_type or None,
+        "resolved_value": resolved_value or None,
+        "blocked_reasons": blocked_reasons,
+        "requires_user_choice": requires_user_choice,
+        "blocked": blocked,
+        "status": status,
+    }
+
+
+def summarize_resolution_gate(
+    resolutions: dict[str, Any] | None,
+    *,
+    suppress_decision_types: set[str] | None = None,
+) -> dict[str, Any]:
+    suppressed = {str(item).strip() for item in (suppress_decision_types or set()) if str(item).strip()}
+    details: list[dict[str, Any]] = []
+    choice_required_types: list[str] = []
+    blocked_types: list[str] = []
+    unresolved_types: list[str] = []
+    for decision_type, resolution in (resolutions or {}).items():
+        if not isinstance(resolution, dict):
+            continue
+        state = get_resolution_gate_state(resolution)
+        normalized_type = str(decision_type or state.get("decision_type") or "").strip()
+        if not normalized_type:
+            continue
+        is_suppressed = normalized_type in suppressed
+        detail = dict(state)
+        detail["decision_type"] = normalized_type
+        detail["suppressed"] = is_suppressed
+        details.append(detail)
+        if is_suppressed:
+            continue
+        if state["status"] == "choice_required":
+            choice_required_types.append(normalized_type)
+            unresolved_types.append(normalized_type)
+        elif state["status"] == "blocked":
+            blocked_types.append(normalized_type)
+            unresolved_types.append(normalized_type)
+    return {
+        "details": details,
+        "choice_required_types": choice_required_types,
+        "blocked_types": blocked_types,
+        "unresolved_types": unresolved_types,
+    }
 
 
 def _candidate_score(candidate: dict[str, Any]) -> float | None:
@@ -205,21 +289,18 @@ def build_week_resolution(
 ) -> dict[str, Any]:
     raw_current_value = str(current_week or "").strip() or None
     current_value = raw_current_value if raw_current_value and "@" in raw_current_value else None
-    dates = _collect_payload_dates(payload, received_at)
+    anchor_month = (raw_current_value.split("@", 1)[0] if raw_current_value else "") or (
+        received_at or datetime.utcnow()
+    ).strftime("%Y-%m")
+    payload_dates = _collect_payload_dates(payload, received_at)
     candidate_months: list[str] = []
-    base_month = (received_at or datetime.utcnow()).strftime("%Y-%m")
-    for value in [raw_current_value, base_month]:
-        normalized = str(value or "").strip()
-        if normalized and normalized not in candidate_months:
-            candidate_months.append(normalized.split("@", 1)[0])
-    for parsed in dates:
-        month_id = parsed.strftime("%Y-%m")
-        if month_id not in candidate_months:
-            candidate_months.append(month_id)
-    if base_month not in candidate_months:
-        candidate_months.append(base_month)
+    for delta in (-2, -1, 0, 1, 2):
+        shifted = sheet_week_service.shift_sheet_month_id(anchor_month, delta)
+        if shifted and shifted not in candidate_months:
+            candidate_months.append(shifted)
     normalized_candidates: list[dict[str, Any]] = []
-    for month_id in candidate_months[:6]:
+    matched_candidates: list[str] = []
+    for month_id in candidate_months:
         for week_option in week_candidate_service.build_week_option_entries(month_id, facility_id):
             week_value = str(week_option.get("week_id") or "").strip()
             raw_start_date = str(week_option.get("date_from") or "").strip()
@@ -231,36 +312,67 @@ def build_week_resolution(
                 end_date = date.fromisoformat(raw_end_date)
             except Exception:
                 continue
+            matched_dates = [
+                item
+                for item in payload_dates
+                if start_date <= item <= end_date
+            ]
+            matched_ratio = (len(matched_dates) / len(payload_dates)) if payload_dates else 0.0
             score = 0.2
+            reason = "calendar"
             if current_value and current_value == week_value:
                 score = 1.0
-            elif any(start_date <= item <= end_date for item in dates):
-                score = 0.9
-            elif month_id == base_month:
+                reason = "current_order_value"
+            elif matched_dates:
+                score = 0.9 + min(matched_ratio, 1.0) * 0.09
+                reason = "ocr_dates"
+                matched_candidates.append(week_value)
+            elif isinstance(received_at, datetime) and start_date <= received_at.date() <= end_date:
+                score = 0.75
+                reason = "received_at"
+            elif month_id == anchor_month:
                 score = 0.6
+                reason = "anchor_month"
             normalized_candidates.append(
                 {
                     "value": week_value,
                     "label": str(week_option.get("label") or week_value),
                     "score": score,
-                    "reason": "ocr_dates" if score >= 0.9 else ("current_order_value" if score >= 1.0 else "calendar"),
+                    "reason": reason,
                 }
             )
     normalized_candidates.sort(key=lambda item: (item.get("score") or 0.0, item.get("value") or ""), reverse=True)
     normalized_candidates = _dedupe_candidates(normalized_candidates)
     top_score = normalized_candidates[0]["score"] if normalized_candidates else None
-    second_score = normalized_candidates[1]["score"] if len(normalized_candidates) > 1 else None
-    requires_user_choice = (
-        len(normalized_candidates) >= 2
-        and (top_score is None or second_score is None or (top_score - second_score) < 0.15 or top_score < 0.85)
-        and not current_value
-    )
-    resolved_value = current_value or (normalized_candidates[0]["value"] if len(normalized_candidates) == 1 else None)
+    deduped_matched_candidates: list[str] = []
+    for value in matched_candidates:
+        if value not in deduped_matched_candidates:
+            deduped_matched_candidates.append(value)
+    requires_user_choice = False
+    month_only_current = bool(raw_current_value and not current_value)
+    resolved_value = current_value
+    if (
+        not resolved_value
+        and len(deduped_matched_candidates) == 1
+        and not (month_only_current and len(normalized_candidates) >= 2)
+    ):
+        resolved_value = deduped_matched_candidates[0]
+    if not resolved_value and len(deduped_matched_candidates) >= 2:
+        requires_user_choice = True
+    elif not resolved_value and month_only_current:
+        # A month-only order week is only ambiguous when OCR payload dates actually
+        # point at a specific weekly slice. Pure calendar fallback candidates are not
+        # authoritative enough to force a user choice ahead of downstream blockers.
+        requires_user_choice = bool(payload_dates)
+    elif not resolved_value and not payload_dates and len(normalized_candidates) >= 2:
+        requires_user_choice = True
+    elif not resolved_value and len(normalized_candidates) >= 2 and not deduped_matched_candidates:
+        requires_user_choice = True
     blocked_reasons: list[str] = []
-    if not resolved_value and not normalized_candidates:
-        blocked_reasons.append("week_candidates_missing")
-    if requires_user_choice:
+    if not resolved_value and requires_user_choice:
         blocked_reasons.append("week_choice_required")
+    elif not resolved_value and not normalized_candidates:
+        blocked_reasons.append("week_candidates_missing")
     return {
         "decision_type": "week",
         "resolved_value": resolved_value,
@@ -342,6 +454,59 @@ def build_template_resolution_snapshot(payload: dict[str, Any] | None) -> dict[s
         "blocked_reasons": blocked_reasons,
         "requires_user_choice": requires_user_choice,
         "candidates": normalized_candidates,
+    }
+
+
+def _collapse_equivalent_template_resolution(
+    *,
+    facility_id: str | None,
+    resolution: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(resolution, dict):
+        return resolution
+    normalized_facility_id = str(facility_id or "").strip() or None
+    if not normalized_facility_id:
+        return resolution
+    facility_config = config_service.get_facility_config(normalized_facility_id)
+    if not isinstance(facility_config, dict):
+        return resolution
+    configured_template_ids = facility_config.get("fax_template_ids") or facility_config.get("fax_template_id")
+    collapsed_template_ids = config_service.collapse_equivalent_template_ids(
+        normalized_facility_id,
+        configured_template_ids,
+    )
+    if len(collapsed_template_ids) != 1:
+        return resolution
+    resolved_value = str(resolution.get("resolved_value") or "").strip()
+    if resolved_value:
+        return resolution
+    candidates = resolution.get("candidates") if isinstance(resolution.get("candidates"), list) else []
+    candidate_values = [
+        str(item.get("value") or "").strip()
+        for item in candidates
+        if isinstance(item, dict) and str(item.get("value") or "").strip()
+    ]
+    configured_values = {
+        str(item).strip()
+        for item in (
+            facility_config.get("fax_template_ids")
+            if isinstance(facility_config.get("fax_template_ids"), list)
+            else [facility_config.get("fax_template_id")]
+        )
+        if str(item).strip()
+    }
+    if candidate_values and any(value not in configured_values for value in candidate_values):
+        return resolution
+    canonical_template_id = collapsed_template_ids[0]
+    return {
+        **resolution,
+        "resolved_value": canonical_template_id,
+        "resolved_label": canonical_template_id,
+        "confidence": resolution.get("confidence") or "high",
+        "blocked": False,
+        "blocked_reasons": [],
+        "requires_user_choice": False,
+        "candidates": [{"value": canonical_template_id, "label": canonical_template_id, "score": 1.0, "reason": "effective_template_equivalent"}],
     }
 
 
@@ -702,7 +867,10 @@ def resolve_order_candidates(
         payload=augmented_payload,
         facility_id=facility.get("resolved_value") or facility_code,
     )
-    template = build_template_resolution_snapshot(augmented_payload)
+    template = _collapse_equivalent_template_resolution(
+        facility_id=facility.get("resolved_value") or facility_code,
+        resolution=build_template_resolution_snapshot(augmented_payload),
+    )
     column_mapping = build_column_mapping_resolution(augmented_payload)
     quantity = build_quantity_resolution(augmented_payload)
     resolutions = {
@@ -727,6 +895,7 @@ def resolve_order_candidates(
         for key, value in resolutions.items()
         if bool(value.get("requires_user_choice"))
     ]
+    gate_summary = summarize_resolution_gate(resolutions)
     overall_confidence_candidates = [
         _confidence_value(resolution.get("confidence"))
         for resolution in resolutions.values()
@@ -742,6 +911,7 @@ def resolve_order_candidates(
     return {
         "order_id": order_id,
         "resolutions": resolutions,
+        "gate_summary": gate_summary,
         "requires_user_choice": bool(critical_choices),
         "critical_choices": critical_choices,
         "attention_required": bool(
@@ -765,6 +935,7 @@ def _compact_resolution(resolution: dict[str, Any] | None, *, max_candidates: in
         "resolved_value": resolution.get("resolved_value"),
         "resolved_label": resolution.get("resolved_label"),
         "confidence": resolution.get("confidence"),
+        "gate_state": get_resolution_gate_state(resolution),
         "blocked": bool(resolution.get("blocked")),
         "blocked_reasons": [str(item).strip() for item in (resolution.get("blocked_reasons") or []) if str(item).strip()],
         "requires_user_choice": bool(resolution.get("requires_user_choice")),
@@ -793,6 +964,7 @@ def resolve_order_list_candidates(
     )
     compact_facility = _compact_resolution(facility, max_candidates=2)
     compact_week = _compact_resolution(week, max_candidates=3)
+    gate_summary = summarize_resolution_gate({"facility": facility, "week": week})
     overall_confidence_candidates = [
         _confidence_value((compact_facility or {}).get("confidence")),
         _confidence_value((compact_week or {}).get("confidence")),
@@ -819,6 +991,7 @@ def resolve_order_list_candidates(
             "facility": compact_facility,
             "week": compact_week,
         },
+        "gate_summary": gate_summary,
         "requires_user_choice": any(item is not None for item in critical_choices),
         "critical_choices": [item for item in critical_choices if isinstance(item, dict)],
         "confidence_band": _confidence_band(overall_confidence if overall_confidence > 0 else None),

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Tuple
@@ -23,7 +24,7 @@ from app.evidence_manifest import ensure_evidence_manifest
 from app.rois import crop_rois, load_template_config
 from app.template_match import choose_template_and_warp
 from app.template_resolution import build_template_resolution
-from app.yomitoku_runner import ocr_image_text, ocr_image_words, run_yomitoku
+from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,11 +72,21 @@ OCR_QUANTITY_SUBGRID_MAX_PASSES = int(os.environ.get("OCR_QUANTITY_SUBGRID_MAX_P
 OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE = (
     os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", "skip").strip().lower()
 )
+OCR_PREWARM_ANALYZER = os.environ.get("OCR_PREWARM_ANALYZER", "true").lower() == "true"
+
+app.logger.info(
+    "OCR pipeline runtime config gunicorn_timeout=%s gunicorn_cmd_args=%s prewarm_analyzer=%s",
+    os.environ.get("GUNICORN_TIMEOUT", ""),
+    os.environ.get("GUNICORN_CMD_ARGS", ""),
+    OCR_PREWARM_ANALYZER,
+)
 
 db = firestore.Client(project=PROJECT_ID or None)
 gcs = storage.Client(project=PROJECT_ID or None)
 
 FIGURE_REGEX = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
+_PREWARM_STARTED = False
+_PREWARM_LOCK = threading.Lock()
 
 
 def _normalize_prefix(prefix: str) -> str:
@@ -213,6 +224,28 @@ def _replace_markdown_images(markdown_text: str, replacements: dict[str, str]) -
 
 def _extract_markdown_images(markdown_text: str) -> list[str]:
     return [match.group(1) for match in FIGURE_REGEX.finditer(markdown_text or "")]
+
+
+def _start_analyzer_prewarm() -> None:
+    global _PREWARM_STARTED  # noqa: PLW0603
+    if not OCR_PREWARM_ANALYZER:
+        return
+    with _PREWARM_LOCK:
+        if _PREWARM_STARTED:
+            return
+        _PREWARM_STARTED = True
+
+    def _runner() -> None:
+        try:
+            prewarm_analyzer(device=YOMITOKU_DEVICE, visualize=YOMITOKU_VIS)
+            app.logger.info("OCR pipeline analyzer prewarm completed")
+        except Exception as exc:  # noqa: BLE001
+            app.logger.warning("OCR pipeline analyzer prewarm failed error=%s", str(exc))
+
+    threading.Thread(target=_runner, name="ocr-pipeline-prewarm", daemon=True).start()
+
+
+_start_analyzer_prewarm()
 
 
 def _classification_score(diagnostics: dict | None, matched_template_id: str | None) -> float | None:
@@ -394,6 +427,24 @@ def _count_non_empty_roi_cells(roi_result: dict[str, Any] | None) -> int:
     return count
 
 
+def _template_roi_needs_ocr_words(tpl_cfg: dict[str, Any] | None) -> bool:
+    if not isinstance(tpl_cfg, dict):
+        return False
+    rois_cfg = tpl_cfg.get("rois")
+    if not isinstance(rois_cfg, dict):
+        return False
+    qty_cfg = rois_cfg.get("qty")
+    if not isinstance(qty_cfg, dict):
+        return False
+    auto_headers = qty_cfg.get("auto_headers") or tpl_cfg.get("auto_headers") or []
+    if not isinstance(auto_headers, list) or not auto_headers:
+        return False
+    column_edges = qty_cfg.get("column_edges") or []
+    if isinstance(column_edges, list) and len(column_edges) >= 2:
+        return False
+    return True
+
+
 def _run_template_classification(
     *,
     pdf_bytes: bytes,
@@ -478,7 +529,9 @@ def _run_template_roi_extraction(
     warped_ocr_bgr = template_context.get("warped_ocr_bgr")
     if not isinstance(tpl_cfg, dict) or warped_ocr_bgr is None:
         return None
-    ocr_words = ocr_image_words(warped_ocr_bgr, device=YOMITOKU_DEVICE)
+    ocr_words = None
+    if _template_roi_needs_ocr_words(tpl_cfg):
+        ocr_words = ocr_image_words(warped_ocr_bgr, device=YOMITOKU_DEVICE)
     rois = crop_rois(
         warped_ocr_bgr,
         tpl_cfg,
@@ -589,6 +642,21 @@ def handler():
             facility_id,
             template_id,
             template_ids,
+        )
+        _update_job_stage(job_ref, "ocr", facility_id=facility_id, template_id=template_id)
+        _write_output_partial(
+            bucket=bucket,
+            object_name=output_name,
+            job_id=job_id,
+            status="running",
+            stage="ocr",
+            input_reference=input_reference,
+            output_reference=output_reference,
+            payload={
+                "facility_id": facility_id,
+                "template_id": template_id,
+                "engine": "yomitoku",
+            },
         )
         classification = None
         template_context = None
@@ -1052,19 +1120,30 @@ def handler():
             ),
             200,
         )
-    except Exception as exc:  # noqa: BLE001
-        job_ref.update(
-            {"status": "failed", "error": repr(exc), "updated_at": firestore.SERVER_TIMESTAMP}
-        )
-        _write_output_partial(
-            bucket=bucket,
-            object_name=output_name,
-            job_id=job_id,
-            status="failed",
-            stage="error",
-            input_reference=input_reference,
-            output_reference=output_reference,
-            payload={"error": repr(exc)},
-        )
+    except BaseException as exc:  # noqa: BLE001
+        try:
+            job_ref.update(
+                {
+                    "status": "failed",
+                    "error": repr(exc),
+                    "error_type": type(exc).__name__,
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            app.logger.exception("OCR pipeline failed to update job failure state job=%s", safe_job_id)
+        try:
+            _write_output_partial(
+                bucket=bucket,
+                object_name=output_name,
+                job_id=job_id,
+                status="failed",
+                stage="error",
+                input_reference=input_reference,
+                output_reference=output_reference,
+                payload={"error": repr(exc), "error_type": type(exc).__name__},
+            )
+        except Exception:  # noqa: BLE001
+            app.logger.exception("OCR pipeline failed to persist terminal error payload job=%s", safe_job_id)
         app.logger.exception("OCR pipeline failed job=%s", safe_job_id)
         raise

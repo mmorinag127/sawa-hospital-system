@@ -1,0 +1,53 @@
+{
+  "families": {
+    "fax_layout_regular_forbidden_v1": {
+      "family_label": "共通・禁食2種",
+      "month_sources": {
+        "2026-03": "共通　2603.xlsx",
+        "2026-04": "共通　2604.xlsx"
+      }
+    },
+    "fax_layout_floor_2f3f_v1": {
+      "family_label": "2F/3F分割",
+      "month_sources": {
+        "2026-03": "春日苑松茂　2603.xlsx",
+        "2026-04": "春日苑松茂　2604.xlsx"
+      }
+    },
+    "fax_layout_regular_soft_mixer_forbidden_v1": {
+      "family_label": "軟菜・ミキサー・禁食",
+      "month_sources": {
+        "2026-03": "藍テラス　2603.xlsx",
+        "2026-04": "藍テラス　2604.xlsx"
+      }
+    },
+    "fax_layout_regular_staff_daycare_v1": {
+      "family_label": "職員・禁食拡張",
+      "month_sources": {
+        "2026-03": "湘南さくら病院 2603.xlsx",
+        "2026-04": "湘南さくら病院 2604.xlsx"
+      }
+    },
+    "fax_layout_regular_diabetes_v1": {
+      "family_label": "糖尿併記",
+      "month_sources": {
+        "2026-03": "いこいの森プラス　2603.xlsx",
+        "2026-04": "いこいの森プラス　2604.xlsx"
+      }
+    },
+    "fax_layout_regular_staff_daycare_other_forbidden_v1": {
+      "family_label": "老健・職員通所・禁食",
+      "month_sources": {
+        "2026-03": "ふれあいの丘 2603.xlsx",
+        "2026-04": "ふれあいの丘 2604.xlsx"
+      }
+    },
+    "fax_layout_soft_packaging_forbidden_v1": {
+      "family_label": "軟菜・袋分け・禁食",
+      "month_sources": {
+        "2026-03": "池袋病院　2603.xlsx",
+        "2026-04": "池袋病院　2604.xlsx"
+      }
+    }
+  }
+}

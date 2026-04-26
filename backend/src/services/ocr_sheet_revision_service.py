@@ -141,6 +141,86 @@ def select_edited_sheet_revision(
     return None
 
 
+def _is_applied_reparse_revision(revision: dict[str, Any] | None) -> bool:
+    if not isinstance(revision, dict):
+        return False
+    return (
+        str(revision.get("sheet_save_mode") or "").strip().lower() == "applied"
+        and bool(revision.get("reparse_applied"))
+    )
+
+
+def _overlay_applied_reparse_quantity_cells(
+    *,
+    base_snapshot: dict[str, Any],
+    revision_snapshot: dict[str, Any],
+) -> dict[str, Any] | None:
+    base_fields = [str(field).strip() for field in (base_snapshot.get("fields") or []) if str(field).strip()]
+    revision_fields = [
+        str(field).strip()
+        for field in (revision_snapshot.get("fields") or [])
+        if str(field).strip()
+    ]
+    if not base_fields or not revision_fields:
+        return None
+
+    quantity_fields = [
+        field
+        for field in base_fields
+        if field.startswith("qty.") and field in revision_fields
+    ]
+    if not quantity_fields:
+        return None
+
+    base_rows = base_snapshot.get("rows") if isinstance(base_snapshot.get("rows"), list) else []
+    revision_rows = revision_snapshot.get("rows") if isinstance(revision_snapshot.get("rows"), list) else []
+    if not base_rows or not revision_rows:
+        return None
+
+    base_index_by_field = {field: idx for idx, field in enumerate(base_fields)}
+    revision_index_by_field = {field: idx for idx, field in enumerate(revision_fields)}
+    revision_rows_by_id = {
+        row_id: revision_rows[idx]
+        for idx, row_id in enumerate(revision_snapshot.get("row_ids") or [])
+        if isinstance(row_id, str) and row_id.strip() and idx < len(revision_rows)
+    }
+
+    merged_rows: list[list[str]] = []
+    base_row_ids = base_snapshot.get("row_ids") if isinstance(base_snapshot.get("row_ids"), list) else []
+    for row_idx, base_row in enumerate(base_rows):
+        if not isinstance(base_row, list):
+            continue
+        merged_row = list(base_row)
+        base_row_id = (
+            str(base_row_ids[row_idx]).strip()
+            if row_idx < len(base_row_ids) and str(base_row_ids[row_idx]).strip()
+            else ""
+        )
+        revision_row = revision_rows_by_id.get(base_row_id)
+        if revision_row is None and row_idx < len(revision_rows) and isinstance(revision_rows[row_idx], list):
+            revision_row = revision_rows[row_idx]
+        if isinstance(revision_row, list):
+            for field in quantity_fields:
+                base_idx = base_index_by_field[field]
+                revision_idx = revision_index_by_field[field]
+                if revision_idx >= len(revision_row):
+                    continue
+                revision_value = str(revision_row[revision_idx] or "").strip()
+                if revision_value == "":
+                    continue
+                while len(merged_row) <= base_idx:
+                    merged_row.append("")
+                merged_row[base_idx] = revision_value
+        merged_rows.append(merged_row)
+
+    return {
+        "fields": list(base_snapshot.get("fields") or []),
+        "header": list(base_snapshot.get("header") or []),
+        "rows": merged_rows,
+        "row_ids": list(base_snapshot.get("row_ids") or [])[: len(merged_rows)],
+    }
+
+
 def build_sheet_payload_from_revision(
     *,
     order_id: str,
@@ -171,6 +251,19 @@ def build_sheet_payload_from_revision(
             field_value_to_str=field_value_to_str,
         )
         if base_snapshot["rows"]:
+            if _is_applied_reparse_revision(revision):
+                overlaid_snapshot = _overlay_applied_reparse_quantity_cells(
+                    base_snapshot=base_snapshot,
+                    revision_snapshot=snapshot,
+                )
+                if isinstance(overlaid_snapshot, dict):
+                    payload["fields"] = overlaid_snapshot["fields"]
+                    payload["header"] = overlaid_snapshot["header"]
+                    payload["rows"] = overlaid_snapshot["rows"]
+                    payload["row_ids"] = overlaid_snapshot["row_ids"]
+                    if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
+                        payload["source"] = "edited_sheet"
+                    return payload
             if (
                 snapshot["fields"] == base_snapshot["fields"]
                 and snapshot["header"] == base_snapshot["header"]

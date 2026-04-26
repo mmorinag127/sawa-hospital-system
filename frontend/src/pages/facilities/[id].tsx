@@ -78,6 +78,16 @@ const parseStringList = (value: unknown): string[] => {
   return [];
 };
 
+const parseConfigString = (value: unknown, defaultValue = ""): string => {
+  return typeof value === "string" ? value : defaultValue;
+};
+
+const parseConfigNumberText = (value: unknown, defaultValue = ""): string => {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return defaultValue;
+};
+
 export default function FacilityConfigPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -102,6 +112,10 @@ export default function FacilityConfigPage() {
   const [geminiOcrModel, setGeminiOcrModel] = useState<string>("");
   const [geminiOcrPrompt, setGeminiOcrPrompt] = useState<string>("");
   const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("pipeline");
+  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<string>("legacy");
+  const [hakodateHeaderRows, setHakodateHeaderRows] = useState<string>("");
+  const [hakodateOcrResolution, setHakodateOcrResolution] = useState<string>("");
+  const [hakodateMinEdgeMarginRatio, setHakodateMinEdgeMarginRatio] = useState<string>("");
   const [largeCellMode, setLargeCellMode] = useState<boolean>(false);
   const [menuOverrideTags, setMenuOverrideTags] = useState<string>("");
 
@@ -151,6 +165,15 @@ export default function FacilityConfigPage() {
           ? geminiFallback.trim().toLowerCase()
           : "pipeline"
       );
+      const rawQuantityStrategy = parseConfigString(configRecord.quantity_assignment_strategy, "legacy")
+        .trim()
+        .toLowerCase();
+      setQuantityAssignmentStrategy(
+        ["legacy", "hakodate", "both"].includes(rawQuantityStrategy) ? rawQuantityStrategy : "legacy"
+      );
+      setHakodateHeaderRows(parseConfigNumberText(configRecord.hakodate_header_rows));
+      setHakodateOcrResolution(parseConfigNumberText(configRecord.hakodate_ocr_resolution));
+      setHakodateMinEdgeMarginRatio(parseConfigNumberText(configRecord.hakodate_min_edge_margin_ratio));
       setLargeCellMode(parseBoolean(configRecord.large_cell_mode));
       setMenuOverrideTags(parseStringList(configRecord.menu_override_tags).join(","));
       const rawPatterns = patternsRes?.data?.patterns;
@@ -258,6 +281,25 @@ export default function FacilityConfigPage() {
         nextConfig.gemini_ocr_fallback_provider = geminiFallbackProvider.trim();
       } else {
         delete nextConfig.gemini_ocr_fallback_provider;
+      }
+      nextConfig.quantity_assignment_strategy = quantityAssignmentStrategy || "legacy";
+      const parsedHakodateHeaderRows = Number.parseInt(hakodateHeaderRows, 10);
+      if (Number.isFinite(parsedHakodateHeaderRows) && parsedHakodateHeaderRows >= 0) {
+        nextConfig.hakodate_header_rows = parsedHakodateHeaderRows;
+      } else {
+        delete nextConfig.hakodate_header_rows;
+      }
+      const parsedHakodateOcrResolution = Number.parseInt(hakodateOcrResolution, 10);
+      if (Number.isFinite(parsedHakodateOcrResolution) && parsedHakodateOcrResolution > 0) {
+        nextConfig.hakodate_ocr_resolution = parsedHakodateOcrResolution;
+      } else {
+        delete nextConfig.hakodate_ocr_resolution;
+      }
+      const parsedHakodateMinEdgeMarginRatio = Number.parseFloat(hakodateMinEdgeMarginRatio);
+      if (Number.isFinite(parsedHakodateMinEdgeMarginRatio) && parsedHakodateMinEdgeMarginRatio >= 0) {
+        nextConfig.hakodate_min_edge_margin_ratio = parsedHakodateMinEdgeMarginRatio;
+      } else {
+        delete nextConfig.hakodate_min_edge_margin_ratio;
       }
       nextConfig.large_cell_mode = largeCellMode;
       const tags = menuOverrideTags
@@ -477,6 +519,51 @@ export default function FacilityConfigPage() {
                   onChange={(e) => setGeminiOcrPrompt(e.target.value)}
                   rows={5}
                   placeholder="施設固有のOCR指示（任意）"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Quantity Assignment Strategy</span>
+                <select
+                  className="input"
+                  value={quantityAssignmentStrategy}
+                  onChange={(e) => setQuantityAssignmentStrategy(e.target.value)}
+                >
+                  <option value="legacy">legacy: 現行方式</option>
+                  <option value="hakodate">hakodate: 箱館方式</option>
+                  <option value="both">both: 比較/監査用</option>
+                </select>
+                <span className="subtle">
+                  シート構造への数量割当方式です。通常の反映を変えずに比較する場合は both を使います。
+                </span>
+              </label>
+              <label className="field">
+                <span className="field-label">Hakodate Header Rows</span>
+                <input
+                  className="input"
+                  value={hakodateHeaderRows}
+                  onChange={(e) => setHakodateHeaderRows(e.target.value)}
+                  placeholder="例: 2"
+                  inputMode="numeric"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Hakodate OCR Resolution</span>
+                <input
+                  className="input"
+                  value={hakodateOcrResolution}
+                  onChange={(e) => setHakodateOcrResolution(e.target.value)}
+                  placeholder="例: 300"
+                  inputMode="numeric"
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Hakodate Min Edge Margin Ratio</span>
+                <input
+                  className="input"
+                  value={hakodateMinEdgeMarginRatio}
+                  onChange={(e) => setHakodateMinEdgeMarginRatio(e.target.value)}
+                  placeholder="例: 0.08"
+                  inputMode="decimal"
                 />
               </label>
               <label className="field checkbox">

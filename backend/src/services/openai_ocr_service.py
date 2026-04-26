@@ -10,6 +10,11 @@ import urllib.request
 from typing import Any
 
 from src.services.pdf_render import render_pdf_to_png_bytes
+from src.services.template_field_schema_service import (
+    build_header_by_field,
+    classify_aux_header_semantic,
+    derive_row_fields_from_columns,
+)
 
 _DEFAULT_ROW_FIELDS = ["date_mmdd", "daypart", "menu", "remarks"]
 _FULLWIDTH_TRANSLATION = str.maketrans(
@@ -51,15 +56,21 @@ def _safe_int(value: object, fallback: int) -> int:
 
 
 def _row_fields(template: dict) -> list[str]:
+    derived = derive_row_fields_from_columns(template.get("columns"))
+    if bool(template.get("columns_authoritative")) and derived:
+        return derived
     fields = template.get("main_ocr_row_fields")
-    if not isinstance(fields, list) or not fields:
-        return list(_DEFAULT_ROW_FIELDS)
-    normalized: list[str] = []
-    for field in fields:
-        text = str(field or "").strip()
-        if text:
-            normalized.append(text)
-    return normalized or list(_DEFAULT_ROW_FIELDS)
+    if isinstance(fields, list):
+        normalized: list[str] = []
+        for field in fields:
+            text = str(field or "").strip()
+            if text:
+                normalized.append(text)
+        if normalized:
+            return normalized
+    if derived:
+        return derived
+    return list(_DEFAULT_ROW_FIELDS)
 
 
 def _is_qty_field(field: str) -> bool:
@@ -73,6 +84,33 @@ def _is_date_field(field: str) -> bool:
 
 def _is_daypart_field(field: str) -> bool:
     return field in {"daypart", "meal", "time"}
+
+
+def _is_aux_field(field: str) -> bool:
+    return field.startswith("aux.")
+
+
+def _is_remarks_field(field: str) -> bool:
+    return field in {"remarks", "note"}
+
+
+def _full_table_patch_fields(row_fields: list[str]) -> list[str]:
+    return [
+        field
+        for field in row_fields
+        if _is_qty_field(field) or _is_aux_field(field) or _is_remarks_field(field)
+    ]
+
+
+def _row_has_field(row: dict[str, Any], field: str) -> bool:
+    if field in row:
+        return True
+    current: Any = row
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current.get(part)
+    return True
 
 
 def _normalize_digits_text(value: str) -> str:
@@ -117,12 +155,14 @@ def _normalize_date_text(value: str) -> str:
     return ""
 
 
-def _normalize_row_cell(field: str, value: object) -> str:
+def _normalize_row_cell(field: str, value: object, *, full_table_mode: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     if _is_qty_field(field):
         return _normalize_digits_text(text)
+    if full_table_mode:
+        return text
     if _is_daypart_field(field):
         return _normalize_daypart_text(text)
     if _is_date_field(field):
@@ -143,6 +183,24 @@ def _quantity_only_mode(template: dict[str, Any]) -> bool:
     return _as_bool(template.get("llm_quantity_only_mode"), default=False)
 
 
+def _full_table_mode(template: dict[str, Any]) -> bool:
+    return _as_bool(template.get("llm_full_table_mode"), default=False)
+
+
+def _resolve_timeout_seconds(template: dict[str, Any]) -> float:
+    configured = template.get("openai_ocr_timeout_seconds")
+    if configured is not None:
+        return float(configured)
+    if _full_table_mode(template):
+        return float(
+            os.getenv(
+                "OPENAI_OCR_FULL_TABLE_TIMEOUT_SECONDS",
+                os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "240"),
+            )
+        )
+    return float(os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "90"))
+
+
 def _quantity_fields(row_fields: list[str]) -> list[str]:
     return [field for field in row_fields if _is_qty_field(field)]
 
@@ -152,6 +210,7 @@ def _normalize_rows(
     row_fields: list[str],
     *,
     quantity_only_mode: bool,
+    full_table_mode: bool,
 ) -> list[dict[str, str]]:
     if not isinstance(rows, list):
         return []
@@ -162,18 +221,27 @@ def _normalize_rows(
             continue
         normalized_row: dict[str, str] = {}
         non_empty = False
-        target_fields = qty_fields if quantity_only_mode and qty_fields else row_fields
+        if quantity_only_mode and qty_fields:
+            target_fields = qty_fields
+        elif full_table_mode:
+            target_fields = _full_table_patch_fields(row_fields)
+        else:
+            target_fields = row_fields
         for field in target_fields:
-            cell = _normalize_row_cell(field, row.get(field))
+            if full_table_mode and not _row_has_field(row, field):
+                continue
+            cell = _normalize_row_cell(field, row.get(field), full_table_mode=full_table_mode)
             normalized_row[field] = cell
             if cell:
                 non_empty = True
-        if quantity_only_mode:
+        if quantity_only_mode or full_table_mode:
             row_index = _normalize_row_index(row.get("row_index"))
             if row_index:
                 normalized_row["row_index"] = row_index
                 non_empty = True
-        if non_empty:
+            elif full_table_mode:
+                continue
+        if non_empty or (full_table_mode and not quantity_only_mode):
             normalized.append(normalized_row)
     return normalized
 
@@ -183,6 +251,7 @@ def _normalize_payload(
     *,
     row_fields: list[str],
     quantity_only_mode: bool,
+    full_table_mode: bool,
 ) -> dict[str, Any]:
     normalized = dict(payload)
 
@@ -203,7 +272,22 @@ def _normalize_payload(
         normalized.get("rows"),
         row_fields,
         quantity_only_mode=quantity_only_mode,
+        full_table_mode=full_table_mode,
     )
+    if full_table_mode:
+        returned_row_indexes: list[int] = []
+        for row in normalized["rows"]:
+            if not isinstance(row, dict):
+                continue
+            row_index = _normalize_row_index(row.get("row_index"))
+            if not row_index:
+                continue
+            try:
+                returned_row_indexes.append(int(row_index))
+            except Exception:
+                continue
+        if returned_row_indexes:
+            normalized["_ocr_returned_row_indexes"] = sorted(set(returned_row_indexes))
     return normalized
 
 
@@ -231,9 +315,13 @@ def _get_model(template: dict) -> str:
 def _build_prompt(template: dict) -> str:
     fields = _row_fields(template)
     quantity_only_mode = _quantity_only_mode(template)
+    full_table_mode = _full_table_mode(template)
     qty_fields = _quantity_fields(fields)
+    patch_fields = _full_table_patch_fields(fields)
     field_list = ", ".join(fields)
     qty_field_list = ", ".join(qty_fields)
+    patch_field_list = ", ".join(patch_fields)
+    header_by_field = build_header_by_field(template.get("columns"))
     custom = str(template.get("openai_ocr_prompt") or "").strip()
     if quantity_only_mode and qty_fields:
         base_prompt = (
@@ -256,6 +344,52 @@ def _build_prompt(template: dict) -> str:
             "- Apply copying/inference only within the clearly indicated range.\n"
             "- Do not output date/daypart/menu fields in rows.\n"
             "- Skip headers, legends, totals, page numbers, and notes outside table body.\n"
+            "- Do not add extra keys.\n"
+            "- Do not output markdown, code fences, or explanations."
+        )
+    elif full_table_mode:
+        field_rules: list[str] = []
+        for field in patch_fields:
+            header = str(header_by_field.get(field) or field).strip()
+            if _is_qty_field(field):
+                field_rules.append(
+                    f"- {field} ({header}) is a quantity field. Copy only the digits visible in that exact quantity column. Never move helper/total numbers into this field."
+                )
+            elif _is_aux_field(field):
+                if classify_aux_header_semantic(header) == "block_total":
+                    field_rules.append(
+                        f"- {field} ({header}) is a display-only helper/total column. Copy the visible helper/total text only into this field. Never move it into qty.* or remarks."
+                    )
+                else:
+                    field_rules.append(
+                        f"- {field} ({header}) is display-only auxiliary text. Copy the visible text exactly. Never reinterpret it as quantity or remarks."
+                    )
+            elif _is_remarks_field(field):
+                field_rules.append(
+                    f"- {field} ({header}) comes only from the actual notes/remarks cell. Do not move side legends, diet markers, or helper annotations into this field."
+                )
+        base_prompt = (
+            "You are an OCR parser for Japanese fax order forms.\n"
+            "Extract sparse current-sheet-aligned cell patches and return strict JSON.\n"
+            "Return ONLY one JSON object with this exact shape:\n"
+            '{"facility_name": string, "date_strings": string[], "rows": object[]}.\n'
+            "facility_name must be empty string when unreadable.\n"
+            "Each row object in rows must include row_index and may include only these patch fields:\n"
+            f"row_index, {patch_field_list}\n"
+            "Rules:\n"
+            "- row_index is the zero-based structural row index from the current sheet/baseline.\n"
+            "- Every returned row object must include row_index.\n"
+            "- Return only rows that need a patch; omit unchanged rows.\n"
+            "- Inside a returned row, omit unchanged fields.\n"
+            "- To explicitly clear a cell, include that field with empty string.\n"
+            "- Do not output structural anchor fields such as date_mmdd, daypart, or menu; those are owned by the current sheet.\n"
+            "- Do not emit unanchored rows.\n"
+            "- Skip header rows, legends, date-only separators, totals-only lines, page numbers, and notes outside the table body.\n"
+            "- Copy only text visible in the same aligned row/cell.\n"
+            "- For display-only helper cells, keep them empty when unreadable instead of guessing.\n"
+            "- For quantity fields only, if handwriting is unreadable you may infer from nearby recognized quantities when continuity is clear; otherwise keep empty string.\n"
+            "- Quantity fields (qty.*) must be digits only ([0-9]+), otherwise empty string.\n"
+            f"{chr(10).join(field_rules)}\n"
             "- Do not add extra keys.\n"
             "- Do not output markdown, code fences, or explanations."
         )
@@ -510,7 +644,7 @@ def run_openai_ocr(
     model = _get_model(template)
     page = max(int(template.get("page", 1)) - 1, 0) + 1
     resolution = int(template.get("openai_ocr_resolution") or template.get("main_ocr_resolution") or 300)
-    timeout = float(template.get("openai_ocr_timeout_seconds") or os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "90"))
+    timeout = _resolve_timeout_seconds(template)
     max_tokens = int(template.get("openai_ocr_max_tokens") or os.getenv("OPENAI_OCR_MAX_TOKENS", "6000"))
     retry_on_truncation = _as_bool(
         template.get("openai_ocr_retry_on_truncation")
@@ -526,6 +660,7 @@ def run_openai_ocr(
     if retry_max_tokens < max_tokens:
         retry_max_tokens = max_tokens
     quantity_only_mode = _quantity_only_mode(template)
+    full_table_mode = _full_table_mode(template)
     system_prompt = _build_prompt(template)
     user_prompt = _build_user_prompt(template)
     row_fields = _row_fields(template)
@@ -584,6 +719,7 @@ def run_openai_ocr(
         parsed,
         row_fields=row_fields,
         quantity_only_mode=quantity_only_mode,
+        full_table_mode=full_table_mode,
     )
     parsed.setdefault("facility_name", None)
     parsed.setdefault("date_strings", [])
@@ -604,6 +740,7 @@ def run_openai_ocr(
         "retry_applied": bool(len(attempts) > 1),
         "recovered_truncated_json": bool(recovered_truncated_json),
         "quantity_only_mode": bool(quantity_only_mode),
+        "full_table_mode": bool(full_table_mode),
     }
     if attempts:
         debug_payload["attempts"] = attempts
@@ -613,6 +750,9 @@ def run_openai_ocr(
         debug_payload["response_id"] = response_id.strip()
     if isinstance(last_attempt.get("usage"), dict):
         debug_payload["usage"] = last_attempt["usage"]
+    returned_row_indexes = parsed.get("_ocr_returned_row_indexes")
+    if isinstance(returned_row_indexes, list) and returned_row_indexes:
+        debug_payload["returned_row_indexes"] = returned_row_indexes
     parsed["_ocr_raw_text"] = text
     parsed["_ocr_debug"] = debug_payload
     return parsed

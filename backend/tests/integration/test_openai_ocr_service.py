@@ -1,5 +1,8 @@
 import sys
 import pathlib
+import socket
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -121,6 +124,52 @@ def test_run_openai_ocr_retries_on_length_and_normalizes(monkeypatch):
     assert output["_ocr_debug"]["finish_reason"] == "stop"
 
 
+def test_run_openai_ocr_reports_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes, dpi, page):  # noqa: ARG001
+        return b"\x89PNG\r\n\x1a\n"
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(openai_ocr_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(openai_ocr_service.urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="OpenAI OCR timeout after 90s"):
+        run_openai_ocr(
+            pdf_bytes=b"%PDF-1.4\n%EOF\n",
+            template={"main_ocr_row_fields": ["date_mmdd", "daypart", "menu"]},
+        )
+
+
+def test_run_openai_ocr_full_table_mode_uses_extended_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes, dpi, page):  # noqa: ARG001
+        return b"\x89PNG\r\n\x1a\n"
+
+    observed: dict[str, float] = {}
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+        observed["timeout"] = timeout
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(openai_ocr_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(openai_ocr_service.urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="OpenAI OCR timeout after 240s"):
+        run_openai_ocr(
+            pdf_bytes=b"%PDF-1.4\n%EOF\n",
+            template={
+                "main_ocr_row_fields": ["date_mmdd", "daypart", "menu"],
+                "llm_full_table_mode": True,
+            },
+        )
+
+    assert observed["timeout"] == 240.0
+
+
 def test_run_openai_ocr_quantity_only_mode_keeps_row_index(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "dummy")
 
@@ -193,6 +242,197 @@ def test_run_openai_ocr_quantity_only_mode_keeps_row_index(monkeypatch):
         {"qty.regular_2f": "", "row_index": "2"},
     ]
     assert output["_ocr_debug"]["quantity_only_mode"] is True
+
+
+def test_run_openai_ocr_full_table_mode_preserves_sparse_patch_rows(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes, dpi, page):  # noqa: ARG001
+        return b"\x89PNG\r\n\x1a\n"
+
+    response = {
+        "id": "resp_full_table",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "content": (
+                        '{"facility_name":"x","date_strings":["04/26"],"rows":['
+                        '{"row_index":0,"date_mmdd":"04/26","daypart":"朝","menu":"Menu A","qty.regular_2f":"２０"},'
+                        '{"row_index":1,"date_mmdd":"","daypart":"","menu":"","qty.regular_2f":""},'
+                        '{"date_mmdd":"04/27","daypart":"昼","menu":"SHOULD_DROP","qty.regular_2f":"99"}]}'
+                    )
+                },
+            }
+        ],
+    }
+
+    class _FakeResponse:
+        def read(self) -> bytes:
+            import json
+
+            return json.dumps(response).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return False
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+        return _FakeResponse()
+
+    monkeypatch.setattr(openai_ocr_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(openai_ocr_service.urllib.request, "urlopen", _fake_urlopen)
+
+    output = run_openai_ocr(
+        pdf_bytes=b"%PDF-1.4\n%EOF\n",
+        template={
+            "llm_full_table_mode": True,
+            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        },
+    )
+
+    assert output["rows"] == [
+        {"row_index": "0", "qty.regular_2f": "20"},
+        {"row_index": "1", "qty.regular_2f": ""},
+    ]
+    assert output["_ocr_debug"]["quantity_only_mode"] is False
+    assert output["_ocr_debug"]["full_table_mode"] is True
+    assert output["_ocr_debug"]["returned_row_indexes"] == [0, 1]
+
+
+def test_run_openai_ocr_full_table_mode_requires_row_index_in_prompt(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes, dpi, page):  # noqa: ARG001
+        return b"\x89PNG\r\n\x1a\n"
+
+    captured_bodies: list[dict] = []
+    response = {
+        "id": "resp_full_table_schema",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": '{"facility_name":"x","date_strings":[],"rows":[]}'},
+            }
+        ],
+    }
+
+    class _FakeResponse:
+        def read(self) -> bytes:
+            import json
+
+            return json.dumps(response).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return False
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+        import json
+
+        captured_bodies.append(json.loads(request.data.decode("utf-8")))
+        return _FakeResponse()
+
+    monkeypatch.setattr(openai_ocr_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(openai_ocr_service.urllib.request, "urlopen", _fake_urlopen)
+
+    run_openai_ocr(
+        pdf_bytes=b"%PDF-1.4\n%EOF\n",
+        template={
+            "llm_full_table_mode": True,
+            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        },
+    )
+
+    system_prompt_text = captured_bodies[0]["messages"][0]["content"]
+    assert "Every returned row object must include row_index." in system_prompt_text
+    assert "Return only rows that need a patch; omit unchanged rows." in system_prompt_text
+    assert "Do not output structural anchor fields such as date_mmdd, daypart, or menu" in system_prompt_text
+
+
+def test_run_openai_ocr_full_table_mode_uses_columns_authoritative_aux_fields(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+
+    def _fake_render_pdf_to_png_bytes(*, pdf_bytes, dpi, page):  # noqa: ARG001
+        return b"\x89PNG\r\n\x1a\n"
+
+    captured_bodies: list[dict] = []
+    response = {
+        "id": "resp_full_table_aux",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "content": (
+                        '{"facility_name":"x","date_strings":["04/26"],"rows":['
+                        '{"row_index":0,"date_mmdd":"04/26","daypart":"朝","aux.col_2":"主","menu":"大豆のトマト煮","aux.col_4":"70","qty.regular_x":"20"},'
+                        '{"row_index":1,"date_mmdd":"04/26","daypart":"朝","aux.col_2":"副","menu":"胡瓜のフレンチサラダ","aux.col_4":"","qty.regular_x":"50"}]}'
+                    )
+                },
+            }
+        ],
+    }
+
+    class _FakeResponse:
+        def read(self) -> bytes:
+            import json
+
+            return json.dumps(response).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return False
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ARG001
+        import json
+
+        captured_bodies.append(json.loads(request.data.decode("utf-8")))
+        return _FakeResponse()
+
+    monkeypatch.setattr(openai_ocr_service, "render_pdf_to_png_bytes", _fake_render_pdf_to_png_bytes)
+    monkeypatch.setattr(openai_ocr_service.urllib.request, "urlopen", _fake_urlopen)
+
+    output = run_openai_ocr(
+        pdf_bytes=b"%PDF-1.4\n%EOF\n",
+        template={
+            "llm_full_table_mode": True,
+            "columns_authoritative": True,
+            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "aux", "header": "副区分"},
+                {"index": 3, "role": "menu_name", "header": "メニュー"},
+                {"index": 4, "role": "aux", "header": "合計"},
+                {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            ],
+        },
+    )
+
+    assert output["rows"] == [
+        {
+            "row_index": "0",
+            "aux.col_2": "主",
+            "aux.col_4": "70",
+            "qty.regular_x": "20",
+        },
+        {
+            "row_index": "1",
+            "aux.col_2": "副",
+            "aux.col_4": "",
+            "qty.regular_x": "50",
+        },
+    ]
+    system_prompt_text = captured_bodies[0]["messages"][0]["content"]
+    assert "aux.col_2" in system_prompt_text
+    assert "aux.col_4" in system_prompt_text
+    assert "display-only helper/total column" in system_prompt_text
 
 
 def test_run_openai_ocr_uses_template_user_prompt(monkeypatch):

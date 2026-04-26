@@ -2100,6 +2100,302 @@ def create_item_stub(month_id: str, name: str):
         return serialize_item(item)
 
 
+def _normalize_exception_facility_ids(
+    session,
+    values: object,
+    *,
+    fallback_scope: str | None = None,
+) -> list[str]:
+    raw_values: list[str] = []
+    if isinstance(values, list):
+        raw_values = [str(value or "").strip() for value in values if str(value or "").strip()]
+    elif isinstance(values, str):
+        raw_values = [part.strip() for part in re.split(r"[,\n\r\t ]+", values) if part.strip()]
+    fallback = str(fallback_scope or "").strip()
+    if not raw_values and fallback:
+        if fallback.upper().startswith(_MENU_OVERRIDE_TAG_PREFIX):
+            raise ValueError("tag scoped entries cannot be edited with direct facility overrides")
+        raw_values = [fallback]
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in raw_values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    if not normalized:
+        raise ValueError("facility_ids is required")
+    facilities = (
+        session.execute(select(Facility.id).where(Facility.id.in_(normalized)))
+        .scalars()
+        .all()
+    )
+    found = {str(item or "").strip() for item in facilities if str(item or "").strip()}
+    missing = [facility_id for facility_id in normalized if facility_id not in found]
+    if missing:
+        raise ValueError(f"unknown facilities: {', '.join(missing)}")
+    return normalized
+
+
+def _find_existing_monthly_entry(
+    session,
+    *,
+    month_id: str,
+    menu_date: date,
+    daypart: str,
+    slot_index: int | None,
+    facility_override: str | None,
+) -> MonthlyMenuEntry | None:
+    query = (
+        select(MonthlyMenuEntry)
+        .where(MonthlyMenuEntry.monthly_menu_id == month_id)
+        .where(MonthlyMenuEntry.menu_date == menu_date)
+        .where(MonthlyMenuEntry.daypart == daypart)
+    )
+    if slot_index is None:
+        query = query.where(MonthlyMenuEntry.slot_index.is_(None))
+    else:
+        query = query.where(MonthlyMenuEntry.slot_index == slot_index)
+    scope = (facility_override or "").strip()
+    if not scope:
+        query = query.where(
+            or_(
+                MonthlyMenuEntry.facility_override.is_(None),
+                MonthlyMenuEntry.facility_override == "",
+            )
+        )
+    else:
+        query = query.where(MonthlyMenuEntry.facility_override == scope)
+    query = query.order_by(MonthlyMenuEntry.id.desc())
+    return session.execute(query).scalars().first()
+
+
+def _find_best_monthly_item_for_entry(
+    session,
+    *,
+    month_id: str,
+    name: str,
+    facility_override: str | None,
+    diet_type: str | None,
+) -> MonthlyMenuItem | None:
+    scope = (facility_override or "").strip() or None
+    item = _find_existing_monthly_item(session, month_id, name, scope)
+    if item is not None:
+        return item
+    normalized_diet = normalize_diet_type(diet_type)
+    if scope:
+        query = (
+            select(MonthlyMenuItem)
+            .where(MonthlyMenuItem.monthly_menu_id == month_id)
+            .where(MonthlyMenuItem.name == name)
+            .where(MonthlyMenuItem.facility_override == scope)
+            .order_by(MonthlyMenuItem.id.desc())
+        )
+        if normalized_diet:
+            query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+        item = session.execute(query).scalars().first()
+        if item is not None:
+            return item
+    query = (
+        select(MonthlyMenuItem)
+        .where(MonthlyMenuItem.monthly_menu_id == month_id)
+        .where(MonthlyMenuItem.name == name)
+        .order_by(MonthlyMenuItem.id.desc())
+    )
+    if normalized_diet:
+        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+    return session.execute(query).scalars().first()
+
+
+def _count_monthly_entry_refs(
+    session,
+    *,
+    month_id: str,
+    name: str,
+    facility_override: str | None,
+    exclude_entry_id: str | None = None,
+) -> int:
+    query = (
+        select(MonthlyMenuEntry)
+        .where(MonthlyMenuEntry.monthly_menu_id == month_id)
+        .where(MonthlyMenuEntry.name == name)
+    )
+    scope = (facility_override or "").strip()
+    if not scope:
+        query = query.where(
+            or_(
+                MonthlyMenuEntry.facility_override.is_(None),
+                MonthlyMenuEntry.facility_override == "",
+            )
+        )
+    else:
+        query = query.where(MonthlyMenuEntry.facility_override == scope)
+    if exclude_entry_id:
+        query = query.where(MonthlyMenuEntry.id != exclude_entry_id)
+    return len(session.execute(query).scalars().all())
+
+
+def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        entry = session.get(MonthlyMenuEntry, entry_id)
+        if not entry or entry.monthly_menu_id != month_id:
+            return None
+
+        source_scope = str(entry.facility_override or "").strip() or None
+        facility_ids = _normalize_exception_facility_ids(
+            session,
+            body.get("facility_ids"),
+            fallback_scope=source_scope,
+        )
+
+        source_item = _find_best_monthly_item_for_entry(
+            session,
+            month_id=month_id,
+            name=str(entry.name or "").strip(),
+            facility_override=source_scope,
+            diet_type=str(entry.diet_type or "").strip() or None,
+        )
+        name = str(body.get("name") or entry.name or "").strip()
+        if not name:
+            raise ValueError("name is required")
+        category = _coerce_master_field_value(
+            "category",
+            body["category"] if "category" in body else entry.category or getattr(source_item, "category", None),
+        )
+        if category is _INVALID_PATCH_VALUE:
+            raise ValueError("invalid category")
+        diet_type = normalize_diet_type(
+            body["diet_type"] if "diet_type" in body else entry.diet_type or getattr(source_item, "diet_type", None)
+        )
+        unit_type = _normalize_menu_unit_type(
+            body["unit_type"] if "unit_type" in body else getattr(source_item, "unit_type", None)
+        )
+        qty_per_serving = _coerce_float(
+            body["qty_per_serving"] if "qty_per_serving" in body else getattr(source_item, "qty_per_serving", None)
+        )
+        bag_max_qty = _coerce_float(
+            body["bag_max_qty"] if "bag_max_qty" in body else getattr(source_item, "bag_max_qty", None)
+        )
+        bag_max_unit = _normalize_menu_unit_type(
+            body["bag_max_unit"] if "bag_max_unit" in body else getattr(source_item, "bag_max_unit", None)
+        )
+        temp_type = _normalize_temp_type(
+            body["temp_type"] if "temp_type" in body else getattr(source_item, "temp_type", None)
+        )
+        resolved_daypart = _coerce_master_field_value(
+            "daypart",
+            entry.daypart or getattr(source_item, "daypart", None),
+        )
+        if resolved_daypart is _INVALID_PATCH_VALUE:
+            resolved_daypart = str(entry.daypart or "").strip() or None
+        seed_fields = {
+            "unit_type": unit_type,
+            "qty_per_serving": qty_per_serving,
+            "temp_type": temp_type,
+            "daypart": resolved_daypart,
+            "category": category,
+            "bag_max_qty": bag_max_qty,
+            "bag_max_unit": bag_max_unit,
+        }
+
+        updated_entries: list[dict] = []
+        updated_items: list[dict] = []
+        for facility_id in facility_ids:
+            scoped_entry = _find_existing_monthly_entry(
+                session,
+                month_id=month_id,
+                menu_date=entry.menu_date,
+                daypart=str(entry.daypart or ""),
+                slot_index=entry.slot_index,
+                facility_override=facility_id,
+            )
+            previous_name = str(scoped_entry.name or "").strip() if scoped_entry else ""
+            if scoped_entry is None:
+                scoped_entry = MonthlyMenuEntry(
+                    id=f"MME{uuid4().hex[:8]}",
+                    monthly_menu_id=month_id,
+                    menu_date=entry.menu_date,
+                    daypart=str(entry.daypart or ""),
+                    slot_index=entry.slot_index,
+                    facility_override=facility_id,
+                    name=name,
+                    category=category if isinstance(category, str) else None,
+                    diet_type=diet_type,
+                )
+                session.add(scoped_entry)
+            else:
+                scoped_entry.name = name
+                scoped_entry.category = category if isinstance(category, str) else None
+                scoped_entry.diet_type = diet_type
+
+            scoped_item = _find_existing_monthly_item(session, month_id, name, facility_id)
+            if scoped_item is None and previous_name and previous_name != name:
+                reusable_item = _find_existing_monthly_item(session, month_id, previous_name, facility_id)
+                if reusable_item is not None and _count_monthly_entry_refs(
+                    session,
+                    month_id=month_id,
+                    name=previous_name,
+                    facility_override=facility_id,
+                    exclude_entry_id=scoped_entry.id,
+                ) == 0:
+                    scoped_item = reusable_item
+            if scoped_item is None:
+                scoped_item = MonthlyMenuItem(
+                    id=f"MMI{uuid4().hex[:8]}",
+                    monthly_menu_id=month_id,
+                    facility_override=facility_id,
+                    name=name,
+                )
+                session.add(scoped_item)
+            resolved_master = _ensure_menu_master(
+                session,
+                name,
+                menu_master_id=scoped_item.menu_master_id or getattr(source_item, "menu_master_id", None),
+                seed_fields=seed_fields,
+            )
+            scoped_item.name = name
+            scoped_item.facility_override = facility_id
+            scoped_item.menu_master_id = resolved_master.id if resolved_master else None
+            scoped_item.master_resolution_mode = "month_only"
+            scoped_item.unit_type = unit_type
+            scoped_item.qty_per_serving = qty_per_serving
+            scoped_item.temp_type = temp_type
+            scoped_item.daypart = resolved_daypart if isinstance(resolved_daypart, str) else None
+            scoped_item.category = category if isinstance(category, str) else None
+            scoped_item.diet_type = diet_type
+            scoped_item.bag_max_qty = bag_max_qty
+            scoped_item.bag_max_unit = bag_max_unit
+
+            if previous_name and previous_name != name:
+                previous_item = _find_existing_monthly_item(session, month_id, previous_name, facility_id)
+                if previous_item is not None and _count_monthly_entry_refs(
+                    session,
+                    month_id=month_id,
+                    name=previous_name,
+                    facility_override=facility_id,
+                    exclude_entry_id=scoped_entry.id,
+                ) == 0:
+                    session.delete(previous_item)
+
+            updated_entries.append(serialize_entry(scoped_entry))
+            updated_items.append(serialize_item(scoped_item))
+
+        logger.info(
+            "Monthly menu entry exceptions upserted",
+            month_id=month_id,
+            entry_id=entry_id,
+            facility_ids=facility_ids,
+        )
+        return {
+            "updated": True,
+            "entry_id": entry_id,
+            "facility_ids": facility_ids,
+            "entries": updated_entries,
+            "items": _merge_master_defaults(updated_items, facility_ids[0] if len(facility_ids) == 1 else None),
+        }
+
+
 def serialize_menu(menu: MonthlyMenu, latest_upload_log: AuditLog | None = None):
     uploaded_at = latest_upload_log.created_at.isoformat() if latest_upload_log and latest_upload_log.created_at else None
     display_name = _format_menu_upload_display(latest_upload_log.created_at if latest_upload_log else None) or menu.filename

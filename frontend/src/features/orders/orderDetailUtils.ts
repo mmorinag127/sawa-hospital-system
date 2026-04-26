@@ -44,7 +44,12 @@ export const normalizeWeekValue = (value?: string | null) => {
   if (!match) return "";
   const normalizedMonth = normalizeWeekId(match[1]);
   if (!normalizedMonth) return "";
-  if (!match[2].startsWith(`${normalizedMonth}-`) || !match[3].startsWith(`${normalizedMonth}-`)) {
+  if (!match[2].startsWith(`${normalizedMonth}-`)) {
+    return "";
+  }
+  const startDate = new Date(`${match[2]}T00:00:00Z`);
+  const endDate = new Date(`${match[3]}T00:00:00Z`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate.getTime() > endDate.getTime()) {
     return "";
   }
   return `${normalizedMonth}@${match[2]}~${match[3]}`;
@@ -105,14 +110,25 @@ export const deriveWeekValueFromCalendarDate = (value?: string | null) => {
   start.setUTCDate(anchor.getUTCDate() - weekday);
   const end = new Date(start);
   end.setUTCDate(start.getUTCDate() + 6);
-  const monthId = `${year}-${String(month).padStart(2, "0")}`;
   const formatDate = (date: Date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
-  const clippedStart = formatDate(start) < `${monthId}-01` ? `${monthId}-01` : formatDate(start);
-  const monthEnd = new Date(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1));
-  monthEnd.setUTCDate(monthEnd.getUTCDate() - 1);
-  const monthEndText = formatDate(monthEnd);
-  const clippedEnd = formatDate(end) > monthEndText ? monthEndText : formatDate(end);
-  return `${monthId}@${clippedStart}~${clippedEnd}`;
+  const startText = formatDate(start);
+  const endText = formatDate(end);
+  const monthId = startText.slice(0, 7);
+  return `${monthId}@${startText}~${endText}`;
+};
+
+export const deriveWeekValueFromCalendarRange = (startValue?: string | null, endValue?: string | null) => {
+  const startText = String(startValue || "").trim();
+  const endText = String(endValue || "").trim();
+  const startMatch = startText.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const endMatch = endText.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!startMatch || !endMatch) return "";
+  const startDate = new Date(`${startText}T00:00:00Z`);
+  const endDate = new Date(`${endText}T00:00:00Z`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate.getTime() > endDate.getTime()) {
+    return "";
+  }
+  return `${startText.slice(0, 7)}@${startText}~${endText}`;
 };
 
 export const normalizeBagGroupToken = (value: unknown, fallback = "") =>

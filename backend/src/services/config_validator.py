@@ -1,6 +1,8 @@
 from typing import Any
 import re
 
+from src.services.template_field_schema_service import derive_row_fields_from_columns
+
 
 def _ensure_list(value: Any, path: str, errors: list[str]) -> list:
     if value is None:
@@ -37,7 +39,7 @@ def _validate_columns(columns: Any, path: str, errors: list[str], warnings: list
 
 
 _MAIN_FIELD_PATTERN = re.compile(
-    r"^(date_mmdd|date|daypart|menu|menu_name|remarks|note|qty\.[a-z_]+_(?:x|\df))$"
+    r"^(date_mmdd|date|daypart|menu|menu_name|remarks|note|aux\.[a-z0-9_]+|qty\.[a-z_]+_(?:x|\df|[a-z0-9_]+))$"
 )
 
 
@@ -57,32 +59,9 @@ def _normalize_area_token(value: Any) -> str:
 
 
 def _derive_main_ocr_row_fields_from_columns(columns: Any) -> list[str]:
-    derived: list[str] = []
-    for column in sorted(
-        [item for item in _ensure_list(columns, "columns", []) if isinstance(item, dict)],
-        key=lambda item: int(item.get("index") or 0),
-    ):
-        role = str(column.get("role") or "").strip().lower()
-        if role == "date":
-            derived.append("date_mmdd")
-            continue
-        if role == "daypart":
-            derived.append("daypart")
-            continue
-        if role == "menu_name":
-            derived.append("menu")
-            continue
-        if role == "note":
-            derived.append("remarks")
-            continue
-        if role not in {"quantity", "quantity_change"}:
-            continue
-        diet = _normalize_token(column.get("diet_type") or column.get("name") or column.get("header"))
-        if not diet:
-            continue
-        area = _normalize_area_token(column.get("area_id") or "x")
-        derived.append(f"qty.{diet}_{area}")
-    return derived
+    return derive_row_fields_from_columns(
+        [item for item in _ensure_list(columns, "columns", []) if isinstance(item, dict)]
+    )
 
 
 def _validate_column_field_consistency(
@@ -422,6 +401,38 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     large_cell_mode = config.get("large_cell_mode")
     if large_cell_mode is not None and not isinstance(large_cell_mode, bool):
         errors.append(f"{path}.large_cell_mode must be a boolean")
+    quantity_assignment_strategy = config.get("quantity_assignment_strategy")
+    if quantity_assignment_strategy is not None:
+        if not isinstance(quantity_assignment_strategy, str):
+            errors.append(f"{path}.quantity_assignment_strategy must be a string")
+        elif quantity_assignment_strategy.strip().lower() not in {"legacy", "hakodate", "both"}:
+            errors.append(
+                f"{path}.quantity_assignment_strategy must be one of legacy|hakodate|both"
+            )
+    hakodate_header_rows = config.get("hakodate_header_rows")
+    if hakodate_header_rows is not None and not isinstance(hakodate_header_rows, int):
+        errors.append(f"{path}.hakodate_header_rows must be an integer")
+    hakodate_ocr_resolution = config.get("hakodate_ocr_resolution")
+    if hakodate_ocr_resolution is not None and not isinstance(hakodate_ocr_resolution, int):
+        errors.append(f"{path}.hakodate_ocr_resolution must be an integer")
+    hakodate_min_edge_margin_ratio = config.get("hakodate_min_edge_margin_ratio")
+    if hakodate_min_edge_margin_ratio is not None and not isinstance(
+        hakodate_min_edge_margin_ratio,
+        (int, float),
+    ):
+        errors.append(f"{path}.hakodate_min_edge_margin_ratio must be a number")
+    hakodate_data_row_count = config.get("hakodate_data_row_count")
+    if hakodate_data_row_count is not None and not isinstance(hakodate_data_row_count, int):
+        errors.append(f"{path}.hakodate_data_row_count must be an integer")
+    hakodate_template_signature = config.get("hakodate_template_signature")
+    if hakodate_template_signature is not None and not isinstance(hakodate_template_signature, str):
+        errors.append(f"{path}.hakodate_template_signature must be a string")
+    hakodate_template_signature_components = config.get("hakodate_template_signature_components")
+    if hakodate_template_signature_components is not None and not isinstance(
+        hakodate_template_signature_components,
+        dict,
+    ):
+        errors.append(f"{path}.hakodate_template_signature_components must be an object")
 
 
 def validate_facility_config(config: Any) -> dict:
@@ -429,6 +440,9 @@ def validate_facility_config(config: Any) -> dict:
     warnings: list[str] = []
     config_dict = _ensure_dict(config, "config", errors)
     _validate_ocr_provider_config(config_dict, "config", errors)
+    expanded_cell_copy_enabled = config_dict.get("expanded_cell_same_daypart_copy_enabled")
+    if expanded_cell_copy_enabled is not None and not isinstance(expanded_cell_copy_enabled, bool):
+        errors.append("config.expanded_cell_same_daypart_copy_enabled must be a boolean")
     pattern_id = config_dict.get("order_form_pattern_id")
     if pattern_id is not None and not isinstance(pattern_id, str):
         errors.append("config.order_form_pattern_id must be a string")
@@ -493,6 +507,11 @@ def validate_facility_master(master: Any) -> dict:
         if not fac.get("facility_name"):
             errors.append(f"facilities[{idx}].facility_name is required")
         _validate_ocr_provider_config(fac, f"facilities[{idx}]", errors)
+        expanded_cell_copy_enabled = fac.get("expanded_cell_same_daypart_copy_enabled")
+        if expanded_cell_copy_enabled is not None and not isinstance(expanded_cell_copy_enabled, bool):
+            errors.append(
+                f"facilities[{idx}].expanded_cell_same_daypart_copy_enabled must be a boolean"
+            )
         fax_template_ids = fac.get("fax_template_ids")
         if fax_template_ids is not None:
             template_ids = _ensure_list(

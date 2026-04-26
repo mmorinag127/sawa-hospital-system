@@ -35,9 +35,27 @@ def _make_uploaded_pdf_attempt_id() -> str:
 def _lease_seconds() -> int:
     raw = str(os.getenv("UPLOADED_PDF_LEASE_SECONDS", "1800") or "").strip()
     try:
-        return max(int(raw), 60)
+        configured = max(int(raw), 60)
     except ValueError:
-        return 1800
+        configured = 1800
+    wait_raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
+    if wait_raw in {"0", "false", "no", "off"}:
+        return configured
+    if not wait_raw:
+        pipeline_url = str(os.getenv("OCR_PIPELINE_URL", "") or "").strip()
+        if not pipeline_url:
+            return configured
+    timeout_raw = str(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600") or "").strip()
+    grace_raw = str(os.getenv("UPLOADED_PDF_LEASE_GRACE_SECONDS", "120") or "").strip()
+    try:
+        timeout_seconds = max(int(timeout_raw), 60)
+    except ValueError:
+        timeout_seconds = 600
+    try:
+        grace_seconds = max(int(grace_raw), 0)
+    except ValueError:
+        grace_seconds = 120
+    return max(60, min(configured, timeout_seconds + grace_seconds))
 
 
 def _max_attempts() -> int:
@@ -185,6 +203,67 @@ def _serialize_uploaded_pdf(row: UploadedPdf) -> dict[str, Any]:
     }
 
 
+def _build_linked_order_summary(session, row: UploadedPdf) -> dict[str, Any] | None:
+    order_id = str(row.current_order_id or "").strip()
+    if not order_id:
+        return None
+    order = session.get(Order, order_id)
+    if order is None:
+        return None
+    week_code = str(order.week_code or "").strip() or None
+    current_document = None
+    if str(order.current_document_id or "").strip():
+        current_document = session.get(OrderDocument, order.current_document_id)
+    prior_document = None
+    superseded_ids = order.superseded_document_ids or []
+    if superseded_ids:
+        prior_document = session.get(OrderDocument, str(superseded_ids[-1] or "").strip())
+    return {
+        "id": order.id,
+        "status": order.status,
+        "facility_code": order.facility_code,
+        "week_code": week_code,
+        "message_id": order.message_id,
+        "received_at": order.received_at.isoformat() if order.received_at else None,
+        "current_document_id": order.current_document_id,
+        "superseded_document_count": len(superseded_ids),
+        "line_count": len(order.lines or []),
+        "current_document": {
+            "id": current_document.id,
+            "storage_uri": current_document.storage_uri,
+            "message_id": current_document.source_email_id,
+            "received_at": current_document.received_at.isoformat() if current_document.received_at else None,
+        }
+        if current_document is not None
+        else None,
+        "prior_document": {
+            "id": prior_document.id,
+            "storage_uri": prior_document.storage_uri,
+            "message_id": prior_document.source_email_id,
+            "received_at": prior_document.received_at.isoformat() if prior_document.received_at else None,
+        }
+        if prior_document is not None
+        else None,
+    }
+
+
+def _serialize_uploaded_pdf_with_context(session, row: UploadedPdf) -> dict[str, Any]:
+    serialized = _serialize_uploaded_pdf(row)
+    linked_order = _build_linked_order_summary(session, row)
+    if linked_order is not None:
+        serialized["linked_order"] = linked_order
+        serialized["supersede_summary"] = {
+            "has_prior_document": bool(linked_order.get("prior_document")),
+            "superseded_document_count": linked_order.get("superseded_document_count"),
+            "current_document": linked_order.get("current_document"),
+            "prior_document": linked_order.get("prior_document"),
+        }
+    else:
+        serialized["linked_order"] = None
+        serialized["supersede_summary"] = None
+    return serialized
+
+
 def _derive_week_hint_from_filename(original_filename: object, received_at: object) -> str | None:
     filename = str(original_filename or "").strip()
     parsed_received_at = _parse_datetime(received_at)
@@ -278,6 +357,7 @@ def create_uploaded_pdf_from_upload(
     facility_name: str | None,
     skip_ocr: bool,
     source_kind: str,
+    page_count: int | None = None,
     force: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     now = _now()
@@ -299,7 +379,7 @@ def create_uploaded_pdf_from_upload(
                 original_filename=saved.original_filename,
                 storage_uri=saved.pdf_uri,
                 received_at=saved.received_at,
-                page_count=None,
+                page_count=page_count,
                 facility_hint=facility_hint or None,
                 week_hint=week_hint or None,
                 facility_name=facility_name or None,
@@ -318,6 +398,7 @@ def create_uploaded_pdf_from_upload(
             row.original_filename = saved.original_filename
             row.storage_uri = saved.pdf_uri
             row.received_at = saved.received_at
+            row.page_count = page_count
             row.facility_hint = facility_hint or None
             row.week_hint = week_hint or None
             row.facility_name = facility_name or None
@@ -369,7 +450,9 @@ def get_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         if row is None:
             return None
-        return _serialize_uploaded_pdf(row)
+        _link_current_entities(session, row)
+        session.flush()
+        return _serialize_uploaded_pdf_with_context(session, row)
 
 
 def get_uploaded_pdf_by_message_id(message_id: str) -> dict[str, Any] | None:
@@ -388,7 +471,9 @@ def get_uploaded_pdf_by_message_id(message_id: str) -> dict[str, Any] | None:
         )
         if row is None:
             return None
-        return _serialize_uploaded_pdf(row)
+        _link_current_entities(session, row)
+        session.flush()
+        return _serialize_uploaded_pdf_with_context(session, row)
 
 
 def refresh_uploaded_pdf_links(uploaded_pdf_id: str) -> dict[str, Any] | None:
@@ -398,7 +483,7 @@ def refresh_uploaded_pdf_links(uploaded_pdf_id: str) -> dict[str, Any] | None:
             return None
         _link_current_entities(session, row)
         session.flush()
-        return _serialize_uploaded_pdf(row)
+        return _serialize_uploaded_pdf_with_context(session, row)
 
 
 def list_uploaded_pdfs(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -408,7 +493,10 @@ def list_uploaded_pdfs(status: str | None = None, limit: int = 100) -> list[dict
         if status:
             query = query.where(UploadedPdf.status == status)
         rows = session.execute(query.limit(limit)).scalars().all()
-        return [_serialize_uploaded_pdf(row) for row in rows]
+        for row in rows:
+            _link_current_entities(session, row)
+        session.flush()
+        return [_serialize_uploaded_pdf_with_context(session, row) for row in rows]
 
 
 def _write_attempt(
@@ -598,6 +686,52 @@ def mark_uploaded_pdf_completed(uploaded_pdf_id: str) -> dict[str, Any] | None:
         )
         session.flush()
         return _serialize_uploaded_pdf(row)
+
+
+def mark_uploaded_pdf_completed_by_message_id_if_ready(message_id: str) -> dict[str, Any] | None:
+    token = str(message_id or "").strip()
+    if not token:
+        return None
+    now = _now()
+    with session_scope() as session:
+        row = (
+            session.execute(
+                select(UploadedPdf)
+                .where(UploadedPdf.message_id == token)
+                .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            return None
+        _link_current_entities(session, row)
+        if not _is_linked_order_ready(session, row):
+            session.flush()
+            return None
+        if str(row.status or "").strip().lower() == "completed":
+            session.flush()
+            return _serialize_uploaded_pdf_with_context(session, row)
+        worker_instance = row.lease_owner
+        row.status = "completed"
+        row.current_stage = "completed"
+        row.lease_owner = None
+        row.lease_expires_at = None
+        row.next_retry_at = None
+        row.last_error_code = None
+        row.last_error_message = None
+        row.updated_at = now
+        _write_attempt(
+            session,
+            uploaded_pdf_id=row.id,
+            attempt_no=int(row.attempt_count or 0),
+            stage=row.current_stage,
+            status="completed",
+            worker_instance=worker_instance,
+            finished_at=now,
+        )
+        session.flush()
+        return _serialize_uploaded_pdf_with_context(session, row)
 
 
 def _maybe_alert(session, row: UploadedPdf) -> None:

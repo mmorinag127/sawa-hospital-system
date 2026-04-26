@@ -40,6 +40,42 @@ tests/
 - Always read this `workspace/AGENTS.md` before starting any task. Do not simplify or reinterpret user requirements; confirm them explicitly if anything is ambiguous, and implement exactly what was requested.
 - Separate commit history from deploy source. It is acceptable to keep fixes in separate commits, but never deploy from a clean branch tree if production already contains newer local or out-of-band changes that are not present in that tree.
 - Before any deploy, verify deploy-source parity: identify the exact prod revision/image currently serving traffic and confirm the deploy source includes those changes. If prod is ahead of the branch, first sync those changes into an integration tree or clean deploy copy, then stack the new fix on top.
+- For web deploys, do not hand-pick or reuse an old clean deploy copy. Use the standard prepare step to create a fresh copy and require deploy-source sentinel parity before building.
 - When only one service needs a fix, do not redeploy the other service from an older tree. Minimize blast radius and avoid rolling back unrelated live behavior.
 - If a clean saved draft or explicit user correction exists, do not let stale OCR evidence warnings or legacy fallback paths override that newer source of truth without an explicit blocker that still applies after the correction.
+- For any Step2 or OCR-order bug, freeze the visible truth path before editing: `page -> endpoint -> saved draft present? -> bootstrap path -> fallback condition`.
+- Treat `saved draft present` and `saved draft missing` as separate execution paths. Do not assume a fix on one path applies to the other.
+- `draft-sheet`, `ocr-sheet`, and `workflow-state` must be treated as a parity tuple for the current order. Do not call a fix complete until all three agree on the same current order state.
+- A generic raw sheet (`col1`, `col2`, `col3`, ...) is not an acceptable current editor surface. Warnings may require review, but they do not by themselves justify downgrading the visible Step2 sheet to a generic raw draft.
+- Keep current and candidate evidence separate by default. A rerun or candidate result is not a visible fix until the current editor has explicitly kept or switched state.
+- Never merge or declare fixed while current/candidate ambiguity, stale saved-revision rebase, or stale evidence mismatch is still unresolved.
+- Exact-order live verification must include the user-visible surface, not only helper APIs. If the user reports a specific order, verify the same order through the same visible flow before claiming success.
+- Before any non-trivial edit, show the user these three items explicitly and keep them aligned until the task is actually complete:
+  - fixed requirements
+  - forbidden actions
+  - completion criteria
+- If the user says the interpretation is wrong, discard the previous interpretation immediately and restate the corrected one before further edits.
+- If the chosen canonical source, schema, facility template, or success condition is ambiguous, stop and ask instead of guessing.
+- If an upstream canonical source is unresolved or missing, block downstream sheet generation or apply/confirm instead of silently falling back to a default or legacy path.
+- For repeated production-visible bugs, do not only patch the visible symptom. Harden the common decision point or shared canonicalization path that allowed the failure.
+- If a fallback path can still recreate the same class of user-visible corruption, keeping that fallback active counts as incomplete.
+- Facility/operator-configured canonical sources must outrank OCR inference, stale drafts, heuristics, and legacy defaults.
+- If a facility has multiple configured template candidates, unresolved per-order template selection is a blocker. Do not silently pick the first/default template and continue.
+- When the user states a precedence rule such as `configured source is canonical and OCR is auxiliary`, encode that precedence in the shared path, not in a one-off patch.
+- For any requested root fix, first define the failure class, the shared decision point that allowed it, and the invariant that should have blocked it. Do not start implementation until those are clear.
+- Preferred root-fix order:
+  - define the failure class
+  - locate the common entry point
+  - define the invariant
+  - remove or block the dangerous fallback
+  - add tests for the failure class and close neighboring cases
+  - verify every visible surface that depends on that path
+- `Fix the reported order with a local exception` is not a root fix.
+- `Patch downstream output after a wrong upstream decision` is not a root fix if the upstream decision can still be wrong elsewhere.
+- A root fix is incomplete if the same failure class can still enter through a sibling path.
+- Before declaring a root fix complete, state which neighboring failure cases were checked and how they are now blocked or still open.
+- Root-fix validation must cover:
+  - the reported case
+  - at least one close sibling case from the same failure class
+  - the explicit stop/block behavior when the invariant cannot be satisfied
 <!-- MANUAL ADDITIONS END -->

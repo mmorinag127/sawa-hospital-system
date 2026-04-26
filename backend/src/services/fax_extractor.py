@@ -7,9 +7,14 @@ import uuid
 
 from loguru import logger
 
-from src.services import config_service
+from src.services import config_service, hakodate_assignment_service
 from src.services.grid_detector import GridDetectionResult, detect_table_grid
 from src.services.ocr_pipeline_service import run_ocr_pipeline
+from src.services.template_field_schema_service import (
+    canonical_aux_field_name as _shared_canonical_aux_field_name,
+    canonical_field_name_from_template_column as _shared_canonical_field_name_from_template_column,
+    derive_row_fields_from_columns as _shared_derive_row_fields_from_columns,
+)
 
 
 @dataclass
@@ -47,6 +52,30 @@ def _get_resolution(template: dict, key: str, fallback: int = 320) -> int:
     if value:
         return int(value)
     return int(template.get("token_ocr_resolution", fallback))
+
+
+def _flag_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _should_disable_llm_provider_fallback(template: dict) -> bool:
+    if _flag_enabled(template.get("llm_full_table_mode")):
+        return True
+    if _flag_enabled(template.get("llm_quantity_only_mode")):
+        return True
+    return bool(str(template.get("_force_main_ocr_provider") or "").strip())
+
+
+def _resolve_provider_fallback(template: dict, key: str) -> str:
+    configured = str(template.get(key) or "").strip().lower()
+    if configured:
+        return configured
+    if _should_disable_llm_provider_fallback(template):
+        return "none"
+    return "pipeline"
 
 
 def _crop_to_bbox(image, bbox: list[float]):
@@ -119,6 +148,29 @@ def _coerce_row_cell(value: object) -> str:
     return str(value)
 
 
+def _canonical_aux_field_name(
+    column: dict[str, Any] | None,
+    *,
+    fallback_index: int | None = None,
+) -> str:
+    return _shared_canonical_aux_field_name(column, fallback_index=fallback_index)
+
+
+def _canonical_field_name_from_template_column(
+    column: dict[str, Any] | None,
+    *,
+    fallback_index: int | None = None,
+) -> str | None:
+    return _shared_canonical_field_name_from_template_column(column, fallback_index=fallback_index)
+
+
+def _derive_row_fields_from_columns(template: dict | None) -> list[str]:
+    if not isinstance(template, dict):
+        return []
+    columns = template.get("columns")
+    return _shared_derive_row_fields_from_columns(columns)
+
+
 def _resolve_payload_template(
     payload: object,
     template: dict | None,
@@ -153,10 +205,15 @@ def _resolve_payload_template(
 
 
 def _get_row_fields(template: dict) -> list[str]:
+    derived = _derive_row_fields_from_columns(template)
+    if bool(template.get("columns_authoritative")) and derived:
+        return derived
     fields = template.get("main_ocr_row_fields")
     if isinstance(fields, list):
-        return [str(field) for field in fields if str(field).strip()]
-    return []
+        stored = [str(field) for field in fields if str(field).strip()]
+        if stored:
+            return stored
+    return derived
 
 
 def _resolve_row_field(row: dict, field: str) -> object:
@@ -172,6 +229,14 @@ def _resolve_row_field(row: dict, field: str) -> object:
     return current
 
 
+def _expected_full_table_row_count(template: dict) -> int | None:
+    try:
+        value = int(template.get("llm_full_table_expected_row_count"))
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
 def _rows_from_payload(payload: object, template: dict) -> list[list[str]] | None:
     if not isinstance(payload, dict):
         return None
@@ -181,10 +246,19 @@ def _rows_from_payload(payload: object, template: dict) -> list[list[str]] | Non
     fields = _get_row_fields(template)
     if not fields:
         return None
+    full_table_mode = _flag_enabled(template.get("llm_full_table_mode"))
+    expected_full_table_row_count = (
+        _expected_full_table_row_count(template) if full_table_mode else None
+    )
     normalized: list[list[str]] = []
     indexed_rows: dict[int, list[str]] = {}
+    returned_row_indexes: list[int] = []
+    returned_row_fields: dict[int, set[str]] = {}
+    dropped_row_indexes: list[int] = []
     for row in rows:
         if isinstance(row, list):
+            if full_table_mode:
+                continue
             normalized.append([_coerce_row_cell(cell) for cell in row])
             continue
         if isinstance(row, dict):
@@ -195,16 +269,50 @@ def _rows_from_payload(payload: object, template: dict) -> list[list[str]] | Non
             except Exception:
                 row_index = None
             if row_index is not None and row_index >= 0:
+                if (
+                    expected_full_table_row_count is not None
+                    and row_index >= expected_full_table_row_count
+                ):
+                    dropped_row_indexes.append(row_index)
+                    continue
                 indexed_rows[row_index] = row_values
+                returned_row_indexes.append(row_index)
+                present_fields = {
+                    field
+                    for field in fields
+                    if field in row
+                }
+                if present_fields:
+                    returned_row_fields.setdefault(row_index, set()).update(present_fields)
             else:
+                if full_table_mode:
+                    continue
                 normalized.append(row_values)
     if indexed_rows:
         width = len(fields)
-        max_index = max(indexed_rows.keys())
-        indexed_normalized = [["" for _ in range(width)] for _ in range(max_index + 1)]
+        if expected_full_table_row_count is not None:
+            indexed_normalized = [
+                ["" for _ in range(width)] for _ in range(expected_full_table_row_count)
+            ]
+        else:
+            max_index = max(indexed_rows.keys())
+            indexed_normalized = [["" for _ in range(width)] for _ in range(max_index + 1)]
         for idx, row_values in indexed_rows.items():
             indexed_normalized[idx] = row_values
         normalized = indexed_normalized + normalized
+    if isinstance(payload.get("_ocr_debug"), dict):
+        debug_payload = dict(payload.get("_ocr_debug") or {})
+        if returned_row_indexes:
+            debug_payload["returned_row_indexes"] = sorted(set(returned_row_indexes))
+        if returned_row_fields:
+            debug_payload["returned_row_fields"] = {
+                str(idx): sorted(fields_for_row)
+                for idx, fields_for_row in sorted(returned_row_fields.items())
+                if fields_for_row
+            }
+        if dropped_row_indexes:
+            debug_payload["dropped_row_indexes"] = sorted(set(dropped_row_indexes))
+        payload["_ocr_debug"] = debug_payload
     if not normalized:
         return None
     return normalized
@@ -475,6 +583,7 @@ def _best_column_index(
     *,
     max_columns: int,
     exclude_src: set[int],
+    allowed_src: set[int] | None,
     scorer,
     minimum_score: int = 1,
 ) -> int | None:
@@ -482,6 +591,8 @@ def _best_column_index(
     best_score = 0
     for idx in range(max_columns):
         if idx in exclude_src:
+            continue
+        if allowed_src is not None and idx not in allowed_src:
             continue
         score = 0
         for row in data:
@@ -505,6 +616,7 @@ def _infer_mapped_indexes(
     data: list[list[str]],
     fields: list[str],
     mapped_indexes: dict[int, int],
+    template: dict | None = None,
 ) -> dict[int, int]:
     if not data:
         return mapped_indexes
@@ -515,11 +627,20 @@ def _infer_mapped_indexes(
     used_src = set(mapped_indexes.keys())
     used_dest = set(mapped_indexes.values())
     field_to_dest = {field: idx for idx, field in enumerate(fields)}
+    allowed_quantity_source_indexes = set(
+        _template_explicit_quantity_source_indexes(template, observed_width=max_columns)
+    )
+    enforce_template_quantity_sources = _template_requires_strict_quantity_source_alignment(
+        template,
+        observed_width=max_columns,
+    )
 
     def _ensure_field(
         field: str,
         scorer,
         minimum_score: int = 1,
+        *,
+        allowed_src: set[int] | None = None,
     ) -> None:
         dest_idx = field_to_dest.get(field)
         if dest_idx is None or dest_idx in used_dest:
@@ -528,6 +649,7 @@ def _infer_mapped_indexes(
             data,
             max_columns=max_columns,
             exclude_src=used_src,
+            allowed_src=allowed_src,
             scorer=scorer,
             minimum_score=minimum_score,
         )
@@ -557,7 +679,15 @@ def _infer_mapped_indexes(
         if _is_quantity_field_name(field)
     ]
     for field in quantity_fields:
-        _ensure_field(field, _looks_like_quantity)
+        _ensure_field(
+            field,
+            _looks_like_quantity,
+            allowed_src=(
+                allowed_quantity_source_indexes
+                if enforce_template_quantity_sources
+                else None
+            ),
+        )
     return mapped_indexes
 
 
@@ -581,6 +711,12 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
     ):
         return _select_field(["qty.regular_bag_x", "regular_bag_x"], fields)
     if "常食" in token or "regular" in token or "常" in token:
+        if "3回" in token or "3回目" in token:
+            return _select_field(["qty.change_2_x", "change_2_x"], fields)
+        if "2回" in token or "2回目" in token:
+            return _select_field(["qty.change_1_x", "change_1_x"], fields)
+        if "1回" in token or "1回目" in token:
+            return _select_field(["qty.regular_x", "regular_x"], fields)
         if quantity_floor == "2f":
             return _select_field(["qty.regular_2f", "regular_2f", "qty.regular_x", "regular_x"], fields)
         if quantity_floor == "3f":
@@ -669,13 +805,160 @@ def _field_from_header(header: str, fields: set[str]) -> str | None:
 def _template_explicit_quantity_column_count(template: dict | None) -> int:
     if not isinstance(template, dict):
         return 0
-    columns = template.get("columns")
-    if not isinstance(columns, list):
-        return 0
+    columns = _template_projection_columns(template)
     return sum(
         1
         for col in columns
         if isinstance(col, dict) and str(col.get("role") or "").strip().lower() == "quantity"
+    )
+
+
+def _template_projection_columns(template: dict | None) -> list[dict[str, Any]]:
+    if not isinstance(template, dict):
+        return []
+    columns = template.get("columns")
+    if isinstance(columns, list):
+        return [dict(col) for col in columns if isinstance(col, dict)]
+
+    merged_by_index: dict[int, dict[str, Any]] = {}
+
+    def _merge_columns(raw_columns: object) -> None:
+        if not isinstance(raw_columns, list):
+            return
+        for raw_col in raw_columns:
+            if not isinstance(raw_col, dict):
+                continue
+            try:
+                column_index = int(raw_col.get("index"))
+            except Exception:
+                continue
+            existing = merged_by_index.get(column_index, {"index": column_index})
+            merged_by_index[column_index] = {
+                **existing,
+                **{key: value for key, value in raw_col.items() if value is not None},
+            }
+
+    _merge_columns(template.get("grid_columns"))
+    _merge_columns(template.get("auto_headers"))
+
+    auto_numeric_columns = template.get("auto_numeric_columns")
+    if isinstance(auto_numeric_columns, dict):
+        _merge_columns(auto_numeric_columns.get("columns"))
+        tail_column = auto_numeric_columns.get("tail_column")
+        if isinstance(tail_column, dict):
+            _merge_columns([tail_column])
+
+    return [merged_by_index[index] for index in sorted(merged_by_index)]
+
+
+def _template_explicit_source_indexes_for_roles(
+    template: dict | None,
+    *,
+    roles: set[str],
+    observed_width: int | None = None,
+) -> list[int]:
+    if not isinstance(template, dict) or not roles:
+        return []
+    columns = template.get("columns")
+    if not isinstance(columns, list):
+        return []
+    normalized_columns = [col for col in columns if isinstance(col, dict)]
+    requires_explicit_source_indexes = False
+    if (
+        bool(template.get("columns_authoritative"))
+        and observed_width is not None
+        and int(observed_width) > len(normalized_columns)
+    ):
+        explicit_source_indexes = [
+            col.get("source_index")
+            for col in normalized_columns
+            if col.get("source_index") is not None
+        ]
+        if not explicit_source_indexes or len(explicit_source_indexes) < len(normalized_columns):
+            requires_explicit_source_indexes = True
+    normalized_roles = {str(role or "").strip().lower() for role in roles if str(role or "").strip()}
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for fallback_index, raw_col in enumerate(normalized_columns):
+        if not isinstance(raw_col, dict):
+            continue
+        role = str(raw_col.get("role") or "").strip().lower()
+        if role not in normalized_roles:
+            continue
+        if requires_explicit_source_indexes and raw_col.get("source_index") is None:
+            return []
+        try:
+            source_col_index = int(
+                raw_col.get("source_index")
+                if raw_col.get("source_index") is not None
+                else raw_col.get("index")
+            )
+        except Exception:
+            source_col_index = fallback_index
+        if source_col_index < 0:
+            continue
+        if observed_width is not None and source_col_index >= int(observed_width):
+            continue
+        if source_col_index in seen:
+            continue
+        seen.add(source_col_index)
+        indexes.append(source_col_index)
+    indexes.sort()
+    return indexes
+
+
+def _template_explicit_quantity_source_indexes(
+    template: dict | None,
+    *,
+    observed_width: int | None = None,
+) -> list[int]:
+    return _template_explicit_source_indexes_for_roles(
+        template,
+        roles={"quantity"},
+        observed_width=observed_width,
+    )
+
+
+def _template_requires_strict_quantity_source_alignment(
+    template: dict | None,
+    *,
+    observed_width: int | None = None,
+) -> bool:
+    quantity_source_indexes = _template_explicit_quantity_source_indexes(template)
+    projection_columns = _template_projection_columns(template)
+    projection_quantity_columns = [
+        col
+        for col in projection_columns
+        if isinstance(col, dict) and str(col.get("role") or "").strip().lower() == "quantity"
+    ]
+    has_projection_quantity_order = len(projection_quantity_columns) >= 2
+    if not quantity_source_indexes and not has_projection_quantity_order:
+        return False
+    menu_source_indexes = _template_explicit_source_indexes_for_roles(
+        template,
+        roles={"menu_name"},
+    )
+    projection_has_structural_anchor = any(
+        str(col.get("role") or "").strip().lower() in {"date", "daypart", "menu_name", "note", "aux"}
+        for col in projection_columns
+        if isinstance(col, dict)
+    )
+    if not menu_source_indexes and not projection_has_structural_anchor:
+        return False
+    if not quantity_source_indexes:
+        return True
+    aux_source_indexes = _template_explicit_source_indexes_for_roles(
+        template,
+        roles={"aux"},
+        observed_width=observed_width,
+    )
+    if not aux_source_indexes:
+        return True
+    last_menu_source_index = max(menu_source_indexes)
+    first_quantity_source_index = min(quantity_source_indexes)
+    return any(
+        last_menu_source_index < source_col_index < first_quantity_source_index
+        for source_col_index in aux_source_indexes
     )
 
 
@@ -689,6 +972,10 @@ def _explicit_field_from_template_column(column: dict[str, Any], fields: list[st
         return "menu" if "menu" in fields else ("menu_name" if "menu_name" in fields else None)
     if role == "note":
         return "remarks" if "remarks" in fields else ("note" if "note" in fields else None)
+    if role == "aux":
+        derived_name = _canonical_field_name_from_template_column(column)
+        if derived_name and derived_name in fields:
+            return derived_name
     if role == "quantity":
         name = str(column.get("name") or "").strip()
         if name and name in fields:
@@ -713,13 +1000,32 @@ def _mapped_indexes_from_template_columns(
     columns = template.get("columns")
     if not isinstance(columns, list):
         return {}
+    normalized_columns = [col for col in columns if isinstance(col, dict)]
+    requires_explicit_source_indexes = False
+    if (
+        bool(template.get("columns_authoritative"))
+        and observed_width > len(normalized_columns)
+    ):
+        explicit_source_indexes = [
+            col.get("source_index")
+            for col in normalized_columns
+            if col.get("source_index") is not None
+        ]
+        if explicit_source_indexes and len(explicit_source_indexes) < len(normalized_columns):
+            requires_explicit_source_indexes = True
     explicit: dict[int, int] = {}
     used_dest_indexes: set[int] = set()
-    for raw_col in columns:
+    for raw_col in normalized_columns:
         if not isinstance(raw_col, dict):
             continue
+        if requires_explicit_source_indexes and raw_col.get("source_index") is None:
+            continue
         try:
-            source_col_index = int(raw_col.get("index"))
+            source_col_index = int(
+                raw_col.get("source_index")
+                if raw_col.get("source_index") is not None
+                else raw_col.get("index")
+            )
         except Exception:
             continue
         if source_col_index < 0 or source_col_index >= observed_width:
@@ -756,12 +1062,43 @@ def _fill_remaining_quantity_mapping_by_order(
     data: list[list[str]],
     fields: list[str],
     mapped_indexes: dict[int, int],
+    template: dict | None = None,
 ) -> dict[int, int]:
     if not data or not fields:
         return mapped_indexes
     max_columns = max((len(row) for row in data), default=0)
     if max_columns <= 0:
         return mapped_indexes
+    enforce_template_quantity_sources = _template_requires_strict_quantity_source_alignment(
+        template,
+        observed_width=max_columns,
+    )
+    allowed_quantity_source_indexes = (
+        set(_template_explicit_quantity_source_indexes(template, observed_width=max_columns))
+        if enforce_template_quantity_sources
+        else set()
+    )
+    if enforce_template_quantity_sources and not allowed_quantity_source_indexes:
+        return dict(mapped_indexes)
+    if enforce_template_quantity_sources and allowed_quantity_source_indexes:
+        normalized = dict(mapped_indexes)
+        used_src = set(normalized.keys())
+        used_dest = set(normalized.values())
+        quantity_dest_indexes = [
+            idx for idx, field in enumerate(fields) if _is_quantity_field_name(field)
+        ]
+        for source_col_index, dest_idx in zip(sorted(allowed_quantity_source_indexes), quantity_dest_indexes):
+            if source_col_index in used_src or dest_idx in used_dest:
+                continue
+            if not any(
+                source_col_index < len(row) and _looks_like_quantity(str(row[source_col_index] or ""))
+                for row in data
+            ):
+                continue
+            normalized[source_col_index] = dest_idx
+            used_src.add(source_col_index)
+            used_dest.add(dest_idx)
+        return normalized
 
     used_src = set(mapped_indexes.keys())
     used_dest = set(mapped_indexes.values())
@@ -777,6 +1114,7 @@ def _fill_remaining_quantity_mapping_by_order(
         idx
         for idx in range(max_columns)
         if idx not in used_src
+        and (not allowed_quantity_source_indexes or idx in allowed_quantity_source_indexes)
         and any(idx < len(row) and _looks_like_quantity(str(row[idx] or "")) for row in data)
     ]
     if len(remaining_src_quantity) != len(remaining_dest_quantity):
@@ -792,6 +1130,7 @@ def _realign_quantity_mapping_by_numeric_block(
     data: list[list[str]],
     fields: list[str],
     mapped_indexes: dict[int, int],
+    template: dict | None = None,
     preserve_sparse_full_header_mapping: bool = False,
 ) -> dict[int, int]:
     if not data or not fields:
@@ -805,6 +1144,15 @@ def _realign_quantity_mapping_by_numeric_block(
     ]
     if not quantity_dest_indexes:
         return mapped_indexes
+    enforce_template_quantity_sources = _template_requires_strict_quantity_source_alignment(
+        template,
+        observed_width=max_columns,
+    )
+    allowed_quantity_source_indexes = (
+        set(_template_explicit_quantity_source_indexes(template, observed_width=max_columns))
+        if enforce_template_quantity_sources
+        else set()
+    )
 
     numeric_hits: dict[int, int] = {idx: 0 for idx in range(max_columns)}
     non_empty_hits: dict[int, int] = {idx: 0 for idx in range(max_columns)}
@@ -819,11 +1167,97 @@ def _realign_quantity_mapping_by_numeric_block(
             if _looks_like_quantity(value):
                 numeric_hits[idx] = int(numeric_hits.get(idx, 0)) + 1
 
-    non_quantity_mapping = {
+    normalized_mapping = {
         src_idx: dest_idx
         for src_idx, dest_idx in mapped_indexes.items()
-        if 0 <= dest_idx < len(fields) and not _is_quantity_field_name(fields[dest_idx])
+        if 0 <= dest_idx < len(fields)
+        and (
+            not _is_quantity_field_name(fields[dest_idx])
+            or not enforce_template_quantity_sources
+            or not allowed_quantity_source_indexes
+            or src_idx in allowed_quantity_source_indexes
+        )
     }
+    non_quantity_mapping = {
+        src_idx: dest_idx
+        for src_idx, dest_idx in normalized_mapping.items()
+        if not _is_quantity_field_name(fields[dest_idx])
+    }
+    if enforce_template_quantity_sources and not allowed_quantity_source_indexes:
+        current_quantity_mapping = {
+            src_idx: dest_idx
+            for src_idx, dest_idx in normalized_mapping.items()
+            if dest_idx in quantity_dest_indexes and int(numeric_hits.get(src_idx, 0)) > 0
+        }
+        if not current_quantity_mapping:
+            return non_quantity_mapping
+        anchor_specs: list[tuple[int, int, int]] = []
+        for src_idx, dest_idx in current_quantity_mapping.items():
+            try:
+                quantity_position = quantity_dest_indexes.index(dest_idx)
+            except ValueError:
+                continue
+            anchor_specs.append((src_idx, quantity_position, dest_idx))
+        anchor_specs.sort()
+        if not anchor_specs:
+            return non_quantity_mapping
+        anchor_positions = [quantity_position for _src, quantity_position, _dest in anchor_specs]
+        if anchor_positions != sorted(set(anchor_positions)):
+            return non_quantity_mapping
+        candidate_source_indexes = [
+            idx
+            for idx in range(max_columns)
+            if int(numeric_hits.get(idx, 0)) > 0
+        ]
+        if not candidate_source_indexes:
+            return normalized_mapping
+
+        anchored_sources = {src_idx for src_idx, _quantity_position, _dest_idx in anchor_specs}
+        anchored_mapping = {
+            src_idx: dest_idx for src_idx, _quantity_position, dest_idx in anchor_specs
+        }
+        normalized = {
+            src_idx: dest_idx
+            for src_idx, dest_idx in non_quantity_mapping.items()
+        }
+        normalized.update(anchored_mapping)
+
+        remaining_sources = [
+            src_idx for src_idx in candidate_source_indexes if src_idx not in anchored_sources
+        ]
+        previous_source: int | None = None
+        previous_quantity_position = -1
+        for anchor_source, anchor_quantity_position, _anchor_dest in anchor_specs:
+            segment_dest_indexes = quantity_dest_indexes[
+                previous_quantity_position + 1 : anchor_quantity_position
+            ]
+            segment_sources = [
+                src_idx
+                for src_idx in remaining_sources
+                if (previous_source is None or src_idx > previous_source) and src_idx < anchor_source
+            ]
+            for src_idx, dest_idx in zip(segment_sources, segment_dest_indexes):
+                normalized[src_idx] = dest_idx
+            previous_source = anchor_source
+            previous_quantity_position = anchor_quantity_position
+        trailing_dest_indexes = quantity_dest_indexes[previous_quantity_position + 1 :]
+        trailing_sources = [
+            src_idx for src_idx in remaining_sources if previous_source is None or src_idx > previous_source
+        ]
+        for src_idx, dest_idx in zip(trailing_sources, trailing_dest_indexes):
+            normalized[src_idx] = dest_idx
+        return normalized
+    if enforce_template_quantity_sources and allowed_quantity_source_indexes:
+        exact_mapping = dict(non_quantity_mapping)
+        current_quantity_mapping = {
+            src_idx: dest_idx
+            for src_idx, dest_idx in normalized_mapping.items()
+            if dest_idx in quantity_dest_indexes
+        }
+        for source_col_index, dest_idx in zip(sorted(allowed_quantity_source_indexes), quantity_dest_indexes):
+            if source_col_index in current_quantity_mapping or int(numeric_hits.get(source_col_index, 0)) > 0:
+                exact_mapping[source_col_index] = dest_idx
+        return exact_mapping
     menu_source_indexes = [
         src_idx
         for src_idx, dest_idx in non_quantity_mapping.items()
@@ -839,32 +1273,39 @@ def _realign_quantity_mapping_by_numeric_block(
         for src_idx, dest_idx in non_quantity_mapping.items()
         if fields[dest_idx] in {"remarks", "note"}
     ]
-    lower_bound = 0
-    if menu_source_indexes:
-        lower_bound = max(menu_source_indexes) + 1
-    elif non_note_source_indexes:
-        lower_bound = max(non_note_source_indexes) + 1
-    upper_bound = max_columns
-    if note_source_indexes:
-        note_src_idx = min(note_source_indexes)
-        note_numeric_hits = int(numeric_hits.get(note_src_idx, 0))
-        note_non_empty_hits = int(non_empty_hits.get(note_src_idx, 0))
-        # Some stale yomitoku markdown shifts the quantity block one cell right
-        # and temporarily places the last quantity inside the nominal remarks slot.
-        if note_numeric_hits > 0 and note_numeric_hits >= note_non_empty_hits:
-            upper_bound = note_src_idx + 1
-        else:
-            upper_bound = note_src_idx
-    if upper_bound <= lower_bound:
-        return mapped_indexes
+    if enforce_template_quantity_sources and allowed_quantity_source_indexes:
+        candidate_source_indexes = [
+            idx
+            for idx in sorted(allowed_quantity_source_indexes)
+            if int(numeric_hits.get(idx, 0)) > 0
+        ]
+    else:
+        lower_bound = 0
+        if menu_source_indexes:
+            lower_bound = max(menu_source_indexes) + 1
+        elif non_note_source_indexes:
+            lower_bound = max(non_note_source_indexes) + 1
+        upper_bound = max_columns
+        if note_source_indexes:
+            note_src_idx = min(note_source_indexes)
+            note_numeric_hits = int(numeric_hits.get(note_src_idx, 0))
+            note_non_empty_hits = int(non_empty_hits.get(note_src_idx, 0))
+            # Some stale yomitoku markdown shifts the quantity block one cell right
+            # and temporarily places the last quantity inside the nominal remarks slot.
+            if note_numeric_hits > 0 and note_numeric_hits >= note_non_empty_hits:
+                upper_bound = note_src_idx + 1
+            else:
+                upper_bound = note_src_idx
+        if upper_bound <= lower_bound:
+            return normalized_mapping
 
-    candidate_source_indexes = [
-        idx
-        for idx in range(lower_bound, upper_bound)
-        if int(numeric_hits.get(idx, 0)) > 0
-    ]
+        candidate_source_indexes = [
+            idx
+            for idx in range(lower_bound, upper_bound)
+            if int(numeric_hits.get(idx, 0)) > 0
+        ]
     if not candidate_source_indexes:
-        return mapped_indexes
+        return normalized_mapping
 
     if len(candidate_source_indexes) > len(quantity_dest_indexes):
         best_window: list[int] | None = None
@@ -884,20 +1325,20 @@ def _realign_quantity_mapping_by_numeric_block(
 
     current_quantity_mapping = {
         src_idx: dest_idx
-        for src_idx, dest_idx in mapped_indexes.items()
+        for src_idx, dest_idx in normalized_mapping.items()
         if dest_idx in quantity_dest_indexes
     }
     if (
         preserve_sparse_full_header_mapping
         and len(current_quantity_mapping) >= len(quantity_dest_indexes)
     ):
-        return mapped_indexes
+        return normalized_mapping
     if (
         preserve_sparse_full_header_mapping
         and len(current_quantity_mapping) >= len(quantity_dest_indexes)
         and len(candidate_source_indexes) < len(quantity_dest_indexes)
     ):
-        return mapped_indexes
+        return normalized_mapping
     current_numeric_score = sum(int(numeric_hits.get(src_idx, 0)) for src_idx in current_quantity_mapping)
     proposed_numeric_score = sum(int(numeric_hits.get(src_idx, 0)) for src_idx in candidate_source_indexes)
     current_has_empty_quantity_column = any(
@@ -908,11 +1349,11 @@ def _realign_quantity_mapping_by_numeric_block(
         and proposed_numeric_score < current_numeric_score
         and not current_has_empty_quantity_column
     ):
-        return mapped_indexes
+        return normalized_mapping
 
     normalized = {
         src_idx: dest_idx
-        for src_idx, dest_idx in mapped_indexes.items()
+        for src_idx, dest_idx in normalized_mapping.items()
         if dest_idx not in quantity_dest_indexes
     }
     for src_idx, dest_idx in zip(candidate_source_indexes, quantity_dest_indexes):
@@ -1558,6 +1999,7 @@ def _finalize_projected_mapped_indexes(
         data=data,
         fields=fields,
         mapped_indexes=dict(mapped_indexes),
+        template=template,
         preserve_sparse_full_header_mapping=(
             explicit_quantity_column_count > 0
             and current_mapped_quantity_count >= explicit_quantity_column_count
@@ -1567,6 +2009,7 @@ def _finalize_projected_mapped_indexes(
         data=data,
         fields=fields,
         mapped_indexes=finalized,
+        template=template,
     )
     return finalized
 
@@ -1621,6 +2064,7 @@ def _project_rows_from_header_and_data_internal(
         data=data,
         fields=fields,
         mapped_indexes=mapped_indexes,
+        template=template,
     )
     mapped_indexes = _prefer_positional_quantity_mapping_when_width_matches(
         header=header,
@@ -2237,7 +2681,33 @@ def extract_fax_data(
     provider = _get_main_provider(template)
     grid = detect_table_grid(pdf_bytes, template)
     page_index = max(int(template.get("page", 1)) - 1, 0)
+    quantity_assignment_strategy = hakodate_assignment_service.resolve_quantity_assignment_strategy(template)
     logger.info("Main OCR provider selected", provider=provider)
+
+    if quantity_assignment_strategy == "hakodate":
+        import pdfplumber
+
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            page = pdf.pages[page_index] if pdf.pages else None
+            if not page:
+                return FaxExtractedData(None, [], [], [], grid=grid, ocr_provider="hakodate")
+            resolution = _get_resolution(template, "hakodate_ocr_resolution", 320)
+            image = page.to_image(resolution=resolution).original
+        facility_name, date_strings = _extract_facility_and_dates_tesseract(image, template)
+        return FaxExtractedData(
+            facility_name=facility_name,
+            date_strings=date_strings,
+            table_rows=[],
+            tokens=[],
+            grid=grid,
+            ocr_provider="hakodate",
+            provider_debug={
+                "provider": "hakodate",
+                "quantity_assignment_strategy": quantity_assignment_strategy,
+                "structure_source": "facility_template_cell_grid",
+                "ocr_token_source": "none_for_quantity_assignment",
+            },
+        )
 
     if provider == "tesseract":
         import pdfplumber
@@ -2313,7 +2783,7 @@ def extract_fax_data(
     if provider == "openai":
         from src.services.openai_ocr_service import run_openai_ocr
 
-        fallback_provider = str(template.get("openai_ocr_fallback_provider") or "pipeline").lower()
+        fallback_provider = _resolve_provider_fallback(template, "openai_ocr_fallback_provider")
         try:
             output = run_openai_ocr(
                 pdf_bytes=pdf_bytes,
@@ -2391,7 +2861,7 @@ def extract_fax_data(
     if provider == "gemini":
         from src.services.gemini_ocr_service import run_gemini_ocr
 
-        fallback_provider = str(template.get("gemini_ocr_fallback_provider") or "pipeline").lower()
+        fallback_provider = _resolve_provider_fallback(template, "gemini_ocr_fallback_provider")
         try:
             output = run_gemini_ocr(
                 pdf_bytes=pdf_bytes,

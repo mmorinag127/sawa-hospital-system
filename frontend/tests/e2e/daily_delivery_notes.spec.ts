@@ -69,7 +69,20 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
                       bag_count: 2,
                       total_quantity: 220,
                       total_amount_label: "22000g",
-                      breakdowns: [{ amount_label: "22000g", count: 2 }],
+                      breakdowns: [
+                        {
+                          amount_label: "22000g",
+                          count: 2,
+                          order_refs: [
+                            {
+                              order_id: "ORD-DAILY-001",
+                              facility_label: "施設A (FAC-001)",
+                              area_id: "2F",
+                              quantity: 220,
+                            },
+                          ],
+                        },
+                      ],
                     },
                   ],
                 },
@@ -117,6 +130,8 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
   await expect(bagTable.getByRole("columnheader", { name: "計算基準" })).toBeVisible();
   await expect(bagTable.getByRole("cell", { name: "主菜" })).toBeVisible();
   await expect(bagTable.getByRole("cell", { name: "100g/人" })).toBeVisible();
+  await expect(page.locator(".bag-breakdown-ref").first()).toContainText("施設A (FAC-001) / 2F / 220食");
+  await expect(page.locator(".bag-breakdown-ref .link").first()).toHaveAttribute("href", "/orders/ORD-DAILY-001");
 });
 
 test("daily delivery notes can save facility-level portion overrides and reflect them in the list", async ({ page }) => {
@@ -549,4 +564,121 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
 
   await expect(page.getByText("全施設の単位設定を保存しました。")).toBeVisible();
   await expect(page.getByRole("dialog").getByText("3個/人")).toBeVisible();
+});
+
+test("daily delivery notes shows blocker text when bag data truly does not exist", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method().toUpperCase();
+
+    if (path.endsWith("/auth/me") && method === "GET") {
+      await route.fulfill({ status: 200, json: { role: "admin" } });
+      return;
+    }
+
+    if (path.endsWith("/facilities") && method === "GET") {
+      await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+      return;
+    }
+
+    if (path.endsWith("/orders/by-line-date") && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        json: {
+          orders: [{ id: "ORD-DAILY-EMPTY-001", facility: "FAC-001", week: "2026-03", status: "確定" }],
+        },
+      });
+      return;
+    }
+
+    if (path.endsWith("/orders/daily-bags") && method === "GET") {
+      await route.fulfill({ status: 200, json: { date: "2026-03-24", order_count: 1, groups: [] } });
+      return;
+    }
+
+    if (path.endsWith("/totals") && method === "GET") {
+      await route.fulfill({ status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
+      return;
+    }
+
+    await route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.getByRole("button", { name: "取得" }).click();
+
+  await expect(page.getByRole("heading", { name: "当日袋分け一覧" })).toBeVisible();
+  await expect(page.getByText("袋分け結果がまだ生成されていません。")).toBeVisible();
+});
+
+test("daily delivery notes bundle download survives responses longer than the old 30s client timeout", async ({ page }) => {
+  test.setTimeout(90000);
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method().toUpperCase();
+
+    if (path.endsWith("/auth/me") && method === "GET") {
+      await route.fulfill({ status: 200, json: { role: "admin" } });
+      return;
+    }
+
+    if (path.endsWith("/facilities") && method === "GET") {
+      await route.fulfill({ status: 200, json: { facilities: [] } });
+      return;
+    }
+
+    if (path.endsWith("/orders/by-line-date") && method === "GET") {
+      await route.fulfill({ status: 200, json: { orders: [] } });
+      return;
+    }
+
+    if (path.endsWith("/orders/daily-bags") && method === "GET") {
+      await route.fulfill({ status: 200, json: { date: "2026-03-24", order_count: 0, groups: [] } });
+      return;
+    }
+
+    if (path.endsWith("/totals") && method === "GET") {
+      await route.fulfill({ status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
+      return;
+    }
+
+    if (path.endsWith("/outputs/daily-bundle") && method === "GET") {
+      await new Promise((resolve) => setTimeout(resolve, 31000));
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "content-disposition": "attachment; filename=\"daily_outputs_2026-03-24_delivery.xlsx\"",
+          "x-daily-bundle-success-orders": "1",
+          "x-daily-bundle-error-orders": "0",
+        },
+        body: "bundle",
+      });
+      return;
+    }
+
+    await route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.getByRole("button", { name: "取得" }).click();
+  await page.getByRole("button", { name: "当日納品書Excel" }).click();
+
+  await expect(page.getByText("当日納品書Excelをダウンロードしました。成功 1件 / 失敗 0件")).toBeVisible({ timeout: 40000 });
 });

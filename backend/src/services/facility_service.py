@@ -165,9 +165,13 @@ def update_facility(facility_id: str, name: str | None, areas: list | None) -> d
     return serialized
 
 
-def update_config(facility_id: str, config: dict) -> bool:
+def update_config(
+    facility_id: str,
+    config: dict,
+    *,
+    allow_authoritative_column_changes: bool = False,
+) -> bool:
     updated = False
-    sanitized_config = config_service.sanitize_facility_config_for_storage(facility_id, config)
     with session_scope() as session:
         _ensure_facility_sync(session)
         session.flush()
@@ -178,6 +182,13 @@ def update_config(facility_id: str, config: dict) -> bool:
             fac = session.get(Facility, facility_id)
         if not fac:
             return False
+        current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
+        sanitized_config = config_service.sanitize_facility_config_for_storage(
+            facility_id,
+            config,
+            current_config=current_config,
+            allow_authoritative_column_changes=allow_authoritative_column_changes,
+        )
         # replace config
         session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
         session.add(FacilityConfig(facility_id=facility_id, config_json=sanitized_config))

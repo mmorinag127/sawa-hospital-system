@@ -1,15 +1,18 @@
 import sys
 import pathlib
 import re
+from datetime import datetime
 
 from sqlalchemy import delete
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import facility_service, config_service  # noqa: E402
+from src.services import facility_service, config_service, order_service  # noqa: E402
+from src.services import template_field_schema_service  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
+from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
 def _clear_facilities():
@@ -146,17 +149,21 @@ def test_placeholder_and_custom_quantity_tokens_are_preserved():
     assert columns[6]["name"] == "qty.pregnancy_x"
 
 
-def test_fac00006_exposes_layout_template_candidates():
+def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00006")
     assert resolved is not None
     assert resolved.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
+    assert resolved.get("fax_template_ids") == ["fax_layout_regular_soft_mixer_forbidden_v1"]
     assert ((resolved.get("fax_template") or {}).get("postprocess") or {}).get("qty_ocr_engine") == "tesseract_digits"
-    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
         "menu",
         "qty.regular_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
         "qty.regular_bag_x",
         "qty.soft_x",
         "qty.mixer_x",
@@ -164,10 +171,33 @@ def test_fac00006_exposes_layout_template_candidates():
         "qty.no_fish_x",
         "remarks",
     ]
-    assert resolved.get("fax_template_ids") == [
-        "fax_layout_regular_soft_mixer_forbidden_v1",
-        "fax_layout_floor_2f3f_v1",
-        "fax_layout_regular_staff_daycare_v1",
+    override = resolved.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    columns = template.get("columns") or []
+    assert [column.get("header") for column in columns] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "常食1回目",
+        "常食2回目",
+        "常食3回目",
+        "常食袋分け",
+        "軟菜",
+        "ミキサー",
+        "禁食肉禁",
+        "禁食魚禁",
+        "備考欄",
+    ]
+    assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert [column.get("name") for column in columns[3:11]] == [
+        "qty.regular_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "qty.regular_bag_x",
+        "qty.soft_x",
+        "qty.mixer_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
     ]
     registry = config_service.load_fax_template_registry()
     assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_ocr_engine"] == "tesseract_digits"
@@ -176,24 +206,714 @@ def test_fac00006_exposes_layout_template_candidates():
     assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_max_value"] == 50
 
 
-def test_fac00007_and_fac00012_use_regular_forbidden_plus_change_columns():
+def test_fac00012_preserves_placeholder_spacer_and_source_indexes_from_master():
     config_service.reload_configs()
-    for facility_id in ("FAC00007", "FAC00012"):
-        resolved = config_service.get_facility_config(facility_id)
-        assert resolved is not None
-        assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
-        template = resolved.get("fax_template") or {}
-        assert template.get("main_ocr_row_fields") == [
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_x",
-            "qty.no_meat_x",
-            "qty.no_fish_x",
-            "qty.change_1_x",
-            "qty.change_2_x",
-            "remarks",
+    resolved = config_service.get_facility_config("FAC00012")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    override = resolved.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.placeholder_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+    columns = template.get("columns") or []
+    assert [column.get("header") for column in columns] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "常食",
+        "-",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+        "備考欄",
+    ]
+    assert [column.get("name") for column in columns[3:9]] == [
+        "qty.regular_x",
+        "qty.placeholder_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+    ]
+    assert [column.get("source_index") for column in columns] == [
+        None,
+        None,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+    ]
+
+
+def test_fac00005_exposes_authoritative_soft_bag_forbidden_change_columns():
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00005")
+    assert resolved is not None
+    override = resolved.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.soft_x",
+        "qty.regular_bag_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+    columns = template.get("columns") or []
+    assert [column.get("role") for column in columns] == [
+        "date",
+        "daypart",
+        "menu_name",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "note",
+    ]
+    assert [column.get("header") for column in columns[3:9]] == [
+        "軟菜",
+        "袋分け",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+    ]
+
+
+def test_fac00004_template_schema_contract_preserves_aux_columns():
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00004")
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+
+    contract = template_field_schema_service.build_template_field_schema_contract(template)
+
+    assert contract["field_count"] == 13
+    assert contract["fields"] == [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "qty.daycare_x",
+        "qty.staff_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.no_fried_x",
+        "qty.change_1_x",
+        "remarks",
+    ]
+    assert contract["aux_fields"] == ["aux.col_2", "aux.col_4"]
+
+
+def test_fac00005_update_config_preserves_authoritative_master_schema():
+    _clear_facilities()
+    facility_service.list_facilities()
+
+    assert facility_service.update_config("FAC00005", {"menu_override_tags": ["larger", "keep"]})
+
+    resolved = config_service.get_facility_config("FAC00005")
+    assert resolved is not None
+    override = resolved.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.soft_x",
+        "qty.regular_bag_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+    columns = template.get("columns") or []
+    assert [column.get("header") for column in columns[3:9]] == [
+        "軟菜",
+        "袋分け",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+    ]
+
+
+def test_fac00007_uses_regular_forbidden_plus_change_columns():
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00007")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+
+
+def test_fac00004_exposes_daycare_staff_and_no_fried_columns():
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00004")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_regular_staff_daycare_other_forbidden_v1"
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "qty.daycare_x",
+        "qty.staff_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.no_fried_x",
+        "qty.change_1_x",
+        "remarks",
+    ]
+    columns = template.get("columns") or []
+    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "aux", "menu_name", "aux"]
+    assert columns[5]["diet_type"] == "regular"
+
+
+def test_columns_authoritative_override_ignores_stale_explicit_main_ocr_row_fields():
+    _clear_facilities()
+    fac = facility_service.create_facility("Columns Authoritative Aux Facility", [])
+    config = {
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "aux", "header": "副区分"},
+                {"index": 3, "role": "menu_name", "header": "メニュー"},
+                {"index": 4, "role": "aux", "header": "合計"},
+                {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 6, "role": "note", "header": "備考欄"},
+            ],
+            "main_ocr_row_fields": [
+                "date_mmdd",
+                "daypart",
+                "menu",
+                "qty.regular_x",
+                "remarks",
+            ],
+        }
+    }
+    assert facility_service.update_config(fac["id"], config)
+
+    resolved = config_service.get_facility_config(fac["id"])
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "remarks",
+    ]
+
+
+def test_fac00014_exposes_staff_sesame_and_change_columns():
+    _clear_facilities()
+    facility_service.list_facilities()
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.staff_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.sesame_allergy_x",
+        "qty.change_1_x",
+        "remarks",
+    ]
+    columns = template.get("columns") or []
+    assert [columns[idx]["role"] for idx in range(3)] == ["date", "daypart", "menu_name"]
+    assert columns[3]["diet_type"] == "regular"
+    assert columns[4]["diet_type"] == "staff"
+    assert columns[5]["diet_type"] == "no_meat"
+    assert columns[6]["diet_type"] == "no_fish"
+    assert columns[7]["diet_type"] == "sesame_allergy"
+    assert columns[8]["diet_type"] == "change_1"
+    assert columns[9]["role"] == "note"
+
+
+def test_fac00014_prefers_master_override_over_stale_persisted_columns():
+    _clear_facilities()
+    facility_service.list_facilities()
+    stale_config = {
+        "fax_template_override": {
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+                {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+                {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                {"index": 7, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+                {"index": 8, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+                {"index": 9, "role": "note", "header": "備考欄"},
+            ]
+        }
+    }
+    assert facility_service.update_config("FAC00014", stale_config)
+
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    columns = (resolved.get("fax_template") or {}).get("columns") or []
+    assert [columns[idx]["role"] for idx in range(3)] == ["date", "daypart", "menu_name"]
+    assert columns[3]["diet_type"] == "regular"
+    assert columns[4]["diet_type"] == "staff"
+    assert columns[5]["diet_type"] == "no_meat"
+    assert columns[6]["diet_type"] == "no_fish"
+    assert columns[7]["diet_type"] == "sesame_allergy"
+    assert columns[8]["diet_type"] == "change_1"
+    assert columns[9]["role"] == "note"
+
+
+def test_fac00014_update_config_sanitizes_stale_override_before_storage():
+    _clear_facilities()
+    facility_service.list_facilities()
+    stale_config = {
+        "fax_template_override": {
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+                {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+                {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                {"index": 7, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+                {"index": 8, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+                {"index": 9, "role": "note", "header": "備考欄"},
+            ]
+        }
+    }
+    assert facility_service.update_config("FAC00014", stale_config)
+
+    stored = facility_service.get_facility_config("FAC00014")
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    columns = override.get("columns") or []
+    assert [columns[idx]["role"] for idx in range(3)] == ["date", "daypart", "menu_name"]
+    assert columns[3]["diet_type"] == "regular"
+    assert columns[4]["diet_type"] == "staff"
+    assert columns[5]["diet_type"] == "no_meat"
+    assert columns[6]["diet_type"] == "no_fish"
+    assert columns[7]["diet_type"] == "sesame_allergy"
+    assert columns[8]["diet_type"] == "change_1"
+    assert override.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.staff_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.sesame_allergy_x",
+        "qty.change_1_x",
+        "remarks",
+    ]
+
+
+def test_save_order_facility_template_columns_persists_deleted_column_authoritatively():
+    _clear_facilities()
+    facility_service.list_facilities()
+    order_service.clear_all()
+
+    order = order_service.create_order_from_ingest(
+        IngestEmailPayload(
+            message_id="msg-fac00014-delete-column",
+            pdf_uri="file://fac00014-delete-column.pdf",
+            received_at=datetime(2026, 4, 12, 12, 0, 0),
+            facility_hint="FAC00014",
+            week_hint="2026-04",
+        ),
+        lines=[],
+    )
+    assert order is not None
+
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    original_columns = ((resolved.get("fax_template") or {}).get("columns") or [])
+    columns_without_change_1 = [
+        dict(column)
+        for column in original_columns
+        if str(column.get("diet_type") or "").strip() != "change_1"
+    ]
+
+    result, error = order_service.save_order_facility_template_columns(
+        order["id"],
+        columns_without_change_1,
+    )
+
+    assert error is None
+    assert result is not None
+    stored = facility_service.get_facility_config("FAC00014")
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    stored_columns = override.get("columns") or []
+    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in stored_columns)
+
+    refreshed = config_service.get_facility_config("FAC00014")
+    assert refreshed is not None
+    refreshed_columns = ((refreshed.get("fax_template") or {}).get("columns") or [])
+    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in refreshed_columns)
+
+
+def test_generic_update_config_preserves_master_authoritative_columns_for_fac00014():
+    _clear_facilities()
+    facility_service.list_facilities()
+
+    attempted_override = {
+        "fax_template_override": {
+            "grid_line_scale_horizontal": 18,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "肉卵魚禁", "diet_type": "forbidden_other", "area_id": "X"},
+                {"index": 5, "role": "note", "header": "備考欄"},
+            ],
+        }
+    }
+
+    assert facility_service.update_config("FAC00014", attempted_override)
+
+    stored = facility_service.get_facility_config("FAC00014")
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    assert override.get("grid_line_scale_horizontal") == 18
+    stored_columns = override.get("columns") or []
+    assert [column.get("diet_type") for column in stored_columns if column.get("role") == "quantity"] == [
+        "regular",
+        "staff",
+        "no_meat",
+        "no_fish",
+        "sesame_allergy",
+        "change_1",
+    ]
+    assert not any(str(column.get("diet_type") or "").strip() == "forbidden_other" for column in stored_columns)
+
+
+def test_generic_update_config_keeps_order_authored_authoritative_columns():
+    _clear_facilities()
+    facility_service.list_facilities()
+    order_service.clear_all()
+
+    order = order_service.create_order_from_ingest(
+        IngestEmailPayload(
+            message_id="msg-fac00014-preserve-authored-columns",
+            pdf_uri="file://fac00014-preserve-authored-columns.pdf",
+            received_at=datetime(2026, 4, 12, 12, 0, 0),
+            facility_hint="FAC00014",
+            week_hint="2026-04",
+        ),
+        lines=[],
+    )
+    assert order is not None
+
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    original_columns = ((resolved.get("fax_template") or {}).get("columns") or [])
+    columns_without_change_1 = [
+        dict(column)
+        for column in original_columns
+        if str(column.get("diet_type") or "").strip() != "change_1"
+    ]
+
+    result, error = order_service.save_order_facility_template_columns(
+        order["id"],
+        columns_without_change_1,
+    )
+
+    assert error is None
+    assert result is not None
+    assert facility_service.update_config("FAC00014", {"menu_override_tags": ["keep-authored-columns"]})
+
+    stored = facility_service.get_facility_config("FAC00014")
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    assert stored.get("menu_override_tags") == ["keep-authored-columns"]
+    stored_columns = override.get("columns") or []
+    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in stored_columns)
+
+
+def test_reconcile_fax_override_keeps_current_when_quantity_families_differ():
+    current_override = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+            {"index": 9, "role": "note", "header": "備考欄"},
         ]
+    }
+    master_override = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "aux", "header": "副区分"},
+            {"index": 3, "role": "menu_name", "header": "メニュー"},
+            {"index": 4, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 5, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
+            {"index": 9, "role": "note", "header": "備考欄"},
+        ]
+    }
+
+    reconciled = config_service._reconcile_fax_template_override(  # type: ignore[attr-defined]
+        current_override,
+        master_override,
+        drop_redundant=False,
+    )
+
+    assert reconciled is not None
+    columns = reconciled.get("columns") or []
+    assert [column.get("role") for column in columns[:3]] == ["date", "daypart", "menu_name"]
+    assert [column.get("diet_type") for column in columns if column.get("role") == "quantity"] == [
+        "regular",
+        "staff",
+        "no_meat",
+        "no_fish",
+        "sesame_allergy",
+        "change_1",
+    ]
+
+
+def test_authoritative_facility_override_is_not_reconciled_back_to_master():
+    _clear_facilities()
+    fac = facility_service.create_facility("Authoritative Override Facility", [])
+    authored_config = {
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食特別", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "職員特別", "diet_type": "staff", "area_id": "X"},
+                {"index": 5, "role": "note", "header": "備考欄"},
+            ],
+        }
+    }
+
+    assert facility_service.update_config(fac["id"], authored_config)
+
+    stored = facility_service.get_facility_config(fac["id"])
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    assert override.get("columns_authoritative") is True
+    stored_columns = override.get("columns") or []
+    assert [column.get("role") for column in stored_columns] == [
+        "date",
+        "daypart",
+        "menu_name",
+        "quantity",
+        "quantity",
+        "note",
+    ]
+    assert [column.get("header") for column in stored_columns[3:5]] == ["常食特別", "職員特別"]
+    assert override.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.staff_x",
+        "remarks",
+    ]
+
+    resolved = config_service.get_facility_config(fac["id"])
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.staff_x",
+        "remarks",
+    ]
+    resolved_columns = template.get("columns") or []
+    assert [column.get("header") for column in resolved_columns[3:5]] == ["常食特別", "職員特別"]
+
+
+def test_reconcile_fax_template_override_prefers_authoritative_master_placeholder_columns():
+    current_override = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 5, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "変更2", "diet_type": "change_2", "area_id": "X"},
+            {"index": 8, "role": "note", "header": "備考欄"},
+        ]
+    }
+    master_override = {
+        "columns_authoritative": True,
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 3},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 4},
+            {"index": 4, "role": "quantity", "header": "-", "diet_type": "placeholder", "area_id": "X", "source_index": 5},
+            {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X", "source_index": 6},
+            {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X", "source_index": 7},
+            {"index": 7, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X", "source_index": 8},
+            {"index": 8, "role": "quantity", "header": "変更2", "diet_type": "change_2", "area_id": "X", "source_index": 9},
+            {"index": 9, "role": "note", "header": "備考欄", "source_index": 10},
+        ],
+    }
+
+    reconciled = config_service._reconcile_fax_template_override(  # type: ignore[attr-defined]
+        current_override,
+        master_override,
+        drop_redundant=False,
+    )
+
+    assert reconciled is not None
+    assert reconciled.get("columns_authoritative") is True
+    assert reconciled.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.placeholder_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+    columns = reconciled.get("columns") or []
+    assert [column.get("header") for column in columns[3:9]] == [
+        "常食",
+        "-",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+    ]
+    assert [column.get("source_index") for column in columns] == [
+        None,
+        None,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+    ]
+
+
+def test_fac00004_update_config_sanitizes_missing_aux_before_storage():
+    _clear_facilities()
+    facility_service.list_facilities()
+    stale_config = {
+        "fax_template_override": {
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
+                {"index": 5, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+                {"index": 6, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+                {"index": 7, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                {"index": 8, "role": "quantity", "header": "揚げ物禁", "diet_type": "no_fried", "area_id": "X"},
+                {"index": 9, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+                {"index": 10, "role": "note", "header": "備考欄"},
+            ]
+        }
+    }
+    assert facility_service.update_config("FAC00004", stale_config)
+
+    stored = facility_service.get_facility_config("FAC00004")
+    assert stored is not None
+    override = stored.get("fax_template_override") or {}
+    columns = override.get("columns") or []
+    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "aux", "menu_name", "aux"]
+    assert columns[5]["diet_type"] == "regular"
+    assert columns[6]["diet_type"] == "daycare"
+    assert columns[7]["diet_type"] == "staff"
+    assert columns[8]["diet_type"] == "no_meat"
+    assert columns[9]["diet_type"] == "no_fish"
+    assert columns[10]["diet_type"] == "no_fried"
+    assert columns[11]["diet_type"] == "change_1"
+    assert override.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "aux.col_2",
+        "menu",
+        "aux.col_4",
+        "qty.regular_x",
+        "qty.daycare_x",
+        "qty.staff_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.no_fried_x",
+        "qty.change_1_x",
+        "remarks",
+    ]
 
 
 def test_fac00010_uses_floor_columns_from_source_master():
@@ -217,6 +937,8 @@ def test_fac00010_uses_floor_columns_from_source_master():
 
 
 def test_fac00014_15_16_expose_custom_quantity_columns():
+    _clear_facilities()
+    facility_service.list_facilities()
     config_service.reload_configs()
 
     fac14 = config_service.get_facility_config("FAC00014")
@@ -234,6 +956,26 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
         "qty.change_1_x",
         "remarks",
     ]
+    fac14_columns = (fac14.get("fax_template") or {}).get("columns") or []
+    assert [column.get("role") for column in fac14_columns] == [
+        "date",
+        "daypart",
+        "menu_name",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "quantity",
+        "note",
+    ]
+    assert fac14_columns[2]["header"] == "メニュー"
+    assert fac14_columns[3]["diet_type"] == "regular"
+    assert fac14_columns[4]["diet_type"] == "staff"
+    assert fac14_columns[5]["diet_type"] == "no_meat"
+    assert fac14_columns[6]["diet_type"] == "no_fish"
+    assert fac14_columns[7]["diet_type"] == "sesame_allergy"
+    assert fac14_columns[8]["diet_type"] == "change_1"
 
     fac15 = config_service.get_facility_config("FAC00015")
     assert fac15 is not None
@@ -295,9 +1037,8 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
 
     fac00013 = config_service.get_facility_config("FAC00013")
     assert fac00013 is not None
-    assert fac00013.get("fax_template_id") == "fax_layout_regular_diabetes_v1"
+    assert fac00013.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
     assert fac00013.get("fax_template_ids") == [
-        "fax_layout_regular_diabetes_v1",
         "fax_layout_regular_forbidden_v1",
     ]
 

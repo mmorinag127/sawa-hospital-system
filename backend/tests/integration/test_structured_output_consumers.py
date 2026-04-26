@@ -400,6 +400,51 @@ def test_build_delivery_rows_sums_regular_bag_into_generic_regular_column():
     assert rows[0]["qty_regular_total"] == 15.0
 
 
+def test_build_delivery_rows_prefers_highest_regular_round_over_generic_regular_sum():
+    rows = output_builder._build_delivery_rows(
+        {
+            "id": "ORD-STRUCTURED-DELIVERY-REGULAR-ROUNDS",
+            "facility": "FAC00006",
+            "lines": [],
+        },
+        {
+            "prefer_ocr_raw_rows": True,
+            "columns": [
+                {
+                    "name": "qty_regular_total",
+                    "source": "quantity",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                }
+            ],
+        },
+        {"zero_as_empty": True},
+        {},
+        {
+            "entries": [
+                {
+                    "date": date(2026, 2, 15),
+                    "daypart": "朝",
+                    "category": "",
+                    "menu_name": "Menu A",
+                    "index": 0,
+                    "quantity_map": {
+                        "regular_x": 11.0,
+                        "change_1_x": 13.0,
+                        "change_2_x": 17.0,
+                        "regular_bag_x": 3.0,
+                    },
+                    "note": "",
+                    "source": "structured_rows",
+                }
+            ]
+        },
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["qty_regular_total"] == 17.0
+
+
 def test_build_delivery_rows_does_not_duplicate_generic_regular_into_specific_area_column():
     rows = output_builder._build_delivery_rows(
         {
@@ -623,3 +668,59 @@ def test_extract_ocr_entries_reads_llm_review_issues_from_latest_revision():
     assert entries[0]["needs_review"] is True
     assert entries[0]["ocr_issues"][0]["issue_code"] == "review_required"
     assert entries[0]["ocr_issues"][0]["source"] == "llm_review"
+
+
+def test_extract_ocr_entries_ignores_fureai_total_aux_column_for_quantity_map():
+    payload = {
+        "pages": [
+            {
+                "page_index": 1,
+                "tables": [
+                    {
+                        "table_id": "p1_t1",
+                        "rows": [
+                            ["日 付", "区 分", "", "献立", "合計", "#☆", "通所", "職員", "平森", "肉蒸", "魚禁", "揚物禁", "変更1", "備考欄"],
+                            ["3/22\n(日)", "材", "副作\n四", "厚揚げとさつま芋の煮物", "", "72", "", "", "", "", "", "", "", ""],
+                            ["", "香", "±A", "鶏じゃが", "67", "66", "", "", "", "", "", "", "", "鶏魚1"],
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    template = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "aux", "header": "副区分"},
+            {"index": 3, "role": "menu_name", "header": "献立"},
+            {"index": 4, "role": "aux", "header": "合計"},
+            {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 6, "role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
+            {"index": 7, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+            {"index": 8, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+            {"index": 9, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+            {"index": 10, "role": "quantity", "header": "揚げ物禁", "diet_type": "no_fried", "area_id": "X"},
+            {"index": 11, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+            {"index": 12, "role": "note", "header": "備考欄"},
+        ],
+        "main_ocr_row_fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "qty.change_1_x",
+            "remarks",
+        ],
+    }
+
+    entries = output_builder._extract_ocr_entries_from_structured_payload(payload, template, 2026)
+
+    assert len(entries) == 2
+    assert entries[0]["quantity_map"] == {"regular_x": 72.0}
+    assert entries[1]["quantity_map"] == {"regular_x": 66.0}
