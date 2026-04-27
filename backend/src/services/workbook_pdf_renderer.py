@@ -55,6 +55,25 @@ def _line_width(side_style: str | None) -> int:
     return 1
 
 
+def _line_style_rank(side_style: str | None) -> int:
+    style = str(side_style or "").strip().lower()
+    if not style:
+        return 0
+    if style in {"hair"}:
+        return 1
+    if style in {"dotted", "dashdotdot", "slantdashdot"}:
+        return 2
+    if style in {"dashed", "dashdot"}:
+        return 3
+    if style in {"thin"}:
+        return 4
+    if style in {"medium", "mediumdashed", "mediumdashdot", "mediumdashdotdot"}:
+        return 5
+    if style in {"thick", "double"}:
+        return 6
+    return 4
+
+
 def _color_to_rgb(color, *, default: tuple[int, int, int]) -> tuple[int, int, int]:
     value = getattr(color, "rgb", None) or getattr(color, "value", None)
     if isinstance(value, str):
@@ -67,6 +86,131 @@ def _color_to_rgb(color, *, default: tuple[int, int, int]) -> tuple[int, int, in
             except ValueError:
                 pass
     return default
+
+
+def _border_priority(side) -> tuple[int, int]:
+    style = str(getattr(side, "style", None) or "").strip().lower()
+    return _line_style_rank(style), _line_width(style)
+
+
+def _upsert_border_segment(
+    segments: dict[tuple[str, int, int, int], dict],
+    *,
+    key: tuple[str, int, int, int],
+    side,
+) -> None:
+    style = str(getattr(side, "style", None) or "").strip().lower()
+    width = _line_width(style)
+    if width <= 0:
+        return
+    candidate = {
+        "style": style,
+        "width": width,
+        "color": _color_to_rgb(getattr(side, "color", None), default=(0, 0, 0)),
+        "priority": _border_priority(side),
+    }
+    current = segments.get(key)
+    if current is None or candidate["priority"] > current["priority"]:
+        segments[key] = candidate
+
+
+def _collect_border_segments(
+    worksheet,
+    *,
+    min_col: int,
+    min_row: int,
+    max_col: int,
+    max_row: int,
+    x_positions: dict[int, int],
+    y_positions: dict[int, int],
+) -> dict[tuple[str, int, int, int], dict]:
+    segments: dict[tuple[str, int, int, int], dict] = {}
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = worksheet.cell(row=row, column=col)
+            border = cell.border
+            x0 = x_positions[col]
+            x1 = x_positions[col + 1]
+            y0 = y_positions[row]
+            y1 = y_positions[row + 1]
+            _upsert_border_segment(
+                segments,
+                key=("v", x0, y0, y1),
+                side=border.left,
+            )
+            _upsert_border_segment(
+                segments,
+                key=("v", x1, y0, y1),
+                side=border.right,
+            )
+            _upsert_border_segment(
+                segments,
+                key=("h", y0, x0, x1),
+                side=border.top,
+            )
+            _upsert_border_segment(
+                segments,
+                key=("h", y1, x0, x1),
+                side=border.bottom,
+            )
+    return segments
+
+
+def _draw_styled_line(
+    draw: ImageDraw.ImageDraw,
+    *,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    style: str,
+    fill: tuple[int, int, int],
+    width: int,
+) -> None:
+    normalized = str(style or "").strip().lower()
+    if normalized == "dotted":
+        x0, y0 = start
+        x1, y1 = end
+        if x0 == x1:
+            step = max(width * 3, 4)
+            dot = max(width, 1)
+            for y in range(min(y0, y1), max(y0, y1), step):
+                draw.line([(x0, y), (x0, min(y + dot, max(y0, y1)))], fill=fill, width=width)
+            return
+        if y0 == y1:
+            step = max(width * 3, 4)
+            dot = max(width, 1)
+            for x in range(min(x0, x1), max(x0, x1), step):
+                draw.line([(x, y0), (min(x + dot, max(x0, x1)), y0)], fill=fill, width=width)
+            return
+    draw.line([start, end], fill=fill, width=width)
+
+
+def _draw_border_segments(
+    draw: ImageDraw.ImageDraw,
+    segments: dict[tuple[str, int, int, int], dict],
+) -> None:
+    for key, segment in segments.items():
+        orientation, fixed, start, end = key
+        width = int(segment["width"])
+        style = str(segment["style"])
+        color = segment["color"]
+        if orientation == "v":
+            _draw_styled_line(
+                draw,
+                start=(fixed, start),
+                end=(fixed, end),
+                style=style,
+                fill=color,
+                width=width,
+            )
+        else:
+            _draw_styled_line(
+                draw,
+                start=(start, fixed),
+                end=(end, fixed),
+                style=style,
+                fill=color,
+                width=width,
+            )
 
 
 def _load_font(size_px: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -197,6 +341,7 @@ def render_worksheet_to_image(
         max_row=max_row,
     )
 
+    text_jobs: list[tuple[tuple[int, int, int, int], object]] = []
     for row in range(min_row, max_row + 1):
         for col in range(min_col, max_col + 1):
             merge_rect = merged.get((row, col))
@@ -222,62 +367,40 @@ def render_worksheet_to_image(
             if getattr(fill, "fill_type", None) == "solid":
                 fill_rgb = _color_to_rgb(fill.fgColor, default=(255, 255, 255))
                 draw.rectangle(rect, fill=fill_rgb)
+            text_jobs.append((rect, cell))
 
-            border = cell.border
-            left_width = _line_width(getattr(border.left, "style", None))
-            right_width = _line_width(getattr(border.right, "style", None))
-            top_width = _line_width(getattr(border.top, "style", None))
-            bottom_width = _line_width(getattr(border.bottom, "style", None))
-            if left_width:
-                left_color = _color_to_rgb(border.left.color, default=(0, 0, 0))
-                for offset in range(left_width):
-                    draw.line(
-                        [(rect[0] + offset, rect[1]), (rect[0] + offset, rect[3])],
-                        fill=left_color,
-                        width=1,
-                    )
-            if right_width:
-                right_color = _color_to_rgb(border.right.color, default=(0, 0, 0))
-                for offset in range(right_width):
-                    draw.line(
-                        [(rect[2] - 1 - offset, rect[1]), (rect[2] - 1 - offset, rect[3])],
-                        fill=right_color,
-                        width=1,
-                    )
-            if top_width:
-                top_color = _color_to_rgb(border.top.color, default=(0, 0, 0))
-                for offset in range(top_width):
-                    draw.line(
-                        [(rect[0], rect[1] + offset), (rect[2], rect[1] + offset)],
-                        fill=top_color,
-                        width=1,
-                    )
-            if bottom_width:
-                bottom_color = _color_to_rgb(border.bottom.color, default=(0, 0, 0))
-                for offset in range(bottom_width):
-                    draw.line(
-                        [(rect[0], rect[3] - 1 - offset), (rect[2], rect[3] - 1 - offset)],
-                        fill=bottom_color,
-                        width=1,
-                    )
+    _draw_border_segments(
+        draw,
+        _collect_border_segments(
+            worksheet,
+            min_col=min_col,
+            min_row=min_row,
+            max_col=max_col,
+            max_row=max_row,
+            x_positions=x_positions,
+            y_positions=y_positions,
+        ),
+    )
 
-            text = _cell_text(cell.value).strip()
-            if text:
-                font_size_px = int(round(float(cell.font.sz or 11.0) * float(dpi) / 72.0))
-                font = _load_font(font_size_px, bold=bool(getattr(cell.font, "bold", False)))
-                font_color = _color_to_rgb(getattr(cell.font, "color", None), default=(0, 0, 0))
-                alignment = cell.alignment
-                horizontal = str(getattr(alignment, "horizontal", "") or "left").strip().lower()
-                vertical = str(getattr(alignment, "vertical", "") or "center").strip().lower()
-                _draw_cell_text(
-                    draw,
-                    rect=rect,
-                    text=text,
-                    font=font,
-                    font_color=font_color,
-                    horizontal=horizontal,
-                    vertical=vertical,
-                )
+    for rect, cell in text_jobs:
+        text = _cell_text(cell.value).strip()
+        if not text:
+            continue
+        font_size_px = int(round(float(cell.font.sz or 11.0) * float(dpi) / 72.0))
+        font = _load_font(font_size_px, bold=bool(getattr(cell.font, "bold", False)))
+        font_color = _color_to_rgb(getattr(cell.font, "color", None), default=(0, 0, 0))
+        alignment = cell.alignment
+        horizontal = str(getattr(alignment, "horizontal", "") or "left").strip().lower()
+        vertical = str(getattr(alignment, "vertical", "") or "center").strip().lower()
+        _draw_cell_text(
+            draw,
+            rect=rect,
+            text=text,
+            font=font,
+            font_color=font_color,
+            horizontal=horizontal,
+            vertical=vertical,
+        )
 
     for image in getattr(worksheet, "_images", []):
         anchor = getattr(image, "anchor", None)

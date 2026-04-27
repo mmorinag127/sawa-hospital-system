@@ -7,7 +7,6 @@ from pathlib import Path
 import os
 import re
 from typing import Any
-import unicodedata
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -193,18 +192,10 @@ def _source_workbook_name_matches_month(source_workbook_name: str, month_id: str
     return bool(re.search(rf"(^|[^\d]){re.escape(token)}($|[^\d])", stem))
 
 
-def _normalize_facility_template_match_text(value: object) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).strip()
-    text = re.sub(r"\d{4}$", "", text)
-    text = re.sub(r"(株式会社|有限会社|医療法人|社会福祉法人|\(株\)|（株）)", "", text)
-    text = re.sub(r"[^0-9A-Za-zぁ-んァ-ン一-龥々]+", "", text)
-    return text
-
-
 def _facility_source_workbook_names(facility: dict | None) -> list[str]:
     if not isinstance(facility, dict):
         return []
-    explicit_names: list[str] = []
+    source_names: list[str] = []
     for key in (
         "order_form_source_workbook",
         "fax_source_workbook",
@@ -212,30 +203,14 @@ def _facility_source_workbook_names(facility: dict | None) -> list[str]:
     ):
         value = str(facility.get(key) or "").strip()
         if value:
-            explicit_names.append(value)
+            source_names.append(value)
     raw_month_sources = facility.get("order_form_month_sources") or facility.get("fax_month_sources")
     if isinstance(raw_month_sources, dict):
-        explicit_names.extend(str(item or "").strip() for item in raw_month_sources.values())
-
-    facility_name_text = _normalize_facility_template_match_text(
-        facility.get("facility_name") or facility.get("name") or ""
-    )
-    scored: list[tuple[int, str]] = []
-    for source_path in sorted(_FAX_SOURCE_TEMPLATE_DIR.glob("*.xlsx")):
-        source_workbook_name = source_path.name
-        if source_workbook_name in explicit_names:
-            scored.append((10_000, source_workbook_name))
-            continue
-        workbook_label = _normalize_facility_template_match_text(source_path.stem)
-        if not workbook_label or len(workbook_label) < 2 or not facility_name_text:
-            continue
-        if workbook_label in facility_name_text:
-            scored.append((len(workbook_label), source_workbook_name))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+        source_names.extend(str(item or "").strip() for item in raw_month_sources.values())
     result: list[str] = []
     seen: set[str] = set()
-    for _score, source_workbook_name in scored:
-        if source_workbook_name in seen:
+    for source_workbook_name in source_names:
+        if not source_workbook_name or source_workbook_name in seen:
             continue
         seen.add(source_workbook_name)
         result.append(source_workbook_name)

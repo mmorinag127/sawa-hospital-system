@@ -1078,6 +1078,10 @@
       "phone": "0883-53-8010",
       "areas": [],
       "facility_id": "FAC00007",
+      "order_form_month_sources": {
+        "2026-03": "百々家 2603.xlsx",
+        "2026-04": "百々家 2604.xlsx"
+      },
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1298,6 +1302,11 @@
       "phone": "0886-837-888",
       "areas": [],
       "facility_id": "FAC00009",
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "order_form_month_sources": {
+        "2026-03": "共通ｸﾞﾙｰﾌﾟﾎｰﾑ　2603.xlsx",
+        "2026-04": "共通ｸﾞﾙｰﾌﾟﾎｰﾑ　2604.xlsx"
+      },
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",

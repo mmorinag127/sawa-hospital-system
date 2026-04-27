@@ -211,11 +211,25 @@ def test_template_scan_detects_vertical_merged_quantity_cells_for_sibling_templa
     )
 
 
-def test_facility_template_scan_prefers_matching_facility_source_workbook() -> None:
+def test_facility_template_scan_uses_configured_source_workbook_not_facility_name() -> None:
+    name_only_facility = {
+        "facility_id": "FAC00007",
+        "facility_name": "ゆうゆう（株）百々家",
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+    }
+    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        name_only_facility,
+        "4月26日～4月30日",
+    ) == "共通　2604.xlsx"
+
     facility = {
         "facility_id": "FAC00007",
         "facility_name": "ゆうゆう（株）百々家",
         "fax_template_id": "fax_layout_regular_forbidden_v1",
+        "order_form_month_sources": {
+            "2026-03": "百々家 2603.xlsx",
+            "2026-04": "百々家 2604.xlsx",
+        },
     }
 
     assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
@@ -228,7 +242,7 @@ def test_facility_template_scan_prefers_matching_facility_source_workbook() -> N
     )
 
 
-def test_build_fax_order_form_excel_uses_facility_matching_source_workbook(tmp_path, monkeypatch):
+def test_build_fax_order_form_excel_uses_configured_facility_source_workbook(tmp_path, monkeypatch):
     monkeypatch.setattr(
         order_form_service.config_service,
         "get_facility_config",
@@ -236,6 +250,10 @@ def test_build_fax_order_form_excel_uses_facility_matching_source_workbook(tmp_p
             "facility_id": facility_id,
             "facility_name": "ゆうゆう（株）百々家",
             "fax_template_id": "fax_layout_regular_forbidden_v1",
+            "order_form_month_sources": {
+                "2026-03": "百々家 2603.xlsx",
+                "2026-04": "百々家 2604.xlsx",
+            },
         },
     )
 

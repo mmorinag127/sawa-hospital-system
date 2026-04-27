@@ -2,11 +2,12 @@ import pathlib
 import sys
 
 from openpyxl import Workbook
+from openpyxl.styles import Border, Side
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services.workbook_pdf_renderer import render_workbook_to_pdf_bytes  # noqa: E402
+from src.services.workbook_pdf_renderer import render_workbook_to_pdf_bytes, render_worksheet_to_image  # noqa: E402
 
 
 def test_render_workbook_to_pdf_bytes_returns_pdf_payload() -> None:
@@ -58,3 +59,18 @@ def test_render_workbook_to_pdf_bytes_renders_merged_range_with_anchor_outside_p
 
     assert pdf_bytes.startswith(b"%PDF")
     assert len(pdf_bytes) > 1000
+
+
+def test_render_worksheet_to_image_draws_shared_border_once() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.print_area = "A1:B1"
+    side = Side(style="medium", color="000000")
+    worksheet["A1"].border = Border(right=side)
+    worksheet["B1"].border = Border(left=side)
+
+    image = render_worksheet_to_image(worksheet, dpi=96)
+    y = image.height // 2
+    black_columns = [x for x in range(image.width) if image.getpixel((x, y)) == (0, 0, 0)]
+
+    assert len(black_columns) == 2
