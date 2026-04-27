@@ -156,6 +156,58 @@ def test_structure_template_source_worksheet_uses_explicit_facility_merged_templ
     assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
 
 
+def test_merge_aware_grid_segments_suppress_internal_merged_quantity_edge() -> None:
+    worksheet = _merged_structure_slot_worksheet()
+    row_edges = [0.0, 0.2, 0.4, 0.6, 0.8]
+    column_edges = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    regions = hakodate_assignment_service._worksheet_merge_regions_for_grid(  # noqa: SLF001
+        worksheet,
+        row_edges=row_edges,
+        column_edges=column_edges,
+        quantity_columns={5},
+    )
+    segments = hakodate_assignment_service._merge_aware_grid_line_segments(  # noqa: SLF001
+        row_edges=row_edges,
+        column_edges=column_edges,
+        merge_regions=regions,
+    )
+
+    assert regions == [
+        {
+            "range": "E11:E12",
+            "min_col": 5,
+            "min_row": 11,
+            "max_col": 5,
+            "max_row": 12,
+            "row_span": 2,
+            "col_span": 1,
+            "start_col_index": 4,
+            "end_col_index": 4,
+            "start_row_index": 2,
+            "end_row_index": 3,
+            "bbox": [0.8, 0.4, 1.0, 0.8],
+            "is_quantity": True,
+        }
+    ]
+    assert {
+        (
+            item["orientation"],
+            tuple(round(value, 3) for value in item["start"]),
+            tuple(round(value, 3) for value in item["end"]),
+        )
+        for item in segments
+        if item["orientation"] == "horizontal" and round(item["start"][1], 3) == 0.6
+    } == {("horizontal", (0.0, 0.6), (0.8, 0.6))}
+    assert any(
+        item["orientation"] == "vertical"
+        and round(item["start"][0], 3) == 0.8
+        and item["start"][1] <= 0.4
+        and item["end"][1] >= 0.8
+        for item in segments
+    )
+
+
 def test_hakodate_assignment_places_numeric_token_in_quantity_cell() -> None:
     result = build_hakodate_assignment(
         tokens=[
@@ -431,9 +483,11 @@ def test_structure_slot_assignment_ocr_each_quantity_cell_without_token_ocr(monk
     assert result["assignments"][0]["ocr_engine_bbox_used_for_assignment"] is False
     assert result["assignments"][0]["fax_cell_bbox"] == seen_cell_boxes[0]
     assert result["metrics"]["ocr_cell_count"] == 1
+    assert result["metrics"]["merged_quantity_cell_count"] == 0
+    assert result["grid"]["actual_structure_slot_grid"]["merged_quantity_cells"] == []
 
 
-def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_row(monkeypatch) -> None:
+def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_row(monkeypatch, tmp_path) -> None:
     skeleton_rows = [
         {"row_id": "row-a", "date": "2026-04-26", "daypart": "朝", "menu_name": "献立A"},
         {"row_id": "row-b", "date": "2026-04-26", "daypart": "朝", "menu_name": "献立B"},
@@ -474,10 +528,12 @@ def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_ro
         return hakodate_assignment_service.HakodateCellOcrResult(text="20", normalized="20")
 
     monkeypatch.setattr(hakodate_assignment_service, "_ocr_quantity_cell", fake_cell_ocr)
+    template = _structure_slot_template(skeleton_rows)
+    template["hakodate_debug_output_dir"] = str(tmp_path)
 
     result = hakodate_assignment_service.build_structure_slot_assignment_from_pdf(
         pdf_bytes=b"%PDF-1.4",
-        template=_structure_slot_template(skeleton_rows),
+        template=template,
         strategy="hakodate",
         skeleton_rows=skeleton_rows,
     )
@@ -489,6 +545,9 @@ def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_ro
     assert {item["value_normalized"] for item in result["assignments"]} == {"20"}
     assert result["assignments"][0]["merged_cell"]["range"] == "E11:E12"
     assert result["assignments"][1]["merged_cell"]["row_span"] == 2
+    assert result["metrics"]["merged_quantity_cell_count"] == 1
+    assert result["grid"]["actual_structure_slot_grid"]["merged_quantity_cells"][0]["range"] == "E11:E12"
+    assert Path(result["artifacts"]["overlay_image_path"]).exists()
 
 
 def test_column_slots_detect_diabetes_quantity_from_template_header() -> None:

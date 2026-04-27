@@ -401,6 +401,158 @@ def _merged_or_single_cell_bbox(
     ], dict(merged)
 
 
+def _worksheet_merge_regions_for_grid(
+    worksheet: Any,
+    *,
+    row_edges: list[float],
+    column_edges: list[float],
+    quantity_columns: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    quantity_columns = set(quantity_columns or set())
+    regions: list[dict[str, Any]] = []
+    for merged_range in worksheet.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        start_row_index = _worksheet_row_to_structure_grid_index(int(min_row))
+        end_row_index = _worksheet_row_to_structure_grid_index(int(max_row))
+        if start_row_index is None or end_row_index is None:
+            continue
+        start_col_index = max(0, int(min_col) - 1)
+        end_col_index = max(0, int(max_col) - 1)
+        if (
+            start_col_index >= len(column_edges) - 1
+            or end_col_index >= len(column_edges) - 1
+            or start_row_index >= len(row_edges) - 1
+            or end_row_index >= len(row_edges) - 1
+            or end_col_index < start_col_index
+            or end_row_index < start_row_index
+        ):
+            continue
+        regions.append(
+            {
+                "range": str(merged_range),
+                "min_col": int(min_col),
+                "min_row": int(min_row),
+                "max_col": int(max_col),
+                "max_row": int(max_row),
+                "row_span": int(max_row - min_row + 1),
+                "col_span": int(max_col - min_col + 1),
+                "start_col_index": start_col_index,
+                "end_col_index": end_col_index,
+                "start_row_index": start_row_index,
+                "end_row_index": end_row_index,
+                "bbox": [
+                    float(column_edges[start_col_index]),
+                    float(row_edges[start_row_index]),
+                    float(column_edges[end_col_index + 1]),
+                    float(row_edges[end_row_index + 1]),
+                ],
+                "is_quantity": any(
+                    col_idx in quantity_columns
+                    for col_idx in range(int(min_col), int(max_col) + 1)
+                ),
+            }
+        )
+    return regions
+
+
+def _subtract_grid_line_intervals(
+    start: float,
+    end: float,
+    intervals: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    segments = [(float(start), float(end))]
+    for raw_a, raw_b in intervals:
+        a = max(float(start), float(raw_a))
+        b = min(float(end), float(raw_b))
+        if b <= a:
+            continue
+        next_segments: list[tuple[float, float]] = []
+        for seg_a, seg_b in segments:
+            if b <= seg_a or a >= seg_b:
+                next_segments.append((seg_a, seg_b))
+                continue
+            if seg_a < a:
+                next_segments.append((seg_a, a))
+            if b < seg_b:
+                next_segments.append((b, seg_b))
+        segments = next_segments
+    return segments
+
+
+def _merge_aware_grid_line_segments(
+    *,
+    row_edges: list[float],
+    column_edges: list[float],
+    merge_regions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if len(row_edges) < 2 or len(column_edges) < 2:
+        return []
+    horizontal_skips: dict[int, list[tuple[float, float]]] = {
+        idx: [] for idx in range(len(row_edges))
+    }
+    vertical_skips: dict[int, list[tuple[float, float]]] = {
+        idx: [] for idx in range(len(column_edges))
+    }
+    for region in merge_regions:
+        try:
+            start_row = int(region["start_row_index"])
+            end_row = int(region["end_row_index"])
+            start_col = int(region["start_col_index"])
+            end_col = int(region["end_col_index"])
+        except Exception:
+            continue
+        if (
+            start_row < 0
+            or end_row >= len(row_edges) - 1
+            or start_col < 0
+            or end_col >= len(column_edges) - 1
+        ):
+            continue
+        x0 = float(column_edges[start_col])
+        x1 = float(column_edges[end_col + 1])
+        y0 = float(row_edges[start_row])
+        y1 = float(row_edges[end_row + 1])
+        for edge_idx in range(start_row + 1, end_row + 1):
+            horizontal_skips.setdefault(edge_idx, []).append((x0, x1))
+        for edge_idx in range(start_col + 1, end_col + 1):
+            vertical_skips.setdefault(edge_idx, []).append((y0, y1))
+
+    segments: list[dict[str, Any]] = []
+    y_start = float(row_edges[0])
+    y_end = float(row_edges[-1])
+    for idx, x in enumerate(column_edges):
+        for seg_start, seg_end in _subtract_grid_line_intervals(
+            y_start,
+            y_end,
+            vertical_skips.get(idx, []),
+        ):
+            if seg_end > seg_start:
+                segments.append(
+                    {
+                        "orientation": "vertical",
+                        "start": [float(x), seg_start],
+                        "end": [float(x), seg_end],
+                    }
+                )
+    x_start = float(column_edges[0])
+    x_end = float(column_edges[-1])
+    for idx, y in enumerate(row_edges):
+        for seg_start, seg_end in _subtract_grid_line_intervals(
+            x_start,
+            x_end,
+            horizontal_skips.get(idx, []),
+        ):
+            if seg_end > seg_start:
+                segments.append(
+                    {
+                        "orientation": "horizontal",
+                        "start": [seg_start, float(y)],
+                        "end": [seg_end, float(y)],
+                    }
+                )
+    return segments
+
+
 def _distance_to_center(token: HakodateToken, bbox: list[float]) -> float:
     cx = (bbox[0] + bbox[2]) / 2.0
     cy = (bbox[1] + bbox[3]) / 2.0
@@ -1388,18 +1540,23 @@ def _save_structure_slot_overlay(
     cells: list[dict[str, Any]],
     actual_box: list[float],
     structure_box: list[float],
+    actual_columns: list[float] | None = None,
+    actual_rows: list[float] | None = None,
+    worksheet: Any | None = None,
+    merge_regions: list[dict[str, Any]] | None = None,
     debug_dir: str | None,
 ) -> str | None:
     if not debug_dir:
         return None
     try:
         from pathlib import Path
-        from PIL import ImageDraw
+        from PIL import Image, ImageDraw
 
         out_dir = Path(debug_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        image = page_image.copy()
-        draw = ImageDraw.Draw(image)
+        image = page_image.convert("RGBA")
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
         width, height = image.size
 
         def px_box(box: list[float]) -> tuple[int, int, int, int]:
@@ -1410,24 +1567,58 @@ def _save_structure_slot_overlay(
                 int(float(box[3]) * height),
             )
 
-        draw.rectangle(px_box(actual_box), outline=(255, 0, 0), width=4)
+        def px_point(point: list[float]) -> tuple[int, int]:
+            return (int(float(point[0]) * width), int(float(point[1]) * height))
+
+        draw.rectangle(px_box(actual_box), outline=(255, 0, 0, 255), width=4)
         mapped_structure_box = _map_structure_bbox_to_fax_bbox(
             structure_box,
             structure_box=structure_box,
             fax_box=actual_box,
         )
         if mapped_structure_box:
-            draw.rectangle(px_box(mapped_structure_box), outline=(0, 128, 255), width=2)
+            draw.rectangle(px_box(mapped_structure_box), outline=(0, 128, 255, 255), width=2)
+
+        grid_drawn = False
+        if actual_columns and actual_rows and worksheet is not None:
+            current_merge_regions = list(merge_regions or [])
+            if not current_merge_regions:
+                quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
+                current_merge_regions = _worksheet_merge_regions_for_grid(
+                    worksheet,
+                    row_edges=actual_rows,
+                    column_edges=actual_columns,
+                    quantity_columns=quantity_columns,
+                )
+            for segment in _merge_aware_grid_line_segments(
+                row_edges=actual_rows,
+                column_edges=actual_columns,
+                merge_regions=current_merge_regions,
+            ):
+                draw.line(
+                    [px_point(segment["start"]), px_point(segment["end"])],
+                    fill=(0, 180, 0, 255),
+                    width=2,
+                )
+            for region in current_merge_regions:
+                if not region.get("is_quantity"):
+                    continue
+                box = region.get("bbox")
+                if not isinstance(box, list) or len(box) != 4:
+                    continue
+                draw.rectangle(px_box(box), fill=(255, 128, 0, 35), outline=(255, 128, 0, 255), width=4)
+            grid_drawn = True
+
         for cell in cells:
             box = cell.get("fax_cell_bbox")
-            if not isinstance(box, list) or len(box) != 4:
-                continue
-            draw.rectangle(px_box(box), outline=(0, 180, 0), width=2)
+            if not grid_drawn and isinstance(box, list) and len(box) == 4:
+                draw.rectangle(px_box(box), outline=(0, 180, 0, 255), width=2)
             center = cell.get("fax_cell_center") or []
             if isinstance(center, list) and len(center) == 2:
                 cx = int(float(center[0]) * width)
                 cy = int(float(center[1]) * height)
-                draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=(255, 128, 0))
+                draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=(255, 128, 0, 255))
+        image = Image.alpha_composite(image, overlay).convert("RGB")
         path = out_dir / "structure_slot_overlay.png"
         image.save(path)
         return str(path)
@@ -1719,6 +1910,24 @@ def build_structure_slot_assignment_from_pdf(
     column_slots = _column_slots_from_worksheet(worksheet, col_count=len(structure_columns) - 1)
     physical_row_map = _workbook_physical_row_map(worksheet, row_count=len(structure_rows) - 1)
     merged_cells = _worksheet_merged_cell_map(worksheet)
+    quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
+    structure_merge_regions = _worksheet_merge_regions_for_grid(
+        worksheet,
+        row_edges=structure_rows,
+        column_edges=structure_columns,
+        quantity_columns=quantity_columns,
+    )
+    actual_merge_regions = _worksheet_merge_regions_for_grid(
+        worksheet,
+        row_edges=actual_rows,
+        column_edges=actual_columns,
+        quantity_columns=quantity_columns,
+    )
+    actual_quantity_merge_regions = [
+        region
+        for region in actual_merge_regions
+        if bool(region.get("is_quantity")) and int(region.get("row_span") or 0) > 1
+    ]
     skeleton_by_index = {
         idx: row
         for idx, row in enumerate(skeleton_rows or [])
@@ -1872,6 +2081,10 @@ def build_structure_slot_assignment_from_pdf(
         cells=cell_regions,
         actual_box=actual_box,
         structure_box=structure_box,
+        actual_columns=actual_columns,
+        actual_rows=actual_rows,
+        worksheet=worksheet,
+        merge_regions=actual_merge_regions,
         debug_dir=debug_dir,
     )
     if debug_dir:
@@ -1915,7 +2128,9 @@ def build_structure_slot_assignment_from_pdf(
                 "column_alignment_evidence": column_alignment_evidence,
                 "row_alignment_evidence": row_alignment_evidence,
                 "confidence": alignment_confidence,
+                "merged_quantity_cells": actual_quantity_merge_regions,
             },
+            "structure_merge_regions": structure_merge_regions,
             "column_slots": column_slots,
             "physical_row_map_count": len(physical_row_map),
         },
@@ -1934,6 +2149,7 @@ def build_structure_slot_assignment_from_pdf(
             "rejected_count": len(rejected),
             "structure_grid_column_count": len(structure_columns) - 1,
             "structure_grid_row_count": len(structure_rows) - 1,
+            "merged_quantity_cell_count": len(actual_quantity_merge_regions),
         },
     }
 
