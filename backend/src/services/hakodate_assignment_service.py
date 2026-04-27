@@ -1099,8 +1099,8 @@ def _source_worksheet_for_structure_template(*, facility_id: str, week_sheet_nam
     fax_template_id = str(order_form_service._infer_fax_template_id_from_facility(facility) or "").strip()  # noqa: SLF001
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
-    source_workbook_name = order_form_service._resolve_source_workbook_name_for_week_sheet(  # noqa: SLF001
-        fax_template_id,
+    source_workbook_name = order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
         week_sheet_name,
     )
     source_workbook_path = order_form_service._resolve_source_workbook_path(source_workbook_name)  # noqa: SLF001

@@ -434,11 +434,30 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     ):
         errors.append(f"{path}.hakodate_template_signature_components must be an object")
 
+
+def _validate_order_form_source_config(config: dict[str, Any], path: str, errors: list[str]) -> None:
+    source_workbook = config.get("order_form_source_workbook")
+    if source_workbook is not None and not isinstance(source_workbook, str):
+        errors.append(f"{path}.order_form_source_workbook must be a string")
+    month_sources = config.get("order_form_month_sources")
+    if month_sources is None:
+        return
+    if not isinstance(month_sources, dict):
+        errors.append(f"{path}.order_form_month_sources must be an object")
+        return
+    for month_id, filename in month_sources.items():
+        if not isinstance(month_id, str) or not month_id.strip():
+            errors.append(f"{path}.order_form_month_sources keys must be non-empty strings")
+        if not isinstance(filename, str) or not filename.strip():
+            errors.append(f"{path}.order_form_month_sources[{month_id!r}] must be a non-empty string")
+
+
 def validate_facility_config(config: Any) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     config_dict = _ensure_dict(config, "config", errors)
     _validate_ocr_provider_config(config_dict, "config", errors)
+    _validate_order_form_source_config(config_dict, "config", errors)
     pattern_id = config_dict.get("order_form_pattern_id")
     if pattern_id is not None and not isinstance(pattern_id, str):
         errors.append("config.order_form_pattern_id must be a string")
@@ -503,6 +522,7 @@ def validate_facility_master(master: Any) -> dict:
         if not fac.get("facility_name"):
             errors.append(f"facilities[{idx}].facility_name is required")
         _validate_ocr_provider_config(fac, f"facilities[{idx}]", errors)
+        _validate_order_form_source_config(fac, f"facilities[{idx}]", errors)
         fax_template_ids = fac.get("fax_template_ids")
         if fax_template_ids is not None:
             template_ids = _ensure_list(

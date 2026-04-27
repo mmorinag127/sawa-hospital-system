@@ -224,7 +224,28 @@ def test_facility_template_scan_does_not_use_facility_name_as_source_workbook() 
     )
 
 
-def test_build_fax_order_form_excel_uses_manifest_source_without_facility_name_guess(tmp_path, monkeypatch):
+def test_facility_template_scan_uses_explicit_facility_source_workbook() -> None:
+    facility = {
+        "facility_id": "FAC00007",
+        "facility_name": "ゆうゆう（株）百々家",
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+        "order_form_month_sources": {
+            "2026-03": "百々家 2603.xlsx",
+            "2026-04": "百々家 2604.xlsx",
+        },
+    }
+
+    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
+        "4月26日～4月30日",
+    ) == "百々家 2604.xlsx"
+    assert order_form_service.facility_template_has_vertical_merged_quantity_cells(
+        facility,
+        week_sheet_name="4月26日～4月30日",
+    )
+
+
+def test_build_fax_order_form_excel_uses_explicit_facility_source_workbook(tmp_path, monkeypatch):
     monkeypatch.setattr(
         order_form_service.config_service,
         "get_facility_config",
@@ -232,6 +253,10 @@ def test_build_fax_order_form_excel_uses_manifest_source_without_facility_name_g
             "facility_id": facility_id,
             "facility_name": "ゆうゆう（株）百々家",
             "fax_template_id": "fax_layout_regular_forbidden_v1",
+            "order_form_month_sources": {
+                "2026-03": "百々家 2603.xlsx",
+                "2026-04": "百々家 2604.xlsx",
+            },
         },
     )
 
@@ -245,8 +270,8 @@ def test_build_fax_order_form_excel_uses_manifest_source_without_facility_name_g
     worksheet = workbook["4月26日～4月30日"]
     metadata = _metadata_rows(workbook)
 
-    assert metadata["source_workbook"] == "共通　2604.xlsx"
-    assert "E11:E12" not in {str(item) for item in worksheet.merged_cells.ranges}
+    assert metadata["source_workbook"] == "百々家 2604.xlsx"
+    assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
 
 
 def test_clear_week_sheet_body_uses_header_detected_quantity_columns_for_sibling_template() -> None:

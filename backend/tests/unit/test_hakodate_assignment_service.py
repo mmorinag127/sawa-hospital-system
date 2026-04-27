@@ -147,6 +147,15 @@ def _real_pdf_template(facility_id: str, debug_dir: Path) -> tuple[dict, list[di
     return template, skeleton_rows
 
 
+def test_structure_template_source_worksheet_uses_explicit_facility_merged_template() -> None:
+    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
+        facility_id="FAC00007",
+        week_sheet_name="4月26日～4月30日",
+    )
+
+    assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
+
+
 def test_hakodate_assignment_places_numeric_token_in_quantity_cell() -> None:
     result = build_hakodate_assignment(
         tokens=[

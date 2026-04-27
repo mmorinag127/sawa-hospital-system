@@ -172,14 +172,14 @@ def test_build_confirm_materialization_candidate_auto_detects_template_merged_qu
         assert facility_service.update_config("FAC00016", previous_config)
 
 
-def test_expanded_cell_copy_does_not_use_facility_name_to_pick_sibling_template_without_manual_flag():
+def test_expanded_cell_copy_uses_explicit_facility_template_merged_quantity_cells():
     previous_config = facility_service.get_facility_config("FAC00007") or {}
     next_config = dict(previous_config)
     next_config.pop("expanded_cell_same_daypart_copy_enabled", None)
     assert facility_service.update_config("FAC00007", next_config)
     try:
         facility_config = config_service.get_facility_config("FAC00007")
-        assert not order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+        assert order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
             facility_config,
             week_sheet_name="4月26日～4月30日",
         )
