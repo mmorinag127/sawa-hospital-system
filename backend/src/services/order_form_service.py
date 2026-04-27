@@ -181,54 +181,6 @@ def _resolve_source_workbook_name_for_month(fax_template_id: str, month_id: str)
     )
 
 
-def _source_workbook_month_token(month_id: str) -> str:
-    normalized_month = _normalize_month_id(month_id)
-    return f"{int(normalized_month[:4]) % 100:02d}{int(normalized_month[5:7]):02d}"
-
-
-def _source_workbook_name_matches_month(source_workbook_name: str, month_id: str) -> bool:
-    token = _source_workbook_month_token(month_id)
-    stem = Path(source_workbook_name).stem
-    return bool(re.search(rf"(^|[^\d]){re.escape(token)}($|[^\d])", stem))
-
-
-def _facility_source_workbook_names(facility: dict | None) -> list[str]:
-    if not isinstance(facility, dict):
-        return []
-    source_names: list[str] = []
-    for key in (
-        "order_form_source_workbook",
-        "fax_source_workbook",
-        "source_workbook",
-    ):
-        value = str(facility.get(key) or "").strip()
-        if value:
-            source_names.append(value)
-    raw_month_sources = facility.get("order_form_month_sources") or facility.get("fax_month_sources")
-    if isinstance(raw_month_sources, dict):
-        source_names.extend(str(item or "").strip() for item in raw_month_sources.values())
-    result: list[str] = []
-    seen: set[str] = set()
-    for source_workbook_name in source_names:
-        if not source_workbook_name or source_workbook_name in seen:
-            continue
-        seen.add(source_workbook_name)
-        result.append(source_workbook_name)
-    return result
-
-
-def _resolve_facility_source_workbook_name_for_month(
-    facility: dict,
-    *,
-    fax_template_id: str,
-    month_id: str,
-) -> str:
-    for source_workbook_name in _facility_source_workbook_names(facility):
-        if _source_workbook_name_matches_month(source_workbook_name, month_id):
-            return source_workbook_name
-    return _resolve_source_workbook_name_for_month(fax_template_id, month_id)
-
-
 def _source_workbook_sheetnames(source_workbook_name: str) -> tuple[str, ...]:
     source_path = _resolve_source_workbook_path(source_workbook_name)
     cache_key = str(source_path)
@@ -330,7 +282,7 @@ def facility_template_has_vertical_merged_quantity_cells(
     if not fax_template_id:
         return False
     if week_sheet_name:
-        source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
+        source_workbook_name = _resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name)
         return source_workbook_has_vertical_merged_quantity_cells(
             source_workbook_name,
             week_sheet_name=week_sheet_name,
@@ -339,8 +291,7 @@ def facility_template_has_vertical_merged_quantity_cells(
     source_names = [
         str(name or "").strip()
         for name in (
-            _facility_source_workbook_names(facility)
-            + list((spec.get("month_sources") or {}).values())
+            list((spec.get("month_sources") or {}).values())
             + [spec.get("source_workbook")]
         )
         if str(name or "").strip()
@@ -368,16 +319,6 @@ def _resolve_source_workbook_name_for_week_sheet(fax_template_id: str, week_shee
     raise ValueError(
         f"week sheet not configured for fax_template_id={fax_template_id}: {week_sheet_name}"
     )
-
-
-def resolve_facility_source_workbook_name_for_week_sheet(facility: dict, week_sheet_name: str) -> str:
-    fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
-    if not fax_template_id:
-        raise ValueError("facility fax_template_id not found")
-    for source_workbook_name in _facility_source_workbook_names(facility):
-        if week_sheet_name in _source_workbook_sheetnames(source_workbook_name):
-            return source_workbook_name
-    return _resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name)
 
 
 def _resolve_facility(facility_id: str) -> dict:
@@ -685,11 +626,7 @@ def _build_monthly_fax_order_form_workbook(
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
     spec = _resolve_fax_family_spec(fax_template_id)
-    source_workbook_name = _resolve_facility_source_workbook_name_for_month(
-        facility,
-        fax_template_id=fax_template_id,
-        month_id=month_id,
-    )
+    source_workbook_name = _resolve_source_workbook_name_for_month(fax_template_id, month_id)
     source_path = _resolve_source_workbook_path(source_workbook_name)
 
     workbook = load_workbook(source_path)
@@ -810,7 +747,7 @@ def build_fax_order_form_excel(
     spec = _resolve_fax_family_spec(fax_template_id)
     facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
     return _render_fax_order_form_workbook(
-        source_workbook_name=resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name),
+        source_workbook_name=_resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name),
         week_sheet_name=week_sheet_name,
         facility_name=facility_name,
         facility_id=facility_id,
@@ -857,7 +794,7 @@ def build_fax_structure_only_excel(
     spec = _resolve_fax_family_spec(fax_template_id)
     facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
     return _render_fax_structure_only_workbook(
-        source_workbook_name=resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name),
+        source_workbook_name=_resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name),
         week_sheet_name=week_sheet_name,
         facility_name=facility_name,
         facility_id=facility_id,
