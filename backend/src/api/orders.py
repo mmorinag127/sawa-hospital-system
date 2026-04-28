@@ -1400,13 +1400,13 @@ def get_draft_sheet(
         payload.update(
             {
                 "order_id": order_id,
-                "source": "hakodate_projected_sheet",
+                "source": str(projected.get("source") or "hakodate_ocr_evidence_sheet"),
                 "quantity_assignment_strategy": "hakodate",
                 "review_state": str((assignment or {}).get("status") or "review_required"),
                 "can_apply": False,
                 "can_confirm": False,
-                "apply_blockers": ["hakodate_projection_requires_review"],
-                "confirm_blockers": ["hakodate_projection_requires_review"],
+                "apply_blockers": list(projected.get("blockers") or []) or ["hakodate_projection_requires_review"],
+                "confirm_blockers": list(projected.get("blockers") or []) or ["hakodate_projection_requires_review"],
                 "hakodate_assignment": assignment,
                 "hakodate_projection_metrics": metrics,
                 "warnings": list((projected.get("warnings") if isinstance(projected, dict) else []) or []),

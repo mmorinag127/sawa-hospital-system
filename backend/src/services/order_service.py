@@ -64,6 +64,7 @@ from src.services import (
     ocr_evidence_service,
     position_column_mapping_service,
     hakodate_assignment_service,
+    hakodate_ocr_evidence_service,
     draft_sheet_service,
     order_current_state_service,
     ocr_patch_candidate_service as patch_candidate_service,
@@ -25746,37 +25747,257 @@ def _hakodate_skeleton_rows_from_baseline(baseline: dict[str, Any] | None) -> li
     return skeleton
 
 
+def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str, ...]]) -> list[dict[str, Any]]:
+    for path in paths:
+        current: Any = payload
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, list):
+            return [item for item in current if isinstance(item, dict)]
+    return []
+
+
+def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    return _first_hakodate_payload_list(
+        payload,
+        [
+            ("hakodate_preprocessing", "target_cell_map"),
+            ("hakodate_preprocessing", "target_cells"),
+            ("hakodate_target_cell_map",),
+            ("target_cell_map",),
+        ],
+    )
+
+
+def _extract_hakodate_ocr_evidence_records_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    order_id: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_records = _first_hakodate_payload_list(
+        payload,
+        [
+            ("hakodate_ocr_evidence", "records"),
+            ("hakodate_ocr_evidence_records",),
+            ("ocr_evidence_records",),
+        ],
+    )
+    if not raw_records:
+        return []
+    if all(str(item.get("evidence_id") or "").strip() for item in raw_records):
+        return raw_records
+    return hakodate_ocr_evidence_service.evidence_from_records(
+        raw_records,
+        run_id=str(payload.get("job_id") or payload.get("run_id") or order_id),
+        engine=str(payload.get("engine") or "hakodate_payload_evidence"),
+        source_scope="payload_evidence",
+    )
+
+
+def _build_hakodate_evidence_assignment_from_payload(
+    *,
+    order_id: str,
+    facility_id: str | None,
+    template_id: str | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    target_cells = _extract_hakodate_target_cells_from_payload(payload)
+    evidence_records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
+    blockers: list[str] = []
+    if not target_cells:
+        blockers.append("hakodate_target_cell_map_missing")
+    if not evidence_records:
+        blockers.append("hakodate_ocr_evidence_missing")
+
+    assignment_result = (
+        hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
+            evidence_records=evidence_records,
+            target_cells=target_cells,
+        )
+        if target_cells and evidence_records
+        else {
+            "assignments": [],
+            "unassigned_evidence": [],
+            "blockers": [],
+            "summary": {
+                "target_cell_count": len(target_cells),
+                "evidence_count": len(evidence_records),
+                "assigned_target_count": 0,
+                "conflict_target_count": 0,
+                "unassigned_evidence_count": 0,
+                "blocker_count": 0,
+            },
+        }
+    )
+    sheet_output = hakodate_ocr_evidence_service.sheet_output_from_assigned_results(
+        assignments=list(assignment_result.get("assignments") or []),
+        blockers=list(blockers) + list(assignment_result.get("blockers") or []),
+        unassigned_evidence=list(assignment_result.get("unassigned_evidence") or []),
+    )
+    output_blockers = list(sheet_output.get("blockers") or [])
+    assigned_count = int((assignment_result.get("summary") or {}).get("assigned_target_count") or 0)
+    status = "auto_assignable" if assigned_count > 0 and not output_blockers else "blocked"
+    if assigned_count > 0 and output_blockers:
+        status = "review_required"
+    return {
+        "version": "2",
+        "strategy": "hakodate",
+        "assignment_mode": "ocr_evidence",
+        "status": status,
+        "blockers": output_blockers,
+        "warnings": ["hakodate_ocr_evidence_assignment"],
+        "order_id": order_id,
+        "facility_id": facility_id,
+        "template_id": template_id,
+        "target_cells": target_cells,
+        "evidence_records": evidence_records,
+        "assignments": list(assignment_result.get("assignments") or []),
+        "unassigned_evidence": list(assignment_result.get("unassigned_evidence") or []),
+        "sheet_output": sheet_output,
+        "metrics": {
+            **dict(assignment_result.get("summary") or {}),
+            "target_cell_count": len(target_cells),
+            "evidence_count": len(evidence_records),
+            "sheet_cell_count": int((sheet_output.get("summary") or {}).get("cell_count") or 0),
+            "sheet_blocker_count": len(output_blockers),
+        },
+    }
+
+
+def _hakodate_sheet_row_identity_lookup(
+    *,
+    fields: list[str],
+    rows: list[list[Any]],
+) -> dict[tuple[str, str, str], int]:
+    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields)}
+    date_idx = field_index.get("date") if "date" in field_index else field_index.get("date_mmdd")
+    daypart_idx = field_index.get("daypart")
+    menu_idx = field_index.get("menu_name") if "menu_name" in field_index else field_index.get("menu")
+    if date_idx is None or daypart_idx is None or menu_idx is None:
+        return {}
+    lookup: dict[tuple[str, str, str], int] = {}
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, list):
+            continue
+
+        def _cell(index: int) -> object:
+            return row[index] if index < len(row) else ""
+
+        key = _hakodate_sheet_identity(
+            _cell(date_idx),
+            _cell(daypart_idx),
+            _cell(menu_idx),
+        )
+        if all(key) and key not in lookup:
+            lookup[key] = row_index
+    return lookup
+
+
+def _hakodate_sheet_identity(date_value: object, daypart: object, menu_name: object) -> tuple[str, str, str]:
+    parsed_date = _normalize_entry_date(date_value)
+    date_key = f"{parsed_date.month:02d}/{parsed_date.day:02d}" if parsed_date else ""
+    return date_key, _normalize_daypart_key(daypart), _normalize_menu_text(str(menu_name or ""))
+
+
+def _apply_hakodate_sheet_output_to_sheet_payload(
+    *,
+    base_sheet: dict[str, Any],
+    assignment: dict[str, Any],
+) -> dict[str, Any]:
+    projected = deepcopy(base_sheet)
+    fields = [str(field or "").strip() for field in (projected.get("fields") or [])]
+    rows = [list(row) for row in (projected.get("rows") or []) if isinstance(row, list)]
+    field_index = {field: idx for idx, field in enumerate(fields) if field}
+    identity_lookup = _hakodate_sheet_row_identity_lookup(fields=fields, rows=rows)
+    sheet_output = assignment.get("sheet_output") if isinstance(assignment.get("sheet_output"), dict) else {}
+    cells = sheet_output.get("cells") if isinstance(sheet_output, dict) else {}
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for sheet_cell, cell in sorted((cells or {}).items()):
+        if not isinstance(cell, dict):
+            continue
+        field = str(cell.get("semantic_field") or "").strip()
+        col_index = field_index.get(field)
+        if col_index is None:
+            skipped.append({**cell, "skip_reason": "field_not_found"})
+            continue
+        key = _hakodate_sheet_identity(cell.get("date"), cell.get("daypart"), cell.get("menu_name"))
+        row_index = identity_lookup.get(key)
+        if row_index is None:
+            skipped.append({**cell, "skip_reason": "row_identity_not_found"})
+            continue
+        while len(rows[row_index]) < len(fields):
+            rows[row_index].append("")
+        previous = rows[row_index][col_index]
+        value = str(cell.get("value_normalized") or cell.get("value_text") or "").strip()
+        rows[row_index][col_index] = value
+        applied.append(
+            {
+                "sheet_cell": sheet_cell,
+                "row_index": row_index,
+                "field": field,
+                "previous": previous,
+                "value": value,
+                "assignment_cell": cell,
+            }
+        )
+    projected["rows"] = rows
+    projected["fields"] = fields
+    projected["source"] = "hakodate_ocr_evidence_sheet"
+    projected["quantity_assignment_strategy"] = "hakodate"
+    projected["hakodate_assignment_status"] = assignment.get("status")
+    projected["hakodate_assignment_mode"] = assignment.get("assignment_mode")
+    projected["hakodate_evidence_projection"] = {
+        "applied": applied,
+        "skipped": skipped,
+        "metrics": {
+            "assignment_count": len(cells or {}),
+            "applied_count": len(applied),
+            "skipped_count": len(skipped),
+        },
+    }
+    blockers = list(assignment.get("blockers") or [])
+    if skipped:
+        blockers.append("hakodate_sheet_projection_incomplete")
+    projected["blockers"] = sorted(set(str(item) for item in blockers if str(item).strip()))
+    projected["warnings"] = sorted(
+        set(
+            [
+                *(str(item) for item in (projected.get("warnings") or []) if str(item).strip()),
+                *(str(item) for item in (assignment.get("warnings") or []) if str(item).strip()),
+            ]
+        )
+    )
+    projected["review_state"] = "blocked" if projected["blockers"] else str(assignment.get("status") or "review_required")
+    return projected
+
+
 def build_order_hakodate_assignment(
     order_id: str,
     *,
     strategy: str | None = None,
     grid_params: Optional[dict] = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    _ = strategy
+    _ = grid_params
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None, "order_not_found"
         facility_id = str(order.facility_code or "").strip() or None
-        document_uri = str(order.document_uri or "").strip() or None
         week_code = str(order.week_code or "").strip() or None
     if not facility_id:
         return None, "facility_missing"
-    if not document_uri:
-        return None, "document_missing"
 
     payload = _load_order_ocr_cache(order_id)
     payload = payload if isinstance(payload, dict) else {}
-    corrected_document_uri = (
-        ((payload.get("page_correction_artifacts") or {}).get("corrected_pdf_uri"))
-        if isinstance(payload.get("page_correction_artifacts"), dict)
-        else None
-    ) or (
-        ((payload.get("page_correction") or {}).get("corrected_pdf_uri"))
-        if isinstance(payload.get("page_correction"), dict)
-        else None
-    )
-    hakodate_document_uri = str(corrected_document_uri or document_uri).strip()
-    hakodate_document_source = "page_correction_corrected_pdf" if corrected_document_uri else "order_document_uri"
     facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(
         order_id=order_id,
         facility_id=facility_id,
@@ -25795,15 +26016,6 @@ def build_order_hakodate_assignment(
         template_to_use["hakodate_week_sheet_name"] = order_form_service._format_week_sheet_name(week_start, week_end)  # noqa: SLF001
     elif month_id:
         template_to_use["hakodate_week_sheet_name"] = str(week_code or "").strip()
-    if isinstance(grid_params, dict):
-        for key, value in grid_params.items():
-            if not isinstance(key, str):
-                continue
-            if not (key.startswith("grid_") or key.startswith("hakodate_")):
-                continue
-            if value is None:
-                continue
-            template_to_use[key] = value
 
     baseline = _resolve_llm_review_baseline(
         order_id=order_id,
@@ -25811,25 +26023,14 @@ def build_order_hakodate_assignment(
         template=template_to_use,
     )
     skeleton_rows = _hakodate_skeleton_rows_from_baseline(baseline)
-    try:
-        pdf_bytes = load_bytes_from_uri(hakodate_document_uri)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Hakodate assignment document load failed", order_id=order_id, error=str(exc))
-        return None, "document_load_failed"
-
-    assignment = hakodate_assignment_service.build_hakodate_assignment_from_pdf(
-        pdf_bytes=pdf_bytes,
-        template=template_to_use,
-        strategy=strategy,
-        skeleton_rows=skeleton_rows,
+    assignment = _build_hakodate_evidence_assignment_from_payload(
+        order_id=order_id,
+        facility_id=facility_id,
+        template_id=effective_template_id or str(template_to_use.get("template_id") or "").strip() or None,
+        payload=payload,
     )
-    assignment["order_id"] = order_id
-    assignment["facility_id"] = facility_id
-    assignment["template_id"] = effective_template_id or template_to_use.get("template_id")
     assignment["baseline_source"] = baseline.get("baseline_source") if isinstance(baseline, dict) else None
     assignment["baseline_row_count"] = len(skeleton_rows)
-    assignment["document_source"] = hakodate_document_source
-    assignment["document_uri"] = hakodate_document_uri
     assignment["quantity_assignment_strategy"] = assignment.get("strategy")
     return assignment, None
 
@@ -26079,66 +26280,22 @@ def build_order_hakodate_projected_sheet(
     if not isinstance(sheet, dict):
         return {"assignment": assignment}, "sheet_unavailable"
 
-    projected = deepcopy(sheet)
-    fields = [str(field or "").strip() for field in (projected.get("fields") or [])]
-    rows = [list(row) for row in (projected.get("rows") or []) if isinstance(row, list)]
-    row_ids = [str(item or "").strip() for item in (projected.get("row_ids") or [])]
-    field_index = {field: idx for idx, field in enumerate(fields) if field}
-    row_index_by_id = {row_id: idx for idx, row_id in enumerate(row_ids) if row_id}
-    applied: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for item in assignment.get("assignments") or []:
-        if not isinstance(item, dict):
-            continue
-        field = str(item.get("field") or "").strip()
-        row_id = str(item.get("row_id") or "").strip()
-        row_index = row_index_by_id.get(row_id)
-        if row_index is None:
-            data_row_index = item.get("data_row_index")
-            if isinstance(data_row_index, int) and 0 <= data_row_index < len(rows):
-                row_index = data_row_index
-        col_index = field_index.get(field)
-        if row_index is None or col_index is None or row_index >= len(rows):
-            skipped.append({**item, "skip_reason": "sheet_cell_not_found"})
-            continue
-        while len(rows[row_index]) < len(fields):
-            rows[row_index].append("")
-        previous = rows[row_index][col_index]
-        value = str(item.get("value_normalized") or item.get("value_text") or "").strip()
-        rows[row_index][col_index] = value
-        applied.append(
-            {
-                "row_id": row_id,
-                "row_index": row_index,
-                "field": field,
-                "previous": previous,
-                "value": value,
-                "assignment": item,
-            }
-        )
-    projected.update(
-        {
-            "rows": rows,
-            "fields": fields,
-            "row_ids": row_ids,
-            "source": "hakodate_projected_sheet",
-            "projection_mode": "non_destructive",
-            "hakodate_assignment_status": assignment.get("status"),
-            "review_state": assignment.get("status"),
-            "warnings": list(assignment.get("warnings") or []),
-            "blockers": list(assignment.get("blockers") or []),
-        }
+    projected = _apply_hakodate_sheet_output_to_sheet_payload(
+        base_sheet=sheet,
+        assignment=assignment,
     )
+    projection = projected.get("hakodate_evidence_projection")
+    metrics = projection.get("metrics") if isinstance(projection, dict) else {}
     return {
         "order_id": order_id,
         "assignment": assignment,
         "projected_sheet": projected,
-        "applied": applied,
-        "skipped": skipped,
+        "applied": list((projection or {}).get("applied") or []) if isinstance(projection, dict) else [],
+        "skipped": list((projection or {}).get("skipped") or []) if isinstance(projection, dict) else [],
         "metrics": {
-            "assignment_count": len(assignment.get("assignments") or []),
-            "applied_count": len(applied),
-            "skipped_count": len(skipped),
+            "assignment_count": int((metrics or {}).get("assignment_count") or 0),
+            "applied_count": int((metrics or {}).get("applied_count") or 0),
+            "skipped_count": int((metrics or {}).get("skipped_count") or 0),
         },
     }, None
 
