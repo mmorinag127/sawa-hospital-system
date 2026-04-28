@@ -26,7 +26,9 @@ Not fixed:
 
 The production pipeline must not let OCR-derived structure override the facility-template cell map unless that change is explicitly approved after a separate validation.
 
-The current OCR step is not a compatibility constraint. It may be discarded and replaced by a new OCR evidence layer.
+The OCR algorithm currently deployed on staging is not a compatibility constraint. It may be discarded and replaced by a new OCR evidence layer.
+
+The sheet path also requires redesign. The production target is not only a new OCR algorithm; it is a new path from template-derived target cells, to OCR evidence, to sheet assignments, to `draft-sheet`, `ocr-sheet`, and `workflow-state`.
 
 ## Production Module Boundary
 
@@ -176,7 +178,7 @@ Pass condition:
 
 ### Phase 4: OCR Evidence Layer Redesign
 
-Discard the current OCR step as a production constraint and replace it with an OCR evidence layer. This layer collects OCR outputs from any approved source and normalizes them before assignment.
+Discard the OCR algorithm currently deployed on staging as a production constraint and replace it with an OCR evidence layer. This layer collects OCR outputs from any approved source and normalizes them before assignment.
 
 Deliverables:
 
@@ -186,6 +188,7 @@ Deliverables:
 - Evidence normalizer that produces one common record shape regardless of engine/source.
 - Evidence store keyed by order, facility, preprocessing run, and engine run.
 - Assignment input that consumes evidence records and the template-derived target-cell map.
+- A hard switch that allows the staging OCR algorithm to be disabled for Hakodate processing once the new evidence path is connected.
 
 OCR engine policy:
 
@@ -195,11 +198,11 @@ OCR engine policy:
 - Do not require OCR to start from target-cell coordinates.
 - If an engine returns structure, store it as evidence, not as the target-cell map owner.
 - Sheet assignment must remain keyed by the template-derived target-cell map.
-- The current OCR step can be removed rather than preserved behind compatibility wrappers.
+- The staging OCR algorithm can be removed rather than preserved behind compatibility wrappers.
 
 Pass condition:
 
-- Evidence can be produced without using the current OCR step.
+- Evidence can be produced without using the staging OCR algorithm.
 - Evidence can be produced from at least one non-cell-crop source.
 - Assignment cannot write to the sheet unless evidence is mapped to a known target cell.
 - OCR engine/source choice is configurable and measurable.
@@ -214,12 +217,16 @@ Deliverables:
 - Normalizer for numeric values, blanks, and remarks.
 - Conflict handling when multiple evidence records map to one cell.
 - Explicit blocker when a value cannot be mapped to a known target cell.
+- A sheet output model that carries assignment state, confidence, evidence IDs, and blockers.
+- Replacement path for the existing sheet generation that currently depends on the staging OCR algorithm's output shape.
+- Parity adapters for `draft-sheet`, `ocr-sheet`, and `workflow-state` so all three read the same assigned result.
 
 Pass condition:
 
 - No OCR evidence can create a new row or column.
 - Unknown OCR evidence does not silently enter the sheet.
 - `draft-sheet`, `ocr-sheet`, and `workflow-state` use the same mapped result.
+- The old staging OCR sheet path can be disabled without losing the Hakodate sheet output.
 
 ### Phase 6: Review UI And Manual Adjustment
 
@@ -255,6 +262,7 @@ Pass condition:
 - `both_compare` can run without overwriting existing draft results.
 - The same order can show legacy vs Hakodate outputs side by side.
 - `hakodate_apply` is blocked until visual and API parity checks pass.
+- Once parity passes, the staging OCR algorithm and its sheet path may be removed for Hakodate mode.
 
 ## Verification Test Plan
 
@@ -267,6 +275,7 @@ Pass condition:
 - Merged-cell templates preserve merged cell geometry.
 - OCR evidence normalization is independent of source scope.
 - Assignment requires mapping to a known target cell before sheet output.
+- Sheet output is built from assigned OCR evidence, not from staging OCR rows/tables.
 - Unknown target cells produce blocker output.
 - Stale template signatures produce blocker output.
 
@@ -331,7 +340,7 @@ Pass condition:
 
 - Engine/input choice is based on measured evidence and assignment results.
 - OCR structure output does not become the target-cell map owner by accident.
-- The current OCR step can be disabled without losing the production path.
+- The staging OCR algorithm can be disabled without losing the production path.
 
 ### Integration Tests
 
@@ -341,6 +350,7 @@ Pass condition:
 - Saved draft is not overwritten by a preprocessing re-run.
 - `draft-sheet`, `ocr-sheet`, and `workflow-state` agree on the same assignment result.
 - `both_compare` keeps legacy output intact while storing Hakodate candidate output separately.
+- Hakodate mode can disable the staging OCR algorithm and still produce sheet output from evidence assignments.
 
 ### Staging Tests
 
