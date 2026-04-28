@@ -151,6 +151,7 @@ def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() ->
             "ocr_contact_slot": [0, 0, 80, 60],
             "ocr_text": "12",
             "ocr_normalized": "12",
+            "ocr_word_count": 1,
             "ocr_words": [{"text": "12", "x": 40, "y": 30}],
             "logical_targets": [
                 {
@@ -172,5 +173,37 @@ def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() ->
 
     assert validation["ok"] is True
     assert validation["error_count"] == 0
+    assert validation["assigned_word_count"] == 1
     assert validation["recognized_region_count"] == 1
     assert validation["recognized_assignment_count"] == 1
+
+
+def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
+    regions = [
+        {
+            "region_id": "E11",
+            "ocr_contact_slot": [0, 0, 80, 60],
+            "ocr_text": "99",
+            "ocr_normalized": "99",
+            "ocr_word_count": 1,
+            "ocr_words": [{"text": "12", "x": 40, "y": 30}],
+            "logical_targets": [
+                {
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                }
+            ],
+        }
+    ]
+    assignments = sheet_assignments_from_ocr_regions(regions)
+    sheet_values = sheet_value_grid_from_assignments(assignments)
+
+    validation = validate_cell_ocr_mapping(
+        ocr_regions=regions,
+        sheet_assignments=assignments,
+        sheet_values=sheet_values,
+    )
+
+    assert validation["ok"] is False
+    assert any("raw OCR words do not reparse" in error for error in validation["errors"])

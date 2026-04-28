@@ -395,6 +395,18 @@ def validate_cell_ocr_mapping(
 
         region_text = str(region.get("ocr_text") or "")
         region_normalized = str(region.get("ocr_normalized") or "")
+        region_words = region.get("ocr_words") or []
+        if not isinstance(region_words, list):
+            errors.append(f"{region_id}: ocr_words is not a list")
+            region_words = []
+        reparsed_text = _words_to_region_text(region_words)
+        reparsed_normalized = _normalize_digits(reparsed_text)
+        if reparsed_text != region_text:
+            errors.append(f"{region_id}: raw OCR words do not reparse to ocr_text")
+        if reparsed_normalized != region_normalized:
+            errors.append(f"{region_id}: raw OCR words do not reparse to ocr_normalized")
+        if int(region.get("ocr_word_count") or 0) != len(region_words):
+            errors.append(f"{region_id}: ocr_word_count does not match ocr_words length")
         for assignment in actual_assignments:
             sheet_cell = str(assignment.get("sheet_cell") or "").strip()
             if not sheet_cell:
@@ -416,7 +428,7 @@ def validate_cell_ocr_mapping(
         slot = region.get("ocr_contact_slot")
         if isinstance(slot, list) and len(slot) == 4:
             sx0, sy0, sx1, sy1 = [float(value) for value in slot]
-            for word in region.get("ocr_words") or []:
+            for word in region_words:
                 try:
                     wx = float(word.get("x") or 0.0)
                     wy = float(word.get("y") or 0.0)
@@ -433,6 +445,7 @@ def validate_cell_ocr_mapping(
         "region_count": len(ocr_regions),
         "assignment_count": len(sheet_assignments),
         "sheet_cell_count": len(cells),
+        "assigned_word_count": sum(len(region.get("ocr_words") or []) for region in ocr_regions),
         "recognized_region_count": sum(1 for region in ocr_regions if str(region.get("ocr_text") or "").strip()),
         "recognized_assignment_count": sum(
             1 for assignment in sheet_assignments if str(assignment.get("value_text") or "").strip()
