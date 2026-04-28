@@ -159,6 +159,66 @@ def test_sheet_output_uses_assigned_evidence_not_legacy_ocr_rows() -> None:
     assert sheet["rows"][0]["values_by_column"] == {"E": "8", "F": ""}
 
 
+def test_sheet_output_expands_merged_region_logical_targets() -> None:
+    evidence = evidence_from_records(
+        [{"text": "3", "center": [15, 20], "confidence": 0.7}],
+        run_id="run-1",
+        engine="new_engine",
+        source_scope="table_area",
+    )
+    assignment_result = assign_evidence_to_target_cells(
+        evidence_records=evidence,
+        target_cells=[
+            {
+                "target_cell_id": "merged-E11-E12",
+                "sheet_cell": "E11",
+                "worksheet_row": 11,
+                "worksheet_col": 5,
+                "semantic_field": "qty.regular",
+                "bbox": [10, 10, 30, 40],
+                "region_id": "E11:E12",
+                "merged_cell": {"range": "E11:E12", "min_row": 11, "max_row": 12},
+                "logical_targets": [
+                    {
+                        "sheet_cell": "E11",
+                        "worksheet_row": 11,
+                        "worksheet_col": 5,
+                        "field": "qty.regular",
+                        "field_label": "常食",
+                        "date": "2026-04-26",
+                        "daypart": "朝",
+                        "menu_name": "肉じゃが",
+                    },
+                    {
+                        "sheet_cell": "E12",
+                        "worksheet_row": 12,
+                        "worksheet_col": 5,
+                        "field": "qty.regular",
+                        "field_label": "常食",
+                        "date": "2026-04-26",
+                        "daypart": "昼",
+                        "menu_name": "魚焼",
+                    },
+                ],
+            }
+        ],
+    )
+
+    sheet = sheet_output_from_assigned_results(
+        assignments=assignment_result["assignments"],
+        blockers=assignment_result["blockers"],
+        unassigned_evidence=assignment_result["unassigned_evidence"],
+    )
+
+    assert sheet["blockers"] == []
+    assert sheet["cells"]["E11"]["value_text"] == "3"
+    assert sheet["cells"]["E12"]["value_text"] == "3"
+    assert sheet["cells"]["E11"]["daypart"] == "朝"
+    assert sheet["cells"]["E12"]["menu_name"] == "魚焼"
+    assert sheet["cells"]["E11"]["merged_cell"]["range"] == "E11:E12"
+    assert sheet["summary"]["cell_count"] == 2
+
+
 def test_sheet_output_blocks_unassigned_evidence_and_conflicts() -> None:
     evidence = evidence_from_records(
         [

@@ -51,6 +51,7 @@ class AssignedOcrResult:
     assignment_confidence: float | None
     assignment_state: str
     raw_texts: list[str]
+    target_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_ocr_value(value: object) -> str:
@@ -258,6 +259,7 @@ def assign_evidence_to_target_cells(
                     assignment_confidence=_mean_confidence(records),
                     assignment_state=state,
                     raw_texts=[str(record.get("raw_text") or "") for record in records],
+                    target_metadata=dict(target.get("metadata") or {}),
                 )
             )
         )
@@ -277,6 +279,23 @@ def assign_evidence_to_target_cells(
     }
 
 
+def _logical_sheet_targets_for_assignment(assignment: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = assignment.get("target_metadata") if isinstance(assignment.get("target_metadata"), dict) else {}
+    logical_targets = metadata.get("logical_targets") if isinstance(metadata, dict) else None
+    if isinstance(logical_targets, list) and logical_targets:
+        targets = [target for target in logical_targets if isinstance(target, dict)]
+        if targets:
+            return targets
+    return [
+        {
+            "sheet_cell": assignment.get("sheet_cell"),
+            "worksheet_row": assignment.get("worksheet_row"),
+            "worksheet_col": assignment.get("worksheet_col"),
+            "field": assignment.get("semantic_field"),
+        }
+    ]
+
+
 def sheet_output_from_assigned_results(
     *,
     assignments: list[dict[str, Any]],
@@ -288,41 +307,53 @@ def sheet_output_from_assigned_results(
     col_indexes: set[int] = set()
     output_blockers = list(blockers or [])
     for assignment in assignments:
-        sheet_cell = str(assignment.get("sheet_cell") or "").strip()
-        if not sheet_cell:
-            output_blockers.append(f"assignment missing sheet_cell: {assignment.get('target_cell_id')}")
-            continue
-        try:
-            worksheet_row = int(assignment.get("worksheet_row") or 0)
-            worksheet_col = int(assignment.get("worksheet_col") or 0)
-        except Exception:
-            output_blockers.append(f"assignment has invalid worksheet position: {sheet_cell}")
-            continue
-        if worksheet_row <= 0 or worksheet_col <= 0:
-            output_blockers.append(f"assignment has non-positive worksheet position: {sheet_cell}")
-            continue
-        if sheet_cell in cells:
-            output_blockers.append(f"duplicate sheet cell assignment: {sheet_cell}")
-            continue
-        row_indexes.add(worksheet_row)
-        col_indexes.add(worksheet_col)
         state = str(assignment.get("assignment_state") or "")
-        if state == "conflict":
-            output_blockers.append(f"conflicting assignment cannot enter sheet: {sheet_cell}")
-        cells[sheet_cell] = {
-            "sheet_cell": sheet_cell,
-            "worksheet_row": worksheet_row,
-            "worksheet_col": worksheet_col,
-            "column_letter": get_column_letter(worksheet_col),
-            "semantic_field": assignment.get("semantic_field"),
-            "value_text": assignment.get("assigned_value") or "",
-            "value_normalized": assignment.get("assigned_value") or "",
-            "assignment_state": state,
-            "assignment_confidence": assignment.get("assignment_confidence"),
-            "target_cell_id": assignment.get("target_cell_id"),
-            "evidence_ids": list(assignment.get("evidence_ids") or []),
-            "raw_texts": list(assignment.get("raw_texts") or []),
-        }
+        for target in _logical_sheet_targets_for_assignment(assignment):
+            sheet_cell = str(target.get("sheet_cell") or "").strip()
+            if not sheet_cell:
+                output_blockers.append(f"assignment missing sheet_cell: {assignment.get('target_cell_id')}")
+                continue
+            try:
+                worksheet_row = int(target.get("worksheet_row") or 0)
+                worksheet_col = int(target.get("worksheet_col") or 0)
+            except Exception:
+                output_blockers.append(f"assignment has invalid worksheet position: {sheet_cell}")
+                continue
+            if worksheet_row <= 0 or worksheet_col <= 0:
+                output_blockers.append(f"assignment has non-positive worksheet position: {sheet_cell}")
+                continue
+            if sheet_cell in cells:
+                output_blockers.append(f"duplicate sheet cell assignment: {sheet_cell}")
+                continue
+            row_indexes.add(worksheet_row)
+            col_indexes.add(worksheet_col)
+            if state == "conflict":
+                output_blockers.append(f"conflicting assignment cannot enter sheet: {sheet_cell}")
+            semantic_field = target.get("field") or target.get("semantic_field") or assignment.get("semantic_field")
+            cells[sheet_cell] = {
+                "sheet_cell": sheet_cell,
+                "worksheet_row": worksheet_row,
+                "worksheet_col": worksheet_col,
+                "column_letter": get_column_letter(worksheet_col),
+                "semantic_field": semantic_field,
+                "field_label": target.get("field_label"),
+                "date": target.get("date"),
+                "daypart": target.get("daypart"),
+                "menu_name": target.get("menu_name"),
+                "value_text": assignment.get("assigned_value") or "",
+                "value_normalized": assignment.get("assigned_value") or "",
+                "assignment_state": state,
+                "assignment_confidence": assignment.get("assignment_confidence"),
+                "target_cell_id": assignment.get("target_cell_id"),
+                "source_region_id": (assignment.get("target_metadata") or {}).get("region_id")
+                if isinstance(assignment.get("target_metadata"), dict)
+                else None,
+                "merged_cell": (assignment.get("target_metadata") or {}).get("merged_cell")
+                if isinstance(assignment.get("target_metadata"), dict)
+                else None,
+                "evidence_ids": list(assignment.get("evidence_ids") or []),
+                "raw_texts": list(assignment.get("raw_texts") or []),
+            }
 
     sorted_cols = sorted(col_indexes)
     rows: list[dict[str, Any]] = []
