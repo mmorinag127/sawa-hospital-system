@@ -1,0 +1,652 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+from openpyxl.utils import get_column_letter
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+from src.services import hakodate_assignment_service
+from src.services.hakodate_fixed_quad_registration_service import (
+    build_fixed_quad_template_registration,
+    extract_template_axes_from_image,
+    rectify_fax_to_template_grid,
+    render_pdf_page_to_bgr,
+    render_template_pdf_to_canvas,
+)
+from src.services.hakodate_step_review_pipeline_service import (
+    TARGET_RULE,
+    WEEK_SHEET_NAME,
+    _align_axes,
+    _bbox_quad_points,
+    _bgr_to_rgb_image,
+    _draw_merge_aware_grid,
+    _draw_quad_points,
+    _draw_target_regions,
+    _make_review_canvas,
+    _post_menu_target_regions,
+    _source_template_name,
+    _split_line_masks,
+    _write_pdf_from_pages,
+)
+
+
+DEFAULT_CELL_OCR_ENGINE = "yomitoku_contact_sheet_batch"
+_FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９，．", "0123456789,.")
+
+
+@dataclass(frozen=True)
+class HakodateCellOcrCaseResult:
+    page: int
+    facility_code: str
+    order_id: str
+    fax_pdf: str
+    template_pdf: str
+    source_template: str
+    ocr_engine: str
+    target_rule: str
+    physical_region_count: int
+    logical_assignment_count: int
+    recognized_region_count: int
+    recognized_assignment_count: int
+    metrics: dict[str, Any]
+    outputs: dict[str, str]
+
+
+def _normalize_digits(value: object) -> str:
+    text = str(value or "").strip().translate(_FULLWIDTH_DIGIT_TRANS)
+    text = re.sub(r"[^0-9,.]", "", text)
+    return text.strip(".,")
+
+
+def _safe_int_box(
+    box: list[float],
+    *,
+    width: int,
+    height: int,
+    margin_ratio: float,
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in box]
+    except Exception:
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    margin_x = (x1 - x0) * max(0.0, min(margin_ratio, 0.35))
+    margin_y = (y1 - y0) * max(0.0, min(margin_ratio, 0.35))
+    ix0 = max(0, min(width, int(round(x0 + margin_x))))
+    iy0 = max(0, min(height, int(round(y0 + margin_y))))
+    ix1 = max(0, min(width, int(round(x1 - margin_x))))
+    iy1 = max(0, min(height, int(round(y1 - margin_y))))
+    if ix1 <= ix0 or iy1 <= iy0:
+        return None
+    return ix0, iy0, ix1, iy1
+
+
+def _preprocess_cell_crop(crop_bgr: np.ndarray) -> Image.Image:
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.equalizeHist(gray)
+    _threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    image = Image.fromarray(binary).convert("L")
+    return ImageOps.autocontrast(image).convert("RGB")
+
+
+def build_cell_contact_sheet(
+    *,
+    rectified_fax_bgr: np.ndarray,
+    regions: list[dict[str, Any]],
+    slot_width: int = 124,
+    slot_height: int = 76,
+    columns: int = 18,
+    margin_ratio: float = 0.08,
+) -> tuple[Image.Image, list[dict[str, Any]]]:
+    height, width = rectified_fax_bgr.shape[:2]
+    usable_regions: list[dict[str, Any]] = []
+    row_count = max(1, (len(regions) + columns - 1) // columns)
+    sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
+    for slot_index, region in enumerate(regions):
+        box = region.get("bbox")
+        if not isinstance(box, list):
+            continue
+        px_box = _safe_int_box(box, width=width, height=height, margin_ratio=margin_ratio)
+        if not px_box:
+            continue
+        x0, y0, x1, y1 = px_box
+        crop = rectified_fax_bgr[y0:y1, x0:x1]
+        if crop.size == 0:
+            continue
+        crop_image = _preprocess_cell_crop(crop)
+        max_w = slot_width - 12
+        max_h = slot_height - 12
+        scale = min(max_w / max(1, crop_image.width), max_h / max(1, crop_image.height))
+        scale = max(1.0, min(scale, 5.0))
+        crop_image = crop_image.resize(
+            (
+                max(1, int(round(crop_image.width * scale))),
+                max(1, int(round(crop_image.height * scale))),
+            ),
+            Image.Resampling.BICUBIC,
+        )
+        slot_col = slot_index % columns
+        slot_row = slot_index // columns
+        slot_x = slot_col * slot_width
+        slot_y = slot_row * slot_height
+        paste_x = slot_x + (slot_width - crop_image.width) // 2
+        paste_y = slot_y + (slot_height - crop_image.height) // 2
+        sheet.paste(crop_image, (paste_x, paste_y))
+        usable_regions.append(
+            {
+                **region,
+                "ocr_contact_slot_index": slot_index,
+                "ocr_contact_slot": [slot_x, slot_y, slot_x + slot_width, slot_y + slot_height],
+                "ocr_contact_crop_box": [paste_x, paste_y, paste_x + crop_image.width, paste_y + crop_image.height],
+                "ocr_cell_crop_bbox_px": [x0, y0, x1, y1],
+            }
+        )
+    return sheet, usable_regions
+
+
+def _workspace_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_yomitoku_ocr_words():
+    ocr_pipeline_root = _workspace_root() / "ocr_pipeline"
+    if str(ocr_pipeline_root) not in sys.path:
+        sys.path.insert(0, str(ocr_pipeline_root))
+    from app.yomitoku_runner import ocr_image_words  # noqa: PLC0415
+
+    return ocr_image_words
+
+
+def _words_to_region_text(words: list[dict[str, Any]]) -> str:
+    if not words:
+        return ""
+    ordered = sorted(
+        words,
+        key=lambda item: (
+            round(float(item.get("y") or 0.0), 4),
+            round(float(item.get("x") or 0.0), 4),
+        ),
+    )
+    lines: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_y: float | None = None
+    for word in ordered:
+        y = float(word.get("y") or 0.0)
+        if current_y is None or abs(y - current_y) <= 0.025:
+            current.append(word)
+            current_y = y if current_y is None else (current_y + y) / 2.0
+            continue
+        lines.append(current)
+        current = [word]
+        current_y = y
+    if current:
+        lines.append(current)
+    rendered: list[str] = []
+    for line in lines:
+        line.sort(key=lambda item: float(item.get("x") or 0.0))
+        text = " ".join(str(item.get("text") or "").strip() for item in line if str(item.get("text") or "").strip())
+        if text:
+            rendered.append(text)
+    return "\n".join(rendered).strip()
+
+
+def assign_yomitoku_words_to_contact_regions(
+    *,
+    words: list[dict[str, Any]],
+    regions: list[dict[str, Any]],
+    sheet_size: tuple[int, int],
+) -> list[dict[str, Any]]:
+    width, height = sheet_size
+    by_region_id: dict[str, list[dict[str, Any]]] = {str(region.get("region_id")): [] for region in regions}
+    for raw_word in words:
+        text = str(raw_word.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            cx = float(raw_word.get("x") or 0.0) * width
+            cy = float(raw_word.get("y") or 0.0) * height
+        except Exception:
+            continue
+        for region in regions:
+            slot = region.get("ocr_contact_slot")
+            if not isinstance(slot, list) or len(slot) != 4:
+                continue
+            if float(slot[0]) <= cx <= float(slot[2]) and float(slot[1]) <= cy <= float(slot[3]):
+                by_region_id.setdefault(str(region.get("region_id")), []).append(
+                    {
+                        "text": text,
+                        "x": cx,
+                        "y": cy,
+                        "normalized_digits": _normalize_digits(text),
+                        "source_word": raw_word,
+                    }
+                )
+                break
+    assigned: list[dict[str, Any]] = []
+    for region in regions:
+        region_words = by_region_id.get(str(region.get("region_id"))) or []
+        text = _words_to_region_text(region_words)
+        assigned.append(
+            {
+                **region,
+                "ocr_text": text,
+                "ocr_normalized": _normalize_digits(text),
+                "ocr_words": region_words,
+                "ocr_word_count": len(region_words),
+            }
+        )
+    return assigned
+
+
+def sheet_assignments_from_ocr_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    assignments: list[dict[str, Any]] = []
+    for region in regions:
+        logical_targets = region.get("logical_targets") or []
+        if not isinstance(logical_targets, list):
+            logical_targets = []
+        for target in logical_targets:
+            if not isinstance(target, dict):
+                continue
+            assignments.append(
+                {
+                    "sheet_cell": target.get("sheet_cell"),
+                    "worksheet_row": target.get("worksheet_row"),
+                    "worksheet_col": target.get("worksheet_col"),
+                    "grid_row_index": target.get("grid_row_index"),
+                    "grid_col_index": target.get("grid_col_index"),
+                    "field": target.get("field"),
+                    "field_label": target.get("field_label"),
+                    "date": target.get("date"),
+                    "daypart": target.get("daypart"),
+                    "menu_name": target.get("menu_name"),
+                    "value_text": region.get("ocr_text") or "",
+                    "value_normalized": region.get("ocr_normalized") or "",
+                    "source_region_id": region.get("region_id"),
+                    "source_region_bbox": region.get("bbox"),
+                    "source_region_crop_bbox_px": region.get("ocr_cell_crop_bbox_px"),
+                    "merged_cell": region.get("merged_cell"),
+                }
+            )
+    return assignments
+
+
+def sheet_value_grid_from_assignments(assignments: list[dict[str, Any]]) -> dict[str, Any]:
+    cells: dict[str, dict[str, Any]] = {}
+    row_indexes: set[int] = set()
+    col_indexes: set[int] = set()
+    for assignment in assignments:
+        sheet_cell = str(assignment.get("sheet_cell") or "").strip()
+        if not sheet_cell:
+            continue
+        try:
+            worksheet_row = int(assignment.get("worksheet_row") or 0)
+            worksheet_col = int(assignment.get("worksheet_col") or 0)
+        except Exception:
+            continue
+        if worksheet_row <= 0 or worksheet_col <= 0:
+            continue
+        row_indexes.add(worksheet_row)
+        col_indexes.add(worksheet_col)
+        cells[sheet_cell] = {
+            "sheet_cell": sheet_cell,
+            "worksheet_row": worksheet_row,
+            "worksheet_col": worksheet_col,
+            "column_letter": get_column_letter(worksheet_col),
+            "value_text": assignment.get("value_text") or "",
+            "value_normalized": assignment.get("value_normalized") or "",
+            "field": assignment.get("field"),
+            "field_label": assignment.get("field_label"),
+            "date": assignment.get("date"),
+            "daypart": assignment.get("daypart"),
+            "menu_name": assignment.get("menu_name"),
+            "source_region_id": assignment.get("source_region_id"),
+            "merged_cell": assignment.get("merged_cell"),
+        }
+    sorted_cols = sorted(col_indexes)
+    rows: list[dict[str, Any]] = []
+    for row_index in sorted(row_indexes):
+        row_values: dict[str, str] = {}
+        row_cells: dict[str, dict[str, Any]] = {}
+        for col_index in sorted_cols:
+            col_letter = get_column_letter(col_index)
+            sheet_cell = f"{col_letter}{row_index}"
+            cell = cells.get(sheet_cell)
+            row_values[col_letter] = str((cell or {}).get("value_text") or "")
+            if cell is not None:
+                row_cells[col_letter] = cell
+        rows.append(
+            {
+                "worksheet_row": row_index,
+                "values_by_column": row_values,
+                "cells_by_column": row_cells,
+            }
+        )
+    return {
+        "cells": cells,
+        "rows": rows,
+        "columns": [get_column_letter(index) for index in sorted_cols],
+    }
+
+
+def _load_overlay_font(size: int = 18) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = [
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        try:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_text_safe(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    *,
+    fill: tuple[int, int, int, int],
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    try:
+        draw.text(xy, text, fill=fill, font=font)
+    except Exception:
+        fallback = text.encode("ascii", "ignore").decode("ascii") or "?"
+        draw.text(xy, fallback, fill=fill, font=font)
+
+
+def draw_ocr_results_overlay(
+    *,
+    target_overlay: Image.Image,
+    ocr_regions: list[dict[str, Any]],
+) -> Image.Image:
+    image = target_overlay.convert("RGBA")
+    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    font = _load_overlay_font(19)
+    small_font = _load_overlay_font(13)
+    for region in ocr_regions:
+        value = str(region.get("ocr_normalized") or region.get("ocr_text") or "").strip()
+        if not value:
+            continue
+        box = region.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+        x0, y0, x1, y1 = [int(round(float(value))) for value in box]
+        cx = int(round((x0 + x1) / 2.0))
+        cy = int(round((y0 + y1) / 2.0))
+        label = value[:12]
+        try:
+            text_box = draw.textbbox((0, 0), label, font=font)
+            text_w = max(28, text_box[2] - text_box[0] + 10)
+            text_h = max(22, text_box[3] - text_box[1] + 8)
+        except Exception:
+            text_w = 42
+            text_h = 24
+        tx0 = min(max(cx + 8, 0), max(0, image.width - text_w - 1))
+        ty0 = min(max(cy - text_h // 2, 0), max(0, image.height - text_h - 1))
+        draw.rectangle((tx0, ty0, tx0 + text_w, ty0 + text_h), fill=(255, 255, 220, 235), outline=(220, 0, 0, 230))
+        _draw_text_safe(draw, (tx0 + 5, ty0 + 3), label, fill=(210, 0, 0, 255), font=font)
+        if len(region.get("logical_targets") or []) > 1:
+            _draw_text_safe(draw, (tx0 + 5, ty0 + text_h - 13), "merged", fill=(0, 80, 180, 230), font=small_font)
+    return Image.alpha_composite(image, layer).convert("RGB")
+
+
+def _bgr_from_pil(image: Image.Image) -> np.ndarray:
+    rgb = np.array(image.convert("RGB"))
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def _run_yomitoku_contact_sheet(contact_sheet: Image.Image, *, device: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ocr_image_words = _load_yomitoku_ocr_words()
+    t0 = time.perf_counter()
+    words = ocr_image_words(_bgr_from_pil(contact_sheet), device=device)
+    elapsed = time.perf_counter() - t0
+    return words, {
+        "engine": DEFAULT_CELL_OCR_ENGINE,
+        "device": device,
+        "ocr_seconds": round(float(elapsed), 3),
+        "raw_word_count": len(words),
+    }
+
+
+def _build_preprocess_for_ocr(
+    *,
+    item: dict[str, Any],
+    page: int,
+    render_width: int,
+) -> dict[str, Any]:
+    facility_code = str(item["facility_code"])
+    order_id = str(item["order_id"])
+    existing_step2 = cv2.imread(item["step2_png"])
+    if existing_step2 is None:
+        raise ValueError(f"step2 canvas not found: {item['step2_png']}")
+    canvas_height, canvas_width = existing_step2.shape[:2]
+    template = render_template_pdf_to_canvas(item["template_pdf"], width=canvas_width, height=canvas_height)
+    template_xs, template_ys, _all_xs, _all_ys = extract_template_axes_from_image(
+        template,
+        manifest_template_bbox=item["template_bbox"],
+    )
+    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
+        facility_id=facility_code,
+        week_sheet_name=WEEK_SHEET_NAME,
+    )
+    registration, _step_images_np = build_fixed_quad_template_registration(
+        facility_code=facility_code,
+        order_id=order_id,
+        fax_pdf=item["fax_pdf"],
+        template_pdf=item["template_pdf"],
+        quad_px=item["quad_px"],
+        manifest_template_bbox=item["template_bbox"],
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+        render_width=render_width,
+        quad_source=item.get("quad_source"),
+        output_dir=None,
+    )
+    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
+    table_bbox = registration.template_outer_grid_bbox_used
+    raw_rectified = rectify_fax_to_template_grid(
+        original,
+        quad_px=item["quad_px"],
+        table_bbox=table_bbox,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+    )
+    horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
+    aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
+        rectified_fax=raw_rectified,
+        template_xs=template_xs,
+        template_ys=template_ys,
+    )
+    grid_overlay, merge_evidence = _draw_merge_aware_grid(
+        worksheet=worksheet,
+        rectified_fax=raw_rectified,
+        xs=aligned_xs,
+        ys=aligned_ys,
+        horizontal_line_mask=horizontal_line_mask,
+    )
+    target_regions, target_evidence = _post_menu_target_regions(
+        worksheet=worksheet,
+        column_edges=[float(value) for value in aligned_xs],
+        row_edges=[float(value) for value in aligned_ys],
+        horizontal_line_mask=horizontal_line_mask,
+    )
+    target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
+    rectified_quad_points = _bbox_quad_points(table_bbox)
+    return {
+        "page": page,
+        "facility_code": facility_code,
+        "order_id": order_id,
+        "worksheet": worksheet,
+        "raw_rectified": raw_rectified,
+        "target_regions": target_regions,
+        "target_overlay": _draw_quad_points(target_overlay, rectified_quad_points, prefix="Q"),
+        "source_template": _source_template_name(facility_code),
+        "axis_evidence": {
+            **axis_evidence,
+            "merge": merge_evidence,
+            "target": target_evidence,
+        },
+    }
+
+
+def build_hakodate_cell_ocr_for_manifest_item(
+    *,
+    item: dict[str, Any],
+    page: int,
+    output_dir: Path,
+    render_width: int = 1864,
+    device: str = "cpu",
+) -> tuple[HakodateCellOcrCaseResult, Image.Image]:
+    t0 = time.perf_counter()
+    pre = _build_preprocess_for_ocr(item=item, page=page, render_width=render_width)
+    facility_code = str(pre["facility_code"])
+    order_id = str(pre["order_id"])
+    case_dir = output_dir / f"{page:02d}_{facility_code}_{order_id}"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    contact_sheet, usable_regions = build_cell_contact_sheet(
+        rectified_fax_bgr=pre["raw_rectified"],
+        regions=pre["target_regions"],
+    )
+    words, ocr_metrics = _run_yomitoku_contact_sheet(contact_sheet, device=device)
+    ocr_regions = assign_yomitoku_words_to_contact_regions(
+        words=words,
+        regions=usable_regions,
+        sheet_size=contact_sheet.size,
+    )
+    sheet_assignments = sheet_assignments_from_ocr_regions(ocr_regions)
+    sheet_values = sheet_value_grid_from_assignments(sheet_assignments)
+    recognized_regions = [region for region in ocr_regions if str(region.get("ocr_text") or "").strip()]
+    recognized_assignments = [
+        assignment for assignment in sheet_assignments if str(assignment.get("value_text") or "").strip()
+    ]
+    ocr_overlay = draw_ocr_results_overlay(
+        target_overlay=pre["target_overlay"],
+        ocr_regions=ocr_regions,
+    )
+    total_seconds = time.perf_counter() - t0
+    metrics = {
+        **ocr_metrics,
+        "total_seconds": round(float(total_seconds), 3),
+        "physical_region_count": len(ocr_regions),
+        "logical_assignment_count": len(sheet_assignments),
+        "recognized_region_count": len(recognized_regions),
+        "recognized_assignment_count": len(recognized_assignments),
+        "cells_per_ocr_second": round(len(ocr_regions) / max(float(ocr_metrics["ocr_seconds"]), 1e-6), 3),
+    }
+    contact_sheet_path = case_dir / "cell_contact_sheet.png"
+    overlay_path = case_dir / "cell_ocr_overlay.png"
+    regions_path = case_dir / "cell_ocr_regions.json"
+    assignments_path = case_dir / "cell_ocr_sheet_assignments.json"
+    sheet_values_path = case_dir / "cell_ocr_sheet_values.json"
+    contact_sheet.save(contact_sheet_path)
+    ocr_overlay.save(overlay_path)
+    regions_path.write_text(json.dumps(ocr_regions, ensure_ascii=False, indent=2), encoding="utf-8")
+    assignments_path.write_text(json.dumps(sheet_assignments, ensure_ascii=False, indent=2), encoding="utf-8")
+    sheet_values_path.write_text(json.dumps(sheet_values, ensure_ascii=False, indent=2), encoding="utf-8")
+    details = [
+        f"source_template={pre['source_template']}",
+        f"target_rule={TARGET_RULE}",
+        (
+            f"engine={DEFAULT_CELL_OCR_ENGINE} device={device} "
+            f"regions={len(ocr_regions)} logical={len(sheet_assignments)} "
+            f"recognized={len(recognized_regions)} logical_recognized={len(recognized_assignments)} "
+            f"ocr_sec={ocr_metrics['ocr_seconds']}"
+        ),
+        "red centers: OCR target cells / yellow labels: yomitoku OCR result assigned by contact-sheet slot",
+    ]
+    review_page = _make_review_canvas(
+        title="Hakodate cell OCR result on target red points",
+        facility_code=facility_code,
+        order_id=order_id,
+        image=ocr_overlay,
+        details=details,
+    )
+    review_page_path = case_dir / "cell_ocr_review_page.png"
+    review_page.save(review_page_path)
+    result = HakodateCellOcrCaseResult(
+        page=page,
+        facility_code=facility_code,
+        order_id=order_id,
+        fax_pdf=str(item["fax_pdf"]),
+        template_pdf=str(item["template_pdf"]),
+        source_template=str(pre["source_template"]),
+        ocr_engine=DEFAULT_CELL_OCR_ENGINE,
+        target_rule=TARGET_RULE,
+        physical_region_count=len(ocr_regions),
+        logical_assignment_count=len(sheet_assignments),
+        recognized_region_count=len(recognized_regions),
+        recognized_assignment_count=len(recognized_assignments),
+        metrics=metrics,
+        outputs={
+            "contact_sheet": str(contact_sheet_path),
+            "overlay": str(overlay_path),
+            "review_page": str(review_page_path),
+            "ocr_regions": str(regions_path),
+            "sheet_assignments": str(assignments_path),
+            "sheet_values": str(sheet_values_path),
+        },
+    )
+    return result, review_page
+
+
+def build_all_facility_hakodate_cell_ocr_pdf(
+    *,
+    manifest_path: Path,
+    output_dir: Path,
+    render_width: int = 1864,
+    device: str = "cpu",
+) -> dict[str, Any]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    items = manifest.get("results") if isinstance(manifest, dict) else manifest
+    if not isinstance(items, list):
+        raise ValueError("manifest results are missing")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pages: list[Image.Image] = []
+    results: list[dict[str, Any]] = []
+    t0 = time.perf_counter()
+    for page, item in enumerate(items, start=1):
+        result, review_page = build_hakodate_cell_ocr_for_manifest_item(
+            item=item,
+            page=page,
+            output_dir=output_dir,
+            render_width=render_width,
+            device=device,
+        )
+        pages.append(review_page)
+        results.append(asdict(result))
+    pdf_path = output_dir / "cell_ocr_results_on_red_points_all14.pdf"
+    _write_pdf_from_pages(pages, pdf_path)
+    summary = {
+        "count": len(results),
+        "ocr_engine": DEFAULT_CELL_OCR_ENGINE,
+        "target_rule": TARGET_RULE,
+        "total_elapsed_seconds": round(float(time.perf_counter() - t0), 3),
+        "total_physical_region_count": sum(int(item["physical_region_count"]) for item in results),
+        "total_logical_assignment_count": sum(int(item["logical_assignment_count"]) for item in results),
+        "total_recognized_region_count": sum(int(item["recognized_region_count"]) for item in results),
+        "total_recognized_assignment_count": sum(int(item["recognized_assignment_count"]) for item in results),
+        "pdf": str(pdf_path),
+        "results": results,
+    }
+    summary_path = output_dir / "cell_ocr_summary.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
