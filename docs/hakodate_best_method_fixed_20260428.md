@@ -23,10 +23,9 @@ The accepted method is fixed only as a verified local baseline. It is not yet th
 6. Draw green target grid lines from the snapped target-cell boundaries.
 7. Draw red points at OCR target-cell centers.
 8. Draw Q markers for the accepted four points.
-9. For OCR evaluation, crop each target cell with `pad_x=1`, `pad_y=8`.
-10. Erase the known cell frame from the crop using the cell bbox.
-11. Remove only small connected-component noise.
-12. Use the current local evaluation OCR method to overlay predicted labels for review.
+9. Optionally draw OCR labels for local review only.
+
+The local OCR labels used during verification are not part of the production contract. The existing OCR step, including any fixed `cell coordinate -> crop -> OCR engine` path, may be discarded during the production redesign.
 
 ## Fixed Verification Artifacts
 
@@ -66,9 +65,9 @@ Required production outputs:
 
 - Rectified FAX image/PDF for review.
 - Overlay PDF/PNG containing four points, green grid lines, red target-cell centers, and optional OCR labels.
-- Machine-readable cell coordinate JSON for downstream OCR.
-- Cell crop artifacts or in-memory crop objects for batch OCR.
-- OCR result records keyed by worksheet cell/semantic target.
+- Machine-readable target-cell map for downstream evidence assignment.
+- Alignment evidence and quality gate state.
+- OCR evidence records only after the redesigned OCR evidence layer runs.
 
 Forbidden during refactor:
 
@@ -86,3 +85,5 @@ The tracked code change at this fix point is limited to cell crop preprocessing 
 - `backend/tests/unit/test_hakodate_cell_ocr_batch_service.py`
 
 That change expands OCR crops with fixed pixel padding, erases known cell borders from the crop, and removes only small noise before OCR contact-sheet generation.
+
+This tracked change is a baseline verification aid, not a requirement that production OCR must use cell crops.

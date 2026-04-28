@@ -15,15 +15,18 @@ Fixed baseline behavior:
 - Snap target-cell X boundaries to actual vertical FAX lines.
 - Keep target Y boundaries from the accepted template-derived regions unless a later approved change explicitly replaces that rule.
 - Produce review output with four-point markers, green target grid lines, red target-cell centers, and OCR labels when available.
-- Produce machine-readable cell coordinates for downstream OCR and sheet assignment.
+- Produce a machine-readable target-cell map for downstream OCR evidence assignment.
 
 Not fixed:
 
 - The final OCR engine.
 - Whether an OCR engine's structure output is collected as auxiliary evidence.
 - The final model/provider used for digit recognition.
+- The OCR input strategy, including whether OCR uses full page, table area, column bands, row bands, cell crops, existing payloads, or a hybrid.
 
 The production pipeline must not let OCR-derived structure override the facility-template cell map unless that change is explicitly approved after a separate validation.
+
+The current OCR step is not a compatibility constraint. It may be discarded and replaced by a new OCR evidence layer.
 
 ## Production Module Boundary
 
@@ -59,10 +62,9 @@ Required outputs:
 
 - Rectified FAX image.
 - Review overlay PDF/PNG.
-- Cell coordinate JSON.
-- OCR target-cell records.
+- Target-cell map JSON.
 - Alignment evidence and quality gates.
-- Optional OCR result overlay after downstream OCR runs.
+- Optional OCR evidence/result overlay after the redesigned OCR evidence layer runs.
 
 No production code should depend on files in `tmp/`.
 
@@ -95,17 +97,28 @@ Each `target_cell` must include:
 - `source_template_signature`
 - `x_snap_evidence`
 
-Each OCR result must include:
+Each OCR evidence record must include:
 
-- `target_cell_id`
-- `sheet_cell`
-- `semantic_field`
-- `crop_bbox`
 - `raw_text`
 - `normalized_value`
 - `confidence`
 - `engine`
+- `source_scope`
+- `source_bbox`
+- `center`
+- `candidate_type`
+- `raw_payload_ref`
 - `engine_metadata`
+
+Each assigned OCR result must include:
+
+- `target_cell_id`
+- `sheet_cell`
+- `semantic_field`
+- `evidence_ids`
+- `assigned_value`
+- `assignment_confidence`
+- `assignment_state`
 
 ## Implementation Phases
 
@@ -161,45 +174,51 @@ Pass condition:
 - Quantity target cells are derived from template semantics, not OCR interpretation.
 - Stale or ambiguous templates produce an explicit blocker.
 
-### Phase 4: OCR Crop And Engine Interface
+### Phase 4: OCR Evidence Layer Redesign
 
-Separate OCR crop generation from OCR engine execution.
+Discard the current OCR step as a production constraint and replace it with an OCR evidence layer. This layer collects OCR outputs from any approved source and normalizes them before assignment.
 
 Deliverables:
 
-- Batch crop generator using the fixed crop behavior: fixed padding, known frame erasure, small-noise removal.
-- OCR engine interface.
-- Engine runner for at least one local/offline-capable path.
-- Optional adapters for additional candidates.
+- OCR evidence schema.
+- OCR adapter interface.
+- Adapters for candidate source scopes: full page, table area, column band, row band, cell crop, existing payload import, or hybrid.
+- Evidence normalizer that produces one common record shape regardless of engine/source.
+- Evidence store keyed by order, facility, preprocessing run, and engine run.
+- Assignment input that consumes evidence records and the template-derived target-cell map.
 
 OCR engine policy:
 
 - Do not fix the final OCR engine at this planning stage.
 - Do not assume one provider must be digit-only.
-- If an engine returns structure, store it as auxiliary evidence unless a later approved validation promotes it.
-- Sheet assignment must remain keyed by template-derived `target_cell_id`.
+- Do not require OCR to start from cell crops.
+- Do not require OCR to start from target-cell coordinates.
+- If an engine returns structure, store it as evidence, not as the target-cell map owner.
+- Sheet assignment must remain keyed by the template-derived target-cell map.
+- The current OCR step can be removed rather than preserved behind compatibility wrappers.
 
 Pass condition:
 
-- Crops are generated from `target_cells` only.
-- OCR can run in batch or with equivalent throughput.
-- OCR result records retain `target_cell_id` and cannot be assigned without it.
+- Evidence can be produced without using the current OCR step.
+- Evidence can be produced from at least one non-cell-crop source.
+- Assignment cannot write to the sheet unless evidence is mapped to a known target cell.
+- OCR engine/source choice is configurable and measurable.
 
 ### Phase 5: Sheet Assignment
 
-Convert OCR results into draft-sheet/ocr-sheet-compatible values.
+Convert OCR evidence into draft-sheet/ocr-sheet-compatible values.
 
 Deliverables:
 
-- Assignment mapper from `target_cell_id` to semantic sheet field.
+- Assignment mapper from evidence records to target cells, then to semantic sheet fields.
 - Normalizer for numeric values, blanks, and remarks.
-- Conflict handling when multiple OCR candidates map to one cell.
+- Conflict handling when multiple evidence records map to one cell.
 - Explicit blocker when a value cannot be mapped to a known target cell.
 
 Pass condition:
 
-- No OCR result can create a new row or column.
-- Unknown OCR candidates do not silently enter the sheet.
+- No OCR evidence can create a new row or column.
+- Unknown OCR evidence does not silently enter the sheet.
 - `draft-sheet`, `ocr-sheet`, and `workflow-state` use the same mapped result.
 
 ### Phase 6: Review UI And Manual Adjustment
@@ -246,8 +265,8 @@ Pass condition:
 - X snap refuses non-monotonic or zero-width cells.
 - Target-cell generation preserves worksheet row/column identity.
 - Merged-cell templates preserve merged cell geometry.
-- Crop generation uses fixed padding and erases only the known cell frame.
-- OCR result assignment requires `target_cell_id`.
+- OCR evidence normalization is independent of source scope.
+- Assignment requires mapping to a known target cell before sheet output.
 - Unknown target cells produce blocker output.
 - Stale template signatures produce blocker output.
 
@@ -278,42 +297,46 @@ Required outputs:
 - Single-facility PDF/PNG.
 - All-facility PDF/PNG.
 - Per-facility page artifacts.
-- OCR result overlay after OCR runner is connected.
+- OCR evidence/result overlay after the OCR evidence layer is connected.
 
 Pass condition:
 
 - Human review can verify cell centers are inside the intended cells.
 - Failed or low-confidence alignment is visibly marked and not treated as success.
 
-### OCR Engine Comparison Tests
+### OCR Evidence Layer Comparison Tests
 
-Compare candidate OCR engines without changing the template-derived assignment logic.
+Compare candidate OCR engines and input strategies without changing the template-derived assignment logic.
 
 Candidate classes:
 
 - Existing local OCR path.
-- Yomitoku-based OCR or structure output as auxiliary evidence.
+- Existing OCR payload import as disposable compatibility input.
+- Yomitoku-based OCR or structure output as evidence.
 - Tesseract/PaddleOCR/other OSS local candidates if available.
+- Full-page, table-area, column-band, row-band, cell-crop, and hybrid input strategies.
 
 Evaluation dimensions:
 
-- Cell crop throughput.
+- End-to-end OCR evidence throughput.
 - Raw recognition accuracy.
 - Blank-cell false positives.
 - Non-empty false negatives.
 - Ability to batch.
 - Determinism across repeated runs.
 - Local deployment cost.
+- Assignment success rate into template-derived target cells.
 
 Pass condition:
 
-- Engine choice is based on measured result records keyed by target cells.
-- OCR structure output does not become the sheet structure owner by accident.
+- Engine/input choice is based on measured evidence and assignment results.
+- OCR structure output does not become the target-cell map owner by accident.
+- The current OCR step can be disabled without losing the production path.
 
 ### Integration Tests
 
 - Order preprocessing resolves the facility template from facility/order context.
-- Missing template blocks downstream OCR assignment.
+- Missing template blocks OCR evidence assignment.
 - Ambiguous template candidates block instead of selecting the first candidate.
 - Saved draft is not overwritten by a preprocessing re-run.
 - `draft-sheet`, `ocr-sheet`, and `workflow-state` agree on the same assignment result.
@@ -346,7 +369,7 @@ Automatic apply is allowed only when:
 - All required quantity cells have valid bbox and center.
 - Cell centers are inside their bboxes.
 - Alignment evidence is recorded.
-- OCR results are keyed to known target cells.
+- OCR evidence has been assigned to known target cells.
 
 Manual review is required when:
 
@@ -354,7 +377,7 @@ Manual review is required when:
 - X snap falls back for a major boundary.
 - Grid/line residual exceeds threshold.
 - Merged-cell geometry is ambiguous.
-- OCR returns values outside known target cells.
+- OCR evidence maps outside known target cells.
 
 Blocker is required when:
 
@@ -370,7 +393,7 @@ Blocker is required when:
 1. Golden fixture manifest and regression script.
 2. Production preprocessing service with visual parity to the accepted tmp output.
 3. Template schema and stale-template blocker.
-4. OCR crop/engine interface.
+4. OCR evidence layer redesign.
 5. Sheet assignment mapper.
 6. Review overlay and manual adjustment UI.
 7. Strategy flag integration.
