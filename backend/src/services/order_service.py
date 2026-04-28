@@ -7361,24 +7361,57 @@ def _payload_has_hakodate_evidence_records(payload: dict[str, Any], *, order_id:
     return bool(_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id))
 
 
-def _resolve_payload_grid_metadata(payload: dict[str, Any]) -> dict[str, Any]:
-    resolution = template_resolution_service.normalize_template_resolution_state(
-        payload.get("template_resolution") if isinstance(payload.get("template_resolution"), dict) else None
-    )
-    resolved = template_resolution_service.resolve_effective_grid_metadata(
-        template_resolution=resolution if isinstance(resolution, dict) else None,
-        payload=payload,
-    )
-    return dict(resolved) if isinstance(resolved, dict) else {}
+def _grid_detection_payload(grid: object) -> dict[str, Any]:
+    if isinstance(grid, dict):
+        return grid
+    return {
+        "table_box": list(getattr(grid, "table_box", []) or []),
+        "grid_column_edges": list(getattr(grid, "column_edges", []) or []),
+        "grid_row_edges": list(getattr(grid, "row_edges", []) or []),
+        "confidence": getattr(grid, "confidence", None),
+    }
 
 
-def _hakodate_target_cell_map_from_payload_grid(
+def _hakodate_week_rows_from_menu_entries(
     *,
-    payload: dict[str, Any],
+    fields: list[str],
+    week_id: str | None,
+    facility_id: str | None,
+) -> list[list[str]]:
+    if not week_id:
+        return []
+    entries = _build_position_menu_entries_safe(week_id, facility_id)
+    if not entries:
+        return []
+    date_idx = fields.index("date") if "date" in fields else fields.index("date_mmdd") if "date_mmdd" in fields else None
+    daypart_idx = fields.index("daypart") if "daypart" in fields else None
+    menu_idx = fields.index("menu_name") if "menu_name" in fields else fields.index("menu") if "menu" in fields else None
+    if date_idx is None or daypart_idx is None or menu_idx is None:
+        return []
+    rows: list[list[str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        row = ["" for _ in fields]
+        menu_date = entry.get("menu_date")
+        row[date_idx] = _format_mmdd(menu_date)
+        row[daypart_idx] = str(entry.get("daypart_key") or entry.get("daypart") or "").strip()
+        row[menu_idx] = str(entry.get("menu_name") or "").strip()
+        if row[date_idx] and row[daypart_idx] and row[menu_idx]:
+            rows.append(row)
+    return rows
+
+
+def _hakodate_target_cell_map_from_grid_and_rows(
+    *,
     template: dict[str, Any],
+    rows: list[list[str]],
+    column_edges: list[float],
+    row_edges: list[float],
+    source: str,
 ) -> list[dict[str, Any]]:
     fields = _row_fields_from_template(template)
-    if not fields:
+    if not fields or not rows:
         return []
     menu_idx = next(
         (
@@ -7388,24 +7421,14 @@ def _hakodate_target_cell_map_from_payload_grid(
         ),
         None,
     )
-    if menu_idx is None:
+    if menu_idx is None or len(column_edges) < 2 or len(row_edges) < 2:
         return []
-    grid_metadata = _resolve_payload_grid_metadata(payload)
-    column_edges = [float(value) for value in (grid_metadata.get("grid_column_edges") or payload.get("grid_column_edges") or [])]
-    row_edges = [float(value) for value in (grid_metadata.get("grid_row_edges") or payload.get("grid_row_edges") or [])]
-    if len(column_edges) < 2 or len(row_edges) < 2:
-        return []
-    payload_rows = _extract_first_pass_rows_from_payload(payload, template)
-    if not payload_rows:
-        payload_rows = _extract_sheet_rows_from_payload(payload, template)
-    if not payload_rows:
-        return []
-    header_rows = int(template.get("hakodate_header_rows") or max(0, len(row_edges) - 1 - len(payload_rows)))
+    header_rows = int(template.get("hakodate_header_rows") or max(0, len(row_edges) - 1 - len(rows)))
     header_rows = max(0, min(header_rows, max(0, len(row_edges) - 1)))
     date_idx = fields.index("date") if "date" in fields else fields.index("date_mmdd") if "date_mmdd" in fields else None
     daypart_idx = fields.index("daypart") if "daypart" in fields else None
     cells: list[dict[str, Any]] = []
-    for payload_row_index, row in enumerate(payload_rows):
+    for payload_row_index, row in enumerate(rows):
         if not isinstance(row, list):
             continue
         grid_row = header_rows + payload_row_index
@@ -7424,7 +7447,7 @@ def _hakodate_target_cell_map_from_payload_grid(
             semantic_field = str(field or "").strip()
             if col_index <= menu_idx or col_index >= len(column_edges) - 1:
                 continue
-            target_id = f"payload-grid-r{grid_row}c{col_index}"
+            target_id = f"{source}-r{grid_row}c{col_index}"
             worksheet_row = grid_row + 1
             worksheet_col = col_index + 1
             sheet_cell = f"R{worksheet_row}C{worksheet_col}"
@@ -7462,66 +7485,107 @@ def _hakodate_target_cell_map_from_payload_grid(
                             "menu_name": menu_name,
                         }
                     ],
-                    "source": "payload_grid_metadata",
+                    "source": source,
                 }
             )
     return cells
 
 
-def _collect_structured_numeric_cells_for_hakodate_evidence(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def _hakodate_document_context(order_id: str) -> dict[str, Any] | None:
+    try:
+        with session_scope() as session:
+            order = session.get(Order, order_id)
+            if not order:
+                return None
+            document_uri = str(order.document_uri or "").strip()
+            if not document_uri:
+                return None
+            return {
+                "document_uri": document_uri,
+                "facility_id": str(order.facility_code or "").strip() or None,
+                "week_id": str(order.week_code or "").strip() or None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Hakodate document context lookup failed", order_id=order_id, error=str(exc))
+        return None
 
-    def _push_cell(cell: dict[str, Any], *, source_scope: str) -> None:
-        text = str(cell.get("text") or cell.get("value") or "").strip()
+
+def _hakodate_target_cell_map_from_order_document(
+    *,
+    order_id: str,
+    template: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context = _hakodate_document_context(order_id)
+    if not isinstance(context, dict):
+        return []
+    fields = _row_fields_from_template(template)
+    rows = _hakodate_week_rows_from_menu_entries(
+        fields=fields,
+        week_id=str(context.get("week_id") or "").strip() or None,
+        facility_id=str(context.get("facility_id") or "").strip() or None,
+    )
+    if not rows:
+        return []
+    try:
+        pdf_bytes = load_bytes_from_uri(str(context.get("document_uri") or ""))
+        grid = detect_table_grid(
+            pdf_bytes,
+            {
+                **template,
+                "grid_auto_table_box": True,
+                "grid_auto_use_raw_edges": True,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Hakodate target-cell grid generation failed", order_id=order_id, error=str(exc))
+        return []
+    grid_payload = _grid_detection_payload(grid)
+    column_edges = [float(value) for value in (grid_payload.get("grid_column_edges") or grid_payload.get("column_edges") or [])]
+    row_edges = [float(value) for value in (grid_payload.get("grid_row_edges") or grid_payload.get("row_edges") or [])]
+    return _hakodate_target_cell_map_from_grid_and_rows(
+        template=template,
+        rows=rows,
+        column_edges=column_edges,
+        row_edges=row_edges,
+        source="order_document_grid",
+    )
+
+
+def _hakodate_tesseract_evidence_from_order_document(
+    *,
+    order_id: str,
+    template: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context = _hakodate_document_context(order_id)
+    if not isinstance(context, dict):
+        return []
+    try:
+        pdf_bytes = load_bytes_from_uri(str(context.get("document_uri") or ""))
+        tokens = hakodate_assignment_service._extract_tesseract_tokens(pdf_bytes, template)  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Hakodate numeric evidence OCR failed", order_id=order_id, error=str(exc))
+        return []
+    raw_records: list[dict[str, Any]] = []
+    for token in tokens:
+        text = str(getattr(token, "text", "") or "").strip()
         normalized = hakodate_ocr_evidence_service.normalize_ocr_value(text)
         if not normalized:
-            return
-        box = cell.get("bbox") or cell.get("source_bbox")
-        if not isinstance(box, list) or len(box) != 4:
-            return
-        records.append(
+            continue
+        raw_records.append(
             {
                 "text": text,
                 "normalized_value": normalized,
-                "bbox": box,
-                "confidence": cell.get("confidence"),
-                "source_scope": source_scope,
-                "engine_metadata": {
-                    "row_index": cell.get("row_index"),
-                    "col_index": cell.get("col_index"),
-                    "row_span": cell.get("row_span"),
-                    "col_span": cell.get("col_span"),
-                },
+                "bbox": list(getattr(token, "bbox", []) or []),
+                "center": [float(getattr(token, "x")), float(getattr(token, "y"))],
+                "confidence": getattr(token, "confidence", None),
             }
         )
-
-    for table in _collect_structured_tables_from_payload(payload):
-        cells = table.get("cells") if isinstance(table, dict) else None
-        if not isinstance(cells, list):
-            continue
-        for cell in cells:
-            if isinstance(cell, dict):
-                _push_cell(cell, source_scope="structured_table_cell")
-    tokens = payload.get("tokens")
-    if isinstance(tokens, list):
-        for token in tokens:
-            if not isinstance(token, dict):
-                continue
-            text = str(token.get("text") or "").strip()
-            normalized = hakodate_ocr_evidence_service.normalize_ocr_value(text)
-            if not normalized:
-                continue
-            records.append(
-                {
-                    "text": text,
-                    "normalized_value": normalized,
-                    "bbox": token.get("bbox") or token.get("box"),
-                    "center": [token.get("x"), token.get("y")] if token.get("x") is not None and token.get("y") is not None else None,
-                    "confidence": token.get("confidence"),
-                    "source_scope": "ocr_token",
-                }
-            )
-    return records
+    return hakodate_ocr_evidence_service.evidence_from_records(
+        raw_records,
+        run_id=f"{order_id}:order-document",
+        engine="hakodate_full_page_tesseract",
+        source_scope="order_document_full_page",
+    )
 
 
 def _augment_hakodate_ocr_payload_artifacts(
@@ -7536,14 +7600,14 @@ def _augment_hakodate_ocr_payload_artifacts(
         return payload
     next_payload = dict(payload)
     if not _payload_has_hakodate_target_cells(next_payload):
-        target_cells = _hakodate_target_cell_map_from_payload_grid(
-            payload=next_payload,
+        target_cells = _hakodate_target_cell_map_from_order_document(
+            order_id=order_id,
             template=template,
         )
         if target_cells:
             preprocessing = dict(next_payload.get("hakodate_preprocessing") or {})
             preprocessing["target_cell_map"] = target_cells
-            preprocessing["source"] = "payload_grid_metadata"
+            preprocessing["source"] = "order_document_grid"
             preprocessing["quality_gate"] = {
                 "ok": True,
                 "target_cell_count": len(target_cells),
@@ -7551,12 +7615,9 @@ def _augment_hakodate_ocr_payload_artifacts(
             }
             next_payload["hakodate_preprocessing"] = preprocessing
     if not _payload_has_hakodate_evidence_records(next_payload, order_id=order_id):
-        raw_records = _collect_structured_numeric_cells_for_hakodate_evidence(next_payload)
-        evidence_records = hakodate_ocr_evidence_service.evidence_from_records(
-            raw_records,
-            run_id=str(next_payload.get("job_id") or next_payload.get("run_id") or order_id),
-            engine=str(next_payload.get("engine") or "hakodate_payload_extraction"),
-            source_scope="payload_numeric_evidence",
+        evidence_records = _hakodate_tesseract_evidence_from_order_document(
+            order_id=order_id,
+            template=template,
         )
         if evidence_records:
             next_payload["hakodate_ocr_evidence_records"] = evidence_records
@@ -25984,9 +26045,18 @@ def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) 
             ("hakodate_preprocessing", "target_cell_map"),
             ("hakodate_preprocessing", "target_cells"),
             ("hakodate_target_cell_map",),
-            ("target_cell_map",),
         ],
     )
+
+
+def _hakodate_evidence_source_allowed(record: dict[str, Any]) -> bool:
+    source_scope = str(record.get("source_scope") or "").strip()
+    engine = str(record.get("engine") or "").strip()
+    if source_scope in {"order_document_full_page", "hakodate_cell_crop_batch", "hakodate_cell_crop_ocr"}:
+        return True
+    if engine.startswith("hakodate_") and "payload" not in engine:
+        return True
+    return not source_scope and not engine and not str(record.get("evidence_id") or "").strip()
 
 
 def _extract_hakodate_ocr_evidence_records_from_payload(
@@ -26001,18 +26071,20 @@ def _extract_hakodate_ocr_evidence_records_from_payload(
         [
             ("hakodate_ocr_evidence", "records"),
             ("hakodate_ocr_evidence_records",),
-            ("ocr_evidence_records",),
         ],
     )
+    if not raw_records:
+        return []
+    raw_records = [item for item in raw_records if _hakodate_evidence_source_allowed(item)]
     if not raw_records:
         return []
     if all(str(item.get("evidence_id") or "").strip() for item in raw_records):
         return raw_records
     return hakodate_ocr_evidence_service.evidence_from_records(
         raw_records,
-        run_id=str(payload.get("job_id") or payload.get("run_id") or order_id),
-        engine=str(payload.get("engine") or "hakodate_payload_evidence"),
-        source_scope="payload_evidence",
+        run_id=f"{order_id}:cached-order-document",
+        engine="hakodate_cached_order_document_evidence",
+        source_scope="order_document_full_page",
     )
 
 
@@ -26121,6 +26193,20 @@ def _hakodate_sheet_identity(date_value: object, daypart: object, menu_name: obj
     return date_key, _normalize_daypart_key(daypart), _normalize_menu_text(str(menu_name or ""))
 
 
+def _hakodate_fields_after_menu(fields: list[str]) -> list[str]:
+    menu_idx = next(
+        (
+            idx
+            for idx, field in enumerate(fields)
+            if str(field or "").strip() in {"menu", "menu_name"}
+        ),
+        None,
+    )
+    if menu_idx is None:
+        return []
+    return [field for field in fields[menu_idx + 1 :] if str(field or "").strip()]
+
+
 def _apply_hakodate_sheet_output_to_sheet_payload(
     *,
     base_sheet: dict[str, Any],
@@ -26133,6 +26219,68 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     identity_lookup = _hakodate_sheet_row_identity_lookup(fields=fields, rows=rows)
     sheet_output = assignment.get("sheet_output") if isinstance(assignment.get("sheet_output"), dict) else {}
     cells = sheet_output.get("cells") if isinstance(sheet_output, dict) else {}
+    target_cells = assignment.get("target_cells") if isinstance(assignment.get("target_cells"), list) else []
+    cleared: list[dict[str, Any]] = []
+    if target_cells:
+        cleared_slots: set[tuple[int, int]] = set()
+        for target in target_cells:
+            if not isinstance(target, dict):
+                continue
+            logical_targets = target.get("logical_targets") if isinstance(target.get("logical_targets"), list) else []
+            identity_sources = [target, *[item for item in logical_targets if isinstance(item, dict)]]
+            for identity_source in identity_sources:
+                field = str(
+                    target.get("semantic_field")
+                    or target.get("field")
+                    or identity_source.get("semantic_field")
+                    or identity_source.get("field")
+                    or ""
+                ).strip()
+                col_index = field_index.get(field)
+                if col_index is None:
+                    continue
+                key = _hakodate_sheet_identity(
+                    identity_source.get("date"),
+                    identity_source.get("daypart"),
+                    identity_source.get("menu_name"),
+                )
+                row_index = identity_lookup.get(key)
+                if row_index is None or (row_index, col_index) in cleared_slots:
+                    continue
+                cleared_slots.add((row_index, col_index))
+                while len(rows[row_index]) < len(fields):
+                    rows[row_index].append("")
+                previous = rows[row_index][col_index]
+                rows[row_index][col_index] = ""
+                if str(previous or "").strip():
+                    cleared.append(
+                        {
+                            "row_index": row_index,
+                            "field": field,
+                            "previous": previous,
+                            "reason": "hakodate_target_cell_reset",
+                        }
+                    )
+                break
+    else:
+        for field in _hakodate_fields_after_menu(fields):
+            col_index = field_index.get(field)
+            if col_index is None:
+                continue
+            for row_index, row in enumerate(rows):
+                while len(row) < len(fields):
+                    row.append("")
+                previous = row[col_index]
+                row[col_index] = ""
+                if str(previous or "").strip():
+                    cleared.append(
+                        {
+                            "row_index": row_index,
+                            "field": field,
+                            "previous": previous,
+                            "reason": "hakodate_missing_target_map_reset",
+                        }
+                    )
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for sheet_cell, cell in sorted((cells or {}).items()):
@@ -26172,10 +26320,12 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     projected["hakodate_evidence_projection"] = {
         "applied": applied,
         "skipped": skipped,
+        "cleared": cleared,
         "metrics": {
             "assignment_count": len(cells or {}),
             "applied_count": len(applied),
             "skipped_count": len(skipped),
+            "cleared_legacy_cell_count": len(cleared),
         },
     }
     blockers = list(assignment.get("blockers") or [])
@@ -26192,6 +26342,75 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     )
     projected["review_state"] = "blocked" if projected["blockers"] else str(assignment.get("status") or "review_required")
     return projected
+
+
+def _build_hakodate_weekly_menu_base_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        facility_id = str(order.facility_code or "").strip() or None
+        week_id = str(order.week_code or "").strip() or None
+        received_at = order.received_at or datetime.utcnow()
+    if not facility_id:
+        return None, "facility_missing"
+    if not week_id:
+        return None, "week_unresolved"
+    facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(
+        order_id=order_id,
+        facility_id=facility_id,
+        ocr_payload=None,
+        allow_workflow_resolution=True,
+        log_context="Hakodate weekly-menu sheet template lookup failed",
+    )
+    if not facility_config:
+        return None, "facility_not_found"
+    if not isinstance(template, dict):
+        return None, template_error or "template_unresolved"
+    fields, field_index = _build_sheet_fields_and_indexes(template)
+    field_error = _validate_sheet_template_fields(fields)
+    if field_error:
+        return None, field_error
+    header = _sheet_header_from_template(fields, template)
+    entries = _build_position_menu_entries_safe(week_id, facility_id)
+    if not entries:
+        return None, "menu_entries_missing"
+    row_items, source = _build_rows_from_menu_entries(
+        entries=entries,
+        fields=fields,
+        field_index=field_index,
+        header=header,
+        line_dates=set(),
+        source="weekly_menu",
+        payload_dates=set(),
+        payload_row_count=0,
+        scope_anchor_date=received_at.date(),
+    )
+    rows = [
+        list(item.get("values") or [])
+        for item in row_items
+        if isinstance(item, dict) and isinstance(item.get("values"), list)
+    ]
+    if not rows:
+        return None, "menu_entries_missing"
+    return {
+        "order_id": order_id,
+        "facility_id": facility_id,
+        "week_id": week_id,
+        "template_id": effective_template_id or str(template.get("template_id") or "").strip() or None,
+        "fields": fields,
+        "header": header,
+        "rows": rows,
+        "row_ids": [
+            str(item.get("row_id") or f"row-{idx + 1}")
+            for idx, item in enumerate(row_items)
+            if isinstance(item, dict) and isinstance(item.get("values"), list)
+        ][: len(rows)],
+        "source": f"hakodate_{source}_template",
+        "warnings": [],
+        "blockers": [],
+        "review_state": "review_required",
+    }, None
 
 
 def build_order_hakodate_assignment(
@@ -26489,7 +26708,7 @@ def build_order_hakodate_projected_sheet(
         return None, assignment_error
     if not isinstance(assignment, dict):
         return None, "assignment_unavailable"
-    sheet, sheet_error = get_ocr_sheet(order_id)
+    sheet, sheet_error = _build_hakodate_weekly_menu_base_sheet(order_id)
     if sheet_error:
         return {"assignment": assignment}, sheet_error
     if not isinstance(sheet, dict):

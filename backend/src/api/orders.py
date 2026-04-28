@@ -1385,7 +1385,19 @@ def get_draft_sheet(
         )
         if error == "order_not_found":
             raise HTTPException(status_code=404, detail="order not found")
-        if error in {"facility_missing", "document_missing", "template_unresolved", "sheet_unavailable", "assignment_unavailable"}:
+        if error in {
+            "facility_missing",
+            "document_missing",
+            "template_unresolved",
+            "week_unresolved",
+            "menu_entries_missing",
+            "sheet_fields_not_found",
+            "sheet_fields_duplicate",
+            "sheet_template_field_invalid",
+            "sheet_quantity_columns_missing",
+            "sheet_unavailable",
+            "assignment_unavailable",
+        }:
             raise HTTPException(status_code=400, detail=error)
         if error == "facility_not_found":
             raise HTTPException(status_code=404, detail="facility not found")
@@ -1591,7 +1603,17 @@ def build_hakodate_assignment(order_id: str, body: dict | None = None):
     )
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
-    if error in {"facility_missing", "document_missing", "template_unresolved"}:
+    if error in {
+        "facility_missing",
+        "document_missing",
+        "template_unresolved",
+        "week_unresolved",
+        "menu_entries_missing",
+        "sheet_fields_not_found",
+        "sheet_fields_duplicate",
+        "sheet_template_field_invalid",
+        "sheet_quantity_columns_missing",
+    }:
         raise HTTPException(status_code=400, detail=error)
     if error == "facility_not_found":
         raise HTTPException(status_code=404, detail="facility not found")
