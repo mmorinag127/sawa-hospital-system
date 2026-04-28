@@ -7353,12 +7353,227 @@ def _load_pipeline_raw_text(order_id: str, message_id: Optional[str]) -> Optiona
         return None
 
 
+def _payload_has_hakodate_target_cells(payload: dict[str, Any]) -> bool:
+    return bool(_extract_hakodate_target_cells_from_payload(payload))
+
+
+def _payload_has_hakodate_evidence_records(payload: dict[str, Any], *, order_id: str) -> bool:
+    return bool(_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id))
+
+
+def _resolve_payload_grid_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    resolution = template_resolution_service.normalize_template_resolution_state(
+        payload.get("template_resolution") if isinstance(payload.get("template_resolution"), dict) else None
+    )
+    resolved = template_resolution_service.resolve_effective_grid_metadata(
+        template_resolution=resolution if isinstance(resolution, dict) else None,
+        payload=payload,
+    )
+    return dict(resolved) if isinstance(resolved, dict) else {}
+
+
+def _hakodate_target_cell_map_from_payload_grid(
+    *,
+    payload: dict[str, Any],
+    template: dict[str, Any],
+) -> list[dict[str, Any]]:
+    fields = _row_fields_from_template(template)
+    if not fields:
+        return []
+    menu_idx = next(
+        (
+            idx
+            for idx, field in enumerate(fields)
+            if str(field or "").strip() in {"menu", "menu_name"}
+        ),
+        None,
+    )
+    if menu_idx is None:
+        return []
+    grid_metadata = _resolve_payload_grid_metadata(payload)
+    column_edges = [float(value) for value in (grid_metadata.get("grid_column_edges") or payload.get("grid_column_edges") or [])]
+    row_edges = [float(value) for value in (grid_metadata.get("grid_row_edges") or payload.get("grid_row_edges") or [])]
+    if len(column_edges) < 2 or len(row_edges) < 2:
+        return []
+    payload_rows = _extract_first_pass_rows_from_payload(payload, template)
+    if not payload_rows:
+        payload_rows = _extract_sheet_rows_from_payload(payload, template)
+    if not payload_rows:
+        return []
+    header_rows = int(template.get("hakodate_header_rows") or max(0, len(row_edges) - 1 - len(payload_rows)))
+    header_rows = max(0, min(header_rows, max(0, len(row_edges) - 1)))
+    date_idx = fields.index("date") if "date" in fields else fields.index("date_mmdd") if "date_mmdd" in fields else None
+    daypart_idx = fields.index("daypart") if "daypart" in fields else None
+    cells: list[dict[str, Any]] = []
+    for payload_row_index, row in enumerate(payload_rows):
+        if not isinstance(row, list):
+            continue
+        grid_row = header_rows + payload_row_index
+        if grid_row >= len(row_edges) - 1:
+            break
+
+        def _cell(index: int | None) -> str:
+            if index is None or index >= len(row):
+                return ""
+            return str(row[index] or "").strip()
+
+        date_value = _cell(date_idx)
+        daypart = _cell(daypart_idx)
+        menu_name = _cell(menu_idx)
+        for col_index, field in enumerate(fields):
+            semantic_field = str(field or "").strip()
+            if col_index <= menu_idx or col_index >= len(column_edges) - 1:
+                continue
+            target_id = f"payload-grid-r{grid_row}c{col_index}"
+            worksheet_row = grid_row + 1
+            worksheet_col = col_index + 1
+            sheet_cell = f"R{worksheet_row}C{worksheet_col}"
+            cells.append(
+                {
+                    "target_cell_id": target_id,
+                    "region_id": target_id,
+                    "sheet_cell": sheet_cell,
+                    "worksheet_row": worksheet_row,
+                    "worksheet_col": worksheet_col,
+                    "semantic_field": semantic_field,
+                    "field_label": _field_label(semantic_field),
+                    "date": date_value,
+                    "daypart": daypart,
+                    "menu_name": menu_name,
+                    "bbox": [
+                        column_edges[col_index],
+                        row_edges[grid_row],
+                        column_edges[col_index + 1],
+                        row_edges[grid_row + 1],
+                    ],
+                    "center": [
+                        (column_edges[col_index] + column_edges[col_index + 1]) / 2.0,
+                        (row_edges[grid_row] + row_edges[grid_row + 1]) / 2.0,
+                    ],
+                    "logical_targets": [
+                        {
+                            "sheet_cell": sheet_cell,
+                            "worksheet_row": worksheet_row,
+                            "worksheet_col": worksheet_col,
+                            "field": semantic_field,
+                            "field_label": _field_label(semantic_field),
+                            "date": date_value,
+                            "daypart": daypart,
+                            "menu_name": menu_name,
+                        }
+                    ],
+                    "source": "payload_grid_metadata",
+                }
+            )
+    return cells
+
+
+def _collect_structured_numeric_cells_for_hakodate_evidence(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+
+    def _push_cell(cell: dict[str, Any], *, source_scope: str) -> None:
+        text = str(cell.get("text") or cell.get("value") or "").strip()
+        normalized = hakodate_ocr_evidence_service.normalize_ocr_value(text)
+        if not normalized:
+            return
+        box = cell.get("bbox") or cell.get("source_bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            return
+        records.append(
+            {
+                "text": text,
+                "normalized_value": normalized,
+                "bbox": box,
+                "confidence": cell.get("confidence"),
+                "source_scope": source_scope,
+                "engine_metadata": {
+                    "row_index": cell.get("row_index"),
+                    "col_index": cell.get("col_index"),
+                    "row_span": cell.get("row_span"),
+                    "col_span": cell.get("col_span"),
+                },
+            }
+        )
+
+    for table in _collect_structured_tables_from_payload(payload):
+        cells = table.get("cells") if isinstance(table, dict) else None
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            if isinstance(cell, dict):
+                _push_cell(cell, source_scope="structured_table_cell")
+    tokens = payload.get("tokens")
+    if isinstance(tokens, list):
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            text = str(token.get("text") or "").strip()
+            normalized = hakodate_ocr_evidence_service.normalize_ocr_value(text)
+            if not normalized:
+                continue
+            records.append(
+                {
+                    "text": text,
+                    "normalized_value": normalized,
+                    "bbox": token.get("bbox") or token.get("box"),
+                    "center": [token.get("x"), token.get("y")] if token.get("x") is not None and token.get("y") is not None else None,
+                    "confidence": token.get("confidence"),
+                    "source_scope": "ocr_token",
+                }
+            )
+    return records
+
+
+def _augment_hakodate_ocr_payload_artifacts(
+    *,
+    order_id: str,
+    payload: dict[str, Any],
+    template: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(template, dict):
+        return payload
+    if hakodate_assignment_service.resolve_quantity_assignment_strategy(template) != "hakodate":
+        return payload
+    next_payload = dict(payload)
+    if not _payload_has_hakodate_target_cells(next_payload):
+        target_cells = _hakodate_target_cell_map_from_payload_grid(
+            payload=next_payload,
+            template=template,
+        )
+        if target_cells:
+            preprocessing = dict(next_payload.get("hakodate_preprocessing") or {})
+            preprocessing["target_cell_map"] = target_cells
+            preprocessing["source"] = "payload_grid_metadata"
+            preprocessing["quality_gate"] = {
+                "ok": True,
+                "target_cell_count": len(target_cells),
+                "blockers": [],
+            }
+            next_payload["hakodate_preprocessing"] = preprocessing
+    if not _payload_has_hakodate_evidence_records(next_payload, order_id=order_id):
+        raw_records = _collect_structured_numeric_cells_for_hakodate_evidence(next_payload)
+        evidence_records = hakodate_ocr_evidence_service.evidence_from_records(
+            raw_records,
+            run_id=str(next_payload.get("job_id") or next_payload.get("run_id") or order_id),
+            engine=str(next_payload.get("engine") or "hakodate_payload_extraction"),
+            source_scope="payload_numeric_evidence",
+        )
+        if evidence_records:
+            next_payload["hakodate_ocr_evidence_records"] = evidence_records
+    return next_payload
+
+
 def _save_order_ocr_cache(order_id: str, payload: dict) -> None:
     next_payload = dict(payload) if isinstance(payload, dict) else {}
     template = _resolve_order_fax_template(order_id)
     annotated_payload = _annotate_payload_with_template_field_schema(next_payload, template)
     if isinstance(annotated_payload, dict):
         next_payload = annotated_payload
+    next_payload = _augment_hakodate_ocr_payload_artifacts(
+        order_id=order_id,
+        payload=next_payload,
+        template=template,
+    )
     try:
         with session_scope() as session:
             cache = session.get(OrderOcrCache, order_id)

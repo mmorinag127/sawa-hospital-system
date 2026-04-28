@@ -18,6 +18,46 @@ def test_hakodate_evidence_assignment_blocks_without_new_payload_contract() -> N
     assert assignment["assignments"] == []
 
 
+def test_hakodate_payload_augmentation_persists_target_map_and_evidence_records() -> None:
+    payload = {
+        "grid_column_edges": [0.0, 0.2, 0.4, 0.6, 0.8],
+        "grid_row_edges": [0.0, 0.2, 0.4, 0.6],
+        "table_rows": [["4/26", "朝", "献立A", "12"]],
+        "tables": [
+            {
+                "rows": [["4/26", "朝", "献立A", "12"]],
+                "cells": [
+                    {
+                        "row_index": 1,
+                        "col_index": 3,
+                        "text": "１２",
+                        "bbox": [0.6, 0.2, 0.8, 0.4],
+                    }
+                ],
+            }
+        ],
+    }
+    template = {
+        "quantity_assignment_strategy": "hakodate",
+        "hakodate_header_rows": 1,
+        "main_ocr_row_fields": ["date", "daypart", "menu_name", "qty.regular_x"],
+    }
+
+    augmented = order_service._augment_hakodate_ocr_payload_artifacts(  # noqa: SLF001
+        order_id="ORD_TEST",
+        payload=payload,
+        template=template,
+    )
+
+    target_cells = augmented["hakodate_preprocessing"]["target_cell_map"]
+    evidence_records = augmented["hakodate_ocr_evidence_records"]
+    assert target_cells[0]["semantic_field"] == "qty.regular_x"
+    assert target_cells[0]["date"] == "04/26"
+    assert target_cells[0]["bbox"] == [0.6, 0.2, 0.8, 0.4]
+    assert evidence_records[0]["normalized_value"] == "12"
+    assert evidence_records[0]["center"] == [0.7, 0.30000000000000004]
+
+
 def test_hakodate_evidence_projection_applies_assigned_cells_to_sheet_rows() -> None:
     assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
         order_id="ORD_TEST",
