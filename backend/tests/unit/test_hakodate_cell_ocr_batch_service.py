@@ -5,6 +5,7 @@ from src.services.hakodate_cell_ocr_batch_service import (
     build_cell_contact_sheet,
     sheet_assignments_from_ocr_regions,
     sheet_value_grid_from_assignments,
+    validate_cell_ocr_mapping,
 )
 
 
@@ -141,3 +142,35 @@ def test_sheet_value_grid_from_assignments_builds_cell_and_row_views() -> None:
             },
         }
     ]
+
+
+def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() -> None:
+    regions = [
+        {
+            "region_id": "E11",
+            "ocr_contact_slot": [0, 0, 80, 60],
+            "ocr_text": "12",
+            "ocr_normalized": "12",
+            "ocr_words": [{"text": "12", "x": 40, "y": 30}],
+            "logical_targets": [
+                {
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                }
+            ],
+        }
+    ]
+    assignments = sheet_assignments_from_ocr_regions(regions)
+    sheet_values = sheet_value_grid_from_assignments(assignments)
+
+    validation = validate_cell_ocr_mapping(
+        ocr_regions=regions,
+        sheet_assignments=assignments,
+        sheet_values=sheet_values,
+    )
+
+    assert validation["ok"] is True
+    assert validation["error_count"] == 0
+    assert validation["recognized_region_count"] == 1
+    assert validation["recognized_assignment_count"] == 1

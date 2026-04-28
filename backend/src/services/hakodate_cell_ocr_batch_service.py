@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 import json
 import re
@@ -340,6 +341,105 @@ def sheet_value_grid_from_assignments(assignments: list[dict[str, Any]]) -> dict
     }
 
 
+def validate_cell_ocr_mapping(
+    *,
+    ocr_regions: list[dict[str, Any]],
+    sheet_assignments: list[dict[str, Any]],
+    sheet_values: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    region_by_id = {str(region.get("region_id")): region for region in ocr_regions}
+    assignments_by_region: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    sheet_cell_counts: Counter[str] = Counter()
+    for assignment in sheet_assignments:
+        region_id = str(assignment.get("source_region_id"))
+        assignments_by_region[region_id].append(assignment)
+        sheet_cell = str(assignment.get("sheet_cell") or "").strip()
+        if sheet_cell:
+            sheet_cell_counts[sheet_cell] += 1
+
+    cells = sheet_values.get("cells") if isinstance(sheet_values, dict) else {}
+    if not isinstance(cells, dict):
+        errors.append("sheet_values.cells is missing")
+        cells = {}
+
+    duplicate_cells = sorted(cell for cell, count in sheet_cell_counts.items() if count != 1)
+    if duplicate_cells:
+        errors.append(f"duplicate or missing sheet assignment uniqueness: {duplicate_cells[:12]}")
+
+    if len(cells) != len(sheet_assignments):
+        errors.append(f"sheet cell count mismatch: cells={len(cells)} assignments={len(sheet_assignments)}")
+
+    unknown_region_ids = sorted(
+        region_id for region_id in assignments_by_region.keys() if region_id not in region_by_id
+    )
+    if unknown_region_ids:
+        errors.append(f"assignments reference unknown regions: {unknown_region_ids[:12]}")
+
+    missing_region_ids = sorted(
+        region_id for region_id in region_by_id.keys() if region_id not in assignments_by_region
+    )
+    if missing_region_ids:
+        errors.append(f"regions without assignments: {missing_region_ids[:12]}")
+
+    for region_id, region in region_by_id.items():
+        expected_targets = region.get("logical_targets") or []
+        if not isinstance(expected_targets, list):
+            expected_targets = []
+        actual_assignments = assignments_by_region.get(region_id) or []
+        if len(actual_assignments) != len(expected_targets):
+            errors.append(
+                f"{region_id}: logical target count mismatch "
+                f"expected={len(expected_targets)} actual={len(actual_assignments)}"
+            )
+
+        region_text = str(region.get("ocr_text") or "")
+        region_normalized = str(region.get("ocr_normalized") or "")
+        for assignment in actual_assignments:
+            sheet_cell = str(assignment.get("sheet_cell") or "").strip()
+            if not sheet_cell:
+                errors.append(f"{region_id}: assignment missing sheet_cell")
+                continue
+            if str(assignment.get("value_text") or "") != region_text:
+                errors.append(f"{region_id}/{sheet_cell}: value_text does not match region OCR text")
+            if str(assignment.get("value_normalized") or "") != region_normalized:
+                errors.append(f"{region_id}/{sheet_cell}: value_normalized does not match region OCR normalized")
+            cell = cells.get(sheet_cell)
+            if cell is None:
+                errors.append(f"{region_id}/{sheet_cell}: missing from sheet_values.cells")
+                continue
+            if str(cell.get("value_text") or "") != region_text:
+                errors.append(f"{region_id}/{sheet_cell}: sheet_values value_text does not match assignment")
+            if str(cell.get("value_normalized") or "") != region_normalized:
+                errors.append(f"{region_id}/{sheet_cell}: sheet_values value_normalized does not match assignment")
+
+        slot = region.get("ocr_contact_slot")
+        if isinstance(slot, list) and len(slot) == 4:
+            sx0, sy0, sx1, sy1 = [float(value) for value in slot]
+            for word in region.get("ocr_words") or []:
+                try:
+                    wx = float(word.get("x") or 0.0)
+                    wy = float(word.get("y") or 0.0)
+                except Exception:
+                    errors.append(f"{region_id}: OCR word has invalid coordinates")
+                    continue
+                if not (sx0 <= wx <= sx1 and sy0 <= wy <= sy1):
+                    errors.append(f"{region_id}: OCR word lies outside assigned contact slot")
+
+    return {
+        "ok": not errors,
+        "error_count": len(errors),
+        "errors": errors[:50],
+        "region_count": len(ocr_regions),
+        "assignment_count": len(sheet_assignments),
+        "sheet_cell_count": len(cells),
+        "recognized_region_count": sum(1 for region in ocr_regions if str(region.get("ocr_text") or "").strip()),
+        "recognized_assignment_count": sum(
+            1 for assignment in sheet_assignments if str(assignment.get("value_text") or "").strip()
+        ),
+    }
+
+
 def _load_overlay_font(size: int = 18) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
         "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
@@ -534,6 +634,11 @@ def build_hakodate_cell_ocr_for_manifest_item(
     )
     sheet_assignments = sheet_assignments_from_ocr_regions(ocr_regions)
     sheet_values = sheet_value_grid_from_assignments(sheet_assignments)
+    parse_validation = validate_cell_ocr_mapping(
+        ocr_regions=ocr_regions,
+        sheet_assignments=sheet_assignments,
+        sheet_values=sheet_values,
+    )
     recognized_regions = [region for region in ocr_regions if str(region.get("ocr_text") or "").strip()]
     recognized_assignments = [
         assignment for assignment in sheet_assignments if str(assignment.get("value_text") or "").strip()
@@ -551,7 +656,10 @@ def build_hakodate_cell_ocr_for_manifest_item(
         "recognized_region_count": len(recognized_regions),
         "recognized_assignment_count": len(recognized_assignments),
         "cells_per_ocr_second": round(len(ocr_regions) / max(float(ocr_metrics["ocr_seconds"]), 1e-6), 3),
+        "parse_validation": parse_validation,
     }
+    if not parse_validation["ok"]:
+        raise ValueError(f"OCR parse validation failed for {facility_code} {order_id}: {parse_validation['errors']}")
     contact_sheet_path = case_dir / "cell_contact_sheet.png"
     overlay_path = case_dir / "cell_ocr_overlay.png"
     regions_path = case_dir / "cell_ocr_regions.json"
@@ -644,6 +752,9 @@ def build_all_facility_hakodate_cell_ocr_pdf(
         "total_logical_assignment_count": sum(int(item["logical_assignment_count"]) for item in results),
         "total_recognized_region_count": sum(int(item["recognized_region_count"]) for item in results),
         "total_recognized_assignment_count": sum(int(item["recognized_assignment_count"]) for item in results),
+        "total_parse_validation_error_count": sum(
+            int(item["metrics"]["parse_validation"]["error_count"]) for item in results
+        ),
         "pdf": str(pdf_path),
         "results": results,
     }
