@@ -100,7 +100,7 @@ def test_build_cell_contact_sheet_uses_only_valid_regions() -> None:
     assert sheet.size == (160, 60)
     assert [region["region_id"] for region in usable] == ["E11"]
     assert usable[0]["ocr_contact_slot"] == [0, 0, 80, 60]
-    assert usable[0]["ocr_cell_crop_bbox_px"]
+    assert usable[0]["ocr_cell_crop_bbox_px"] == [9, 2, 81, 58]
 
 
 def test_sheet_value_grid_from_assignments_builds_cell_and_row_views() -> None:

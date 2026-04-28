@@ -12,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
 from src.services import hakodate_assignment_service
 from src.services.hakodate_fixed_quad_registration_service import (
@@ -93,23 +93,97 @@ def _safe_int_box(
     return ix0, iy0, ix1, iy1
 
 
-def _preprocess_cell_crop(crop_bgr: np.ndarray) -> Image.Image:
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    gray = cv2.equalizeHist(gray)
+def _expanded_cell_box(
+    box: list[float],
+    *,
+    width: int,
+    height: int,
+    pad_x_px: int,
+    pad_y_px: int,
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in box]
+    except Exception:
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    pad_x = max(0, min(int(pad_x_px), 24))
+    pad_y = max(0, min(int(pad_y_px), 24))
+    ix0 = max(0, min(width, int(np.floor(x0 - pad_x))))
+    iy0 = max(0, min(height, int(np.floor(y0 - pad_y))))
+    ix1 = max(0, min(width, int(np.ceil(x1 + pad_x))))
+    iy1 = max(0, min(height, int(np.ceil(y1 + pad_y))))
+    if ix1 <= ix0 or iy1 <= iy0:
+        return None
+    return ix0, iy0, ix1, iy1
+
+
+def _erase_known_cell_frame(
+    gray: np.ndarray,
+    *,
+    cell_box: list[float],
+    crop_box: tuple[int, int, int, int],
+) -> np.ndarray:
+    crop_x0, crop_y0, _crop_x1, _crop_y1 = crop_box
+    x0, y0, x1, y1 = [float(value) for value in cell_box]
+    rel_x0 = int(round(x0 - crop_x0))
+    rel_y0 = int(round(y0 - crop_y0))
+    rel_x1 = int(round(x1 - crop_x0))
+    rel_y1 = int(round(y1 - crop_y0))
+    height, width = gray.shape[:2]
+    thickness = max(4, int(round(min(max(1, x1 - x0), max(1, y1 - y0)) * 0.075)))
+    erased = gray.copy()
+
+    def fill_rect(rx0: int, ry0: int, rx1: int, ry1: int) -> None:
+        ax0 = max(0, min(width, rx0))
+        ay0 = max(0, min(height, ry0))
+        ax1 = max(0, min(width, rx1))
+        ay1 = max(0, min(height, ry1))
+        if ax1 > ax0 and ay1 > ay0:
+            erased[ay0:ay1, ax0:ax1] = 255
+
+    fill_rect(rel_x0 - thickness, rel_y0 - thickness, rel_x1 + thickness, rel_y0 + thickness)
+    fill_rect(rel_x0 - thickness, rel_y1 - thickness, rel_x1 + thickness, rel_y1 + thickness)
+    fill_rect(rel_x0 - thickness, rel_y0 - thickness, rel_x0 + thickness, rel_y1 + thickness)
+    fill_rect(rel_x1 - thickness, rel_y0 - thickness, rel_x1 + thickness, rel_y1 + thickness)
+    return erased
+
+
+def _remove_small_noise_only(gray: np.ndarray) -> np.ndarray:
     _threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    image = Image.fromarray(binary).convert("L")
-    return ImageOps.autocontrast(image).convert("RGB")
+    ink = 255 - binary
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    cleaned = gray.copy()
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 5:
+            cleaned[labels == label] = 255
+    return cleaned
+
+
+def _preprocess_cell_crop(
+    crop_bgr: np.ndarray,
+    *,
+    cell_box: list[float],
+    crop_box: tuple[int, int, int, int],
+) -> Image.Image:
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
+    frame_removed = _erase_known_cell_frame(gray, cell_box=cell_box, crop_box=crop_box)
+    cleaned = _remove_small_noise_only(frame_removed)
+    return Image.fromarray(cleaned).convert("RGB")
 
 
 def build_cell_contact_sheet(
     *,
     rectified_fax_bgr: np.ndarray,
     regions: list[dict[str, Any]],
-    slot_width: int = 124,
-    slot_height: int = 76,
-    columns: int = 18,
-    margin_ratio: float = 0.08,
+    slot_width: int = 220,
+    slot_height: int = 130,
+    columns: int = 12,
+    crop_pad_x_px: int = 1,
+    crop_pad_y_px: int = 8,
 ) -> tuple[Image.Image, list[dict[str, Any]]]:
     height, width = rectified_fax_bgr.shape[:2]
     usable_regions: list[dict[str, Any]] = []
@@ -119,18 +193,24 @@ def build_cell_contact_sheet(
         box = region.get("bbox")
         if not isinstance(box, list):
             continue
-        px_box = _safe_int_box(box, width=width, height=height, margin_ratio=margin_ratio)
+        px_box = _expanded_cell_box(
+            box,
+            width=width,
+            height=height,
+            pad_x_px=crop_pad_x_px,
+            pad_y_px=crop_pad_y_px,
+        )
         if not px_box:
             continue
         x0, y0, x1, y1 = px_box
         crop = rectified_fax_bgr[y0:y1, x0:x1]
         if crop.size == 0:
             continue
-        crop_image = _preprocess_cell_crop(crop)
+        crop_image = _preprocess_cell_crop(crop, cell_box=box, crop_box=px_box)
         max_w = slot_width - 12
         max_h = slot_height - 12
         scale = min(max_w / max(1, crop_image.width), max_h / max(1, crop_image.height))
-        scale = max(1.0, min(scale, 5.0))
+        scale = max(0.2, min(scale, 5.0))
         crop_image = crop_image.resize(
             (
                 max(1, int(round(crop_image.width * scale))),
