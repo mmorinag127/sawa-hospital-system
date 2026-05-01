@@ -7374,7 +7374,25 @@ def _payload_has_current_hakodate_canonical_pipeline(payload: dict[str, Any] | N
     pipeline = payload.get("hakodate_canonical_pipeline")
     if not isinstance(pipeline, dict):
         return False
-    return str(pipeline.get("version") or "").strip() == HAKODATE_CANONICAL_PIPELINE_VERSION
+    version = str(pipeline.get("version") or "").strip()
+    if version:
+        return version == HAKODATE_CANONICAL_PIPELINE_VERSION
+    # Compatibility for already-persisted Hakodate evidence created before the
+    # canonical version field was added. This must still outrank order_ocr_cache;
+    # otherwise a current evidence run can display a stale cached overlay.
+    return (
+        str(pipeline.get("producer") or "").strip()
+        == "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item"
+        and str(pipeline.get("source") or "").strip() == "live_order_facility_source_workbook"
+        and str(pipeline.get("requested_order_id") or "").strip() != ""
+    )
+
+
+def _hakodate_version_matches_current(value: object, *, allow_versionless: bool = False) -> bool:
+    version = str(value or "").strip()
+    if version == HAKODATE_CANONICAL_PIPELINE_VERSION:
+        return True
+    return allow_versionless and not version
 
 
 def _payload_has_hakodate_output_content(payload: dict[str, Any] | None, *, order_id: str) -> bool:
@@ -9356,7 +9374,10 @@ def get_cached_hakodate_overlay_preview(order_id: str) -> dict[str, Any]:
     overlay_version = str(overlay.get("version") or "").strip()
     if (
         overlay_producer != "hakodate_best_method_pipeline"
-        or overlay_version != HAKODATE_CANONICAL_PIPELINE_VERSION
+        or not _hakodate_version_matches_current(
+            overlay_version,
+            allow_versionless=has_latest_hakodate_evidence,
+        )
     ):
         return {
             "status": "blocked",
@@ -18971,7 +18992,10 @@ def _build_hakodate_overlay_preview(
         cached_overlay_uri
         and cached_overlay_fingerprint
         and cached_overlay_producer == "hakodate_best_method_pipeline"
-        and cached_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and _hakodate_version_matches_current(
+            cached_overlay_version,
+            allow_versionless=has_latest_hakodate_evidence,
+        )
         and isinstance(cached_assignment_preview, dict)
         and cached_assignment_preview.get("version") == HAKODATE_CANONICAL_PIPELINE_VERSION
         and cached_assignment_preview.get("fingerprint") == cached_overlay_fingerprint
@@ -19061,7 +19085,10 @@ def _build_hakodate_overlay_preview(
         refreshed_overlay_uri
         and refreshed_overlay_fingerprint == overlay_fingerprint
         and refreshed_overlay_producer == "hakodate_best_method_pipeline"
-        and refreshed_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and _hakodate_version_matches_current(
+            refreshed_overlay_version,
+            allow_versionless=refreshed_has_latest_hakodate_evidence,
+        )
     ):
         refreshed_overlay_url = _signed_url_from_uri(refreshed_overlay_uri)
         if refreshed_overlay_url:
@@ -19086,7 +19113,10 @@ def _build_hakodate_overlay_preview(
         isinstance(cached_overlay, dict)
         and cached_overlay.get("fingerprint") == overlay_fingerprint
         and cached_overlay_producer == "hakodate_best_method_pipeline"
-        and cached_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and _hakodate_version_matches_current(
+            cached_overlay_version,
+            allow_versionless=has_latest_hakodate_evidence,
+        )
     ):
         if cached_overlay_uri:
             cached_overlay_url = _signed_url_from_uri(cached_overlay_uri)

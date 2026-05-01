@@ -277,6 +277,65 @@ def test_hakodate_overlay_preview_prefers_latest_evidence_overlay_over_legacy_ca
     assert preview["latest_hakodate_evidence"] is True
 
 
+def test_hakodate_overlay_preview_prefers_legacy_versionless_latest_evidence_over_cache(monkeypatch) -> None:
+    latest_payload = {
+        "hakodate_canonical_pipeline": {
+            "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
+            "source": "live_order_facility_source_workbook",
+            "requested_order_id": "ORD_TEST",
+        },
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                    "bbox": [10, 10, 30, 30],
+                }
+            ]
+        },
+        "hakodate_ocr_evidence_records": [{"text": "7", "center": [20, 20], "confidence": 0.9}],
+        "hakodate_overlay": {
+            "uri": "gs://bucket/latest-versionless-overlay.png",
+            "fingerprint": "latest-versionless-fingerprint",
+            "producer": "hakodate_best_method_pipeline",
+        },
+    }
+    stale_cache_payload = {
+        "hakodate_overlay": {
+            "uri": "gs://bucket/stale-cache-overlay.png",
+            "fingerprint": "stale-cache-fingerprint",
+            "producer": "hakodate_best_method_pipeline",
+            "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+        },
+        "hakodate_assignment_preview": {
+            "fingerprint": "stale-cache-fingerprint",
+            "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+            "assignment": {"status": "auto_assignable", "blockers": []},
+        },
+    }
+    monkeypatch.setattr(
+        order_service,
+        "get_latest_ocr_evidence_run",
+        lambda _order_id, backfill_from_cache=False: {"id": "OEV_VERSIONLESS", "payload_json": latest_payload},
+    )
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: stale_cache_payload)
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}")
+    monkeypatch.setattr(
+        order_service,
+        "get_cached_hakodate_assignment_preview",
+        lambda _order_id: {"status": "auto_assignable", "blockers": []},
+    )
+
+    preview = order_service.get_cached_hakodate_overlay_preview("ORD_TEST")
+
+    assert preview["status"] == "ready"
+    assert preview["overlay_uri"] == "gs://bucket/latest-versionless-overlay.png"
+    assert preview["overlay_url"] == "signed:gs://bucket/latest-versionless-overlay.png"
+    assert preview["source_evidence_run_id"] == "OEV_VERSIONLESS"
+    assert preview["latest_hakodate_evidence"] is True
+
+
 def test_hakodate_current_draft_is_rebuilt_when_latest_evidence_exists(monkeypatch) -> None:
     stale_draft = {"draft_sheet_json": {"source": "weekly_menu", "rows": []}}
     rebuilt_draft = {
