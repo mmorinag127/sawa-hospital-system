@@ -483,10 +483,12 @@ def build_best_method_for_manifest_item(
     facility_code = str(item.get("facility_code") or "")
     order_id = str(item.get("order_id") or "")
     pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width)
+    draft_rows = draft_sheet.get("rows") if isinstance(draft_sheet.get("rows"), list) else []
+    max_worksheet_row = ROWS_START + len(draft_rows)
     eval_regions = [
         region
         for region in pre["target_regions"]
-        if ROWS_START <= int(region.get("worksheet_row") or 0)
+        if ROWS_START <= int(region.get("worksheet_row") or 0) < max_worksheet_row
     ]
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
     snapped_regions, snap_debug = _snap_regions_x_to_fax_lines_all_targets(pre["raw_rectified"], eval_regions)
