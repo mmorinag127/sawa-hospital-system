@@ -19019,7 +19019,7 @@ def _build_hakodate_overlay_preview(
     assignment, assignment_error = build_order_hakodate_assignment(
         order_id,
         strategy="hakodate",
-        allow_artifact_repair=True,
+        allow_artifact_repair=False,
     )
     if assignment_error:
         blockers = [assignment_error]
