@@ -6,6 +6,9 @@ opencv-python-headless==4.10.0.84
 numpy==2.0.2
 Pillow==10.4.0
 pypdfium2==4.30.0
-yomitoku
-pytesseract==0.3.13
+torch==2.6.0+cpu; platform_system == "Linux" and platform_machine == "x86_64"
+torch==2.6.0; platform_system != "Linux" or platform_machine != "x86_64"
+torchvision==0.21.0+cpu; platform_system == "Linux" and platform_machine == "x86_64"
+torchvision==0.21.0; platform_system != "Linux" or platform_machine != "x86_64"
+yomitoku==0.9.5
 PyYAML==6.0.2

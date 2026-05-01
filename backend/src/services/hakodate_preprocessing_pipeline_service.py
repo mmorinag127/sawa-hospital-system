@@ -16,6 +16,7 @@ from src.services.hakodate_fixed_quad_registration_service import (
     rectify_fax_to_template_grid,
     render_pdf_page_to_bgr,
     render_template_pdf_to_canvas,
+    resolve_fixed_quad_px_for_manifest_item,
 )
 from src.services.hakodate_step_review_pipeline_service import (
     WEEK_SHEET_NAME,
@@ -266,24 +267,25 @@ def build_hakodate_preprocessing_for_manifest_item(
         facility_id=facility_code,
         week_sheet_name=WEEK_SHEET_NAME,
     )
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
         fax_pdf=item["fax_pdf"],
         template_pdf=item["template_pdf"],
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         manifest_template_bbox=item["template_bbox"],
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         render_width=render_width,
-        quad_source=item.get("quad_source"),
+        quad_source=quad_source,
         output_dir=None,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
     table_bbox = registration.template_outer_grid_bbox_used
     raw_rectified = rectify_fax_to_template_grid(
         original,
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         table_bbox=table_bbox,
         canvas_width=canvas_width,
         canvas_height=canvas_height,
@@ -342,6 +344,7 @@ def build_hakodate_preprocessing_for_manifest_item(
             "merge": merge_evidence,
             "target": target_evidence,
             "x_snap": snap_evidence,
+            "quad_estimate": quad_estimate,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         outputs = {
@@ -356,6 +359,7 @@ def build_hakodate_preprocessing_for_manifest_item(
             "merge": merge_evidence,
             "target": target_evidence,
             "x_snap": snap_evidence,
+            "quad_estimate": quad_estimate,
         }
     quality_gate = {
         "ok": bool(target_cells) and bool(snap_evidence.get("applied")),

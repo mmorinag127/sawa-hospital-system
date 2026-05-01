@@ -245,6 +245,43 @@ def test_facility_template_scan_uses_explicit_facility_source_workbook() -> None
     )
 
 
+def test_facility_template_scan_uses_registered_source_workbook_uri(tmp_path) -> None:
+    source_path = tmp_path / "registered.xlsx"
+    _build_source_workbook(source_path, "4月26日～4月30日")
+    facility = {
+        "facility_id": "FACURI",
+        "facility_name": "登録テンプレート施設",
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+        "order_form_source_workbook_uri": str(source_path),
+    }
+
+    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
+        "4月26日～4月30日",
+    ) == str(source_path)
+
+
+def test_facility_template_scan_month_uri_replaces_default_source(tmp_path) -> None:
+    default_path = tmp_path / "default.xlsx"
+    month_path = tmp_path / "month.xlsx"
+    _build_source_workbook(default_path, "3月22日～3月28日")
+    _build_source_workbook(month_path, "4月26日～4月30日")
+    facility = {
+        "facility_id": "FACURI",
+        "facility_name": "登録テンプレート施設",
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+        "order_form_source_workbook_uri": str(default_path),
+        "order_form_month_source_uris": {
+            "2026-04": str(month_path),
+        },
+    }
+
+    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+        facility,
+        "4月26日～4月30日",
+    ) == str(month_path)
+
+
 def test_build_fax_order_form_excel_uses_explicit_facility_source_workbook(tmp_path, monkeypatch):
     monkeypatch.setattr(
         order_form_service.config_service,

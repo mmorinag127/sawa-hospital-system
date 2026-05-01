@@ -1,17 +1,12 @@
-# OCR Setup (Tesseract + pdfplumber)
+# OCR Setup
 
-1. Install Tesseract with Japanese language data.
-   - macOS (brew): `brew install tesseract-lang`
-   - Ubuntu/Debian: `apt-get install tesseract-ocr tesseract-ocr-jpn`
-2. Set `TESSDATA_PREFIX` (see backend/.env.example).
-3. Install Python deps: `pip install -r backend/requirements.txt` (includes pdfplumber/pytesseract/pillow).
-4. Validate install:
-   - `tesseract --list-langs | grep jpn`
-   - `python -c "import pdfplumber; import pytesseract; print('ok')"`  
-5. Performance tuning:
+1. Install Python deps: `pip install -r backend/requirements.txt`.
+2. Validate install:
+   - `python -c "import pdfplumber; print('ok')"`
+3. Performance tuning:
    - Use retries=3 (default) from env.
    - Prefer exact region extraction via pdfplumber before OCR full-page.
-6. Container builds: ensure OS packages include `libjpeg`, `libpng`, `libtiff`, `poppler-utils` for pdfplumber.
+4. Container builds: ensure OS packages include `poppler-utils` for PDF rendering.
 
 ## Facility OCR Pipeline (Template + ROI)
 

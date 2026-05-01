@@ -19,6 +19,7 @@ from src.services.hakodate_fixed_quad_registration_service import (
     render_pdf_page_to_bgr,
     render_template_pdf_to_canvas,
     rectify_fax_to_template_grid,
+    resolve_fixed_quad_px_for_manifest_item,
 )
 
 
@@ -866,21 +867,23 @@ def build_hakodate_step_review_for_manifest_item(
         template,
         manifest_template_bbox=item["template_bbox"],
     )
+    week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
         facility_id=facility_code,
-        week_sheet_name=WEEK_SHEET_NAME,
+        week_sheet_name=week_sheet_name,
     )
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
     registration, step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
         fax_pdf=item["fax_pdf"],
         template_pdf=item["template_pdf"],
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         manifest_template_bbox=item["template_bbox"],
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         render_width=render_width,
-        quad_source=item.get("quad_source"),
+        quad_source=quad_source,
         output_dir=None,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
@@ -891,7 +894,7 @@ def build_hakodate_step_review_for_manifest_item(
 
     raw_rectified = rectify_fax_to_template_grid(
         original,
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         table_bbox=table_bbox,
         canvas_width=canvas_width,
         canvas_height=canvas_height,
@@ -926,6 +929,7 @@ def build_hakodate_step_review_for_manifest_item(
         "line_extraction": line_evidence,
         "merge": merge_evidence,
         "target": target_evidence,
+        "quad_estimate": quad_estimate,
     }
     details = [
         f"source_template={source_template}",

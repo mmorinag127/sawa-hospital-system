@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from typing import Any, Callable
 
 import cv2
@@ -132,47 +131,6 @@ def _ink_quality(ink_ratio: float, *, min_ratio: float, max_ratio: float) -> flo
         span = max(1e-6, 1.0 - max_ratio)
         return max(0.0, 1.0 - ((ink_ratio - max_ratio) / span))
     return 1.0
-
-
-def _tesseract_qty_fallback_enabled() -> bool:
-    return os.environ.get("OCR_ENABLE_TESSERACT_QTY_FALLBACK", "false").lower() == "true"
-
-
-def _tesseract_digits_text(image: np.ndarray) -> str:
-    if shutil.which("tesseract") is None:
-        return ""
-    try:
-        import pytesseract
-    except Exception:
-        return ""
-
-    gray = _ensure_gray(image)
-    variants = [
-        gray,
-        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1],
-        cv2.adaptiveThreshold(
-            gray,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            31,
-            2,
-        ),
-    ]
-    configs = [
-        "--psm 7 -c tessedit_char_whitelist=0123456789",
-        "--psm 6 -c tessedit_char_whitelist=0123456789",
-    ]
-    best = ""
-    for variant in variants:
-        for cfg in configs:
-            raw = pytesseract.image_to_string(variant, lang="eng", config=cfg).strip()
-            digits = re.sub(r"\D+", "", raw)
-            if digits and len(digits) <= 2:
-                return digits
-            if len(digits) > len(best):
-                best = digits
-    return best[:2]
 
 
 def _tight_crop_to_ink(
@@ -505,9 +463,6 @@ def postprocess_and_retry(
     min_digit_purity = float(post.get("qty_min_digit_purity", 0.5) or 0.5)
     min_ink_ratio = float(post.get("qty_min_ink_ratio", 0.003) or 0.003)
     max_ink_ratio = float(post.get("qty_max_ink_ratio", 0.35) or 0.35)
-    tesseract_min_ink_ratio = float(
-        post.get("qty_tesseract_min_ink_ratio", max(min_ink_ratio, 0.008)) or max(min_ink_ratio, 0.008)
-    )
     reject_multiline_bands = int(post.get("qty_reject_multiline_bands") or 0)
     tight_crop = bool(post.get("qty_tight_crop", True))
     tight_crop_padding_px = int(post.get("qty_tight_crop_padding_px", 3) or 3)
@@ -540,7 +495,6 @@ def postprocess_and_retry(
     metrics = {
         "ocr_calls": 0,
         "retries": 0,
-        "tesseract_qty_calls": 0,
         "accepted_qty_cells": 0,
         "rejected_qty_cells": 0,
         "low_confidence_qty_cells": 0,
@@ -638,51 +592,6 @@ def postprocess_and_retry(
                 min_confidence=min_confidence,
                 high_confidence=high_confidence,
             )
-            if (
-                route.startswith("reject_")
-                and _tesseract_qty_fallback_enabled()
-                and (any(text.strip() for text in raw_texts) or max_seen_ink_ratio >= tesseract_min_ink_ratio)
-            ):
-                tesseract_targets: list[tuple[str, np.ndarray]] = []
-                if variants:
-                    # Prefer the prepared fallback variant before the raw crop.
-                    for variant_label, target in variants:
-                        if target is None or target.size == 0:
-                            continue
-                        if variant_label == "fallback":
-                            tesseract_targets.insert(0, (f"tesseract_{variant_label}", target))
-                        else:
-                            tesseract_targets.append((f"tesseract_{variant_label}", target))
-                seen_tesseract_signatures: set[tuple[tuple[int, ...], int]] = set()
-                for variant_label, target in tesseract_targets:
-                    gray = _ensure_gray(target)
-                    signature = (gray.shape, hash(gray.tobytes()))
-                    if signature in seen_tesseract_signatures:
-                        continue
-                    seen_tesseract_signatures.add(signature)
-                    metrics["tesseract_qty_calls"] += 1
-                    raw_text = _tesseract_digits_text(target).strip()
-                    if raw_text:
-                        raw_texts.append(raw_text)
-                    candidate = _parse_qty_candidate(
-                        raw_text,
-                        qty_re=qty_re,
-                        normalize_fullwidth=normalize_fullwidth,
-                        min_digit_purity=min_digit_purity,
-                    )
-                    if candidate is None:
-                        continue
-                    ink_ratio = _ink_ratio(target)
-                    max_seen_ink_ratio = max(max_seen_ink_ratio, ink_ratio)
-                    candidate["source"] = variant_label
-                    candidate["raw_text"] = raw_text
-                    candidate["ink_ratio"] = ink_ratio
-                    candidate["ink_quality"] = _ink_quality(
-                        ink_ratio,
-                        min_ratio=min_ink_ratio,
-                        max_ratio=max_ink_ratio,
-                    )
-                    candidates.append(candidate)
             best_candidate, route = _choose_qty_candidate(
                 candidates,
                 agree_votes=agree_votes,

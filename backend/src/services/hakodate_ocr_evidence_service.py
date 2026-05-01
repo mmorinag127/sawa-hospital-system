@@ -396,3 +396,4 @@ def sheet_output_from_assigned_results(
             "conflict_cell_count": sum(1 for cell in cells.values() if cell["assignment_state"] == "conflict"),
         },
     }
+

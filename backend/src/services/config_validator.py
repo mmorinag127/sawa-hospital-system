@@ -336,9 +336,9 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     if provider is not None:
         if not isinstance(provider, str):
             errors.append(f"{path}.main_ocr_provider must be a string")
-        elif provider.strip().lower() not in {"pipeline", "tesseract", "openai", "gemini"}:
+        elif provider.strip().lower() not in {"pipeline", "openai", "gemini"}:
             errors.append(
-                f"{path}.main_ocr_provider must be one of pipeline|tesseract|openai|gemini"
+                f"{path}.main_ocr_provider must be one of pipeline|openai|gemini"
             )
     enabled = config.get("openai_ocr_enabled")
     if enabled is not None and not isinstance(enabled, bool):
@@ -405,9 +405,9 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     if quantity_assignment_strategy is not None:
         if not isinstance(quantity_assignment_strategy, str):
             errors.append(f"{path}.quantity_assignment_strategy must be a string")
-        elif quantity_assignment_strategy.strip().lower() not in {"legacy", "hakodate", "both"}:
+        elif quantity_assignment_strategy.strip().lower() != "hakodate":
             errors.append(
-                f"{path}.quantity_assignment_strategy must be one of legacy|hakodate|both"
+                f"{path}.quantity_assignment_strategy must be hakodate"
             )
     hakodate_header_rows = config.get("hakodate_header_rows")
     if hakodate_header_rows is not None and not isinstance(hakodate_header_rows, int):

@@ -17,7 +17,7 @@ from google.cloud import firestore, storage
 from app.issue_detection import detect_table_cell_issues, merge_cell_issues
 from app.page_correction import correct_pdf_for_yomitoku
 from app.pdf_render import render_pdf_to_page_images, render_pdf_to_png_bytes
-from app.postprocess import _tesseract_digits_text, postprocess_and_retry
+from app.postprocess import postprocess_and_retry
 from app.preprocess import build_images_for_match_and_ocr
 from app.quantity_subgrid import build_quantity_subgrid_second_passes
 from app.evidence_manifest import ensure_evidence_manifest
@@ -545,16 +545,14 @@ def _run_template_roi_extraction(
         or os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE)
         or ""
     ).strip().lower()
+    if qty_ocr_engine == "tesseract_digits" or text_ocr_engine == "tesseract_digits":
+        raise RuntimeError("tesseract_digits has been removed")
     if not text_ocr_engine:
-        text_ocr_engine = "skip" if qty_ocr_engine == "tesseract_digits" else "yomitoku"
+        text_ocr_engine = "yomitoku"
 
     def _ocr_fn(image_bgr, _prompt: str, _max_tokens: int) -> str:
-        if _max_tokens <= 32 and qty_ocr_engine == "tesseract_digits":
-            return _tesseract_digits_text(image_bgr)
         if _max_tokens > 32 and text_ocr_engine in {"skip", "none", "disabled", "off"}:
             return ""
-        if _max_tokens > 32 and text_ocr_engine == "tesseract_digits":
-            return _tesseract_digits_text(image_bgr)
         return ocr_image_text(image_bgr, device=YOMITOKU_DEVICE)
 
     roi_result = postprocess_and_retry(

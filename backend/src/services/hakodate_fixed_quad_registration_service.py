@@ -8,6 +8,7 @@ from typing import Any
 import cv2
 import fitz
 import numpy as np
+from PIL import Image
 
 
 FORBIDDEN_DOWNSTREAM_METHODS = [
@@ -37,6 +38,328 @@ class FixedQuadTemplateRegistrationResult:
     legacy_manifest_template_bbox_not_used: list[float]
     forbidden_downstream_methods: list[str]
     outputs: dict[str, str | None]
+
+
+def render_pdf_page_to_rgb_at_dpi(pdf_path: str | Path, *, dpi: int = 220) -> Image.Image:
+    doc = fitz.open(str(pdf_path))
+    if doc.page_count < 1:
+        raise ValueError(f"pdf has no pages: {pdf_path}")
+    page = doc.load_page(0)
+    pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+
+def _edge_locked_binarize(arr: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+
+def _edge_locked_masks(thresholded: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    height, width = thresholded.shape
+    horizontal = cv2.morphologyEx(
+        thresholded,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(28, width // 90), 1)),
+        iterations=1,
+    )
+    vertical = cv2.morphologyEx(
+        thresholded,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(28, height // 90))),
+        iterations=1,
+    )
+    combined = cv2.bitwise_or(horizontal, vertical)
+    combined = cv2.morphologyEx(
+        combined,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+        iterations=1,
+    )
+    combined = cv2.dilate(
+        combined,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+    return horizontal, vertical, combined
+
+
+def _edge_locked_choose_component(combined: np.ndarray) -> tuple[np.ndarray, dict[str, Any], str]:
+    height, width = combined.shape
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats((combined > 0).astype("uint8"), 8)
+    best: dict[str, Any] | None = None
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if w < width * 0.35 or h < height * 0.25 or area < 800:
+            continue
+        score = w * h + area * 8
+        if y < height * 0.03:
+            score *= 0.75
+        row = {
+            "label": int(label),
+            "x": int(x),
+            "y": int(y),
+            "w": int(w),
+            "h": int(h),
+            "area": int(area),
+            "score": float(score),
+        }
+        if best is None or row["score"] > best["score"]:
+            best = row
+    source = "large_grid_component"
+    if best is None:
+        for label in range(1, count):
+            x, y, w, h, area = stats[label]
+            row = {
+                "label": int(label),
+                "x": int(x),
+                "y": int(y),
+                "w": int(w),
+                "h": int(h),
+                "area": int(area),
+                "score": float(area),
+            }
+            if best is None or row["score"] > best["score"]:
+                best = row
+        source = "fallback_largest_component"
+    if best is None:
+        raise ValueError("edge locked grid component not found")
+    return (labels == best["label"]).astype("uint8") * 255, best, source
+
+
+def _edge_locked_order_quad(points: np.ndarray) -> list[np.ndarray]:
+    points = np.asarray(points, float)
+    sums = points.sum(axis=1)
+    diffs = np.diff(points, axis=1).reshape(-1)
+    return [
+        points[np.argmin(sums)],
+        points[np.argmin(diffs)],
+        points[np.argmax(sums)],
+        points[np.argmax(diffs)],
+    ]
+
+
+def _edge_locked_line2(point1: np.ndarray, point2: np.ndarray) -> np.ndarray:
+    point1 = np.asarray(point1, float)
+    point2 = np.asarray(point2, float)
+    vector = point2 - point1
+    norm = np.linalg.norm(vector)
+    return np.array([vector[0] / norm, vector[1] / norm, point1[0], point1[1]], float)
+
+
+def _edge_locked_dist(points: np.ndarray, line: np.ndarray) -> np.ndarray:
+    vx, vy, x0, y0 = line
+    normal = np.array([-vy, vx], float)
+    return (points - np.array([x0, y0], float)) @ normal
+
+
+def _edge_locked_fit(points: np.ndarray, fallback: np.ndarray) -> tuple[np.ndarray, str]:
+    if len(points) >= 30:
+        vx, vy, x0, y0 = cv2.fitLine(
+            np.asarray(points, np.float32),
+            cv2.DIST_L1,
+            0,
+            0.01,
+            0.01,
+        ).flatten()
+        return np.array([vx, vy, x0, y0], float), "fit"
+    return fallback, "fallback"
+
+
+def _edge_locked_intersect(line1: np.ndarray, line2: np.ndarray) -> np.ndarray | None:
+    vx1, vy1, x1, y1 = line1
+    vx2, vy2, x2, y2 = line2
+    matrix = np.array([[vx1, -vx2], [vy1, -vy2]], float)
+    if abs(np.linalg.det(matrix)) < 1e-8:
+        return None
+    t, _ = np.linalg.solve(matrix, np.array([x2 - x1, y2 - y1], float))
+    return np.array([x1 + vx1 * t, y1 + vy1 * t], float)
+
+
+def _edge_locked_line_points(mask: np.ndarray) -> np.ndarray:
+    return np.column_stack(np.where(mask > 0)[::-1]).astype(float)
+
+
+def _edge_locked_refine(
+    component_mask: np.ndarray,
+    horizontal_mask: np.ndarray,
+    vertical_mask: np.ndarray,
+) -> tuple[list[np.ndarray], list[np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, str], dict[str, int]]:
+    ys, xs = np.where(component_mask > 0)
+    points = np.column_stack([xs, ys]).astype(np.float32)
+    initial = _edge_locked_order_quad(cv2.boxPoints(cv2.minAreaRect(points)))
+    top_left, top_right, bottom_right, bottom_left = initial
+    base = {
+        "top": _edge_locked_line2(top_left, top_right),
+        "right": _edge_locked_line2(top_right, bottom_right),
+        "bottom": _edge_locked_line2(bottom_left, bottom_right),
+        "left": _edge_locked_line2(top_left, bottom_left),
+    }
+    horizontal_points = _edge_locked_line_points(cv2.bitwise_and(component_mask, horizontal_mask))
+    vertical_points = _edge_locked_line_points(cv2.bitwise_and(component_mask, vertical_mask))
+    component_points = _edge_locked_line_points(component_mask)
+    refined: dict[str, np.ndarray] = {}
+    sources: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for edge, base_line in base.items():
+        if edge in ("top", "bottom") and len(horizontal_points) > 0:
+            primary = horizontal_points
+        elif edge in ("left", "right") and len(vertical_points) > 0:
+            primary = vertical_points
+        else:
+            primary = component_points
+        # Exact accepted v4 lock: only pixels close to the initial outer edge.
+        distances = np.abs(_edge_locked_dist(primary, base_line))
+        band = 22.0
+        selected = primary[distances <= band]
+        if len(selected) < 30:
+            fallback_distances = np.abs(_edge_locked_dist(component_points, base_line))
+            selected = component_points[fallback_distances <= band]
+        refined[edge], sources[edge] = _edge_locked_fit(selected, base_line)
+        counts[edge] = int(len(selected))
+    quad = [
+        _edge_locked_intersect(refined["top"], refined["left"]),
+        _edge_locked_intersect(refined["top"], refined["right"]),
+        _edge_locked_intersect(refined["bottom"], refined["right"]),
+        _edge_locked_intersect(refined["bottom"], refined["left"]),
+    ]
+    if any(point is None for point in quad):
+        quad = initial
+    return initial, quad, base, refined, sources, counts  # type: ignore[return-value]
+
+
+def _edge_locked_collect(
+    mask: np.ndarray,
+    line: np.ndarray,
+    point1: np.ndarray,
+    point2: np.ndarray,
+    *,
+    search: int = 14,
+    samples: int = 360,
+) -> dict[str, float]:
+    height, width = mask.shape
+    point1 = np.asarray(point1, float)
+    point2 = np.asarray(point2, float)
+    vx, vy, _x0, _y0 = line
+    normal = np.array([-vy, vx], float)
+    normal = normal / (np.linalg.norm(normal) or 1)
+    hits = 0
+    offsets: list[int] = []
+    miss = 0
+    max_miss = 0
+    for index in range(samples):
+        point = point1 * (1 - index / (samples - 1)) + point2 * (index / (samples - 1))
+        found = None
+        for delta in range(-search, search + 1):
+            candidate = point + normal * delta
+            x = int(round(candidate[0]))
+            y = int(round(candidate[1]))
+            if 0 <= x < width and 0 <= y < height and mask[y, x] > 0:
+                found = delta
+                break
+        if found is None:
+            miss += 1
+            max_miss = max(max_miss, miss)
+        else:
+            hits += 1
+            offsets.append(abs(found))
+            miss = 0
+    line_length = float(np.linalg.norm(point2 - point1))
+    return {
+        "hit_rate": round(hits / samples, 4),
+        "mean_abs_offset_px": round(float(np.mean(offsets)) if offsets else 999, 3),
+        "max_abs_offset_px": round(float(np.max(offsets)) if offsets else 999, 3),
+        "gap_max_px_est": round(max_miss * line_length / max(1, samples - 1), 1),
+    }
+
+
+def _edge_locked_validate(
+    horizontal_mask: np.ndarray,
+    vertical_mask: np.ndarray,
+    combined_mask: np.ndarray,
+    quad: list[np.ndarray],
+    lines: dict[str, np.ndarray],
+) -> dict[str, dict[str, float]]:
+    top_left, top_right, bottom_right, bottom_left = quad
+    return {
+        "top": _edge_locked_collect(cv2.bitwise_or(horizontal_mask, combined_mask), lines["top"], top_left, top_right),
+        "right": _edge_locked_collect(cv2.bitwise_or(vertical_mask, combined_mask), lines["right"], top_right, bottom_right),
+        "bottom": _edge_locked_collect(
+            cv2.bitwise_or(horizontal_mask, combined_mask),
+            lines["bottom"],
+            bottom_left,
+            bottom_right,
+        ),
+        "left": _edge_locked_collect(cv2.bitwise_or(vertical_mask, combined_mask), lines["left"], top_left, bottom_left),
+    }
+
+
+def _edge_locked_reasons(
+    metrics: dict[str, dict[str, float]],
+    edge_sources: dict[str, str],
+    component_source: str,
+) -> list[str]:
+    reasons: list[str] = []
+    if component_source != "large_grid_component":
+        reasons.append(component_source)
+    for edge, metric in metrics.items():
+        if edge_sources.get(edge) != "fit":
+            reasons.append(f"{edge}_line_not_refit")
+        if metric["hit_rate"] < 0.78:
+            reasons.append(f"{edge}_hit_rate_low:{metric['hit_rate']}")
+        if metric["mean_abs_offset_px"] > 4.5:
+            reasons.append(f"{edge}_offset_high:{metric['mean_abs_offset_px']}")
+        if metric["gap_max_px_est"] > 140:
+            reasons.append(f"{edge}_gap_large:{metric['gap_max_px_est']}")
+    return reasons
+
+
+def estimate_edge_locked_quad_from_pdf(
+    pdf_path: str | Path,
+    *,
+    dpi: int = 220,
+) -> dict[str, Any]:
+    image = render_pdf_page_to_rgb_at_dpi(pdf_path, dpi=dpi)
+    arr = np.array(image)
+    thresholded = _edge_locked_binarize(arr)
+    horizontal_mask, vertical_mask, combined_mask = _edge_locked_masks(thresholded)
+    component_mask, component, component_source = _edge_locked_choose_component(combined_mask)
+    initial, refined, _base, refined_lines, edge_sources, edge_point_counts = _edge_locked_refine(
+        component_mask,
+        horizontal_mask,
+        vertical_mask,
+    )
+    metrics = _edge_locked_validate(horizontal_mask, vertical_mask, combined_mask, refined, refined_lines)
+    reasons = _edge_locked_reasons(metrics, edge_sources, component_source)
+    shift = {
+        key: round(float(np.linalg.norm(np.asarray(refined[index]) - np.asarray(initial[index]))), 2)
+        for index, key in enumerate(["TL", "TR", "BR", "BL"])
+    }
+    return {
+        "status": "ok" if not reasons else "ng",
+        "reasons": reasons,
+        "component_source": component_source,
+        "component": component,
+        "edge_sources": edge_sources,
+        "edge_point_counts": edge_point_counts,
+        "initial_quad_px": [[round(float(x), 2), round(float(y), 2)] for x, y in initial],
+        "refined_quad_px": [[round(float(x), 2), round(float(y), 2)] for x, y in refined],
+        "corner_shift_px": shift,
+        "metrics": metrics,
+    }
+
+
+def resolve_fixed_quad_px_for_manifest_item(item: dict[str, Any]) -> tuple[list[list[float]], str, dict[str, Any] | None]:
+    quad = item.get("quad_px")
+    if isinstance(quad, list) and len(quad) == 4:
+        return quad, str(item.get("quad_source") or "manifest_quad_px"), None
+    pdf_path = item.get("fax_pdf") or item.get("local_pdf")
+    if not pdf_path:
+        raise ValueError("quad_px missing and fax_pdf/local_pdf unavailable")
+    estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220)
+    if estimate["status"] != "ok":
+        raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
+    return estimate["refined_quad_px"], "edge_locked_v4_estimated_from_fax_pdf", estimate
 
 
 def load_fixed_quad_manifest_item(
@@ -303,7 +626,7 @@ def build_fixed_quad_template_registration(
     order_id: str,
     fax_pdf: str,
     template_pdf: str,
-    quad_px: list[list[float]],
+    quad_px: list[list[float]] | None,
     manifest_template_bbox: list[float],
     canvas_width: int,
     canvas_height: int,
@@ -311,6 +634,13 @@ def build_fixed_quad_template_registration(
     quad_source: str | None = None,
     output_dir: Path | None = None,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
+    if quad_px is None:
+        estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220)
+        if estimate["status"] != "ok":
+            raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
+        quad_px = estimate["refined_quad_px"]
+        if quad_source is None:
+            quad_source = "edge_locked_v4_estimated_from_fax_pdf"
     original = render_pdf_page_to_bgr(fax_pdf, width=render_width)
     template = render_template_pdf_to_canvas(
         template_pdf,

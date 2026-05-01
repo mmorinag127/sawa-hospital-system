@@ -107,6 +107,76 @@ def test_persist_evidence_run_dedupes_identical_payload_digest():
     assert third["artifact_digest"] != first["artifact_digest"]
 
 
+def test_persist_evidence_run_does_not_dedupe_different_record_identity_for_same_digest():
+    order_service.clear_all()
+    order = _seed_order("msg-evidence-dedupe-identity")
+
+    legacy = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v1_legacy",
+        producer_version="legacy-cache-mirror/v1",
+        source="legacy-cache-mirror",
+    )
+    hakodate = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v2_hakodate_evidence_rerun",
+        producer_version="hakodate_best_method_pipeline",
+        source="ocr-rerun-hakodate",
+    )
+
+    assert isinstance(legacy, dict)
+    assert isinstance(hakodate, dict)
+    assert legacy["artifact_digest"] == hakodate["artifact_digest"]
+    assert legacy["id"] != hakodate["id"]
+    assert hakodate["created"] is True
+
+
+def test_save_order_ocr_cache_does_not_create_legacy_mirror_for_hakodate_payload():
+    order_service.clear_all()
+    order = _seed_order("msg-hakodate-cache-no-legacy-mirror")
+    payload = {
+        "status": "done",
+        "stage": "done",
+        "engine": "hakodate_best_method_pipeline",
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "target_cell_id": "D11",
+                    "sheet_cell": "D11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 4,
+                    "semantic_field": "qty.regular_2f",
+                    "bbox": [90.0, 190.0, 110.0, 210.0],
+                    "center": [100.0, 200.0],
+                    "source": "hakodate_best_method_pipeline",
+                }
+            ]
+        },
+        "hakodate_ocr_evidence_records": [
+            {
+                "evidence_id": "hakodate-cell-1",
+                "text": "9",
+                "normalized_value": "9",
+                "center": [100.0, 200.0],
+                "engine": "yomitoku_contact_sheet_batch",
+                "source_scope": "hakodate_cell_crop_batch",
+            }
+        ],
+    }
+
+    order_service._save_order_ocr_cache(  # noqa: SLF001
+        order["id"],
+        payload,
+        augment_hakodate_artifacts=False,
+        persist_evidence=True,
+        refresh_workflow=False,
+    )
+
+    assert ocr_evidence_service.get_latest_evidence_run(order["id"]) is None
+
+
 def test_classify_evidence_payload_marks_failed_partial_output_unpersistable():
     result = ocr_evidence_service.classify_evidence_payload(
         {
@@ -130,6 +200,70 @@ def test_classify_evidence_payload_marks_empty_done_output_unpersistable():
             "stage": "done",
             "input_reference": "gs://bucket/input.pdf",
             "output_reference": "gs://bucket/output.json",
+        }
+    )
+
+    assert result["persistable"] is False
+    assert result["error"] == "evidence_unusable"
+
+
+def test_classify_evidence_payload_accepts_hakodate_live_artifacts():
+    result = ocr_evidence_service.classify_evidence_payload(
+        {
+            "status": "done",
+            "stage": "done",
+            "engine": "hakodate_best_method_pipeline",
+            "hakodate_preprocessing": {
+                "target_cell_map": [
+                    {
+                        "target_cell_id": "D11",
+                        "sheet_cell": "D11",
+                        "worksheet_row": 11,
+                        "worksheet_col": 4,
+                        "semantic_field": "qty.regular_2f",
+                        "bbox": [90.0, 190.0, 110.0, 210.0],
+                        "center": [100.0, 200.0],
+                        "source": "hakodate_best_method_pipeline",
+                    }
+                ]
+            },
+            "hakodate_ocr_evidence_records": [
+                {
+                    "evidence_id": "hakodate-cell-1",
+                    "text": "9",
+                    "normalized_value": "9",
+                    "center": [100.0, 200.0],
+                    "engine": "yomitoku_contact_sheet_batch",
+                    "source_scope": "hakodate_cell_crop_batch",
+                }
+            ],
+        }
+    )
+
+    assert result["persistable"] is True
+
+
+def test_classify_evidence_payload_rejects_hakodate_target_map_without_ocr_evidence():
+    result = ocr_evidence_service.classify_evidence_payload(
+        {
+            "status": "done",
+            "stage": "done",
+            "engine": "hakodate_best_method_pipeline",
+            "hakodate_preprocessing": {
+                "target_cell_map": [
+                    {
+                        "target_cell_id": "D11",
+                        "sheet_cell": "D11",
+                        "worksheet_row": 11,
+                        "worksheet_col": 4,
+                        "semantic_field": "qty.regular_2f",
+                        "bbox": [90.0, 190.0, 110.0, 210.0],
+                        "center": [100.0, 200.0],
+                        "source": "hakodate_best_method_pipeline",
+                    }
+                ]
+            },
+            "hakodate_ocr_evidence_records": [],
         }
     )
 

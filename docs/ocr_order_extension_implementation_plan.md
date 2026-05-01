@@ -224,7 +224,7 @@
 
 #### 実装内容
 - 施設設定に以下を追加:
-  - `main_ocr_provider: openai|pipeline|tesseract`
+  - `main_ocr_provider: openai|pipeline`
   - `openai_ocr_enabled: true|false`
   - `openai_ocr_model`（例: `gpt-4.1-mini` / `gpt-4.1` など）
   - `openai_ocr_prompt`（施設固有プロンプト）

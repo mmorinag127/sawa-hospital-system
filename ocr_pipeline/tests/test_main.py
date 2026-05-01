@@ -81,7 +81,6 @@ def _install_stub_modules() -> None:
     sys.modules.setdefault("app.pdf_render", pdf_render_module)
 
     postprocess_module = types.ModuleType("app.postprocess")
-    postprocess_module._tesseract_digits_text = lambda *args, **kwargs: ""
     postprocess_module.postprocess_and_retry = lambda *args, **kwargs: {}
     sys.modules.setdefault("app.postprocess", postprocess_module)
 
@@ -266,23 +265,16 @@ class MainArtifactTests(unittest.TestCase):
         self.assertIsNone(uri)
         upload_mock.assert_not_called()
 
-    def test_template_roi_extraction_skips_large_text_ocr_when_qty_uses_tesseract(self):
+    def test_template_roi_extraction_rejects_removed_qty_engine(self):
         sample_image = object()
-        captured: dict[str, object] = {}
 
         def _fake_postprocess_and_retry(*, rois, tpl_cfg, ocr_fn, base_prompt=""):  # noqa: ARG001
-            captured["qty"] = ocr_fn(sample_image, "", 32)
-            captured["menu"] = ocr_fn(sample_image, "", 512)
             return {"qty": {}, "qty_row_order": [], "qty_col_order": []}
 
         with mock.patch.object(pipeline_main, "ocr_image_words", return_value=[]), mock.patch.object(
             pipeline_main,
             "crop_rois",
             return_value={"qty_cells": [], "qty_schema": {"rows": 0, "cols": 0}},
-        ), mock.patch.object(
-            pipeline_main,
-            "_tesseract_digits_text",
-            return_value="42",
         ), mock.patch.object(
             pipeline_main,
             "ocr_image_text",
@@ -292,18 +284,15 @@ class MainArtifactTests(unittest.TestCase):
             "postprocess_and_retry",
             side_effect=_fake_postprocess_and_retry,
         ):
-            result = pipeline_main._run_template_roi_extraction(
-                template_context={
-                    "template_id": "tpl-test",
-                    "template": {"postprocess": {"qty_ocr_engine": "tesseract_digits"}},
-                    "warped_ocr_bgr": sample_image,
-                }
-            )
-
-        self.assertEqual(captured["qty"], "42")
-        self.assertEqual(captured["menu"], "")
+            with self.assertRaisesRegex(RuntimeError, "removed"):
+                pipeline_main._run_template_roi_extraction(
+                    template_context={
+                        "template_id": "tpl-test",
+                        "template": {"postprocess": {"qty_ocr_engine": "tesseract_digits"}},
+                        "warped_ocr_bgr": sample_image,
+                    }
+                )
         ocr_text_mock.assert_not_called()
-        self.assertEqual(result["template_id"], "tpl-test")
 
     def test_template_roi_extraction_can_force_large_text_ocr_engine(self):
         sample_image = object()
@@ -320,10 +309,6 @@ class MainArtifactTests(unittest.TestCase):
             return_value={"qty_cells": [], "qty_schema": {"rows": 0, "cols": 0}},
         ), mock.patch.object(
             pipeline_main,
-            "_tesseract_digits_text",
-            return_value="42",
-        ), mock.patch.object(
-            pipeline_main,
             "ocr_image_text",
             return_value="menu-text",
         ) as ocr_text_mock, mock.patch.object(
@@ -336,7 +321,7 @@ class MainArtifactTests(unittest.TestCase):
                     "template_id": "tpl-test",
                     "template": {
                         "postprocess": {
-                            "qty_ocr_engine": "tesseract_digits",
+                            "qty_ocr_engine": "yomitoku",
                             "text_ocr_engine": "yomitoku",
                         }
                     },
@@ -344,9 +329,9 @@ class MainArtifactTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(captured["qty"], "42")
+        self.assertEqual(captured["qty"], "menu-text")
         self.assertEqual(captured["menu"], "menu-text")
-        ocr_text_mock.assert_called_once_with(sample_image, device=pipeline_main.YOMITOKU_DEVICE)
+        self.assertEqual(ocr_text_mock.call_count, 2)
         self.assertEqual(result["template_id"], "tpl-test")
 
     def test_template_roi_extraction_skips_ocr_words_when_column_edges_are_defined(self):

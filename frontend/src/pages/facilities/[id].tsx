@@ -112,12 +112,14 @@ export default function FacilityConfigPage() {
   const [geminiOcrModel, setGeminiOcrModel] = useState<string>("");
   const [geminiOcrPrompt, setGeminiOcrPrompt] = useState<string>("");
   const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("pipeline");
-  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<string>("legacy");
+  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<string>("hakodate");
   const [hakodateHeaderRows, setHakodateHeaderRows] = useState<string>("");
   const [hakodateOcrResolution, setHakodateOcrResolution] = useState<string>("");
   const [hakodateMinEdgeMarginRatio, setHakodateMinEdgeMarginRatio] = useState<string>("");
   const [largeCellMode, setLargeCellMode] = useState<boolean>(false);
   const [menuOverrideTags, setMenuOverrideTags] = useState<string>("");
+  const [sourceWorkbookMonthId, setSourceWorkbookMonthId] = useState<string>("");
+  const [sourceWorkbookUploading, setSourceWorkbookUploading] = useState<boolean>(false);
 
   const loadFacility = async () => {
     if (!id || Array.isArray(id)) return;
@@ -165,12 +167,7 @@ export default function FacilityConfigPage() {
           ? geminiFallback.trim().toLowerCase()
           : "pipeline"
       );
-      const rawQuantityStrategy = parseConfigString(configRecord.quantity_assignment_strategy, "legacy")
-        .trim()
-        .toLowerCase();
-      setQuantityAssignmentStrategy(
-        ["legacy", "hakodate", "both"].includes(rawQuantityStrategy) ? rawQuantityStrategy : "legacy"
-      );
+      setQuantityAssignmentStrategy("hakodate");
       setHakodateHeaderRows(parseConfigNumberText(configRecord.hakodate_header_rows));
       setHakodateOcrResolution(parseConfigNumberText(configRecord.hakodate_ocr_resolution));
       setHakodateMinEdgeMarginRatio(parseConfigNumberText(configRecord.hakodate_min_edge_margin_ratio));
@@ -282,7 +279,7 @@ export default function FacilityConfigPage() {
       } else {
         delete nextConfig.gemini_ocr_fallback_provider;
       }
-      nextConfig.quantity_assignment_strategy = quantityAssignmentStrategy || "legacy";
+      nextConfig.quantity_assignment_strategy = "hakodate";
       const parsedHakodateHeaderRows = Number.parseInt(hakodateHeaderRows, 10);
       if (Number.isFinite(parsedHakodateHeaderRows) && parsedHakodateHeaderRows >= 0) {
         nextConfig.hakodate_header_rows = parsedHakodateHeaderRows;
@@ -346,6 +343,35 @@ export default function FacilityConfigPage() {
       setMessage("Config loaded from file.");
     };
     reader.readAsText(file);
+  };
+
+  const uploadSourceWorkbook = async (file: File | null) => {
+    if (!facility || !file) return;
+    const form = new FormData();
+    form.append("file", file);
+    if (sourceWorkbookMonthId.trim()) {
+      form.append("month_id", sourceWorkbookMonthId.trim());
+    }
+    setSourceWorkbookUploading(true);
+    setMessage("");
+    try {
+      const res = await apiClient.post(`/facilities/${facility.id}/order-form-source-workbook`, form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      if (res.data?.resolved_config) {
+        setResolvedText(prettyJson(res.data.resolved_config));
+      }
+      const nextConfig = res.data?.config || res.data?.resolved_config;
+      if (nextConfig) {
+        setConfigText(prettyJson(nextConfig));
+      }
+      setMessage("施設テンプレートExcelを登録しました。次回OCR再実行からこのExcelを使います。");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setMessage(typeof detail === "string" ? detail : "施設テンプレートExcelの登録に失敗しました。");
+    } finally {
+      setSourceWorkbookUploading(false);
+    }
   };
 
   return (
@@ -419,6 +445,30 @@ export default function FacilityConfigPage() {
               </label>
               <p className="subtle">注文書自動生成とOCR補正の既定パターンです。</p>
               <label className="field">
+                <span className="field-label">施設テンプレートExcel</span>
+                <input
+                  className="input"
+                  type="file"
+                  accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                  onChange={(e) => void uploadSourceWorkbook(e.target.files?.[0] || null)}
+                  disabled={sourceWorkbookUploading}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">月指定（任意: YYYY-MM）</span>
+                <input
+                  className="input"
+                  value={sourceWorkbookMonthId}
+                  onChange={(e) => setSourceWorkbookMonthId(e.target.value)}
+                  placeholder="例: 2026-04。空なら施設の既定テンプレートとして登録"
+                  disabled={sourceWorkbookUploading}
+                />
+              </label>
+              <p className="subtle">
+                登録すると `order_form_source_workbook_uri` または `order_form_month_source_uris` が更新されます。
+                同じ施設でテンプレートが変わった場合は、新しいExcelを再登録すれば置き換わります。
+              </p>
+              <label className="field">
                 <span className="field-label">Menu Override Tags</span>
                 <input
                   className="input"
@@ -440,7 +490,6 @@ export default function FacilityConfigPage() {
                   onChange={(e) => setMainOcrProvider(e.target.value)}
                 >
                   <option value="pipeline">pipeline (default)</option>
-                  <option value="tesseract">tesseract</option>
                   <option value="openai">openai</option>
                   <option value="gemini">gemini</option>
                 </select>
@@ -523,17 +572,9 @@ export default function FacilityConfigPage() {
               </label>
               <label className="field">
                 <span className="field-label">Quantity Assignment Strategy</span>
-                <select
-                  className="input"
-                  value={quantityAssignmentStrategy}
-                  onChange={(e) => setQuantityAssignmentStrategy(e.target.value)}
-                >
-                  <option value="legacy">legacy: 現行方式</option>
-                  <option value="hakodate">hakodate: 箱館方式</option>
-                  <option value="both">both: 比較/監査用</option>
-                </select>
+                <div className="input" aria-readonly="true">{quantityAssignmentStrategy}: 箱館方式</div>
                 <span className="subtle">
-                  シート構造への数量割当方式です。通常の反映を変えずに比較する場合は both を使います。
+                  シート構造への数量割当方式は箱館方式に固定されています。
                 </span>
               </label>
               <label className="field">

@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 import json
+import os
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -15,12 +17,14 @@ from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 
 from src.services import hakodate_assignment_service
+from src.services.storage_service import load_bytes_from_uri
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
     extract_template_axes_from_image,
     rectify_fax_to_template_grid,
     render_pdf_page_to_bgr,
     render_template_pdf_to_canvas,
+    resolve_fixed_quad_px_for_manifest_item,
 )
 from src.services.hakodate_step_review_pipeline_service import (
     TARGET_RULE,
@@ -41,6 +45,8 @@ from src.services.hakodate_step_review_pipeline_service import (
 
 DEFAULT_CELL_OCR_ENGINE = "yomitoku_contact_sheet_batch"
 _FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９，．", "0123456789,.")
+_LOCAL_YOMITOKU_ANALYZER = None
+_LOCAL_YOMITOKU_ANALYZER_KEY: tuple[str, bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -238,16 +244,194 @@ def build_cell_contact_sheet(
 
 
 def _workspace_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    path = Path(__file__).resolve()
+    for candidate in (path.parents[3], path.parents[2]):
+        if (candidate / "tmp" / "hakodate_text_recognizer_trial_20260428").exists():
+            return candidate
+    for candidate in (path.parents[3], path.parents[2]):
+        if (candidate / "tmp").exists() or (candidate / "backend").exists():
+            return candidate
+    return path.parents[2]
 
 
 def _load_yomitoku_ocr_words():
     ocr_pipeline_root = _workspace_root() / "ocr_pipeline"
     if str(ocr_pipeline_root) not in sys.path:
         sys.path.insert(0, str(ocr_pipeline_root))
-    from app.yomitoku_runner import ocr_image_words  # noqa: PLC0415
+    try:
+        from app.yomitoku_runner import ocr_image_words  # noqa: PLC0415
 
-    return ocr_image_words
+        return ocr_image_words
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"app", "app.yomitoku_runner"}:
+            raise
+    return _local_yomitoku_ocr_words
+
+
+def _coerce_jsonable(value: object) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _coerce_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_jsonable(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _coerce_jsonable(value.tolist())
+        except Exception:
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _serialize_yomitoku_results(results: object) -> dict[str, Any] | None:
+    if isinstance(results, dict):
+        return _coerce_jsonable(results)
+    for method_name, kwargs in (
+        ("model_dump", {"mode": "python"}),
+        ("model_dump", {}),
+        ("to_dict", {}),
+        ("dict", {}),
+        ("to_json", {}),
+        ("json", {}),
+    ):
+        method = getattr(results, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            serialized = method(**kwargs)
+        except TypeError:
+            try:
+                serialized = method()
+            except Exception:
+                continue
+        except Exception:
+            continue
+        if isinstance(serialized, str):
+            try:
+                serialized = json.loads(serialized)
+            except Exception:
+                continue
+        if isinstance(serialized, dict):
+            return _coerce_jsonable(serialized)
+    return None
+
+
+def _normalize_yomitoku_box(box: object, *, width: int, height: int) -> list[float] | None:
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(item) for item in box]
+    except Exception:
+        return None
+    if max(abs(x0), abs(y0), abs(x1), abs(y1)) > 1.0:
+        if width <= 0 or height <= 0:
+            return None
+        x0 /= float(width)
+        x1 /= float(width)
+        y0 /= float(height)
+        y1 /= float(height)
+    x0 = max(0.0, min(1.0, x0))
+    x1 = max(0.0, min(1.0, x1))
+    y0 = max(0.0, min(1.0, y0))
+    y1 = max(0.0, min(1.0, y1))
+    return [x0, y0, x1, y1]
+
+
+def _center_from_yomitoku_points(points: object) -> tuple[float, float] | None:
+    if not isinstance(points, list) or not points:
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            xs.append(float(point[0]))
+            ys.append(float(point[1]))
+        except Exception:
+            continue
+    if not xs or not ys:
+        return None
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def _analysis_to_yomitoku_words(
+    analysis: dict[str, Any] | None,
+    *,
+    width: int,
+    height: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(analysis, dict):
+        return []
+    raw_words = analysis.get("words")
+    if not isinstance(raw_words, list):
+        return []
+    words: list[dict[str, Any]] = []
+    for raw_word in raw_words:
+        if not isinstance(raw_word, dict):
+            continue
+        text = str(raw_word.get("content") or raw_word.get("contents") or "").strip()
+        if not text:
+            continue
+        box = _normalize_yomitoku_box(raw_word.get("box"), width=width, height=height)
+        if box is not None:
+            x_center = (box[0] + box[2]) / 2.0
+            y_center = (box[1] + box[3]) / 2.0
+        else:
+            center = _center_from_yomitoku_points(raw_word.get("points"))
+            if center is None or width <= 0 or height <= 0:
+                continue
+            x_center = center[0] / float(width)
+            y_center = center[1] / float(height)
+        words.append(
+            {
+                "text": text,
+                "x": max(0.0, min(1.0, float(x_center))),
+                "y": max(0.0, min(1.0, float(y_center))),
+                "box": box,
+            }
+        )
+    return words
+
+
+def _get_local_yomitoku_analyzer(device: str, visualize: bool):
+    global _LOCAL_YOMITOKU_ANALYZER  # noqa: PLW0603
+    global _LOCAL_YOMITOKU_ANALYZER_KEY  # noqa: PLW0603
+    key = (device, visualize)
+    if _LOCAL_YOMITOKU_ANALYZER is not None and _LOCAL_YOMITOKU_ANALYZER_KEY == key:
+        return _LOCAL_YOMITOKU_ANALYZER
+    if not os.getenv("HF_HOME"):
+        os.environ["HF_HOME"] = "/tmp/hf"
+    from yomitoku import DocumentAnalyzer  # noqa: PLC0415
+
+    configs = {
+        "ocr": {
+            "text_detector": {},
+            "text_recognizer": {},
+        },
+        "layout_analyzer": {
+            "layout_parser": {},
+            "table_structure_recognizer": {},
+        },
+    }
+    _LOCAL_YOMITOKU_ANALYZER = DocumentAnalyzer(configs=configs, device=device, visualize=visualize)
+    _LOCAL_YOMITOKU_ANALYZER_KEY = key
+    return _LOCAL_YOMITOKU_ANALYZER
+
+
+def _local_yomitoku_ocr_words(image_bgr: np.ndarray, *, device: str) -> list[dict[str, Any]]:
+    if image_bgr.ndim == 2:
+        image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+    analyzer = _get_local_yomitoku_analyzer(device, False)
+    results, _ocr_vis, _layout_vis = analyzer(image_bgr)
+    analysis = _serialize_yomitoku_results(results)
+    height, width = image_bgr.shape[:2]
+    return _analysis_to_yomitoku_words(analysis, width=width, height=height)
 
 
 def _words_to_region_text(words: list[dict[str, Any]]) -> str:
@@ -573,8 +757,7 @@ def draw_ocr_results_overlay(
     image = target_overlay.convert("RGBA")
     layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    font = _load_overlay_font(19)
-    small_font = _load_overlay_font(13)
+    font = _load_overlay_font(20)
     for region in ocr_regions:
         value = str(region.get("ocr_normalized") or region.get("ocr_text") or "").strip()
         if not value:
@@ -588,17 +771,14 @@ def draw_ocr_results_overlay(
         label = value[:12]
         try:
             text_box = draw.textbbox((0, 0), label, font=font)
-            text_w = max(28, text_box[2] - text_box[0] + 10)
-            text_h = max(22, text_box[3] - text_box[1] + 8)
+            text_w = max(1, text_box[2] - text_box[0])
+            text_h = max(1, text_box[3] - text_box[1])
         except Exception:
-            text_w = 42
-            text_h = 24
-        tx0 = min(max(cx + 8, 0), max(0, image.width - text_w - 1))
-        ty0 = min(max(cy - text_h // 2, 0), max(0, image.height - text_h - 1))
-        draw.rectangle((tx0, ty0, tx0 + text_w, ty0 + text_h), fill=(255, 255, 220, 235), outline=(220, 0, 0, 230))
-        _draw_text_safe(draw, (tx0 + 5, ty0 + 3), label, fill=(210, 0, 0, 255), font=font)
-        if len(region.get("logical_targets") or []) > 1:
-            _draw_text_safe(draw, (tx0 + 5, ty0 + text_h - 13), "merged", fill=(0, 80, 180, 230), font=small_font)
+            text_w = 28
+            text_h = 20
+        tx0 = min(max(cx + 12, 0), max(0, image.width - text_w - 1))
+        ty0 = min(max(cy - text_h - 8, 0), max(0, image.height - text_h - 1))
+        _draw_text_safe(draw, (tx0, ty0), label, fill=(220, 0, 0, 255), font=font)
     return Image.alpha_composite(image, layer).convert("RGB")
 
 
@@ -620,6 +800,75 @@ def _run_yomitoku_contact_sheet(contact_sheet: Image.Image, *, device: str) -> t
     }
 
 
+def build_hakodate_best_method_for_manifest_item(
+    *,
+    item: dict[str, Any],
+    page: int,
+    draft_sheet: dict[str, Any],
+    output_dir: Path,
+    render_width: int = 1864,
+) -> tuple[HakodateCellOcrCaseResult, Image.Image]:
+    """Production-compatible entry point for the accepted Hakodate cell OCR pipeline.
+
+    Keep the live entry point on the same accepted runtime that produced the
+    locally reviewed best_method overlay/records artifacts. Path materialization
+    is handled before dispatch; the accepted runtime logic itself is unchanged.
+    """
+    runtime_item = _materialize_best_method_item_paths(item=item, output_dir=output_dir)
+    from src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities import (
+        build_best_method_for_manifest_item,
+    )
+
+    summary, review_page = build_best_method_for_manifest_item(
+        item=runtime_item,
+        page_index=page,
+        draft_sheet=draft_sheet,
+        output_dir=output_dir,
+        render_width=render_width,
+    )
+    outputs = {
+        key: str(value)
+        for key, value in (summary.get("outputs") or {}).items()
+        if value is not None
+    }
+    metrics = dict(summary.get("metrics") or {})
+    result = HakodateCellOcrCaseResult(
+        page=page,
+        facility_code=str(runtime_item.get("facility_code") or ""),
+        order_id=str(runtime_item.get("order_id") or ""),
+        fax_pdf=str(runtime_item.get("fax_pdf") or ""),
+        template_pdf=str(runtime_item.get("template_pdf") or ""),
+        source_template=str(summary.get("source_template") or ""),
+        ocr_engine=str(summary.get("engine") or "opencv_knn_leave_one_out_k5"),
+        target_rule=TARGET_RULE,
+        physical_region_count=int(metrics.get("numeric_eval_cell_count") or 0),
+        logical_assignment_count=int(metrics.get("numeric_eval_cell_count") or 0),
+        recognized_region_count=int(metrics.get("pred_nonempty_count") or 0),
+        recognized_assignment_count=int(metrics.get("pred_nonempty_count") or 0),
+        metrics=metrics,
+        outputs=outputs,
+    )
+    return result, review_page
+
+
+def _materialize_best_method_item_paths(*, item: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    """Resolve deployment/storage paths only; keep the accepted OCR runtime logic untouched."""
+    resolved = dict(item)
+    materialized_dir = output_dir / "_inputs"
+    for key, suffix in (("fax_pdf", ".pdf"), ("template_pdf", ".pdf"), ("step2_png", ".png")):
+        raw = str(resolved.get(key) or "").strip()
+        if not raw or Path(raw).exists():
+            continue
+        parsed = urlparse(raw)
+        if parsed.scheme not in {"gs", "file"}:
+            continue
+        materialized_dir.mkdir(parents=True, exist_ok=True)
+        target = materialized_dir / f"{key}{suffix}"
+        target.write_bytes(load_bytes_from_uri(raw))
+        resolved[key] = str(target)
+    return resolved
+
+
 def _build_preprocess_for_ocr(
     *,
     item: dict[str, Any],
@@ -637,28 +886,30 @@ def _build_preprocess_for_ocr(
         template,
         manifest_template_bbox=item["template_bbox"],
     )
+    week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
         facility_id=facility_code,
-        week_sheet_name=WEEK_SHEET_NAME,
+        week_sheet_name=week_sheet_name,
     )
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
         fax_pdf=item["fax_pdf"],
         template_pdf=item["template_pdf"],
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         manifest_template_bbox=item["template_bbox"],
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         render_width=render_width,
-        quad_source=item.get("quad_source"),
+        quad_source=quad_source,
         output_dir=None,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
     table_bbox = registration.template_outer_grid_bbox_used
     raw_rectified = rectify_fax_to_template_grid(
         original,
-        quad_px=item["quad_px"],
+        quad_px=quad_px,
         table_bbox=table_bbox,
         canvas_width=canvas_width,
         canvas_height=canvas_height,
@@ -691,12 +942,15 @@ def _build_preprocess_for_ocr(
         "worksheet": worksheet,
         "raw_rectified": raw_rectified,
         "target_regions": target_regions,
+        "rectified_quad_points": rectified_quad_points,
+        "template_outer_grid_bbox_used": table_bbox,
         "target_overlay": _draw_quad_points(target_overlay, rectified_quad_points, prefix="Q"),
         "source_template": _source_template_name(facility_code),
         "axis_evidence": {
             **axis_evidence,
             "merge": merge_evidence,
             "target": target_evidence,
+            "quad_estimate": quad_estimate,
         },
     }
 
@@ -772,7 +1026,7 @@ def build_hakodate_cell_ocr_for_manifest_item(
             f"recognized={len(recognized_regions)} logical_recognized={len(recognized_assignments)} "
             f"ocr_sec={ocr_metrics['ocr_seconds']}"
         ),
-        "red centers: OCR target cells / yellow labels: yomitoku OCR result assigned by contact-sheet slot",
+        "red centers: OCR target cells / red digit labels: OCR result assigned by contact-sheet slot",
     ]
     review_page = _make_review_canvas(
         title="Hakodate cell OCR result on target red points",

@@ -1402,6 +1402,727 @@ def test_get_ocr_pages_preview_only_uses_structured_tables_without_loading_markd
     ]
 
 
+def test_get_ocr_pages_does_not_run_heavy_cache_side_effects(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-light-read-001")
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [
+                {
+                    "page_index": 1,
+                    "markdown_uri": None,
+                    "ocr_overlay_uri": "gs://bucket/ocr-page-1.png",
+                    "layout_overlay_uri": "gs://bucket/layout-page-1.png",
+                    "figure_uris": [],
+                }
+            ],
+            "hakodate_preprocessing": {
+                "target_cell_map": [
+                    {
+                        "target_cell_id": "cell-1",
+                        "sheet_cell": "D3",
+                        "bbox": [0.1, 0.2, 0.3, 0.4],
+                        "center": [0.2, 0.3],
+                    }
+                ]
+            },
+            "hakodate_ocr_evidence_records": [
+                {
+                    "evidence_id": "ev-1",
+                    "engine": "hakodate_cell_crop_ocr",
+                    "source_scope": "hakodate_cell_crop_batch",
+                    "text": "2",
+                    "bbox": [0.12, 0.22, 0.28, 0.38],
+                    "center": [0.2, 0.3],
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "_augment_hakodate_ocr_payload_artifacts",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("read path must not regenerate Hakodate artifacts")),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "persist_ocr_evidence_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("read path must not persist evidence")),
+    )
+    monkeypatch.setattr(
+        order_service.workflow_state_service,
+        "refresh_workflow_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("read path must not refresh workflow")),
+    )
+
+    pages, error = order_service.get_ocr_pages(
+        order["id"],
+        preview_only=True,
+        quantity_assignment_strategy="hakodate",
+    )
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["hakodate_overlay_status"] in {"ready", "blocked"}
+    assert isinstance(pages.get("hakodate_assignment"), dict)
+    assert "target_cells" in pages["hakodate_assignment"]
+    assert "assignments" in pages["hakodate_assignment"]
+    assert "evidence_records" not in pages["hakodate_assignment"]
+
+
+def test_hakodate_assignment_rejects_order_document_grid_and_full_page_tesseract():
+    payload = {
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "target_cell_id": "order_document_grid-r0c3",
+                    "sheet_cell": "R1C4",
+                    "worksheet_row": 1,
+                    "worksheet_col": 4,
+                    "semantic_field": "qty.regular_x",
+                    "bbox": [0.1, 0.1, 0.2, 0.2],
+                    "center": [0.15, 0.15],
+                    "source": "order_document_grid",
+                }
+            ]
+        },
+        "hakodate_ocr_evidence_records": [
+            {
+                "evidence_id": "ev-full-page",
+                "run_id": "ORD-test:order-document",
+                "engine": "hakodate_full_page_tesseract",
+                "source_scope": "order_document_full_page",
+                "raw_text": "3",
+                "normalized_value": "3",
+                "source_bbox": [0.1, 0.1, 0.2, 0.2],
+                "center": [0.15, 0.15],
+            }
+        ],
+    }
+
+    assignment = order_service._build_hakodate_evidence_assignment_from_payload(
+        order_id="ORD-test",
+        facility_id="FAC-test",
+        template_id="template-test",
+        payload=payload,
+    )
+
+    assert assignment["target_cells"] == []
+    assert assignment["evidence_records"] == []
+    assert "hakodate_target_cell_map_missing" in assignment["blockers"]
+    assert "hakodate_ocr_evidence_missing" in assignment["blockers"]
+
+
+def test_hakodate_overlay_preview_ready_requires_rendered_artifact(monkeypatch):
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    assignment = {
+        "target_cells": [target_cell],
+        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
+        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}],
+        "blockers": [],
+    }
+    saved: dict[str, object] = {}
+
+    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
+    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
+    monkeypatch.setattr(order_service, "get_default_output_bucket", lambda: "bucket")
+
+    def _save_artifact(bucket, job_id, name, data, content_type=None):
+        saved.update({"bucket": bucket, "job_id": job_id, "name": name, "data": data, "content_type": content_type})
+        return f"gs://{bucket}/artifacts/{job_id}/{name}"
+
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
+    monkeypatch.setattr(order_service, "save_artifact_bytes_to_gcs", _save_artifact)
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+
+    preview = order_service._build_hakodate_overlay_preview(
+        order_id="ORD-render-artifact-test",
+        document_uri="gs://bucket/source.pdf",
+    )
+
+    assert preview["status"] == "blocked"
+    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
+    assert saved == {}
+
+
+def test_hakodate_overlay_preview_uses_pipeline_overlay_for_pipeline_coordinates(monkeypatch):
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [944, 575, 1114, 638],
+        "center": [1029, 606.5],
+        "source": "hakodate_best_method_pipeline",
+    }
+    assignment_item = {"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}
+    assignment = {
+        "target_cells": [target_cell],
+        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
+        "assignments": [assignment_item],
+        "blockers": [],
+    }
+    fingerprint = order_service._hakodate_overlay_fingerprint(
+        target_cells=[target_cell],
+        assignments=[assignment_item],
+    )
+
+    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
+    monkeypatch.setattr(
+        order_service,
+        "_load_order_ocr_cache",
+        lambda _order_id: {
+            "hakodate_overlay": {
+                "uri": "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png",
+                "fingerprint": fingerprint,
+                "producer": "hakodate_best_method_pipeline",
+                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+            }
+        },
+    )
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "render_pdf_to_png_bytes",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("pipeline overlay must not be redrawn on source PDF")),
+    )
+
+    preview = order_service._build_hakodate_overlay_preview(
+        order_id="ORD-test",
+        document_uri="gs://bucket/source.pdf",
+    )
+
+    assert preview["status"] == "ready"
+    assert preview["overlay_uri"] == "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
+    assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
+
+
+def test_hakodate_overlay_preview_reuses_cached_compact_assignment(monkeypatch):
+    cached_assignment = {
+        "target_cells": [{"target_cell_id": "cell-1", "bbox": [1, 2, 3, 4]}],
+        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2"}],
+        "blockers": [],
+    }
+    monkeypatch.setattr(
+        order_service,
+        "_load_order_ocr_cache",
+        lambda _order_id: {
+            "hakodate_overlay": {
+                "uri": "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png",
+                "fingerprint": "fp-compact-1",
+                "producer": "hakodate_best_method_pipeline",
+                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+            },
+            "hakodate_assignment_preview": {
+                "fingerprint": "fp-compact-1",
+                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+                "assignment": cached_assignment,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        order_service,
+        "build_order_hakodate_assignment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached compact overlay preview must not rebuild assignment")
+        ),
+    )
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+
+    preview = order_service._build_hakodate_overlay_preview(
+        order_id="ORD-test",
+        document_uri="gs://bucket/source.pdf",
+    )
+
+    assert preview["status"] == "ready"
+    assert preview["assignment"] == cached_assignment
+    assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
+
+
+def test_hakodate_overlay_preview_blocks_when_pipeline_overlay_missing(monkeypatch):
+    assignment = {
+        "target_cells": [
+            {
+                "target_cell_id": "cell-1",
+                "sheet_cell": "D3",
+                "bbox": [944, 575, 1114, 638],
+                "center": [1029, 606.5],
+                "source": "hakodate_best_method_pipeline",
+            }
+        ],
+        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
+        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}],
+        "blockers": [],
+    }
+    saved: dict[str, object] = {}
+
+    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
+    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
+    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
+    monkeypatch.setattr(order_service, "get_default_output_bucket", lambda: "bucket")
+
+    def _save_artifact(bucket, job_id, name, data, content_type=None):
+        saved.update({"bucket": bucket, "job_id": job_id, "name": name, "data": data, "content_type": content_type})
+        return f"gs://{bucket}/artifacts/{job_id}/{name}"
+
+    monkeypatch.setattr(order_service, "save_artifact_bytes_to_gcs", _save_artifact)
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+
+    preview = order_service._build_hakodate_overlay_preview(
+        order_id="ORD-pipeline-render-fallback-test",
+        document_uri="gs://bucket/source.pdf",
+    )
+
+    assert preview["status"] == "blocked"
+    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
+    assert saved == {}
+
+
+def test_hakodate_overlay_preview_blocks_when_render_artifact_missing(monkeypatch):
+    assignment = {
+        "target_cells": [{"target_cell_id": "cell-1", "bbox": [0.1, 0.2, 0.3, 0.4]}],
+        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
+        "assignments": [],
+        "blockers": [],
+    }
+
+    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
+    preview = order_service._build_hakodate_overlay_preview(
+        order_id="ORD-render-missing-test",
+        document_uri="gs://bucket/source.pdf",
+    )
+
+    assert preview["status"] == "blocked"
+    assert preview["overlay_url"] is None
+    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
+
+
+def test_save_order_ocr_cache_preserves_hakodate_artifacts_when_light_read_payload_lacks_them():
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-cache-preserve-hakodate-001")
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    evidence_record = {
+        "evidence_id": "ev-1",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1.png"}],
+            "hakodate_preprocessing": {"target_cell_map": [target_cell]},
+            "hakodate_ocr_evidence_records": [evidence_record],
+        },
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1-updated.png"}],
+            "engine": "read-preview",
+        },
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    cached = order_service._load_order_ocr_cache(order["id"])
+
+    assert cached is not None
+    assert cached["pages"][0]["ocr_overlay_uri"] == "gs://bucket/ocr-page-1-updated.png"
+    assert order_service._extract_hakodate_target_cells_from_payload(cached) == [target_cell]
+    assert order_service._extract_hakodate_ocr_evidence_records_from_payload(cached, order_id=order["id"]) == [
+        evidence_record
+    ]
+
+
+def test_build_hakodate_assignment_repairs_missing_artifacts_and_persists_them(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-hakodate-assignment-repair-001")
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    evidence_record = {
+        "evidence_id": "ev-1",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {"pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1.png"}]},
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_effective_sheet_template",
+        lambda **_kwargs: (
+            {"facility_id": "FAC00001"},
+            {"template_id": "template-hakodate", "quantity_assignment_strategy": "hakodate"},
+            "template-hakodate",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_llm_review_baseline",
+        lambda **_kwargs: {"baseline_source": "test", "rows": []},
+    )
+
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+        assert order_id == order["id"]
+        assert template["template_id"] == "template-hakodate"
+        assert force_hakodate is False
+        repaired = dict(payload)
+        repaired["hakodate_preprocessing"] = {"target_cell_map": [target_cell]}
+        repaired["hakodate_ocr_evidence_records"] = [evidence_record]
+        return repaired
+
+    monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
+
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"])
+    cached = order_service._load_order_ocr_cache(order["id"])
+
+    assert error is None
+    assert assignment is not None
+    assert assignment["target_cells"] == [target_cell]
+    assert assignment["evidence_records"] == [evidence_record]
+    assert cached is not None
+    assert order_service._extract_hakodate_target_cells_from_payload(cached) == [target_cell]
+    assert order_service._extract_hakodate_ocr_evidence_records_from_payload(cached, order_id=order["id"]) == [
+        evidence_record
+    ]
+
+
+def test_build_hakodate_assignment_explicit_strategy_forces_repair_when_template_strategy_legacy(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-hakodate-explicit-strategy-repair-001")
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    evidence_record = {
+        "evidence_id": "ev-1",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {"pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1.png"}]},
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_effective_sheet_template",
+        lambda **_kwargs: (
+            {"facility_id": "FAC00001"},
+            {"template_id": "template-legacy", "quantity_assignment_strategy": "legacy"},
+            "template-legacy",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_llm_review_baseline",
+        lambda **_kwargs: {"baseline_source": "test", "rows": []},
+    )
+
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+        assert order_id == order["id"]
+        assert template["template_id"] == "template-legacy"
+        assert force_hakodate is True
+        repaired = dict(payload)
+        repaired["hakodate_preprocessing"] = {"target_cell_map": [target_cell]}
+        repaired["hakodate_ocr_evidence_records"] = [evidence_record]
+        return repaired
+
+    monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
+
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate")
+
+    assert error is None
+    assert assignment is not None
+    assert assignment["target_cells"] == [target_cell]
+    assert assignment["evidence_records"] == [evidence_record]
+
+
+def test_build_hakodate_assignment_explicit_strategy_regenerates_stale_artifacts(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-hakodate-explicit-regenerates-stale-001")
+    stale_target = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    fresh_target = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    stale_evidence = {
+        "evidence_id": "ev-stale",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "9",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    fresh_evidence = {
+        "evidence_id": "ev-fresh",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "hakodate_preprocessing": {"target_cell_map": [stale_target]},
+            "hakodate_ocr_evidence_records": [stale_evidence],
+        },
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_effective_sheet_template",
+        lambda **_kwargs: (
+            {"facility_id": "FAC00001"},
+            {"template_id": "template-legacy", "quantity_assignment_strategy": "legacy"},
+            "template-legacy",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_resolve_llm_review_baseline",
+        lambda **_kwargs: {"baseline_source": "test", "rows": []},
+    )
+
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+        assert order_id == order["id"]
+        assert force_hakodate is True
+        repaired = dict(payload)
+        repaired["hakodate_preprocessing"] = {"target_cell_map": [fresh_target]}
+        repaired["hakodate_ocr_evidence_records"] = [fresh_evidence]
+        return repaired
+
+    monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
+
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate")
+
+    assert error is None
+    assert assignment is not None
+    assert assignment["evidence_records"] == [fresh_evidence]
+    assert stale_evidence not in assignment["evidence_records"]
+
+
+def test_ensure_hakodate_evidence_draft_current_uses_cache_artifacts_when_evidence_run_missing(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-hakodate-cache-draft-current-001")
+    target_cell = {
+        "target_cell_id": "D3",
+        "sheet_cell": "D3",
+        "worksheet_row": 3,
+        "worksheet_col": 4,
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    evidence_record = {
+        "evidence_id": "ev-1",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "hakodate_preprocessing": {"target_cell_map": [target_cell]},
+            "hakodate_ocr_evidence_records": [evidence_record],
+        },
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    projected_sheet = {
+        "fields": ["date", "menu", "qty.regular"],
+        "rows": [["04/26", "menu", "2"]],
+        "source": "hakodate_ocr_evidence_sheet",
+        "hakodate_evidence_projection": {"metrics": {"applied_count": 1}},
+    }
+    monkeypatch.setattr(order_service, "_latest_hakodate_evidence_available", lambda _order_id: False)
+    monkeypatch.setattr(
+        order_service,
+        "build_order_hakodate_projected_sheet",
+        lambda _order_id, **_kwargs: ({"projected_sheet": projected_sheet}, None),
+    )
+
+    draft, error = order_service.ensure_hakodate_evidence_draft_current(order["id"])
+
+    assert error is None
+    assert draft is not None
+    assert draft["draft_sheet_json"]["source"] == "hakodate_ocr_evidence_sheet"
+    assert draft["draft_sheet_json"]["rows"][0][2] == "2"
+
+
+def test_get_ocr_pages_repairs_missing_hakodate_artifacts_for_hakodate_preview(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-repair-on-hakodate-preview-001")
+    target_cell = {
+        "target_cell_id": "cell-1",
+        "sheet_cell": "D3",
+        "bbox": [0.1, 0.2, 0.3, 0.4],
+        "center": [0.2, 0.3],
+    }
+    evidence_record = {
+        "evidence_id": "ev-1",
+        "engine": "hakodate_cell_crop_ocr",
+        "source_scope": "hakodate_cell_crop_batch",
+        "text": "2",
+        "bbox": [0.12, 0.22, 0.28, 0.38],
+        "center": [0.2, 0.3],
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {"pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1.png"}]},
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "_augment_hakodate_ocr_payload_artifacts",
+        lambda **_kwargs: {
+            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-page-1.png"}],
+            "hakodate_preprocessing": {"target_cell_map": [target_cell]},
+            "hakodate_ocr_evidence_records": [evidence_record],
+        },
+    )
+
+    pages, error = order_service.get_ocr_pages(
+        order["id"],
+        preview_only=True,
+        quantity_assignment_strategy="hakodate",
+    )
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["hakodate_assignment"]["target_cells"] == [target_cell]
+    assert pages["hakodate_assignment"]["metrics"]["evidence_count"] == 1
+
+
+def test_get_ocr_pages_returns_hakodate_overlay_without_legacy_pages(monkeypatch):
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-ocr-pages-hakodate-overlay-only-001")
+    target_cell = {
+        "target_cell_id": "H13",
+        "sheet_cell": "H13",
+        "worksheet_row": 13,
+        "worksheet_col": 8,
+        "semantic_field": "qty.no_fish_x",
+        "bbox": [10, 10, 30, 30],
+        "center": [20, 20],
+    }
+    evidence_record = {
+        "evidence_id": "ev-h13",
+        "text": "1",
+        "normalized_value": "1",
+        "bbox": [12, 12, 28, 28],
+        "center": [20, 20],
+        "confidence": 0.09,
+    }
+    order_service._save_order_ocr_cache(
+        order["id"],
+        {
+            "hakodate_preprocessing": {"target_cell_map": [target_cell]},
+            "hakodate_ocr_evidence_records": [evidence_record],
+            "hakodate_overlay": {
+                "uri": "gs://bucket/hakodate-overlay.png",
+                "fingerprint": "fp",
+                "producer": "hakodate_best_method_pipeline",
+            },
+        },
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+    monkeypatch.setattr(
+        order_service,
+        "_augment_hakodate_ocr_payload_artifacts",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ocr-pages read path must not repair artifacts")),
+    )
+    monkeypatch.setattr(
+        order_service,
+        "_build_hakodate_overlay_preview",
+        lambda **_kwargs: {
+            "status": "ready",
+            "blockers": [],
+            "message": "",
+            "overlay_uri": "gs://bucket/hakodate-overlay.png",
+            "overlay_url": "signed:gs://bucket/hakodate-overlay.png",
+            "assignment": {"target_cells": [target_cell], "evidence_records": [evidence_record], "blockers": []},
+        },
+    )
+
+    pages, error = order_service.get_ocr_pages(
+        order["id"],
+        preview_only=True,
+        quantity_assignment_strategy="hakodate",
+    )
+
+    assert error is None
+    assert isinstance(pages, dict)
+    assert pages["page_count"] == 1
+    assert pages["pages"][0]["synthetic_source"] == "hakodate_overlay_only"
+    assert pages["pages"][0]["hakodate_overlay_url"] == "signed:gs://bucket/hakodate-overlay.png"
+    assert pages["pages"][0]["ocr_overlay_url"] is None
+    assert pages["hakodate_overlay_status"] == "ready"
+
+
 def test_get_ocr_pages_returns_pages_even_when_grid_metadata_cannot_be_recovered(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-pages-no-grid-001")
@@ -6229,6 +6950,105 @@ def test_apply_payload_cells_by_menu_priority_recovers_missing_quantities():
     assert stats.get("loose_cell", 0) >= 1
     assert stats.get("gap_fill", 0) >= 1
     assert stats.get("unstructured", 0) >= 1
+
+
+def test_hakodate_projection_uses_target_truth_field_for_remarks_column():
+    base_sheet = {
+        "fields": [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_2f",
+            "qty.regular_3f",
+            "qty.soft_2f",
+            "qty.soft_3f",
+            "qty.mixer_2f",
+            "qty.mixer_3f",
+            "qty.regular_x",
+            "remarks",
+        ],
+        "rows": [
+            ["04/26", "朝", "Menu A", "", "", "", "", "", "", "", ""],
+            ["04/26", "朝", "Menu B", "", "", "", "", "", "", "", ""],
+            ["04/26", "昼", "Menu C", "", "", "", "", "", "", "", ""],
+        ],
+    }
+    assignment = {
+        "target_cells": [
+            {
+                "target_cell_id": "K13",
+                "sheet_cell": "K13",
+                "worksheet_row": 13,
+                "worksheet_col": 11,
+                "semantic_field": "note",
+                "metadata": {"truth": {"row_index": 2, "field": "remarks"}},
+            }
+        ],
+        "sheet_output": {
+            "cells": {
+                "K13": {
+                    "sheet_cell": "K13",
+                    "worksheet_row": 13,
+                    "worksheet_col": 11,
+                    "semantic_field": "note",
+                    "value_text": "111",
+                    "value_normalized": "111",
+                    "assignment_confidence": 0.66,
+                }
+            }
+        },
+    }
+
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+        base_sheet=base_sheet,
+        assignment=assignment,
+    )
+
+    assert projected["rows"][2][10] == "111"
+    assert projected["hakodate_projection_version"] == order_service.HAKODATE_EVIDENCE_PROJECTION_VERSION
+    assert projected["hakodate_evidence_projection"]["applied"][0]["field"] == "remarks"
+
+
+def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_truth():
+    base_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        "rows": [["04/26", "朝", "Menu A", "", ""]],
+    }
+    assignment = {
+        "target_cells": [
+            {
+                "target_cell_id": "D3",
+                "sheet_cell": "D3",
+                "worksheet_row": 3,
+                "worksheet_col": 4,
+                "semantic_field": "qty.regular_2f",
+            }
+        ],
+        "sheet_output": {
+            "cells": {
+                "D3": {
+                    "sheet_cell": "D3",
+                    "worksheet_row": 3,
+                    "worksheet_col": 4,
+                    "semantic_field": "qty.regular_2f",
+                    "value_text": "70",
+                    "value_normalized": "70",
+                    "assignment_confidence": 0.9,
+                }
+            }
+        },
+    }
+
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+        base_sheet=base_sheet,
+        assignment=assignment,
+    )
+
+    assert projected["rows"][0][3] == ""
+    projection = projected["hakodate_evidence_projection"]
+    assert projection["applied"] == []
+    assert projection["skipped"][0]["skip_reason"] == "row_identity_not_found"
+    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
 
 
 def test_get_ocr_sheet_weekly_menu_blocks_payload_off_month_noise_when_order_lines_exist():

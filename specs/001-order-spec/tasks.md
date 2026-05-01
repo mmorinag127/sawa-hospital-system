@@ -11,7 +11,7 @@
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [x] T001 Create backend/.env.example with DB_URI, REDIS_URI, STORAGE_URI/PATH, TESSDATA_PREFIX, AUTH settings (admin OAuth, operator basic) and JST timezone.
+- [x] T001 Create backend/.env.example with DB_URI, REDIS_URI, STORAGE_URI/PATH, AUTH settings (admin OAuth, operator basic) and JST timezone.
 - [x] T002 Provision docker-compose.yml in infra/docker-compose.yml for PostgreSQL, Redis, MinIO (or mount path) and bind storage paths for PDFs/outputs.
 - [x] T003 Install OCR deps (Tesseract Japanese, pdfplumber prerequisites) and document steps in docs/ocr-setup.md.
 - [x] T004 Configure mail ingress mock/adapter in backend/src/workers/ingest_mail_adapter.py to accept message_id, pdf_uri, received_at.

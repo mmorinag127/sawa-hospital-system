@@ -12,7 +12,7 @@
 
 ## 2) Configuration
 
-- Create env files for backend (DB_URI, REDIS_URI, STORAGE_BUCKET/PATH, TESSDATA_PREFIX, AUTH settings for admin Google OAuth and operator basic auth).
+- Create env files for backend (DB_URI, REDIS_URI, STORAGE_BUCKET/PATH, AUTH settings for admin Google OAuth and operator basic auth).
 - Seed facility master configs (templates, label rules, invoice mappings) and initial weekly menu if available.
 - Set OCR retry defaults (3) and retention window (1–2 months).
 

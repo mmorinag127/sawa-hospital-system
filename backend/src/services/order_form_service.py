@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import os
 import re
+import tempfile
 from typing import Any
+from urllib.parse import urlparse
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -14,6 +17,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
 
 from src.services import config_service, menu_service
+from src.services.storage_service import (
+    get_default_output_bucket,
+    load_bytes_from_uri,
+    save_artifact_bytes_to_gcs,
+)
 
 
 _MONTH_ID_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -38,6 +46,12 @@ _THIN_BORDER = Border(
 )
 _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR = Path(__file__).resolve().parents[1] / "data" / "order_form_source_workbooks"
 _ORDER_FORM_SOURCE_TEMPLATE_MANIFEST = _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR / "manifest.json"
+_SOURCE_WORKBOOK_MATERIALIZED_DIR = Path(
+    os.getenv("FAX_SOURCE_TEMPLATE_MATERIALIZED_DIR", "/tmp/fax-source-template-workbooks")
+)
+_SOURCE_WORKBOOK_UPLOAD_DIR = Path(
+    os.getenv("FAX_SOURCE_TEMPLATE_UPLOAD_DIR", "/tmp/fax-source-template-uploads")
+)
 
 
 def _resolve_fax_source_template_dir() -> Path:
@@ -158,8 +172,29 @@ def _resolve_pattern(facility: dict, pattern_id: str | None) -> dict:
     return {"pattern_id": "PATTERN_A", "label": "標準A", "marker_cells": []}
 
 
+def _safe_source_workbook_suffix(value: str) -> str:
+    suffix = Path(str(value or "")).suffix.lower()
+    return suffix if suffix in {".xlsx", ".xlsm"} else ".xlsx"
+
+
+def _materialize_source_workbook_uri(uri: str) -> Path:
+    data = load_bytes_from_uri(uri)
+    digest = hashlib.sha256(data).hexdigest()
+    target = _SOURCE_WORKBOOK_MATERIALIZED_DIR / f"{digest}{_safe_source_workbook_suffix(uri)}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(data)
+    return target
+
+
 def _resolve_source_workbook_path(source_workbook_name: str) -> Path:
-    source_path = _FAX_SOURCE_TEMPLATE_DIR / source_workbook_name
+    source_ref = str(source_workbook_name or "").strip()
+    parsed = urlparse(source_ref)
+    if parsed.scheme in {"gs", "file"}:
+        source_path = _materialize_source_workbook_uri(source_ref)
+    else:
+        direct_path = Path(source_ref)
+        source_path = direct_path if direct_path.is_absolute() else _FAX_SOURCE_TEMPLATE_DIR / source_ref
     if not source_path.exists():
         raise ValueError(
             f"source workbook not found: {source_workbook_name} (dir={_FAX_SOURCE_TEMPLATE_DIR})"
@@ -191,9 +226,18 @@ def _facility_source_workbook_names(facility: dict | None) -> list[str]:
             source_workbook = str(raw_month_sources.get(month_id) or "").strip()
             if source_workbook:
                 source_names.append(source_workbook)
+    raw_month_source_uris = facility.get("order_form_month_source_uris")
+    if isinstance(raw_month_source_uris, dict):
+        for month_id in sorted(raw_month_source_uris):
+            source_workbook = str(raw_month_source_uris.get(month_id) or "").strip()
+            if source_workbook:
+                source_names.append(source_workbook)
     source_workbook = str(facility.get("order_form_source_workbook") or "").strip()
     if source_workbook:
         source_names.append(source_workbook)
+    source_workbook_uri = str(facility.get("order_form_source_workbook_uri") or "").strip()
+    if source_workbook_uri:
+        source_names.append(source_workbook_uri)
     result: list[str] = []
     seen: set[str] = set()
     for source_workbook in source_names:
@@ -216,9 +260,17 @@ def _resolve_facility_source_workbook_name_for_month(
         source_workbook = str(raw_month_sources.get(normalized_month) or "").strip()
         if source_workbook:
             return source_workbook
+    raw_month_source_uris = facility.get("order_form_month_source_uris")
+    if isinstance(raw_month_source_uris, dict):
+        source_workbook = str(raw_month_source_uris.get(normalized_month) or "").strip()
+        if source_workbook:
+            return source_workbook
     source_workbook = str(facility.get("order_form_source_workbook") or "").strip()
     if source_workbook:
         return source_workbook
+    source_workbook_uri = str(facility.get("order_form_source_workbook_uri") or "").strip()
+    if source_workbook_uri:
+        return source_workbook_uri
     return _resolve_source_workbook_name_for_month(fax_template_id, normalized_month)
 
 
@@ -371,6 +423,52 @@ def resolve_facility_source_workbook_name_for_week_sheet(facility: dict, week_sh
         if week_sheet_name in _source_workbook_sheetnames(source_workbook_name):
             return source_workbook_name
     return _resolve_source_workbook_name_for_week_sheet(fax_template_id, week_sheet_name)
+
+
+def save_facility_source_workbook_upload(
+    *,
+    facility_id: str,
+    filename: str,
+    data: bytes,
+) -> dict[str, Any]:
+    if not data:
+        raise ValueError("source workbook is empty")
+    suffix = _safe_source_workbook_suffix(filename)
+    digest = hashlib.sha256(data).hexdigest()
+    safe_name = _sanitize_filename_fragment(Path(filename or "source_workbook").stem)
+    object_name = f"{safe_name}_{digest[:12]}{suffix}"
+    bucket = get_default_output_bucket()
+    if bucket:
+        uri = save_artifact_bytes_to_gcs(
+            bucket,
+            f"facility-template-{facility_id}",
+            object_name,
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        storage = "gcs"
+    else:
+        _SOURCE_WORKBOOK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        target = _SOURCE_WORKBOOK_UPLOAD_DIR / object_name
+        target.write_bytes(data)
+        uri = str(target)
+        storage = "local"
+    # Validate the uploaded workbook before it is referenced by facility config.
+    workbook_path = _materialize_source_workbook_uri(f"file://{uri}") if uri.startswith("/") else _resolve_source_workbook_path(uri)
+    workbook = load_workbook(workbook_path, read_only=True)
+    try:
+        sheetnames = list(workbook.sheetnames)
+    finally:
+        workbook.close()
+    if not sheetnames:
+        raise ValueError("source workbook has no sheets")
+    return {
+        "uri": uri,
+        "storage": storage,
+        "filename": filename,
+        "sha256": digest,
+        "sheetnames": sheetnames,
+    }
 
 
 def _resolve_facility(facility_id: str) -> dict:

@@ -84,6 +84,77 @@ def _sample_payload(quantity: str = "3") -> dict:
     }
 
 
+def _sample_hakodate_payload(quantity: str = "9") -> dict:
+    return {
+        "status": "done",
+        "stage": "done",
+        "engine": "hakodate_best_method_pipeline",
+        "input_reference": "file://dummy.pdf",
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "target_id": "target-1",
+                    "target_cell_id": "D11",
+                    "sheet_cell": "D11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 4,
+                    "row_index": 0,
+                    "field": "qty.regular_2f",
+                    "semantic_field": "qty.regular_2f",
+                    "bbox": [90.0, 190.0, 110.0, 210.0],
+                    "center": [100.0, 200.0],
+                    "logical_targets": [
+                        {
+                            "sheet_cell": "D11",
+                            "worksheet_row": 11,
+                            "worksheet_col": 4,
+                            "field": "qty.regular_2f",
+                            "date": "03/22",
+                            "daypart": "朝",
+                            "menu_name": "Menu A",
+                        }
+                    ],
+                    "source": "hakodate_best_method_pipeline",
+                }
+            ],
+            "source": "hakodate_best_method_pipeline",
+        },
+        "hakodate_ocr_evidence_records": [
+            {
+                "evidence_id": "evidence-1",
+                "text": quantity,
+                "normalized_value": quantity,
+                "center": [100.0, 200.0],
+                "confidence": None,
+                "engine": "yomitoku_contact_sheet_batch",
+                "source_scope": "hakodate_cell_crop_batch",
+            }
+        ],
+        "hakodate_canonical_pipeline": {
+            "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
+            "source": "live_order_facility_source_workbook",
+            "manifest_path": None,
+        },
+    }
+
+
+def _sample_hakodate_base_sheet(order_id: str) -> dict:
+    return {
+        "order_id": order_id,
+        "facility_id": "FAC00001",
+        "week_id": "2026-03@2026-03-22~2026-03-28",
+        "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["03/22", "朝", "Menu A", ""]],
+        "row_ids": ["row-1"],
+        "source": "hakodate_weekly_menu_template",
+        "warnings": [],
+        "blockers": [],
+        "review_state": "review_required",
+    }
+
+
 def _append_sheet_revision(
     *,
     order_id: str,
@@ -1758,13 +1829,8 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
     monkeypatch.setattr(
         order_service,
-        "run_ocr_pipeline",
-        lambda **_kwargs: {
-            **_sample_payload("9"),
-            "status": "done",
-            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "output_reference": "gs://bucket/output.json",
-        },
+        "_hakodate_canonical_payload_from_manifest_item",
+        lambda **_kwargs: _sample_hakodate_payload("9"),
     )
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
@@ -1800,7 +1866,7 @@ def test_rerun_ocr_evidence_only_maps_failed_partial_output_to_pipeline_failure(
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
     monkeypatch.setattr(
         order_service,
-        "run_ocr_pipeline",
+        "_hakodate_canonical_payload_from_manifest_item",
         lambda **_kwargs: {
             "status": "failed",
             "stage": "error",
@@ -1829,7 +1895,7 @@ def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(mon
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
     monkeypatch.setattr(
         order_service,
-        "run_ocr_pipeline",
+        "_hakodate_canonical_payload_from_manifest_item",
         lambda **_kwargs: {
             "status": "done",
             "stage": "done",
@@ -1874,24 +1940,15 @@ def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_o
     assert isinstance(saved, dict)
 
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-    monkeypatch.setattr(
-        order_service,
-        "run_ocr_pipeline",
-        lambda **_kwargs: {
-            "status": "running",
-            "stage": "ocr",
-            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "output_reference": "gs://bucket/output.json",
-        },
-    )
+    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
     assert error is None
-    assert rerun == {"status": "running", "output_reference": "gs://bucket/output.json"}
+    assert isinstance(rerun, dict)
     job = order_service.get_ocr_job(f"OCR-{order['id']}")
     assert isinstance(job, dict)
-    assert job["status"] == "awaiting_output"
+    assert job["status"] == "done"
     current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
     assert isinstance(current_draft, dict)
     draft_json = current_draft["draft_sheet_json"]
@@ -1900,10 +1957,10 @@ def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_o
     regular_index = draft_json["fields"].index("qty.regular_2f")
     assert draft_json["rows"][0][:3] == ["03/22", "朝", "Menu A"]
     assert draft_json["rows"][0][regular_index] == "3"
-    assert current_draft["base_evidence_run_id"] == first["id"]
+    assert current_draft["base_evidence_run_id"] == rerun["id"]
     latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
     assert isinstance(latest_evidence, dict)
-    assert latest_evidence["id"] == first["id"]
+    assert latest_evidence["id"] == rerun["id"]
 
 
 def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch) -> None:
@@ -1912,26 +1969,25 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch) -> No
 
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
 
-    def _raise_pending(**_kwargs):
-        raise order_service.OCRPipelineOutputPendingError(
-            input_reference="gs://bucket/input.pdf",
-            output_reference="gs://bucket/output-awaiting.json",
-            timeout_seconds=600,
-        )
-
-    monkeypatch.setattr(order_service, "run_ocr_pipeline", _raise_pending)
+    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
+    monkeypatch.setattr(
+        order_service,
+        "_build_hakodate_weekly_menu_base_sheet",
+        lambda order_id: (_sample_hakodate_base_sheet(order_id), None),
+    )
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
     assert error is None
-    assert rerun == {"status": "running", "output_reference": "gs://bucket/output-awaiting.json"}
+    assert isinstance(rerun, dict)
     job = order_service.get_ocr_job(f"OCR-{order['id']}")
     assert isinstance(job, dict)
-    assert job["status"] == "awaiting_output"
+    assert job["status"] == "done"
     metrics = job.get("metrics") or {}
-    assert metrics.get("result_state") == "awaiting_output"
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-    assert workflow["state"] == "rerun_in_progress"
+    assert metrics.get("result_state") == "evidence_ready"
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
+    assert isinstance(latest_evidence, dict)
+    assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
 def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeypatch) -> None:
@@ -1939,33 +1995,25 @@ def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeyp
     order = _seed_order("msg-rerun-evidence-async-trigger")
 
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-    captured: dict[str, object] = {}
-
-    def _fake_run_ocr_pipeline(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "running",
-            "input_reference": "gs://bucket/input-async.pdf",
-            "output_reference": "gs://bucket/output-async.json",
-            "trigger_error": "OCR pipeline request timeout: timed out",
-        }
-
-    monkeypatch.setattr(order_service, "run_ocr_pipeline", _fake_run_ocr_pipeline)
+    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
+    monkeypatch.setattr(
+        order_service,
+        "_build_hakodate_weekly_menu_base_sheet",
+        lambda order_id: (_sample_hakodate_base_sheet(order_id), None),
+    )
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
     assert error is None
-    assert rerun == {"status": "running", "output_reference": "gs://bucket/output-async.json"}
-    assert captured["wait_for_output"] is False
+    assert isinstance(rerun, dict)
     job = order_service.get_ocr_job(f"OCR-{order['id']}")
     assert isinstance(job, dict)
-    assert job["status"] == "awaiting_output"
-    assert job["output_reference"] == "gs://bucket/output-async.json"
+    assert job["status"] == "done"
     metrics = job.get("metrics") or {}
-    assert metrics.get("result_state") == "awaiting_output"
-    assert metrics.get("trigger_error") == "OCR pipeline request timeout: timed out"
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-    assert workflow["state"] == "rerun_in_progress"
+    assert metrics.get("result_state") == "evidence_ready"
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
+    assert isinstance(latest_evidence, dict)
+    assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
 def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypatch) -> None:
@@ -1978,25 +2026,18 @@ def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypat
 
     captured: dict[str, object] = {}
 
-    def _fake_heartbeat(job_id, **kwargs):
-        captured["job_id"] = job_id
-        captured["timeout_seconds_override"] = kwargs.get("timeout_seconds_override")
-        return {
-            **_sample_payload("9"),
-            "status": "done",
-            "stage": "done",
-            "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "output_reference": "gs://bucket/output.json",
-        }
+    def _fake_hakodate(**kwargs):
+        captured.update(kwargs)
+        return _sample_hakodate_payload("9")
 
-    monkeypatch.setattr(order_service, "_run_reparse_with_heartbeat", _fake_heartbeat)
+    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", _fake_hakodate)
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
     assert error is None
     assert isinstance(rerun, dict)
-    assert captured["job_id"] == f"OCR-{order['id']}"
-    assert captured["timeout_seconds_override"] == 1245.0
+    assert captured["order_id"] == order["id"]
+    assert captured["item"] == {"source": "live_order_facility_source_workbook"}
 
 
 def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(monkeypatch) -> None:

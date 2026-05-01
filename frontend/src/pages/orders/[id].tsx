@@ -283,6 +283,10 @@ type OcrPage = {
   markdown_text?: string | null;
   ocr_overlay_url?: string | null;
   layout_overlay_url?: string | null;
+  hakodate_overlay_url?: string | null;
+  hakodate_overlay_status?: string | null;
+  hakodate_overlay_blockers?: string[] | null;
+  hakodate_overlay_message?: string | null;
   figure_urls?: string[];
   tables?: {
     rows?: string[][];
@@ -297,6 +301,21 @@ type OcrPage = {
 type OcrPagesMeta = {
   table_box?: number[] | null;
   table_units?: string | null;
+  quantity_assignment_strategy?: string | null;
+  hakodate_overlay_status?: string | null;
+  hakodate_overlay_blockers?: string[] | null;
+  hakodate_overlay_message?: string | null;
+  hakodate_assignment?: HakodateAssignmentPayload | null;
+};
+
+type HakodateOverlayPreviewPayload = {
+  status?: string | null;
+  blockers?: string[] | null;
+  message?: string | null;
+  overlay_url?: string | null;
+  overlay_uri?: string | null;
+  assignment?: HakodateAssignmentPayload | null;
+  job_status?: ReparseStatePayload | null;
 };
 
 type OcrSheetPayload = {
@@ -312,6 +331,7 @@ type OcrSheetPayload = {
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
   source?: string;
+  quantity_assignment_strategy?: string | null;
   quantity_column_count?: number;
   warnings?: string[];
   review_state?: string | null;
@@ -326,6 +346,8 @@ type OcrSheetPayload = {
   result_state?: string | null;
   confirmed_lines_retained?: boolean | null;
   sheet_projection?: SheetProjectionPayload | null;
+  hakodate_assignment?: HakodateAssignmentPayload | null;
+  hakodate_projection_metrics?: Record<string, unknown> | null;
 };
 
 type DraftSheetJsonPayload = {
@@ -340,6 +362,7 @@ type DraftSheetJsonPayload = {
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
   source?: string | null;
   warnings?: string[] | null;
+  quantity_assignment_strategy?: string | null;
 };
 
 type DraftSheetPayload = {
@@ -374,6 +397,9 @@ type DraftSheetPayload = {
   evidence_capabilities?: Record<string, boolean> | null;
   evidence_degraded_reasons?: string[] | null;
   sheet_projection?: SheetProjectionPayload | null;
+  quantity_assignment_strategy?: string | null;
+  hakodate_assignment?: HakodateAssignmentPayload | null;
+  hakodate_projection_metrics?: Record<string, unknown> | null;
 };
 
 type NormalizedEditorSheetPayload = {
@@ -391,7 +417,6 @@ type NormalizedEditorSheetPayload = {
 
 type OcrCellConfidenceTier = "high" | "medium" | "low";
 type OcrConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
-type QuantityAssignmentStrategy = "legacy" | "hakodate";
 type OcrNumericCellClassification = "accepted" | "deterministic_candidate" | "weak_candidate" | "unresolved";
 type OcrNumericCellItem = {
   classification?: OcrNumericCellClassification | string | null;
@@ -425,6 +450,99 @@ type OcrVisibleOverlayItem = OcrNumericCellItem & {
   target_col_index: number;
   value: string;
   classification: OcrNumericCellClassification;
+};
+
+type HakodateTargetCell = {
+  [key: string]: unknown;
+  target_cell_id?: string | null;
+  region_id?: string | null;
+  sheet_cell?: string | null;
+  worksheet_row?: number | string | null;
+  worksheet_col?: number | string | null;
+  semantic_field?: string | null;
+  field_label?: string | null;
+  date?: string | null;
+  daypart?: string | null;
+  menu_name?: string | null;
+  bbox?: number[] | null;
+  center?: number[] | null;
+  merged_cell?: unknown;
+  logical_targets?: unknown[] | null;
+  covered_sheet_cells?: string[] | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type HakodateAssignmentItem = {
+  target_cell_id?: string | null;
+  sheet_cell?: string | null;
+  worksheet_row?: number | string | null;
+  worksheet_col?: number | string | null;
+  semantic_field?: string | null;
+  assigned_value?: string | null;
+  value_text?: string | null;
+  value_normalized?: string | null;
+  assignment_state?: string | null;
+  assignment_confidence?: number | null;
+  raw_texts?: string[] | null;
+  evidence_ids?: string[] | null;
+  target_metadata?: Record<string, unknown> | null;
+};
+
+type HakodateSheetOutputCell = {
+  target_cell_id?: string | null;
+  sheet_cell?: string | null;
+  worksheet_row?: number | string | null;
+  worksheet_col?: number | string | null;
+  semantic_field?: string | null;
+  field_label?: string | null;
+  date?: string | null;
+  daypart?: string | null;
+  menu_name?: string | null;
+  value_text?: string | null;
+  value_normalized?: string | null;
+  assignment_state?: string | null;
+  assignment_confidence?: number | null;
+  raw_texts?: string[] | null;
+  evidence_ids?: string[] | null;
+};
+
+type HakodateAssignmentPayload = {
+  version?: string | null;
+  strategy?: string | null;
+  assignment_mode?: string | null;
+  status?: string | null;
+  blockers?: string[] | null;
+  warnings?: string[] | null;
+  target_cells?: HakodateTargetCell[] | null;
+  evidence_records?: Record<string, unknown>[] | null;
+  assignments?: HakodateAssignmentItem[] | null;
+  unassigned_evidence?: Record<string, unknown>[] | null;
+  sheet_output?: {
+    cells?: Record<string, HakodateSheetOutputCell> | null;
+    blockers?: string[] | null;
+    warnings?: string[] | null;
+    summary?: Record<string, unknown> | null;
+  } | null;
+  metrics?: Record<string, unknown> | null;
+};
+
+type HakodateOverlayCell = HakodateTargetCell & {
+  targetKey: string;
+  sheetCell: string;
+  bbox: number[];
+  center: number[] | null;
+  quantityText: string;
+  assignmentState: string;
+  hasInk: boolean;
+};
+
+type HakodateOverlayBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  centerLeft: number;
+  centerTop: number;
 };
 
 type OcrEditRevision = {
@@ -1508,6 +1626,96 @@ const dedupeStrings = (items: Array<string | null | undefined>) => {
     }
   });
   return result;
+};
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value && typeof value === "object" && !Array.isArray(value));
+
+const asHakodateAssignmentPayload = (value: unknown): HakodateAssignmentPayload | null =>
+  isObjectRecord(value) ? (value as HakodateAssignmentPayload) : null;
+
+const asReparseStatePayload = (value: unknown): ReparseStatePayload | null =>
+  isObjectRecord(value) ? (value as ReparseStatePayload) : null;
+
+const asHakodateMetricsPayload = (value: unknown): Record<string, unknown> | null =>
+  isObjectRecord(value) ? value : null;
+
+const normalizeHakodateNumberArray = (value: unknown, expectedLength: number): number[] | null => {
+  if (!Array.isArray(value) || value.length !== expectedLength) return null;
+  const numbers = value.map((item) => Number(item));
+  return numbers.every((item) => Number.isFinite(item)) ? numbers : null;
+};
+
+const firstNonEmptyText = (...values: unknown[]) => {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+};
+
+const hakodateCellTruthMetadata = (value: unknown): Record<string, unknown> | null => {
+  if (!isObjectRecord(value)) return null;
+  const metadata = isObjectRecord(value.metadata) ? value.metadata : null;
+  if (!metadata) return null;
+  return isObjectRecord(metadata.truth) ? metadata.truth : null;
+};
+
+const hakodateNestedMetadata = (value: unknown): Record<string, unknown> | null => {
+  if (!isObjectRecord(value)) return null;
+  const nested = value.metadata;
+  return isObjectRecord(nested) ? nested : value;
+};
+
+const hakodateCellHasInk = (...metadataValues: unknown[]) => {
+  for (const metadataValue of metadataValues) {
+    const metadata = hakodateNestedMetadata(metadataValue);
+    if (!metadata) continue;
+    if (metadata.recognizer_candidate === true || metadata.ocr_candidate === true) return true;
+    const stats = isObjectRecord(metadata.recognizer_ink_stats) ? metadata.recognizer_ink_stats : null;
+    if (!stats) continue;
+    const inkArea = Number(stats.ink_area);
+    const keptCount = Number(stats.kept_component_count);
+    if ((Number.isFinite(inkArea) && inkArea > 0) || (Number.isFinite(keptCount) && keptCount > 0)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const readNumericMetric = (metrics: Record<string, unknown> | null | undefined, key: string): number => {
+  const value = metrics?.[key];
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const describeHakodateOverlayBlocker = (code: string) => {
+  const normalized = String(code || "").trim();
+  if (normalized === "hakodate_target_cell_map_missing") {
+    return "箱館 target_cell_map がありません。位置合わせ/読み取り対象セルの生成後に再実行してください。";
+  }
+  if (normalized === "hakodate_ocr_evidence_missing") {
+    return "箱館 OCR evidence がありません。セルOCRを実行して数量 evidence を作成してください。";
+  }
+  if (normalized === "hakodate_assignment_unavailable") {
+    return "箱館 assignment を生成できませんでした。";
+  }
+  if (normalized === "hakodate_overlay_render_unavailable") {
+    return "箱館 overlay の描画に失敗しました。";
+  }
+  if (normalized === "template_unresolved") {
+    return "箱館 template を解決できませんでした。";
+  }
+  if (normalized === "facility_missing") {
+    return "施設設定がないため箱館 overlay を作れません。";
+  }
+  if (normalized === "facility_not_found") {
+    return "施設設定を取得できないため箱館 overlay を作れません。";
+  }
+  if (normalized === "hakodate_preview_image_missing") {
+    return "重ね表示に使う画像プレビューがありません。OCRページ/原本プレビューを再取得してください。";
+  }
+  return normalized;
 };
 
 const normalizeLlmProviderLabel = (provider?: string | null) => {
@@ -2660,6 +2868,12 @@ export default function OrderDetailPage() {
   const [ocrPages, setOcrPages] = useState<OcrPage[]>([]);
   const [ocrPagesMessage, setOcrPagesMessage] = useState<string>("");
   const [ocrPagesLoading, setOcrPagesLoading] = useState<boolean>(false);
+  const [hakodateOverlayLoading, setHakodateOverlayLoading] = useState<boolean>(false);
+  const [hakodateOverlayUrl, setHakodateOverlayUrl] = useState<string>("");
+  const [hakodateOverlayStatus, setHakodateOverlayStatus] = useState<string>("");
+  const [hakodateOverlayBlockers, setHakodateOverlayBlockers] = useState<string[]>([]);
+  const [hakodateOverlayMessage, setHakodateOverlayMessage] = useState<string>("");
+  const [hakodateJobStatus, setHakodateJobStatus] = useState<ReparseStatePayload | null>(null);
   const [ocrTableBox, setOcrTableBox] = useState<number[] | null>(null);
   const [ocrTableUnits, setOcrTableUnits] = useState<string | null>(null);
   const [tableBoxUnitsOverride, setTableBoxUnitsOverride] = useState<string | null>(null);
@@ -2707,7 +2921,9 @@ export default function OrderDetailPage() {
   const [ocrSheetColumnFillTarget, setOcrSheetColumnFillTarget] = useState<string>("");
   const [ocrSheetColumnFillValue, setOcrSheetColumnFillValue] = useState<string>("");
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<OcrConfidenceDisplayMode>("suggestion");
-  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<QuantityAssignmentStrategy>("legacy");
+  const quantityAssignmentStrategy = "hakodate" as const;
+  const [hakodateAssignment, setHakodateAssignment] = useState<HakodateAssignmentPayload | null>(null);
+  const [hakodateProjectionMetrics, setHakodateProjectionMetrics] = useState<Record<string, unknown> | null>(null);
   const [candidateSheetPreview, setCandidateSheetPreview] = useState<NormalizedEditorSheetPayload | null>(null);
   const [candidateSheetPreviewLoading, setCandidateSheetPreviewLoading] = useState<boolean>(false);
   const [candidateSheetPreviewMessage, setCandidateSheetPreviewMessage] = useState<string>("");
@@ -3026,6 +3242,12 @@ export default function OrderDetailPage() {
     ocrSheetEditedSinceLoadRef.current = false;
     setOcrPages([]);
     setOcrPagesMessage("");
+    setHakodateOverlayUrl("");
+    setHakodateOverlayLoading(false);
+    setHakodateOverlayStatus("");
+    setHakodateOverlayBlockers([]);
+    setHakodateOverlayMessage("");
+    setHakodateJobStatus(null);
     setOcrTableBox(null);
     setOcrTableUnits(null);
     setOcrTableHeader([]);
@@ -3091,6 +3313,8 @@ export default function OrderDetailPage() {
     setPdfError("");
     setPdfSourceKind("original");
     setPdfSourceVariant("");
+    setHakodateAssignment(null);
+    setHakodateProjectionMetrics(null);
   }, [id]);
 
   useEffect(() => {
@@ -3397,7 +3621,10 @@ export default function OrderDetailPage() {
     mode: OcrConfidenceDisplayMode,
   ): boolean => {
     if (!tier) return false;
-    return true;
+    if (tier === "high") return true;
+    if (tier === "medium") return mode === "assisted" || mode === "suggestion";
+    if (tier === "low") return mode === "suggestion";
+    return false;
   };
 
   const normalizeLooseSheetEditorPayload = (payload: {
@@ -3990,11 +4217,6 @@ export default function OrderDetailPage() {
     }
   };
 
-  useEffect(() => {
-    if (!order?.id) return;
-    refreshOcrOutput(order.id);
-  }, [order?.id]);
-
   const resolveWeekDraftFromCanonicalSelection = (
     currentDraft: string,
     options: WeekOption[],
@@ -4263,7 +4485,7 @@ export default function OrderDetailPage() {
   ]);
 
   const loadOcrSheet = async (
-    options: { silent?: boolean; strategy?: QuantityAssignmentStrategy; force?: boolean } = {},
+    options: { silent?: boolean; force?: boolean } = {},
   ): Promise<{
     fields: string[];
     header: string[];
@@ -4272,7 +4494,7 @@ export default function OrderDetailPage() {
     source: string;
   } | null> => {
   if (!order) return null;
-  const { silent = false, strategy = quantityAssignmentStrategy, force = false } = options;
+  const { silent = false, force = false } = options;
   if (ocrSheetLoading && !force) return null;
     const requestSeq = ocrSheetRequestSeqRef.current + 1;
     ocrSheetRequestSeqRef.current = requestSeq;
@@ -4286,9 +4508,9 @@ export default function OrderDetailPage() {
       const res = await apiClient.get(`/orders/${order.id}/draft-sheet`, {
         params: {
           compact: 1,
-          quantity_assignment_strategy: strategy === "hakodate" ? "hakodate" : "legacy",
+          quantity_assignment_strategy: "hakodate",
         },
-        timeout: strategy === "hakodate" ? 120000 : undefined,
+        timeout: 120000,
       });
       const payload = (res.data || {}) as DraftSheetPayload;
       const normalizedPayload = normalizeDraftSheetPayload(payload);
@@ -4299,6 +4521,8 @@ export default function OrderDetailPage() {
         return ocrSheetBaselinePayloadRef.current;
       }
       ocrSheetAppliedSeqRef.current = requestSeq;
+      setHakodateAssignment(asHakodateAssignmentPayload(payload.hakodate_assignment));
+      setHakodateProjectionMetrics(asHakodateMetricsPayload(payload.hakodate_projection_metrics));
       applyNormalizedSheetEditorPayload(normalizedPayload);
       applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, payload));
       setOcrSheetAutoRetryBlocked(false);
@@ -4308,11 +4532,11 @@ export default function OrderDetailPage() {
         );
         setOcrSheetMessage(
           reviewStateLabel
-            ? `${strategy === "hakodate" ? "箱館方式" : "旧方式"}: ${reviewStateLabel}のシートを読み込みました。`
+            ? `箱館方式: ${reviewStateLabel}のシートを読み込みました。`
             : normalizedPayload.rows.length
               ? normalizedPayload.source.startsWith("edited_sheet")
                 ? "保存済みシートを読み込みました。"
-                : `${strategy === "hakodate" ? "箱館方式" : "旧方式"}のシートを取得しました。`
+                : "箱館方式のシートを取得しました。"
               : "シートは取得しましたが、編集対象の行がありません。",
         );
       }
@@ -4320,6 +4544,8 @@ export default function OrderDetailPage() {
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
+      setHakodateAssignment(null);
+      setHakodateProjectionMetrics(null);
       setOcrSheetAutoRetryBlocked(true);
       resetSheetReviewMeta();
       if (!silent || status === 400 || status === 404) {
@@ -4356,12 +4582,6 @@ export default function OrderDetailPage() {
         setOcrSheetLoadSettled(true);
       }
     }
-  };
-
-  const switchQuantityAssignmentStrategy = (strategy: QuantityAssignmentStrategy) => {
-    if (strategy === quantityAssignmentStrategy) return;
-    setQuantityAssignmentStrategy(strategy);
-    void loadOcrSheet({ strategy, force: true });
   };
 
   const loadCandidateSheetPreview = async (options: { silent?: boolean } = {}): Promise<NormalizedEditorSheetPayload | null> => {
@@ -4587,6 +4807,68 @@ export default function OrderDetailPage() {
     return next;
   };
 
+  const loadHakodateOverlayPreview = async (
+    options: { silent?: boolean; force?: boolean } = {},
+  ) => {
+    const currentOrder = authoritativeOrderRef.current || order;
+    const orderId = String(currentOrder?.id || "").trim();
+    if (!orderId) return;
+    const { silent = false, force = false } = options;
+    if (hakodateOverlayLoading && !force) return;
+    setHakodateOverlayLoading(true);
+    if (!silent && !hakodateOverlayUrl) {
+      setOcrPagesMessage("箱館オーバーレイを取得中...");
+    }
+    try {
+      const res = await apiClient.get(`/orders/${orderId}/hakodate-overlay-preview`, {
+        timeout: 30000,
+      });
+      const payload = (res.data || {}) as HakodateOverlayPreviewPayload;
+      const nextStatus = typeof payload.status === "string" ? payload.status : "";
+      const nextBlockers = Array.isArray(payload.blockers)
+        ? payload.blockers.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+        : [];
+      const nextMessage = typeof payload.message === "string" ? payload.message : "";
+      const nextOverlayUrl = typeof payload.overlay_url === "string" ? payload.overlay_url.trim() : "";
+      setHakodateOverlayStatus(nextStatus);
+      setHakodateOverlayBlockers(nextBlockers);
+      setHakodateOverlayMessage(nextMessage);
+      setHakodateOverlayUrl(nextOverlayUrl);
+      setHakodateJobStatus(asReparseStatePayload(payload.job_status));
+      const nextAssignment = asHakodateAssignmentPayload(payload.assignment);
+      if (nextAssignment) {
+        setHakodateAssignment(nextAssignment);
+        setHakodateProjectionMetrics(asHakodateMetricsPayload(nextAssignment.metrics));
+      }
+      ocrPreviewRefreshKeyRef.current = [
+        orderId,
+        String(currentOrder?.current_sheet_revision_id || ""),
+        String(currentOrder?.ocr_updated_at || ""),
+        String(currentOrder?.ocr_result_state || ""),
+        String(currentOrder?.workflow_state?.current_sheet_revision_id || ""),
+        String(currentOrder?.workflow_state?.active_evidence_run_id || ""),
+        String(currentOrder?.workflow_state?.candidate_evidence_run_id || ""),
+        String(Boolean(currentOrder?.workflow_state?.candidate_prompt_visible)),
+        String(currentOrder?.workflow_state?.reparse_state?.status || ""),
+      ].join("|");
+      if (nextOverlayUrl && !ocrPages.length) {
+        setOcrPagesMessage("");
+      }
+    } catch {
+      if (!silent) {
+        setOcrPagesMessage("箱館オーバーレイの取得に失敗しました。");
+      }
+      if (!hakodateOverlayUrl) {
+        setHakodateOverlayStatus("blocked");
+        setHakodateOverlayBlockers(["hakodate_preview_image_missing"]);
+        setHakodateOverlayMessage("");
+        setHakodateJobStatus(null);
+      }
+    } finally {
+      setHakodateOverlayLoading(false);
+    }
+  };
+
   const loadOcrPages = async (
     options: { silent?: boolean; force?: boolean } = {},
   ) => {
@@ -4603,7 +4885,11 @@ export default function OrderDetailPage() {
     }
     try {
       const res = await apiClient.get(`/orders/${orderId}/ocr-pages`, {
-        params: { preview_only: 1 },
+        params: {
+          preview_only: 1,
+          quantity_assignment_strategy: "hakodate",
+        },
+        timeout: 180000,
       });
       if (requestSeq < ocrPagesRequestSeqRef.current) {
         return;
@@ -4611,6 +4897,11 @@ export default function OrderDetailPage() {
       if (res.status === 202 || res.data?.pending) {
         setOcrPagesMessage("OCRページは処理中です。");
         setOcrPages([]);
+        setHakodateOverlayUrl("");
+        setHakodateOverlayStatus("");
+        setHakodateOverlayBlockers([]);
+        setHakodateOverlayMessage("");
+        setHakodateJobStatus(null);
         setOcrTableBox(null);
         setOcrTableUnits(null);
         setTableBoxUnitsOverride(null);
@@ -4629,6 +4920,21 @@ export default function OrderDetailPage() {
         return;
       }
       const pages = Array.isArray(res.data?.pages) ? res.data.pages : [];
+      const nextHakodateOverlayStatus =
+        typeof res.data?.hakodate_overlay_status === "string" ? res.data.hakodate_overlay_status : "";
+      const nextHakodateOverlayBlockers = Array.isArray(res.data?.hakodate_overlay_blockers)
+        ? res.data.hakodate_overlay_blockers.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+        : [];
+      const nextHakodateOverlayMessage =
+        typeof res.data?.hakodate_overlay_message === "string" ? res.data.hakodate_overlay_message : "";
+      setHakodateOverlayStatus(nextHakodateOverlayStatus);
+      setHakodateOverlayBlockers(nextHakodateOverlayBlockers);
+      setHakodateOverlayMessage(nextHakodateOverlayMessage);
+      const nextHakodateAssignment = asHakodateAssignmentPayload(res.data?.hakodate_assignment);
+      if (nextHakodateAssignment) {
+        setHakodateAssignment(nextHakodateAssignment);
+        setHakodateProjectionMetrics(asHakodateMetricsPayload(nextHakodateAssignment.metrics));
+      }
       const metaTableBox = Array.isArray(res.data?.table_box) ? res.data.table_box : null;
       const metaTableUnits = typeof res.data?.table_units === "string" ? res.data.table_units : null;
       const metaColumnEdges = Array.isArray(res.data?.grid_column_edges)
@@ -4674,11 +4980,16 @@ export default function OrderDetailPage() {
         setOcrPages(pages);
         setOcrPagesMessage("");
       } else {
-      setOcrPages([]);
-      setOcrPagesMessage("OCRページがありません。");
-      setOcrTableBox(metaTableBox);
-      setOcrTableUnits(metaTableUnits);
-      setTableBoxUnitsOverride(null);
+        setOcrPages([]);
+        setOcrPagesMessage("OCRページがありません。");
+        setHakodateOverlayUrl("");
+        setHakodateOverlayStatus("");
+        setHakodateOverlayBlockers([]);
+        setHakodateOverlayMessage("");
+        setHakodateJobStatus(null);
+        setOcrTableBox(metaTableBox);
+        setOcrTableUnits(metaTableUnits);
+        setTableBoxUnitsOverride(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -4692,21 +5003,28 @@ export default function OrderDetailPage() {
       }
       const status = err?.response?.status;
       setOcrPagesMessage(status === 404 ? "OCRページが見つかりません。" : "OCRページの取得に失敗しました。");
-      setOcrPages([]);
-      setOcrTableBox(null);
-      setOcrTableUnits(null);
-      setTableBoxUnitsOverride(null);
-      setTableBoxDraft(null);
-      setGridColumnEdges(null);
-      setGridColumnEdgesDraft(null);
-      setGridRowEdges(null);
-      setGridRowEdgesDraft(null);
-      setOcrTableHeader([]);
-      setOcrTableRows([]);
-      setOcrTablePageIndex(null);
-      setOcrTableMessage("");
-      ocrPageSelectionModeRef.current = "auto";
-      setActiveOcrPageIndex(0);
+      if (!ocrPages.length || status === 404) {
+        setOcrPages([]);
+        setHakodateOverlayStatus("");
+        setHakodateOverlayUrl("");
+        setHakodateOverlayBlockers([]);
+        setHakodateOverlayMessage("");
+        setHakodateJobStatus(null);
+        setOcrTableBox(null);
+        setOcrTableUnits(null);
+        setTableBoxUnitsOverride(null);
+        setTableBoxDraft(null);
+        setGridColumnEdges(null);
+        setGridColumnEdgesDraft(null);
+        setGridRowEdges(null);
+        setGridRowEdgesDraft(null);
+        setOcrTableHeader([]);
+        setOcrTableRows([]);
+        setOcrTablePageIndex(null);
+        setOcrTableMessage("");
+        ocrPageSelectionModeRef.current = "auto";
+        setActiveOcrPageIndex(0);
+      }
     } finally {
       if (requestSeq === ocrPagesRequestSeqRef.current) {
         setOcrPagesLoading(false);
@@ -4771,11 +5089,6 @@ export default function OrderDetailPage() {
   };
 
   useEffect(() => {
-    if (!order?.id) return;
-    void loadOcrPages({ silent: true, force: true });
-  }, [order?.id]);
-
-  useEffect(() => {
     if (activeStep !== 1) return;
     const currentOrder = authoritativeOrderRef.current || order;
     if (!currentOrder?.id) return;
@@ -4807,7 +5120,7 @@ export default function OrderDetailPage() {
       return;
     }
     ocrPreviewRefreshKeyRef.current = nextRefreshKey;
-    void loadOcrPages({ silent: true, force: true });
+    void loadHakodateOverlayPreview({ silent: true, force: true });
   }, [
     activeStep,
     order?.id,
@@ -4856,8 +5169,9 @@ export default function OrderDetailPage() {
 
   useEffect(() => {
     if (!order?.id) return;
+    if (activeStep !== 3) return;
     loadBags();
-  }, [order?.id]);
+  }, [activeStep, order?.id]);
 
   useEffect(() => {
     const handlePointerRelease = () => {
@@ -4997,7 +5311,7 @@ export default function OrderDetailPage() {
         if (item.target_row_index >= next.length || item.target_col_index >= next[item.target_row_index].length) {
           continue;
         }
-        next[item.target_row_index][item.target_col_index] = normalizeOcrCellConfidenceTier(item.confidence_tier) || "";
+        next[item.target_row_index][item.target_col_index] = "high";
       }
       return next;
     });
@@ -5021,7 +5335,7 @@ export default function OrderDetailPage() {
       ...adoptableItems.map((item) => ({
         ...item,
         classification: "accepted" as const,
-        confidence_tier: normalizeOcrCellConfidenceTier(item.confidence_tier) || null,
+        confidence_tier: "high" as const,
         reason: "overlay_adopted",
       })),
     ];
@@ -5774,7 +6088,7 @@ export default function OrderDetailPage() {
       if (observer) observer.disconnect();
       window.removeEventListener("resize", updateOverlaySize);
     };
-  }, [ocrPages, activeOcrPageIndex, showOcrEdit]);
+  }, [ocrPages, activeOcrPageIndex, ocrPreviewMode, quantityAssignmentStrategy, showOcrEdit, hakodateOverlayUrl]);
 
   const tableBoxUnitsLabel = (tableBoxUnitsOverride || ocrTableUnits || "normalized").toLowerCase();
   const tableBoxNormalized = tableBoxUnitsLabel === "normalized" || tableBoxUnitsLabel === "ratio";
@@ -5941,6 +6255,9 @@ export default function OrderDetailPage() {
       const next = !prev;
       if (next && !tableBoxDraft) {
         setTableBoxDraft(ocrTableBox ? [...ocrTableBox] : [0.05, 0.2, 0.95, 0.9]);
+      }
+      if (next && !ocrPages.length && !ocrPagesLoading) {
+        void loadOcrPages({ silent: true, force: true });
       }
       if (!next && tableBoxDraft) {
         setOcrTableBox([...tableBoxDraft]);
@@ -8097,7 +8414,7 @@ export default function OrderDetailPage() {
   } else if (layoutOverlayError) {
     layoutOverlayPlaceholder = "レイアウトオーバーレイの読み込みに失敗しました。";
   }
-  const hasUsableOverlayPreview = showOcrOverlay || usingSyntheticOverlay;
+  const hasUsableOverlayPreview = showOcrOverlay || usingSyntheticOverlay || Boolean(hakodateOverlayUrl);
   const originalPreviewImageUrl = (() => {
     const figureUrl =
       Array.isArray(activeOcrPage?.figure_urls) && activeOcrPage?.figure_urls.length
@@ -8110,6 +8427,249 @@ export default function OrderDetailPage() {
     return "";
   })();
   const canHighlightOriginalPreview = Boolean(originalPreviewImageUrl);
+  const isHakodateOverlayMode = quantityAssignmentStrategy === "hakodate";
+  const hakodateMetrics = hakodateAssignment?.metrics || hakodateProjectionMetrics || null;
+  const hakodateTargetCellsRaw = Array.isArray(hakodateAssignment?.target_cells)
+    ? hakodateAssignment.target_cells
+    : [];
+  const hakodateEvidenceRecords = Array.isArray(hakodateAssignment?.evidence_records)
+    ? hakodateAssignment.evidence_records
+    : [];
+  const hakodateAssignmentItems = Array.isArray(hakodateAssignment?.assignments)
+    ? hakodateAssignment.assignments
+    : [];
+  const hakodateSheetOutputCells =
+    hakodateAssignment?.sheet_output?.cells && isObjectRecord(hakodateAssignment.sheet_output.cells)
+      ? hakodateAssignment.sheet_output.cells
+      : {};
+  const hakodateAssignmentByTargetId = new Map<string, HakodateAssignmentItem>();
+  const hakodateAssignmentBySheetCell = new Map<string, HakodateAssignmentItem>();
+  const hakodateQuantityByTargetId = new Map<string, { text: string; state: string }>();
+  const hakodateQuantityBySheetCell = new Map<string, { text: string; state: string }>();
+  const registerHakodateQuantity = (
+    targetId: string,
+    sheetCell: string,
+    text: string,
+    state: string,
+  ) => {
+    const record = { text, state };
+    if (targetId) {
+      const previous = hakodateQuantityByTargetId.get(targetId);
+      if (!previous || (!previous.text && text)) {
+        hakodateQuantityByTargetId.set(targetId, record);
+      }
+    }
+    if (sheetCell) {
+      const previous = hakodateQuantityBySheetCell.get(sheetCell);
+      if (!previous || (!previous.text && text)) {
+        hakodateQuantityBySheetCell.set(sheetCell, record);
+      }
+    }
+  };
+  hakodateAssignmentItems.forEach((assignment) => {
+    const targetId = firstNonEmptyText(assignment.target_cell_id);
+    const sheetCell = firstNonEmptyText(assignment.sheet_cell);
+    const text = firstNonEmptyText(assignment.assigned_value, assignment.value_normalized, assignment.value_text);
+    const state = firstNonEmptyText(assignment.assignment_state);
+    if (targetId) hakodateAssignmentByTargetId.set(targetId, assignment);
+    if (sheetCell) hakodateAssignmentBySheetCell.set(sheetCell, assignment);
+    registerHakodateQuantity(targetId, sheetCell, text, state);
+  });
+  Object.entries(hakodateSheetOutputCells).forEach(([sheetCellKey, cell]) => {
+    const targetId = firstNonEmptyText(cell.target_cell_id);
+    const sheetCell = firstNonEmptyText(cell.sheet_cell, sheetCellKey);
+    const text = firstNonEmptyText(cell.value_normalized, cell.value_text);
+    const state = firstNonEmptyText(cell.assignment_state);
+    registerHakodateQuantity(targetId, sheetCell, text, state);
+  });
+  const hakodateTargetCellMatchesActivePage = (cell: HakodateTargetCell) => {
+    const metadata = isObjectRecord(cell.metadata) ? cell.metadata : null;
+    const pageValue = firstNonEmptyText(
+      cell.page_index,
+      cell.page,
+      cell.page_number,
+      metadata?.page_index,
+      metadata?.page,
+      metadata?.page_number,
+    );
+    if (!pageValue) return true;
+    const parsed = Number(pageValue);
+    if (!Number.isFinite(parsed)) return true;
+    const zeroBasedPageIndex = parsed > 0 ? parsed - 1 : parsed;
+    return zeroBasedPageIndex === activeOcrPageIndex;
+  };
+  const hakodateOverlayCells: HakodateOverlayCell[] = hakodateTargetCellsRaw
+    .filter(hakodateTargetCellMatchesActivePage)
+    .map((cell) => {
+      const bbox = normalizeHakodateNumberArray(cell.bbox, 4);
+      if (!bbox || bbox[2] <= bbox[0] || bbox[3] <= bbox[1]) return null;
+      const center =
+        normalizeHakodateNumberArray(cell.center, 2) || [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+      const targetKey = firstNonEmptyText(cell.target_cell_id, cell.region_id, cell.sheet_cell);
+      const sheetCell = firstNonEmptyText(cell.sheet_cell, targetKey);
+      const quantity =
+        (targetKey ? hakodateQuantityByTargetId.get(targetKey) : undefined) ||
+        (sheetCell ? hakodateQuantityBySheetCell.get(sheetCell) : undefined) ||
+        { text: "", state: "" };
+      const assignment =
+        (targetKey ? hakodateAssignmentByTargetId.get(targetKey) : undefined) ||
+        (sheetCell ? hakodateAssignmentBySheetCell.get(sheetCell) : undefined);
+      return {
+        ...cell,
+        targetKey,
+        sheetCell,
+        bbox,
+        center,
+        quantityText: quantity.text,
+        assignmentState: quantity.state,
+        hasInk: hakodateCellHasInk(assignment?.target_metadata, cell.metadata),
+      };
+    })
+    .filter((cell): cell is HakodateOverlayCell => Boolean(cell));
+  const resolveHakodateOverlayBox = (bbox: number[], center: number[] | null): HakodateOverlayBox | null => {
+    if (!overlayImageSize.width || !overlayImageSize.height) return null;
+    const image = overlayImageRef.current;
+    const naturalWidth = image?.naturalWidth || overlayImageSize.width;
+    const naturalHeight = image?.naturalHeight || overlayImageSize.height;
+    const values = [...bbox, ...(center || [])];
+    const normalized = values.every((value) => value >= -0.02 && value <= 1.2);
+    const coordinateMaxX = Math.max(
+      naturalWidth,
+      ...hakodateOverlayCells.map((cell) => Number(cell.bbox?.[2] ?? 0)).filter((value) => Number.isFinite(value)),
+    );
+    const coordinateMaxY = Math.max(
+      naturalHeight,
+      ...hakodateOverlayCells.map((cell) => Number(cell.bbox?.[3] ?? 0)).filter((value) => Number.isFinite(value)),
+    );
+    const absoluteScaleX =
+      coordinateMaxX > naturalWidth * 1.05
+        ? overlayImageSize.width / coordinateMaxX
+        : overlayImageSize.width / (naturalWidth || 1);
+    const absoluteScaleY =
+      coordinateMaxY > naturalHeight * 1.05
+        ? overlayImageSize.height / coordinateMaxY
+        : overlayImageSize.height / (naturalHeight || 1);
+    const scaleX = normalized ? overlayImageSize.width : absoluteScaleX;
+    const scaleY = normalized ? overlayImageSize.height : absoluteScaleY;
+    const left = bbox[0] * scaleX;
+    const top = bbox[1] * scaleY;
+    const right = bbox[2] * scaleX;
+    const bottom = bbox[3] * scaleY;
+    const width = Math.max(right - left, 1);
+    const height = Math.max(bottom - top, 1);
+    if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) {
+      return null;
+    }
+    const centerLeft = center ? center[0] * scaleX : left + width / 2;
+    const centerTop = center ? center[1] * scaleY : top + height / 2;
+    return { left, top, width, height, centerLeft, centerTop };
+  };
+  const hakodateRenderedOverlayCells = hakodateOverlayCells
+    .map((cell) => ({ cell, box: resolveHakodateOverlayBox(cell.bbox, cell.center) }))
+    .filter((item): item is { cell: HakodateOverlayCell; box: HakodateOverlayBox } => Boolean(item.box));
+  const hakodateFocusedOverlayHighlights = (() => {
+    const focusedRowIndex = focusedSheetCell?.rowIndex ?? focusedSheetRowIndex;
+    if (!hakodateRenderedOverlayCells.length || focusedRowIndex == null) {
+      return { row: null as HakodateOverlayBox | null, column: null as HakodateOverlayBox | null };
+    }
+    const focusedField = focusedSheetCell ? String(ocrSheetFields[focusedSheetCell.cellIndex] || "").trim() : "";
+    const focusedFieldAliases = new Set(
+      [
+        focusedField,
+        focusedField === "qty.placeholder_x" ? "post_menu.F" : "",
+        focusedField === "remarks" ? "note" : "",
+      ].filter(Boolean),
+    );
+    const hakodateTruthRowIndex = (cell: HakodateOverlayCell): number | null => {
+      const truth = hakodateCellTruthMetadata(cell);
+      const rowIndex = Number(truth?.row_index);
+      return Number.isFinite(rowIndex) ? rowIndex : null;
+    };
+    const hakodateTruthField = (cell: HakodateOverlayCell): string =>
+      firstNonEmptyText(hakodateCellTruthMetadata(cell)?.field, cell.semantic_field, cell.field);
+    const boxFromItems = (items: Array<{ cell: HakodateOverlayCell; box: HakodateOverlayBox }>) => {
+      if (!items.length) return null;
+      const left = Math.min(...items.map((item) => item.box.left));
+      const top = Math.min(...items.map((item) => item.box.top));
+      const right = Math.max(...items.map((item) => item.box.left + item.box.width));
+      const bottom = Math.max(...items.map((item) => item.box.top + item.box.height));
+      return {
+        left,
+        top,
+        width: Math.max(right - left, 1),
+        height: Math.max(bottom - top, 1),
+        centerLeft: left + Math.max(right - left, 1) / 2,
+        centerTop: top + Math.max(bottom - top, 1) / 2,
+      };
+    };
+    const rowItemsByTruth = hakodateRenderedOverlayCells.filter(
+      (item) => hakodateTruthRowIndex(item.cell) === focusedRowIndex,
+    );
+    const columnItems = focusedFieldAliases.size
+      ? hakodateRenderedOverlayCells.filter((item) =>
+          focusedFieldAliases.has(hakodateTruthField(item.cell)),
+        )
+      : [];
+    return {
+      row: boxFromItems(rowItemsByTruth),
+      column: boxFromItems(columnItems),
+    };
+  })();
+  const hakodateTargetCellCount =
+    hakodateTargetCellsRaw.length || readNumericMetric(hakodateMetrics, "target_cell_count");
+  const hakodateEvidenceCount =
+    hakodateEvidenceRecords.length || readNumericMetric(hakodateMetrics, "evidence_count");
+  const hakodateAssignedCount =
+    readNumericMetric(hakodateMetrics, "assigned_target_count") ||
+    readNumericMetric(hakodateMetrics, "assigned_count") ||
+    hakodateOverlayCells.filter((cell) => Boolean(cell.quantityText)).length;
+  const hakodateQuantityLabelCount = hakodateOverlayCells.filter((cell) => Boolean(cell.quantityText)).length;
+  const activeHakodateServerOverlayUrl = firstNonEmptyText(hakodateOverlayUrl);
+  const hakodatePreviewUsesServerOverlay =
+    isHakodateOverlayMode &&
+    Boolean(activeHakodateServerOverlayUrl);
+  const hakodatePreviewImageUrl = hakodatePreviewUsesServerOverlay ? activeHakodateServerOverlayUrl : null;
+  const effectiveHakodateJobStatus = hakodateJobStatus || order?.workflow_state?.reparse_state || null;
+  const hakodateJobStatusCode = String(effectiveHakodateJobStatus?.status || "").trim().toLowerCase();
+  const hakodateJobStage = firstNonEmptyText(
+    effectiveHakodateJobStatus?.processing_stage,
+    order?.ocr_processing_stage,
+  );
+  const hakodateJobStatusLabel = (() => {
+    if (!hakodateJobStatusCode || hakodateJobStatusCode === "idle") return "未実行";
+    if (["queued", "pending"].includes(hakodateJobStatusCode)) return "待機中";
+    if (hakodateJobStatusCode === "running") return "実行中";
+    if (hakodateJobStatusCode === "done") return "完了";
+    if (hakodateJobStatusCode === "awaiting_output") return "成果物待ち";
+    if (hakodateJobStatusCode === "recovering") return "復旧中";
+    if (hakodateJobStatusCode === "stalled") return "停止";
+    if (hakodateJobStatusCode === "hard_failed" || hakodateJobStatusCode === "failed") return "失敗";
+    return hakodateJobStatusCode;
+  })();
+  const hakodateJobDetail = dedupeStrings([
+    effectiveHakodateJobStatus?.job_id ? `job ${effectiveHakodateJobStatus.job_id}` : "",
+    hakodateJobStage ? describeProcessingStage(hakodateJobStage) || hakodateJobStage : "",
+    effectiveHakodateJobStatus?.result_state ? `result ${effectiveHakodateJobStatus.result_state}` : "",
+    effectiveHakodateJobStatus?.error ? `error ${effectiveHakodateJobStatus.error}` : "",
+    effectiveHakodateJobStatus?.progress_updated_at ? `updated ${effectiveHakodateJobStatus.progress_updated_at}` : "",
+  ]).join(" / ");
+  const hakodateRawBlockers = dedupeStrings([
+    ...(isHakodateOverlayMode && hakodateOverlayStatus === "blocked" ? hakodateOverlayBlockers : []),
+    ...(Array.isArray(hakodateAssignment?.blockers) ? hakodateAssignment.blockers : []),
+    ...(Array.isArray(hakodateAssignment?.sheet_output?.blockers) ? hakodateAssignment.sheet_output.blockers : []),
+    ...ocrSheetApplyBlockers.filter((item) => String(item || "").startsWith("hakodate")),
+    ...ocrSheetConfirmBlockers.filter((item) => String(item || "").startsWith("hakodate")),
+    hakodateTargetCellCount ? "" : "hakodate_target_cell_map_missing",
+    hakodateEvidenceCount ? "" : "hakodate_ocr_evidence_missing",
+    hakodatePreviewImageUrl || ocrPagesLoading || hakodateOverlayLoading || (isHakodateOverlayMode && hakodateOverlayStatus === "blocked")
+      ? ""
+      : "hakodate_preview_image_missing",
+  ]);
+  const hakodateOverlayBlockerMessages = [
+    ...hakodateRawBlockers.map(describeHakodateOverlayBlocker),
+    ...(hakodateOverlayMessage && !hakodateRawBlockers.length ? [hakodateOverlayMessage] : []),
+  ];
+  const hakodateOverlayHasBlocker = hakodateRawBlockers.length > 0;
   const step2CriticalBannerMessages = (() => {
     const messages: string[] = [];
     const candidateEvidenceState = resolveCandidateEvidenceState(order);
@@ -8175,8 +8735,12 @@ export default function OrderDetailPage() {
         ? "原本FAX PDFが見つからないため、OCR生成PDFを表示しています。右のシートを直接修正してください。"
         : "原本PDFを表示しています。右のシートを直接修正してください。"
       : "";
-  const canSwitchPreviewMode = Boolean(canShowOriginalPdfPreview && hasUsableOverlayPreview && !shouldFallbackToRawPdfPreview);
-  const overlayPreviewModeLabel = shouldShowOriginalPdfPreview
+  const canSwitchPreviewMode = Boolean(
+    !isHakodateOverlayMode && canShowOriginalPdfPreview && hasUsableOverlayPreview && !shouldFallbackToRawPdfPreview,
+  );
+  const overlayPreviewModeLabel = isHakodateOverlayMode
+    ? "箱館オーバーレイ（数量込み）"
+    : shouldShowOriginalPdfPreview
     ? shouldFallbackToRawPdfPreview
       ? showingArtifactPdf
         ? `${artifactPdfLabel} (fallback)`
@@ -8187,7 +8751,13 @@ export default function OrderDetailPage() {
     : usingSyntheticOverlay
       ? `OCRプレビュー (${activeOcrPage?.pdf_variant_used === "corrected" ? "corrected PDF" : "raw PDF"})`
       : "OCRオーバーレイ";
-  const primaryPreviewOpenUrl = shouldShowOriginalPdfPreview ? pdfUrl : showOcrOverlay ? ocrOverlayUrl : null;
+  const primaryPreviewOpenUrl = isHakodateOverlayMode
+    ? hakodatePreviewImageUrl || pdfUrl || null
+    : shouldShowOriginalPdfPreview
+      ? pdfUrl
+      : showOcrOverlay
+        ? ocrOverlayUrl
+        : null;
   useEffect(() => {
     if (shouldFallbackToRawPdfPreview) {
       ocrPreviewForcedFallbackRef.current = true;
@@ -8340,7 +8910,7 @@ export default function OrderDetailPage() {
     ocrHistoryLatest?.ui_mode === "sheet"
       ? "シートUI"
       : ocrHistoryLatest?.ui_mode === "legacy"
-        ? "旧UI"
+        ? "履歴UI"
         : ocrHistoryLatest?.ui_mode || "-";
   const latestOcrRevisionChanged =
     typeof ocrHistoryLatest?.changed === "boolean"
@@ -8473,10 +9043,10 @@ export default function OrderDetailPage() {
   ].join(" / ");
   const ocrSheetConfidenceModeDescription =
     ocrConfidenceDisplayMode === "strict"
-      ? "accepted のみを表示します。candidate overlay は出しません。"
+      ? "厳格: OCRスコア0.45以上だけをシート本体に表示します。"
       : ocrConfidenceDisplayMode === "assisted"
-        ? "accepted に deterministic candidate overlay を重ねます。canonical current sheet 自体は変えません。"
-        : "accepted に deterministic / weak candidate overlay を重ねます。canonical current sheet 自体は変えません。";
+        ? "補助: 厳格に加えてOCRスコア0.15以上の候補をoverlay表示します。"
+        : "提案: 厳格/補助に加えてOCRスコア0.05以上の弱い候補をoverlay表示します。";
   const applyVisibleOcrOverlaySuggestions = () => {
     adoptVisibleOcrOverlayItems(
       ocrSheetVisibleOverlayItems,
@@ -10217,26 +10787,7 @@ export default function OrderDetailPage() {
                           </div>
                           <div className="ocr-editor-mode-switch">
                             <span className="subtle">数量割当</span>
-                            <div className="preview-mode-toggle" role="tablist" aria-label="quantity assignment strategy">
-                              <button
-                                className={`btn ghost ${quantityAssignmentStrategy === "legacy" ? "active" : ""}`}
-                                type="button"
-                                onClick={() => switchQuantityAssignmentStrategy("legacy")}
-                                aria-pressed={quantityAssignmentStrategy === "legacy"}
-                                disabled={ocrSheetLoading}
-                              >
-                                旧方式
-                              </button>
-                              <button
-                                className={`btn ghost ${quantityAssignmentStrategy === "hakodate" ? "active" : ""}`}
-                                type="button"
-                                onClick={() => switchQuantityAssignmentStrategy("hakodate")}
-                                aria-pressed={quantityAssignmentStrategy === "hakodate"}
-                                disabled={ocrSheetLoading}
-                              >
-                                箱館方式
-                              </button>
-                            </div>
+                            <span className="ocr-fixed-mode-pill">箱館方式</span>
                           </div>
                         </div>
                         {ocrSheetMessage ? <p className="subtle">{ocrSheetMessage}</p> : null}
@@ -10837,7 +11388,7 @@ export default function OrderDetailPage() {
                                         {item.ui_mode === "sheet"
                                           ? "シートUI"
                                           : item.ui_mode === "legacy"
-                                            ? "旧UI"
+                                            ? "履歴UI"
                                             : item.ui_mode || "-"}
                                       </span>
                                       <span>
@@ -10931,15 +11482,239 @@ export default function OrderDetailPage() {
                             ) : null}
                           </div>
                         </div>
-                        <div className="edit-hint active">
-                          {shouldShowOriginalPdfPreview
+	                          <div className="edit-hint active">
+	                            {isHakodateOverlayMode
+	                            ? "左はbackendが生成した箱館方式の数量込みoverlay画像です。frontendは画像を再合成せず、シートカーソルだけを薄く重ねます。"
+                            : shouldShowOriginalPdfPreview
                             ? step2FallbackSummary || (showingArtifactPdf
                               ? "OCR生成PDFを見ながら、右のシートだけを更新します。"
                               : "原本PDFを見ながら、右のシートだけを更新します。")
                             : "左は比較用です。編集は右のシートだけを更新します。"}
                         </div>
                         <div className="preview-surface">
-                          {shouldShowOriginalPdfPreview ? (
+                          {isHakodateOverlayMode ? (
+                            <div className="hakodate-overlay-preview" data-testid="hakodate-overlay-preview">
+                              {hakodatePreviewImageUrl ? (
+                                <div
+                                  ref={ocrPreviewWrapperRef}
+                                  className="ocr-preview-wrapper ocr-preview-wrapper--framed"
+                                  data-testid="ocr-preview-wrapper"
+                                  data-preview-mode="hakodate-overlay"
+                                >
+                                  <img
+                                    ref={overlayImageRef}
+                                    src={hakodatePreviewImageUrl}
+                                    alt="Hakodate quantity overlay base"
+                                    className="ocr-preview"
+                                  />
+                                  {hakodateFocusedOverlayHighlights.column ? (
+                                    <div
+                                      className="ocr-overlay-column-highlight"
+                                      data-testid="ocr-overlay-column-highlight"
+                                      style={{
+                                        left: `${hakodateFocusedOverlayHighlights.column.left}px`,
+                                        top: `${hakodateFocusedOverlayHighlights.column.top}px`,
+                                        width: `${hakodateFocusedOverlayHighlights.column.width}px`,
+                                        height: `${hakodateFocusedOverlayHighlights.column.height}px`,
+                                      }}
+                                    />
+                                  ) : null}
+                                  {hakodateFocusedOverlayHighlights.row ? (
+                                    <div
+                                      className="ocr-overlay-row-highlight"
+                                      data-testid="ocr-overlay-row-highlight"
+                                      style={{
+                                        left: `${hakodateFocusedOverlayHighlights.row.left}px`,
+                                        top: `${hakodateFocusedOverlayHighlights.row.top}px`,
+                                        width: `${hakodateFocusedOverlayHighlights.row.width}px`,
+                                        height: `${hakodateFocusedOverlayHighlights.row.height}px`,
+                                      }}
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : ocrPagesLoading || hakodateOverlayLoading ? (
+                                <div className="preview-placeholder">箱館オーバーレイを取得中...</div>
+                              ) : isHakodateOverlayMode ? (
+                                <div className="hakodate-overlay-blocked" data-testid="hakodate-overlay-image-missing">
+                                  箱館方式のoverlay成果物がありません。yomitoku overlayへの自動フォールバックは停止しています。
+                                </div>
+                              ) : (
+                                <div className="preview-placeholder">箱館オーバーレイを表示できるPDF/画像がありません。</div>
+                              )}
+                              <div
+                                className={`hakodate-overlay-status ${hakodateOverlayHasBlocker ? "blocked" : "ready"}`}
+                                data-testid="hakodate-overlay-status"
+                              >
+                                <div className="hakodate-overlay-status-header">
+                                  <strong>{hakodateOverlayHasBlocker ? "箱館オーバーレイ要確認" : "箱館オーバーレイ表示中"}</strong>
+                                  <span>
+                                    対象セル {hakodateTargetCellCount} / evidence {hakodateEvidenceCount} / 割当 {hakodateAssignedCount} / 表示数量 {hakodateQuantityLabelCount}
+                                  </span>
+                                </div>
+                                <div className="hakodate-job-status" data-testid="hakodate-job-status">
+                                  <strong>OCRジョブ</strong>
+                                  <span>{hakodateJobStatusLabel}</span>
+                                  {hakodateJobDetail ? <span className="subtle">{hakodateJobDetail}</span> : null}
+                                </div>
+                                {hakodateOverlayBlockerMessages.length ? (
+                                  <ul className="hakodate-overlay-blocker-list" data-testid="hakodate-overlay-blockers">
+                                    {hakodateOverlayBlockerMessages.map((message) => (
+                                      <li key={message}>{message}</li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <p className="subtle">backend生成画像に、推定セル・インク判定・OCR数量を含めています。frontendの追加描画はカーソル表示だけです。</p>
+                                )}
+                              </div>
+                              <div className="hakodate-frame-editor" data-testid="hakodate-frame-editor">
+                                <div className="hakodate-frame-editor-header">
+                                  <div>
+                                    <strong>枠位置合わせ</strong>
+                                    <p className="subtle">
+                                      施設テンプレートの外枠・列線・行線を調整します。保存後に再計算すると、左の緑枠と右のシートに反映されます。
+                                    </p>
+                                  </div>
+                                  <div className="hakodate-frame-editor-actions">
+                                    <button className="btn ghost" type="button" onClick={toggleTableBoxEditor}>
+                                      {showTableBoxEditor ? "枠編集を閉じる" : "枠を編集"}
+                                    </button>
+                                    <button
+                                      className="btn ghost"
+                                      type="button"
+                                      onClick={() => void detectGridEdges()}
+                                      disabled={gridDetecting}
+                                    >
+                                      {gridDetecting ? "自動検出中..." : "自動検出"}
+                                    </button>
+                                    <button
+                                      className="btn primary"
+                                      type="button"
+                                      onClick={() => void saveTableBox()}
+                                      disabled={!showTableBoxEditor || tableBoxSaving || !tableBoxReady}
+                                    >
+                                      {tableBoxSaving ? "保存中..." : "施設テンプレートに保存"}
+                                    </button>
+                                    <button
+                                      className="btn ghost"
+                                      type="button"
+                                      onClick={() => {
+                                        void (async () => {
+                                          await loadOcrSheet({ silent: true, force: true });
+                                          await loadHakodateOverlayPreview({ force: true });
+                                        })();
+                                      }}
+                                      disabled={ocrSheetLoading || ocrPagesLoading || hakodateOverlayLoading}
+                                    >
+                                      再計算して表示
+                                    </button>
+                                  </div>
+                                </div>
+                                {showTableBoxEditor ? (
+                                  <div className="hakodate-frame-editor-body">
+                                    <div className="hakodate-frame-grid">
+                                      {["x0", "y0", "x1", "y1"].map((label, idx) => (
+                                        <label className="input-label" key={`hakodate-frame-${label}`}>
+                                          <span>{label}</span>
+                                          <input
+                                            className="input"
+                                            inputMode="decimal"
+                                            value={tableBoxDraft?.[idx]?.toFixed(tableBoxDecimals) ?? ""}
+                                            onChange={(event) => updateTableBoxIndex(idx, event.target.value)}
+                                          />
+                                        </label>
+                                      ))}
+                                      <label className="input-label">
+                                        <span>移動量</span>
+                                        <input
+                                          className="input"
+                                          inputMode="decimal"
+                                          value={tableBoxStep}
+                                          onChange={(event) => {
+                                            const parsed = Number(event.target.value);
+                                            if (!Number.isNaN(parsed)) {
+                                              setTableBoxStep(parsed);
+                                            }
+                                          }}
+                                        />
+                                      </label>
+                                    </div>
+                                    <div className="hakodate-frame-editor-actions hakodate-frame-editor-actions--wrap">
+                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(-tableBoxNudge, 0)} disabled={!tableBoxReady}>
+                                        左へ
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(tableBoxNudge, 0)} disabled={!tableBoxReady}>
+                                        右へ
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(0, -tableBoxNudge)} disabled={!tableBoxReady}>
+                                        上へ
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(0, tableBoxNudge)} disabled={!tableBoxReady}>
+                                        下へ
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={() => expandTableBox(tableBoxNudge)} disabled={!tableBoxReady}>
+                                        外へ広げる
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={() => expandTableBox(-tableBoxNudge)} disabled={!tableBoxReady}>
+                                        内へ縮める
+                                      </button>
+                                      <button className="btn ghost" type="button" onClick={resetTableBoxDraft}>
+                                        取得値に戻す
+                                      </button>
+                                    </div>
+                                    <div className="hakodate-frame-grid hakodate-frame-grid--wide">
+                                      <label className="input-label">
+                                        <span>列数</span>
+                                        <input
+                                          className="input"
+                                          inputMode="numeric"
+                                          placeholder={String(Math.max(overlayColumnCount, 1))}
+                                          onChange={(event) => setColumnCount(Number(event.target.value))}
+                                        />
+                                      </label>
+                                      <label className="input-label">
+                                        <span>行数</span>
+                                        <input
+                                          className="input"
+                                          inputMode="numeric"
+                                          placeholder={String(Math.max(overlayRowCount, 1))}
+                                          onChange={(event) => setRowCount(Number(event.target.value))}
+                                        />
+                                      </label>
+                                      <label className="input-label hakodate-frame-wide-field">
+                                        <span>列線(%)</span>
+                                        <input
+                                          className="input"
+                                          value={columnEdgesText}
+                                          onChange={(event) => {
+                                            setColumnEdgesText(event.target.value);
+                                            updateColumnEdgesText(event.target.value);
+                                          }}
+                                          placeholder="例: 24.8, 32.1, 39.4"
+                                        />
+                                      </label>
+                                      <label className="input-label hakodate-frame-wide-field">
+                                        <span>行線(%)</span>
+                                        <input
+                                          className="input"
+                                          value={rowEdgesText}
+                                          onChange={(event) => {
+                                            setRowEdgesText(event.target.value);
+                                            updateRowEdgesText(event.target.value);
+                                          }}
+                                          placeholder="例: 18.5, 20.9, 23.3"
+                                        />
+                                      </label>
+                                    </div>
+                                  </div>
+                                ) : null}
+                                {tableBoxMessage || gridDetectMessage ? (
+                                  <p className="subtle">
+                                    {[tableBoxMessage, gridDetectMessage].filter(Boolean).join(" / ")}
+                                  </p>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : shouldShowOriginalPdfPreview ? (
                             canHighlightOriginalPreview ? (
                               <div
                                 ref={ocrPreviewWrapperRef}
@@ -11054,12 +11829,12 @@ export default function OrderDetailPage() {
                             </div>
                           )}
                         </div>
-                        {!shouldShowOriginalPdfPreview && usingSyntheticOverlay ? (
+                        {!isHakodateOverlayMode && !shouldShowOriginalPdfPreview && usingSyntheticOverlay ? (
                           <p className="subtle">
                             OCR overlay artifact が無いため、PDFレンダリング画像を比較表示しています。
                           </p>
                         ) : null}
-                        {!shouldShowOriginalPdfPreview ? (
+                        {!isHakodateOverlayMode && !shouldShowOriginalPdfPreview ? (
                           <div className="layout-toggle">
                             <button
                               className="btn ghost"
@@ -11074,7 +11849,7 @@ export default function OrderDetailPage() {
                             </span>
                           </div>
                         ) : null}
-                        {!shouldShowOriginalPdfPreview && showLayoutOverlay ? (
+                        {!isHakodateOverlayMode && !shouldShowOriginalPdfPreview && showLayoutOverlay ? (
                           showLayoutOverlayImage ? (
                             <div className="preview-surface preview-surface--secondary">
                               <div className="ocr-preview-wrapper ocr-preview-wrapper--framed">
@@ -13120,6 +13895,17 @@ export default function OrderDetailPage() {
           transition: top 120ms ease, height 120ms ease;
         }
 
+        .ocr-overlay-column-highlight {
+          position: absolute;
+          border: 3px solid rgba(37, 129, 176, 0.85);
+          background: rgba(124, 202, 238, 0.18);
+          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.62), 0 8px 22px rgba(37, 129, 176, 0.14);
+          border-radius: 8px;
+          pointer-events: none;
+          z-index: 2;
+          transition: left 120ms ease, width 120ms ease;
+        }
+
         .ocr-overlay-row-marker {
           position: absolute;
           width: 14px;
@@ -13142,6 +13928,98 @@ export default function OrderDetailPage() {
           border-top: 5px solid transparent;
           border-bottom: 5px solid transparent;
           border-left: 8px solid rgba(193, 83, 28, 0.98);
+        }
+
+        .hakodate-overlay-preview {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .hakodate-overlay-status,
+        .hakodate-overlay-blocked {
+          border: 1px solid rgba(34, 139, 78, 0.24);
+          background: rgba(238, 248, 241, 0.92);
+          border-radius: 12px;
+          padding: 10px 12px;
+          color: #1f2a2a;
+          font-size: 12px;
+        }
+
+        .hakodate-overlay-status.blocked,
+        .hakodate-overlay-blocked {
+          border-color: rgba(193, 83, 28, 0.35);
+          background: rgba(255, 246, 236, 0.96);
+        }
+
+        .hakodate-overlay-status-header {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          justify-content: space-between;
+          align-items: center;
+        }
+
+        .hakodate-job-status {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+          margin-top: 8px;
+          padding-top: 8px;
+          border-top: 1px solid rgba(31, 42, 42, 0.12);
+        }
+
+        .hakodate-overlay-blocker-list {
+          margin: 8px 0 0;
+          padding-left: 18px;
+        }
+
+        .hakodate-frame-editor {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          background: rgba(255, 255, 255, 0.88);
+          border-radius: 14px;
+          padding: 12px;
+        }
+
+        .hakodate-frame-editor-header,
+        .hakodate-frame-editor-actions {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .hakodate-frame-editor-actions {
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .hakodate-frame-editor-actions--wrap {
+          justify-content: flex-start;
+        }
+
+        .hakodate-frame-editor-body {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .hakodate-frame-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+          gap: 8px;
+        }
+
+        .hakodate-frame-grid--wide {
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        }
+
+        .hakodate-frame-wide-field {
+          grid-column: span 2;
         }
 
         .ocr-overlay-text {
@@ -13597,6 +14475,20 @@ export default function OrderDetailPage() {
           display: flex;
           gap: 8px;
           flex-wrap: wrap;
+          align-items: center;
+        }
+
+        .ocr-fixed-mode-pill {
+          display: inline-flex;
+          align-items: center;
+          min-height: 32px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(34, 139, 78, 0.25);
+          background: rgba(238, 248, 241, 0.92);
+          color: #1f2a2a;
+          font-size: 13px;
+          font-weight: 700;
         }
 
         .ocr-edit-actions {
@@ -14439,11 +15331,11 @@ export default function OrderDetailPage() {
         }
 
         .ocr-sheet-input-overlay-deterministic_candidate {
-          color: #99691a;
+          color: #0f5f99;
         }
 
         .ocr-sheet-input-overlay-weak_candidate {
-          color: #8a4633;
+          color: #0a7f8f;
         }
 
         .ocr-sheet-input-has-overlay {

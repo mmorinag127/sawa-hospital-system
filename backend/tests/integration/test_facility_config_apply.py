@@ -61,7 +61,7 @@ def test_fac00002_template_columns_preserve_area_schema_without_duplicates():
     assert "qty.mixer_x" not in fields
     assert "qty.change_1_x" in fields
     assert "qty.change_2_x" in fields
-    assert ((template.get("postprocess") or {}).get("qty_ocr_engine")) == "tesseract_digits"
+    assert ((template.get("postprocess") or {}).get("qty_ocr_engine")) == "disabled"
     assert ((template.get("postprocess") or {}).get("qty_max_value")) == 50
 
 
@@ -155,7 +155,7 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
     assert resolved is not None
     assert resolved.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
     assert resolved.get("fax_template_ids") == ["fax_layout_regular_soft_mixer_forbidden_v1"]
-    assert ((resolved.get("fax_template") or {}).get("postprocess") or {}).get("qty_ocr_engine") == "tesseract_digits"
+    assert ((resolved.get("fax_template") or {}).get("postprocess") or {}).get("qty_ocr_engine") == "disabled"
     template = resolved.get("fax_template") or {}
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
@@ -200,8 +200,8 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
         "qty.no_fish_x",
     ]
     registry = config_service.load_fax_template_registry()
-    assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_ocr_engine"] == "tesseract_digits"
-    assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_ocr_engine"] == "tesseract_digits"
+    assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_ocr_engine"] == "disabled"
+    assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_ocr_engine"] == "disabled"
     assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_max_value"] == 50
     assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_max_value"] == 50
 

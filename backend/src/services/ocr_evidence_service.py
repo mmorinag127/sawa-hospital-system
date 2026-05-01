@@ -11,7 +11,12 @@ from sqlalchemy import text
 
 from src.db import Base, engine, session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
-from src.services import evidence_manifest_service, order_current_state_service, template_resolution_service
+from src.services import (
+    evidence_manifest_service,
+    hakodate_ocr_evidence_service,
+    order_current_state_service,
+    template_resolution_service,
+)
 
 
 Base.metadata.create_all(bind=engine)
@@ -66,6 +71,11 @@ _EVIDENCE_ARTIFACT_KEYS = (
     "grid_row_edges",
     "roi_extraction",
     "cell_issues",
+    "hakodate_preprocessing",
+    "hakodate_ocr_evidence",
+    "hakodate_ocr_evidence_records",
+    "hakodate_overlay",
+    "hakodate_canonical_pipeline",
 )
 
 _HIGH_RISK_NUMERIC_ISSUE_CODES = {
@@ -77,6 +87,15 @@ _HIGH_RISK_NUMERIC_ISSUE_CODES = {
     "missing_blank_anchor_rows",
 }
 
+_HAKODATE_ALLOWED_EVIDENCE_ENGINES = {
+    "hakodate_cell_crop_ocr",
+    "yomitoku_contact_sheet_batch",
+}
+_HAKODATE_ALLOWED_SOURCE_SCOPES = {
+    "hakodate_cell_crop_batch",
+    "hakodate_cell_crop_ocr",
+}
+
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -84,6 +103,111 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def hakodate_evidence_record_allowed(record: dict[str, Any]) -> bool:
+    source_scope = str(record.get("source_scope") or "").strip()
+    engine = str(record.get("engine") or "").strip()
+    if source_scope in _HAKODATE_ALLOWED_SOURCE_SCOPES:
+        return True
+    if engine in _HAKODATE_ALLOWED_EVIDENCE_ENGINES:
+        return True
+    return not source_scope and not engine and not str(record.get("evidence_id") or "").strip()
+
+
+def _extract_hakodate_target_cells(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    candidates = (
+        ((payload.get("hakodate_preprocessing") or {}).get("target_cell_map")),
+        ((payload.get("hakodate_preprocessing") or {}).get("target_cells")),
+        payload.get("hakodate_target_cell_map"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+    return []
+
+
+def _extract_hakodate_evidence_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_records = None
+    hakodate_evidence = payload.get("hakodate_ocr_evidence")
+    if isinstance(hakodate_evidence, dict) and isinstance(hakodate_evidence.get("records"), list):
+        raw_records = hakodate_evidence.get("records")
+    elif isinstance(payload.get("hakodate_ocr_evidence_records"), list):
+        raw_records = payload.get("hakodate_ocr_evidence_records")
+    if not isinstance(raw_records, list):
+        return []
+    return [
+        item
+        for item in raw_records
+        if isinstance(item, dict) and hakodate_evidence_record_allowed(item)
+    ]
+
+
+def _summarize_hakodate_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    target_cells = _extract_hakodate_target_cells(payload)
+    evidence_records = _extract_hakodate_evidence_records(payload)
+    canonical_pipeline = (
+        payload.get("hakodate_canonical_pipeline")
+        if isinstance(payload.get("hakodate_canonical_pipeline"), dict)
+        else None
+    )
+    has_hakodate_signal = bool(
+        target_cells
+        or evidence_records
+        or isinstance(canonical_pipeline, dict)
+        or isinstance(payload.get("hakodate_overlay"), dict)
+    )
+    if not has_hakodate_signal:
+        return None
+
+    blockers: list[str] = []
+    if not target_cells:
+        blockers.append("hakodate_target_cell_map_missing")
+    if not evidence_records:
+        blockers.append("hakodate_ocr_evidence_missing")
+
+    assigned_target_count = 0
+    assignment_blockers: list[str] = []
+    if target_cells and evidence_records:
+        assignment_result = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
+            evidence_records=evidence_records,
+            target_cells=target_cells,
+        )
+        summary = assignment_result.get("summary") if isinstance(assignment_result, dict) else {}
+        assigned_target_count = int((summary or {}).get("assigned_target_count") or 0)
+        assignment_blockers = [
+            str(item).strip()
+            for item in (assignment_result.get("blockers") or [])
+            if str(item).strip()
+        ]
+        blockers.extend(assignment_blockers)
+        if assigned_target_count <= 0:
+            blockers.append("hakodate_assignment_missing")
+
+    if isinstance(canonical_pipeline, dict) and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked":
+        blockers.extend(
+            str(item).strip()
+            for item in (canonical_pipeline.get("blockers") or [])
+            if str(item).strip()
+        )
+
+    deduped_blockers: list[str] = []
+    for blocker in blockers:
+        if blocker and blocker not in deduped_blockers:
+            deduped_blockers.append(blocker)
+    return {
+        "target_cell_count": len(target_cells),
+        "evidence_record_count": len(evidence_records),
+        "assigned_target_count": assigned_target_count,
+        "assignment_blockers": assignment_blockers,
+        "blockers": deduped_blockers,
+    }
 
 
 def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
@@ -100,6 +224,9 @@ def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
     if isinstance(payload.get("page_correction"), dict):
         return True
     if isinstance(payload.get("page_correction_artifacts"), dict):
+        return True
+    hakodate_state = _summarize_hakodate_payload(payload)
+    if isinstance(hakodate_state, dict) and int(hakodate_state.get("evidence_record_count") or 0) > 0:
         return True
     return False
 
@@ -123,6 +250,23 @@ def classify_evidence_payload(payload: object) -> dict[str, Any]:
             "status": status or None,
             "stage": stage or None,
         }
+    hakodate_state = _summarize_hakodate_payload(payload)
+    if isinstance(hakodate_state, dict):
+        blockers = [str(item).strip() for item in (hakodate_state.get("blockers") or []) if str(item).strip()]
+        if blockers:
+            return {
+                "persistable": False,
+                "error": "evidence_unusable",
+                "message": f"Hakodate canonical evidence blocked: {', '.join(blockers)}",
+                "status": status or None,
+                "stage": stage or None,
+            }
+        if int(hakodate_state.get("assigned_target_count") or 0) > 0:
+            return {
+                "persistable": True,
+                "status": status or None,
+                "stage": stage or None,
+            }
     if not _has_meaningful_evidence(payload):
         return {
             "persistable": False,
@@ -226,6 +370,19 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     table_raw = bool((artifacts or {}).get("table_raw"))
     tables = bool(payload.get("tables"))
     quantity_subgrid = bool((artifacts or {}).get("quantity_subgrid"))
+    hakodate_state = _summarize_hakodate_payload(payload)
+    hakodate_ready = bool(
+        isinstance(hakodate_state, dict)
+        and not list(hakodate_state.get("blockers") or [])
+        and int(hakodate_state.get("assigned_target_count") or 0) > 0
+    )
+    hakodate_overlay = bool(
+        str(
+            ((payload.get("hakodate_overlay") or {}).get("uri"))
+            or ((payload.get("hakodate_overlay") or {}).get("url"))
+            or ""
+        ).strip()
+    )
     effective_grid_metadata = template_resolution_service.resolve_effective_grid_metadata(
         template_resolution=payload.get("template_resolution") if isinstance(payload, dict) else None,
         payload=payload,
@@ -244,23 +401,34 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     template_present = isinstance(template_resolution, dict) and bool(
         str(template_resolution.get("resolved_template_id") or template_resolution.get("template_id") or "").strip()
     )
-    quantity_column_semantics_ready = payload_has_quantity_column_semantics(payload)
+    quantity_column_semantics_ready = payload_has_quantity_column_semantics(payload) or hakodate_ready
 
-    step2_view_ready = overlay_pages or corrected_pdf or bool(payload.get("input_reference"))
-    step2_edit_ready = table_raw or tables or quantity_subgrid
-    semantic_shell_only = bool(
-        step2_view_ready and step2_edit_ready and (not template_present or not quantity_column_semantics_ready)
+    step2_view_ready = overlay_pages or corrected_pdf or hakodate_overlay or bool(payload.get("input_reference"))
+    step2_edit_ready = table_raw or tables or quantity_subgrid or hakodate_ready
+    semantic_shell_only = (
+        False
+        if hakodate_ready
+        else bool(step2_view_ready and step2_edit_ready and (not template_present or not quantity_column_semantics_ready))
     )
-    numeric_trust_low = bool(
-        step2_edit_ready
-        and (
-            not quantity_subgrid
-            or semantic_shell_only
-            or payload_has_high_risk_numeric_issues(payload)
+    numeric_trust_low = (
+        False
+        if hakodate_ready
+        else bool(
+            step2_edit_ready
+            and (
+                not quantity_subgrid
+                or semantic_shell_only
+                or payload_has_high_risk_numeric_issues(payload)
+            )
         )
     )
-    apply_ready = step2_edit_ready and not template_blocked and template_present and quantity_column_semantics_ready
-    confirm_ready = apply_ready and bool(quantity_subgrid or table_raw)
+    apply_ready = (
+        step2_edit_ready
+        and not template_blocked
+        and (template_present or hakodate_ready)
+        and (quantity_column_semantics_ready or hakodate_ready)
+    )
+    confirm_ready = apply_ready and bool(quantity_subgrid or table_raw or hakodate_ready)
     recovery_required = not step2_view_ready or not step2_edit_ready
     return {
         "step2_view_ready": bool(step2_view_ready),
@@ -268,7 +436,7 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
         "semantic_shell_only": bool(semantic_shell_only),
         "numeric_trust_low": bool(numeric_trust_low),
         "quantity_column_semantics_ready": bool(quantity_column_semantics_ready),
-        "grid_metadata_complete": bool(grid_metadata),
+        "grid_metadata_complete": bool(grid_metadata or hakodate_ready),
         "rerunnable": bool(step2_view_ready or step2_edit_ready or payload.get("input_reference")),
         "switch_candidate_available": False,
         "apply_ready": bool(apply_ready),
@@ -368,7 +536,14 @@ def persist_evidence_run(
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .first()
         )
-        if latest and str(latest.artifact_digest or "") == str(record["artifact_digest"]):
+        latest_matches_record_identity = bool(
+            latest
+            and str(latest.artifact_digest or "") == str(record["artifact_digest"])
+            and str(latest.schema_version or "") == str(record["schema_version"])
+            and str(latest.producer_version or "") == str(record["producer_version"])
+            and str(latest.source or "") == str(record.get("source") or "")
+        )
+        if latest_matches_record_identity:
             existing = _serialize_evidence_run(latest, include_payload=True)
             existing["created"] = False
             return existing

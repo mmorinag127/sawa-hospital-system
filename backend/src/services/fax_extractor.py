@@ -90,30 +90,13 @@ def _crop_to_bbox(image, bbox: list[float]):
 
 
 def _ocr_crop_text(crop) -> str:
-    import pytesseract
-
-    return pytesseract.image_to_string(crop, config="--psm 7").strip()
+    _ = crop
+    raise RuntimeError("tesseract_ocr_removed")
 
 
 def _extract_tesseract_tokens(image) -> list[dict]:
-    import pytesseract
-
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-    width, height = image.size
-    tokens: list[dict] = []
-    for text, left, top, w, h in zip(
-        data.get("text", []),
-        data.get("left", []),
-        data.get("top", []),
-        data.get("width", []),
-        data.get("height", []),
-    ):
-        if not text or not str(text).strip():
-            continue
-        x = (left + w / 2) / width
-        y = (top + h / 2) / height
-        tokens.append({"text": str(text).strip(), "x": x, "y": y})
-    return tokens
+    _ = image
+    raise RuntimeError("tesseract_ocr_removed")
 
 
 def _map_tokens_to_box(tokens: list[dict], bbox: list[float]) -> list[dict]:
@@ -2693,10 +2676,9 @@ def extract_fax_data(
                 return FaxExtractedData(None, [], [], [], grid=grid, ocr_provider="hakodate")
             resolution = _get_resolution(template, "hakodate_ocr_resolution", 320)
             image = page.to_image(resolution=resolution).original
-        facility_name, date_strings = _extract_facility_and_dates_tesseract(image, template)
         return FaxExtractedData(
-            facility_name=facility_name,
-            date_strings=date_strings,
+            facility_name=None,
+            date_strings=[],
             table_rows=[],
             tokens=[],
             grid=grid,
@@ -2710,38 +2692,7 @@ def extract_fax_data(
         )
 
     if provider == "tesseract":
-        import pdfplumber
-
-        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            page = pdf.pages[page_index] if pdf.pages else None
-            if not page:
-                return FaxExtractedData(None, [], [], [], grid=grid, ocr_provider=provider)
-            resolution = _get_resolution(template, "main_ocr_resolution", 320)
-            image = page.to_image(resolution=resolution).original
-        logger.info(
-            "Main OCR provider: tesseract",
-            resolution=resolution,
-            use_table_box=bool(template.get("main_ocr_use_table_box", True)),
-        )
-        facility_name, date_strings = _extract_facility_and_dates_tesseract(image, template)
-        use_table_box = bool(template.get("main_ocr_use_table_box", True))
-        table_box = template.get("table_box") if use_table_box else None
-        token_image = image
-        if table_box:
-            crop = _crop_to_bbox(image, table_box)
-            if crop:
-                token_image = crop
-        tokens = _extract_tesseract_tokens(token_image)
-        if table_box:
-            tokens = _map_tokens_to_box(tokens, table_box)
-        return FaxExtractedData(
-            facility_name=facility_name,
-            date_strings=date_strings,
-            table_rows=[],
-            tokens=tokens,
-            grid=grid,
-            ocr_provider=provider,
-        )
+        raise RuntimeError("main_ocr_provider=tesseract has been removed")
 
     if provider == "pipeline":
         output = run_ocr_pipeline(

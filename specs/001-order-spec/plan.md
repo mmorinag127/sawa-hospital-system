@@ -100,7 +100,7 @@ frontend/
 
 1. **Environment & Infrastructure**
    - Provision PostgreSQL, Redis, and S3-compatible storage or filesystem paths.
-   - Install Tesseract (Japanese) and pdfplumber dependencies; set TESSDATA_PREFIX.
+   - Install pdfplumber dependencies.
    - Configure retention window (1–2 months) and timezone (JST) for services.
    - Wire mail ingress to ingestion endpoint/service (accept PDF URI + metadata).
 2. **Backend Foundations**

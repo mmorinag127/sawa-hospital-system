@@ -129,14 +129,11 @@ def test_postprocess_and_retry_continues_after_blank_raw_variant():
     assert result["qty_cell_diagnostics"][0]["route"] == "high_conf_single"
 
 
-def test_postprocess_and_retry_uses_tesseract_qty_fallback(monkeypatch):
+def test_postprocess_and_retry_does_not_use_removed_qty_fallback():
     responses = iter([""])
 
     def _ocr_fn(_image, _prompt: str, _max_tokens: int) -> str:
         return next(responses, "")
-
-    monkeypatch.setenv("OCR_ENABLE_TESSERACT_QTY_FALLBACK", "true")
-    monkeypatch.setattr(postprocess, "_tesseract_digits_text", lambda _image: "4")
 
     result = postprocess.postprocess_and_retry(
         rois=_rois(),
@@ -144,9 +141,9 @@ def test_postprocess_and_retry_uses_tesseract_qty_fallback(monkeypatch):
         ocr_fn=_ocr_fn,
     )
 
-    assert result["qty"]["r0"]["c0"] == 4
-    assert result["metrics"]["tesseract_qty_calls"] >= 1
-    assert result["qty_cell_diagnostics"][0]["route"] == "agree_votes_2"
+    assert result["qty"]["r0"]["c0"] is None
+    assert "tesseract_qty_calls" not in result["metrics"]
+    assert result["qty_cell_diagnostics"][0]["route"] == "reject_no_candidate"
 
 
 def test_postprocess_and_retry_rejects_conflicting_single_vote_candidates():
@@ -202,18 +199,9 @@ def test_postprocess_and_retry_tight_crops_wide_qty_cells():
     assert seen_shapes[1][0] >= seen_shapes[0][0]
 
 
-def test_postprocess_and_retry_skips_tesseract_fallback_for_blank_cells(monkeypatch):
-    calls = {"count": 0}
-
+def test_postprocess_and_retry_skips_removed_fallback_for_blank_cells():
     def _ocr_fn(_image, _prompt: str, _max_tokens: int) -> str:
         return ""
-
-    def _fake_tesseract(_image) -> str:
-        calls["count"] += 1
-        return "4"
-
-    monkeypatch.setenv("OCR_ENABLE_TESSERACT_QTY_FALLBACK", "true")
-    monkeypatch.setattr(postprocess, "_tesseract_digits_text", _fake_tesseract)
 
     result = postprocess.postprocess_and_retry(
         rois=_blank_rois(),
@@ -222,8 +210,7 @@ def test_postprocess_and_retry_skips_tesseract_fallback_for_blank_cells(monkeypa
     )
 
     assert result["qty"]["r0"]["c0"] is None
-    assert calls["count"] == 0
-    assert result["metrics"]["tesseract_qty_calls"] == 0
+    assert "tesseract_qty_calls" not in result["metrics"]
 
 
 def test_postprocess_and_retry_rejects_qty_above_sanity_limit():

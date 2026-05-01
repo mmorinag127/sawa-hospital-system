@@ -162,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ocr-provider",
         default="",
-        help="Optional provider override: pipeline|tesseract|openai|gemini",
+        help="Optional provider override: pipeline|openai|gemini",
     )
     parser.add_argument(
         "--ocr-prompt",

@@ -69,7 +69,7 @@ templates:
       notes_box: [0.84, 0.26, 0.11, 0.64]
     postprocess:
       qty_strategy: disabled
-      qty_ocr_engine: tesseract_digits
+      qty_ocr_engine: disabled
       qty_regex: '^\d{0,2}$'
       qty_max_value: 50
       qty_reject_multiline_bands: 2
@@ -285,7 +285,7 @@ templates:
         cell_inset_px: 1
       table_box: [0.061762, 0.171135, 0.918568, 0.965488]
     postprocess:
-      qty_ocr_engine: tesseract_digits
+      qty_ocr_engine: disabled
       qty_regex: '^\d{0,2}$'
       qty_max_value: 50
       qty_reject_multiline_bands: 2
@@ -399,7 +399,7 @@ templates:
         cell_inset_px: 1
       table_box: [0.089693, 0.171671, 0.912274, 0.911048]
     postprocess:
-      qty_ocr_engine: tesseract_digits
+      qty_ocr_engine: disabled
       qty_regex: '^\d{0,2}$'
       qty_max_value: 50
       qty_reject_multiline_bands: 2
@@ -527,7 +527,7 @@ templates:
         cell_inset_px: 1
       table_box: [0.061762, 0.171135, 0.918568, 0.965488]
     postprocess:
-      qty_ocr_engine: tesseract_digits
+      qty_ocr_engine: disabled
       qty_regex: '^\d{0,2}$'
       qty_max_value: 50
       qty_reject_multiline_bands: 2
@@ -634,7 +634,7 @@ templates:
       table_box: [0.048904, 0.172371, 0.958179, 0.968234]
       notes_box: [0.048904, 0.699828, 0.954469, 0.968234]
     postprocess:
-      qty_ocr_engine: tesseract_digits
+      qty_ocr_engine: disabled
       qty_regex: '^\d{0,2}$'
       qty_max_value: 50
       qty_reject_multiline_bands: 2

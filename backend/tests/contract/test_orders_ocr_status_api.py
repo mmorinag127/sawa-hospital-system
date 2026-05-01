@@ -2,6 +2,7 @@ import sys
 import pathlib
 import json
 from datetime import datetime, timedelta
+from io import BytesIO
 from urllib.error import HTTPError
 from uuid import uuid4
 
@@ -1899,6 +1900,30 @@ def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     assert (job.get("metrics") or {}).get("request_mode") == "llm_reparse"
 
 
+def test_reparse_endpoint_rejects_removed_tesseract_provider():
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-reparse-tesseract-removed")
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/reparse", json={"ocr_provider": "tesseract", "force": True})
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "ocr_provider=tesseract has been removed"
+    assert get_job(f"OCR-{order['id']}") is None
+
+
+def test_ocr_rerun_endpoint_rejects_removed_tesseract_provider():
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-rerun-tesseract-removed")
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/ocr-rerun", json={"ocr_provider": "tesseract"})
+
+    assert res.status_code == 400
+    assert res.json()["detail"] == "ocr_provider=tesseract has been removed"
+    assert get_job(f"OCR-{order['id']}") is None
+
+
 def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003-default-llm")
@@ -2121,6 +2146,44 @@ def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeyp
     assert captured["ocr_job_id"] == job_id
 
 
+def test_ocr_rerun_endpoint_force_replaces_active_job(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003-rerun-force")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "request_mode": "ocr_rerun",
+            "processing_stage": "ocr_pipeline",
+            "result_state": "processing",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_run(order_id, ocr_job_id):
+        captured["order_id"] = order_id
+        captured["ocr_job_id"] = ocr_job_id
+
+    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
+
+    client = TestClient(app)
+    res = client.post(f"/orders/{order['id']}/ocr-rerun", json={"force": True})
+
+    assert res.status_code == 202
+    assert res.json()["accepted"] is True
+    assert res.json()["mode"] == "pipeline_rerun"
+    assert captured["order_id"] == order["id"]
+    assert captured["ocr_job_id"] == job_id
+    job = get_job(job_id)
+    assert job is not None
+    assert job.get("status") == "running"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("request_mode") == "ocr_rerun"
+    assert metrics.get("processing_stage") == "queued"
+
+
 def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003b")
@@ -2156,6 +2219,74 @@ def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
     assert metrics.get("result_state") == "hard_failed"
     assert metrics.get("error") == "reparse_crashed"
     assert metrics.get("crash_detail") == "boom"
+
+
+def test_run_reparse_background_marks_job_failed_on_system_exit(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003c")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "request_mode": "llm_reparse",
+            "requested_provider": "gemini",
+            "llm_assist": True,
+            "processing_stage": "queued",
+            "result_state": "processing",
+        },
+    )
+
+    def _raise(*_args, **_kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(order_service, "reparse_order", _raise)
+
+    orders_api._run_reparse_background(order["id"], None, None, "gemini", None, True)
+
+    job = get_job(job_id)
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert "reparse_crashed:1" in str(job.get("error_message") or "")
+    metrics = job.get("metrics") or {}
+    assert metrics.get("processing_stage") == "crashed"
+    assert metrics.get("result_state") == "hard_failed"
+    assert metrics.get("error") == "reparse_crashed"
+    assert metrics.get("crash_detail") == "1"
+
+
+def test_run_ocr_rerun_background_marks_job_failed_on_system_exit(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003d")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "request_mode": "ocr_rerun",
+            "processing_stage": "queued",
+            "result_state": "processing",
+        },
+    )
+
+    def _raise(*_args, **_kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _raise)
+
+    orders_api._run_ocr_rerun_background(order["id"], job_id)
+
+    job = get_job(job_id)
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert "ocr_rerun_crashed:1" in str(job.get("error_message") or "")
+    metrics = job.get("metrics") or {}
+    assert metrics.get("request_mode") == "ocr_rerun"
+    assert metrics.get("processing_stage") == "crashed"
+    assert metrics.get("result_state") == "hard_failed"
+    assert metrics.get("error") == "1"
 
 
 def test_get_ocr_output_includes_reparse_debug_from_cache(tmp_path):

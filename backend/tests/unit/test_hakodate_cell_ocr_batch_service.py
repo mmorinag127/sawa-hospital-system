@@ -1,6 +1,12 @@
-import numpy as np
+import sys
+from types import ModuleType
 
+import numpy as np
+import pytest
+
+from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
+    _analysis_to_yomitoku_words,
     assign_yomitoku_words_to_contact_regions,
     build_cell_contact_sheet,
     sheet_assignments_from_ocr_regions,
@@ -207,3 +213,90 @@ def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
 
     assert validation["ok"] is False
     assert any("raw OCR words do not reparse" in error for error in validation["errors"])
+
+
+def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, tmp_path) -> None:
+    fax_pdf = tmp_path / "fax.pdf"
+    template_pdf = tmp_path / "template.pdf"
+    step2_png = tmp_path / "step2.png"
+    fax_pdf.write_bytes(b"%PDF-fax")
+    template_pdf.write_bytes(b"%PDF-template")
+    step2_png.write_bytes(b"png")
+    item = {
+        "facility_code": "FAC_TEST",
+        "order_id": "ORD_TEST",
+        "fax_pdf": str(fax_pdf),
+        "template_pdf": str(template_pdf),
+        "step2_png": str(step2_png),
+    }
+    calls = []
+
+    def fake_best_method_runtime(**kwargs):
+        calls.append(kwargs)
+        return (
+            {
+                "engine": "opencv_knn_leave_one_out_k5",
+                "metrics": {
+                    "numeric_eval_cell_count": 10,
+                    "pred_nonempty_count": 3,
+                },
+                "outputs": {
+                    "records": str(tmp_path / "best_method_records.json"),
+                    "ocr_regions": str(tmp_path / "best_method_ocr_regions.json"),
+                    "overlay": str(tmp_path / "best_method_overlay.png"),
+                },
+            },
+            "review-page",
+        )
+
+    fake_runtime_module = ModuleType("src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities")
+    fake_runtime_module.build_best_method_for_manifest_item = fake_best_method_runtime
+    monkeypatch.setitem(
+        sys.modules,
+        "src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities",
+        fake_runtime_module,
+    )
+
+    result, review_page = hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item(
+        item=item,
+        page=1,
+        draft_sheet={"rows": [["must", "not", "be", "truth"]]},
+        output_dir=tmp_path,
+    )
+
+    assert result.ocr_engine == "opencv_knn_leave_one_out_k5"
+    assert result.outputs["records"].endswith("best_method_records.json")
+    assert result.physical_region_count == 10
+    assert result.recognized_region_count == 3
+    assert review_page == "review-page"
+    assert calls == [
+        {
+            "item": item,
+            "page_index": 1,
+            "draft_sheet": {"rows": [["must", "not", "be", "truth"]]},
+            "output_dir": tmp_path,
+            "render_width": 1864,
+        }
+    ]
+
+
+def test_local_yomitoku_word_parser_normalizes_absolute_boxes() -> None:
+    words = _analysis_to_yomitoku_words(
+        {
+            "words": [
+                {"content": "１２", "box": [10, 20, 30, 40]},
+                {"contents": "A", "points": [[50, 60], [70, 60], [70, 80], [50, 80]]},
+                {"content": "", "box": [0, 0, 1, 1]},
+            ]
+        },
+        width=100,
+        height=200,
+    )
+
+    assert words[0] == {
+        "text": "１２",
+        "x": pytest.approx(0.2),
+        "y": pytest.approx(0.15),
+        "box": pytest.approx([0.1, 0.1, 0.3, 0.2]),
+    }
+    assert words[1] == {"text": "A", "x": pytest.approx(0.6), "y": pytest.approx(0.35), "box": None}

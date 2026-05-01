@@ -14,6 +14,168 @@ from src.main import app  # noqa: E402
 client = TestClient(app)
 
 
+def test_list_orders_default_is_lightweight_without_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "list_orders",
+        lambda status=None, include_archived=False: [
+            {
+                "id": "ORD-LIST-DEFAULT-001",
+                "status": "要確認",
+                "document": "file://dummy.pdf",
+                "message_id": "msg-list-default-001",
+                "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "_load_order_ocr_cache_map",
+        lambda _order_ids: (_ for _ in ()).throw(AssertionError("default list path must not hydrate runtime cache")),
+    )
+    monkeypatch.setattr(
+        orders_api,
+        "_attach_order_review_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("default list path must not attach review summary")),
+    )
+    monkeypatch.setattr(
+        orders_api,
+        "_attach_order_workflow_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default list path must not refresh workflow context")
+        ),
+    )
+
+    res = client.get("/orders")
+
+    assert res.status_code == 200
+    assert res.json()["orders"][0]["id"] == "ORD-LIST-DEFAULT-001"
+
+
+def test_get_draft_sheet_reads_saved_artifacts_without_rebuilding_hakodate_projection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_by_id",
+        lambda order_id: {"id": order_id, "status": "要確認"},
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_latest_sheet_draft",
+        lambda order_id, **_kwargs: {
+            "id": "ODR-SAVED-001",
+            "order_id": order_id,
+            "base_evidence_run_id": "EVD-SAVED-001",
+            "draft_state": "draft_ready",
+            "blockers_json": [],
+            "warnings_json": ["review_required"],
+            "draft_sheet_json": {
+                "fields": ["date", "menu", "qty.normal"],
+                "header": ["日付", "献立", "常食"],
+                "rows": [["04/26", "大豆のトマト煮", "41"]],
+                "row_ids": ["row-1"],
+                "source": "hakodate_ocr_evidence_sheet",
+                "blockers": [],
+                "warnings": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_cached_hakodate_assignment_preview",
+        lambda _order_id: {
+            "status": "ready",
+            "target_cells": [{"target_cell_id": "cell-1", "sheet_cell": "D3", "bbox": [1, 2, 3, 4]}],
+            "assignments": [{"target_cell_id": "cell-1", "assigned_value": "41"}],
+            "sheet_output": {"cells": {"D3": {"value_normalized": "41"}}},
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "build_order_hakodate_projected_sheet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("draft-sheet read path must not rebuild Hakodate projection")
+        ),
+    )
+
+    res = client.get("/orders/ORD-DRAFT-READ/draft-sheet?compact=1&quantity_assignment_strategy=hakodate")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["draft_id"] == "ODR-SAVED-001"
+    assert payload["rows"] == [["04/26", "大豆のトマト煮", "41"]]
+    assert payload["hakodate_assignment"]["assignments"] == [
+        {"target_cell_id": "cell-1", "assigned_value": "41"}
+    ]
+
+
+def test_get_draft_sheet_blocks_when_saved_artifact_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_by_id",
+        lambda order_id: {"id": order_id, "status": "要確認"},
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_latest_sheet_draft",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "build_order_hakodate_projected_sheet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing saved artifact must not trigger read-time projection")
+        ),
+    )
+
+    res = client.get("/orders/ORD-DRAFT-MISSING/draft-sheet?compact=1&quantity_assignment_strategy=hakodate")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["rows"] == []
+    assert payload["review_state"] == "blocked"
+    assert "hakodate_sheet_artifact_missing" in payload["blockers"]
+
+
+def test_hakodate_overlay_preview_endpoint_uses_canonical_service(monkeypatch) -> None:
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_by_id",
+        lambda order_id: {"id": order_id, "status": "要確認"},
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_hakodate_overlay_preview",
+        lambda order_id: {
+            "status": "ready",
+            "blockers": [],
+            "message": "",
+            "overlay_uri": f"gs://bucket/{order_id}/hakodate-overlay.png",
+            "overlay_url": "https://signed.example/hakodate-overlay.png",
+            "assignment": {
+                "target_cells": [{"target_cell_id": "cell-1", "bbox": [1, 2, 3, 4]}],
+                "assignments": [{"target_cell_id": "cell-1", "assigned_value": "41"}],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_cached_hakodate_overlay_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("overlay preview endpoint must use the canonical preview service")
+        ),
+    )
+
+    res = client.get("/orders/ORD-OVERLAY-READ/hakodate-overlay-preview")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["status"] == "ready"
+    assert payload["overlay_url"] == "https://signed.example/hakodate-overlay.png"
+    assert payload["assignment"]["assignments"] == [
+        {"target_cell_id": "cell-1", "assigned_value": "41"}
+    ]
+
+
 def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
@@ -99,7 +261,7 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
         },
     )
 
-    res = client.get("/orders?include_ocr=false")
+    res = client.get("/orders?include_ocr=false&include_candidate_summary=true")
 
     assert res.status_code == 200
     rows = res.json()["orders"]
@@ -110,6 +272,41 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     assert row["candidate_resolution"]["resolutions"]["facility"]["resolved_label"] == "施設A"
     assert row["ocr_status"] == "success"
     assert row["ocr_pages_count"] == 1
+
+
+def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "list_orders",
+        lambda status=None, include_archived=False: [
+            {
+                "id": "ORD-LIST-NO-CANDIDATE-001",
+                "facility": None,
+                "week": "2026-03",
+                "week_value": "2026-03",
+                "status": "要確認",
+                "document": "file://dummy.pdf",
+                "message_id": "msg-list-no-candidate-001",
+                "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
+            }
+        ],
+    )
+    monkeypatch.setattr(orders_api.order_service, "_load_order_ocr_cache_map", lambda order_ids: {})
+    monkeypatch.setattr(orders_api.workflow_state_service, "list_workflow_states", lambda order_ids: {})
+    monkeypatch.setattr(
+        orders_api.candidate_resolution_service,
+        "resolve_order_list_candidates",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate resolution must be opt-in on order list hydration")
+        ),
+    )
+
+    res = client.get("/orders?include_ocr=false")
+
+    assert res.status_code == 200
+    row = res.json()["orders"][0]
+    assert row["id"] == "ORD-LIST-NO-CANDIDATE-001"
+    assert "candidate_resolution" not in row
 
 
 def test_list_orders_without_ocr_uses_uploaded_pdf_week_hint_when_order_week_missing(monkeypatch) -> None:
@@ -150,7 +347,7 @@ def test_list_orders_without_ocr_uses_uploaded_pdf_week_hint_when_order_week_mis
         },
     )
 
-    res = client.get("/orders?include_ocr=false")
+    res = client.get("/orders?include_ocr=false&include_candidate_summary=true")
 
     assert res.status_code == 200
     rows = res.json()["orders"]

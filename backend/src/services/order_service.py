@@ -10,6 +10,7 @@ import re
 import time
 import threading
 import unicodedata
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from urllib.parse import urlparse
 from difflib import SequenceMatcher
@@ -64,6 +65,7 @@ from src.services import (
     ocr_evidence_service,
     position_column_mapping_service,
     hakodate_assignment_service,
+    hakodate_cell_ocr_batch_service,
     hakodate_ocr_evidence_service,
     draft_sheet_service,
     order_current_state_service,
@@ -86,10 +88,11 @@ from src.services.template_field_schema_service import (
     classify_aux_header_semantic,
     normalize_aux_semantic_display_value,
 )
-from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket
+from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket, save_artifact_bytes_to_gcs
 from src.services.storage_service import generate_signed_url
 from src.services.grid_detector import GridDetectionResult, detect_table_grid, detect_table_grid_image
 from src.services.pdf_render import render_pdf_to_png_bytes
+from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf
 from src.services.ocr_job_service import (
     create_job,
     update_job,
@@ -105,6 +108,10 @@ from src.services.ocr_pipeline_service import (
 )
 
 Base.metadata.create_all(bind=engine)
+
+
+HAKODATE_EVIDENCE_PROJECTION_VERSION = "hakodate_projection_truth_v2"
+HAKODATE_CANONICAL_PIPELINE_VERSION = "hakodate_best_method_canonical_v2"
 
 
 def _ensure_orders_lines_updated_at() -> None:
@@ -7361,6 +7368,25 @@ def _payload_has_hakodate_evidence_records(payload: dict[str, Any], *, order_id:
     return bool(_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id))
 
 
+def _payload_has_current_hakodate_canonical_pipeline(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    pipeline = payload.get("hakodate_canonical_pipeline")
+    if not isinstance(pipeline, dict):
+        return False
+    return str(pipeline.get("version") or "").strip() == HAKODATE_CANONICAL_PIPELINE_VERSION
+
+
+def _payload_has_hakodate_output_content(payload: dict[str, Any] | None, *, order_id: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if _payload_has_hakodate_target_cells(payload):
+        return True
+    if _payload_has_hakodate_evidence_records(payload, order_id=order_id):
+        return True
+    return isinstance(payload.get("hakodate_overlay"), dict)
+
+
 def _grid_detection_payload(grid: object) -> dict[str, Any]:
     if isinstance(grid, dict):
         return grid
@@ -7551,41 +7577,454 @@ def _hakodate_target_cell_map_from_order_document(
     )
 
 
-def _hakodate_tesseract_evidence_from_order_document(
+def save_order_hakodate_canonical_manifest_item(
+    order_id: str,
+    item: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    _ = item
+    return {
+        "order_id": order_id,
+        "deprecated": True,
+        "replacement": "live_order_facility_source_workbook",
+    }, "hakodate_manifest_deprecated"
+
+
+def get_order_hakodate_canonical_manifest_item(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return None, "order_not_found"
+        facility_id = str(order.facility_code or "").strip()
+    payload = _load_order_ocr_cache(order_id)
+    pipeline = payload.get("hakodate_canonical_pipeline") if isinstance(payload, dict) else None
+    return {
+        "order_id": order_id,
+        "facility_id": facility_id,
+        "manifest_item": None,
+        "has_manifest_item": False,
+        "manifest_deprecated": True,
+        "live_source": "live_order_facility_source_workbook",
+        "hakodate_canonical_pipeline": pipeline if isinstance(pipeline, dict) else None,
+    }, None
+
+
+def _hakodate_best_method_draft_sheet(order_id: str) -> dict[str, Any] | None:
+    base_sheet, error = _build_hakodate_weekly_menu_base_sheet(order_id)
+    if error:
+        logger.warning("Hakodate best method draft fallback failed", order_id=order_id, error=error)
+    if not isinstance(base_sheet, dict):
+        return None
+    order = get_order_by_id(order_id)
+    order_lines = order.get("lines") if isinstance(order, dict) and isinstance(order.get("lines"), list) else []
+    if not order_lines:
+        return base_sheet
+    fields = [str(field or "").strip() for field in (base_sheet.get("fields") or [])]
+    rows = [list(row) for row in (base_sheet.get("rows") or []) if isinstance(row, list)]
+    quantity_index = _build_sheet_quantity_index(fields)
+    if not fields or not rows or not quantity_index:
+        return base_sheet
+    date_idx = fields.index("date_mmdd") if "date_mmdd" in fields else (fields.index("date") if "date" in fields else -1)
+    daypart_idx = fields.index("daypart") if "daypart" in fields else -1
+    menu_idx = fields.index("menu") if "menu" in fields else (fields.index("menu_name") if "menu_name" in fields else -1)
+    if date_idx < 0 or daypart_idx < 0 or menu_idx < 0:
+        return base_sheet
+    row_lookup: dict[tuple[str, str, str], int] = {}
+    for row_index, row in enumerate(rows):
+        key = _hakodate_sheet_identity(
+            row[date_idx] if date_idx < len(row) else "",
+            row[daypart_idx] if daypart_idx < len(row) else "",
+            row[menu_idx] if menu_idx < len(row) else "",
+        )
+        if all(key) and key not in row_lookup:
+            row_lookup[key] = row_index
+    for line in order_lines:
+        if not isinstance(line, dict):
+            continue
+        qty = line.get("quantity_corrected")
+        if qty is None:
+            qty = line.get("quantity_original")
+        if qty is None:
+            continue
+        try:
+            qty_float = float(qty)
+        except Exception:
+            continue
+        col_idx = _resolve_quantity_column_index(
+            quantity_index=quantity_index,
+            diet_key=_normalize_sheet_diet(line.get("diet_type")),
+            area_key=_normalize_sheet_area(line.get("area_id")),
+        )
+        if col_idx is None:
+            continue
+        row_index = row_lookup.get(_hakodate_sheet_identity(line.get("date"), line.get("daypart"), line.get("menu_name")))
+        if row_index is None:
+            continue
+        while len(rows[row_index]) <= col_idx:
+            rows[row_index].append("")
+        rows[row_index][col_idx] = _numeric_string_add(str(rows[row_index][col_idx] or ""), qty_float)
+    seeded = deepcopy(base_sheet)
+    seeded["rows"] = rows
+    seeded["source"] = "hakodate_confirmed_lines_seed_sheet"
+    return seeded
+
+
+def _estimate_hakodate_template_bbox_from_rendered_image(image: Any) -> list[float]:
+    import cv2
+    import numpy as np
+
+    height, width = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)[1]
+    horizontal = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (80, 1)),
+    )
+    vertical = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, 80)),
+    )
+    combined = cv2.bitwise_or(horizontal, vertical)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(combined, 8)
+    best_bbox: list[float] | None = None
+    best_score = 0.0
+    for label in range(1, count):
+        x, y, w, h, area = [int(value) for value in stats[label]]
+        if w < width * 0.35 or h < height * 0.35:
+            continue
+        score = float(area) * float(w) * float(h)
+        if score > best_score:
+            best_score = score
+            best_bbox = [float(x), float(y), float(x + w), float(y + h)]
+    if best_bbox is None:
+        raise ValueError("hakodate_template_bbox_not_found")
+    return best_bbox
+
+
+def _build_live_hakodate_manifest_item(
     *,
     order_id: str,
-    template: dict[str, Any],
-) -> list[dict[str, Any]]:
-    context = _hakodate_document_context(order_id)
-    if not isinstance(context, dict):
-        return []
-    try:
-        pdf_bytes = load_bytes_from_uri(str(context.get("document_uri") or ""))
-        tokens = hakodate_assignment_service._extract_tesseract_tokens(pdf_bytes, template)  # noqa: SLF001
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Hakodate numeric evidence OCR failed", order_id=order_id, error=str(exc))
-        return []
-    raw_records: list[dict[str, Any]] = []
-    for token in tokens:
-        text = str(getattr(token, "text", "") or "").strip()
-        normalized = hakodate_ocr_evidence_service.normalize_ocr_value(text)
-        if not normalized:
-            continue
-        raw_records.append(
+    facility_id: str,
+    output_dir: Path,
+    render_width: int = 1864,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            raise ValueError("order_not_found")
+        document_uri = str(order.document_uri or "").strip()
+        week_code = str(order.week_code or "").strip()
+    if not document_uri:
+        raise ValueError("document_missing")
+    week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
+    if not week_sheet_name:
+        raise ValueError("week_unresolved")
+
+    structure_dir = output_dir / "_structure_template"
+    structure_dir.mkdir(parents=True, exist_ok=True)
+    fax_pdf_for_registration = document_uri
+    parsed_document_uri = urlparse(document_uri)
+    if parsed_document_uri.scheme in {"gs", "file"} or not Path(document_uri).exists():
+        materialized_fax_pdf = structure_dir / f"{order_id}_fax.pdf"
+        materialized_fax_pdf.write_bytes(load_bytes_from_uri(document_uri))
+        fax_pdf_for_registration = str(materialized_fax_pdf)
+    packaged_template_pdf = (
+        Path(__file__).resolve().parents[2]
+        / "tmp/outer_quad_eval_correct_20260426/preprocess_v10_template_snap_real_orders_20260425_0430/templates"
+        / f"{facility_id}_{week_sheet_name}.pdf"
+    )
+    if packaged_template_pdf.exists():
+        structure_pdf = packaged_template_pdf
+    else:
+        structure_xlsx = order_form_service.build_fax_structure_only_excel(
+            facility_id=facility_id,
+            week_sheet_name=week_sheet_name,
+            output_dir=structure_dir,
+        )
+        structure_pdf = structure_dir / f"{structure_xlsx.stem}.pdf"
+        render_workbook_path_to_pdf(
+            structure_xlsx,
+            output_path=structure_pdf,
+            sheet_name=week_sheet_name,
+        )
+    from src.services.hakodate_fixed_quad_registration_service import (
+        build_fixed_quad_template_registration,
+        render_pdf_page_to_bgr,
+    )
+
+    # The accepted Hakodate runtime treats step2_png as the rectified FAX canvas,
+    # not as the template image. Keep the runtime contract identical to the
+    # locally accepted manifest by generating that rectified canvas here.
+    accepted_canvas_width = 2362
+    accepted_canvas_height = 4273
+    template_image = render_pdf_page_to_bgr(str(structure_pdf), width=accepted_canvas_width)
+    template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
+    registration_dir = structure_dir / f"{facility_id}_{order_id}_fixed_quad"
+    registration, _images = build_fixed_quad_template_registration(
+        facility_code=facility_id,
+        order_id=order_id,
+        fax_pdf=fax_pdf_for_registration,
+        template_pdf=str(structure_pdf),
+        quad_px=None,
+        manifest_template_bbox=template_bbox,
+        canvas_width=accepted_canvas_width,
+        canvas_height=accepted_canvas_height,
+        render_width=render_width,
+        quad_source=None,
+        output_dir=registration_dir,
+    )
+    step2_png = Path(registration.outputs["step2"])
+    return {
+        "order_id": order_id,
+        "facility_code": facility_id,
+        "facility_id": facility_id,
+        "fax_pdf": fax_pdf_for_registration,
+        "template_pdf": str(structure_pdf),
+        "step2_png": str(step2_png),
+        "template_bbox": template_bbox,
+        "quad_px": registration.quad_px,
+        "quad_source": registration.quad_source,
+        "week_sheet_name": week_sheet_name,
+        "source": "live_order_facility_source_workbook",
+    }
+
+
+def _hakodate_overlay_fingerprint(
+    *,
+    target_cells: list[dict[str, Any]],
+    assignments: list[dict[str, Any]],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
             {
-                "text": text,
-                "normalized_value": normalized,
-                "bbox": list(getattr(token, "bbox", []) or []),
-                "center": [float(getattr(token, "x")), float(getattr(token, "y"))],
-                "confidence": getattr(token, "confidence", None),
+                "target_cells": [
+                    {
+                        "target_cell_id": item.get("target_cell_id"),
+                        "sheet_cell": item.get("sheet_cell"),
+                        "bbox": item.get("bbox"),
+                        "center": item.get("center"),
+                    }
+                    for item in target_cells
+                    if isinstance(item, dict)
+                ],
+                "assignments": [
+                    {
+                        "target_cell_id": item.get("target_cell_id"),
+                        "sheet_cell": item.get("sheet_cell"),
+                        "assigned_value": item.get("assigned_value"),
+                    }
+                    for item in assignments
+                    if isinstance(item, dict)
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _hakodate_canonical_payload_from_manifest_item(
+    *,
+    order_id: str,
+    facility_id: str | None,
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    draft_sheet = _hakodate_best_method_draft_sheet(order_id)
+    if not isinstance(draft_sheet, dict):
+        raise ValueError("hakodate_best_method_draft_sheet_missing")
+    with tempfile.TemporaryDirectory(prefix=f"hakodate_canonical_{order_id}_") as tmp:
+        output_dir = Path(tmp)
+        runtime_item = dict(item)
+        if not all(str(runtime_item.get(key) or "").strip() for key in ("fax_pdf", "template_pdf", "step2_png")):
+            if not facility_id:
+                raise ValueError("facility_missing")
+            runtime_item = _build_live_hakodate_manifest_item(
+                order_id=order_id,
+                facility_id=facility_id,
+                output_dir=output_dir,
+                render_width=1864,
+            )
+        result, _review_page = hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item(
+            item=runtime_item,
+            page=1,
+            draft_sheet=draft_sheet,
+            output_dir=output_dir,
+            render_width=1864,
+        )
+        outputs = dict(result.outputs or {})
+        regions_path = outputs.get("ocr_regions")
+        records_path = outputs.get("records")
+        overlay_path = outputs.get("overlay")
+        if not regions_path:
+            return None
+        regions = json.loads(Path(regions_path).read_text(encoding="utf-8"))
+        if not isinstance(regions, list):
+            return None
+        digit_records: list[dict[str, Any]] = []
+        if records_path and Path(records_path).exists():
+            loaded_records = json.loads(Path(records_path).read_text(encoding="utf-8"))
+            if isinstance(loaded_records, list):
+                digit_records = [item for item in loaded_records if isinstance(item, dict)]
+        canonical_regions: list[dict[str, Any]] = []
+        raw_evidence_records: list[dict[str, Any]] = []
+        for index, region in enumerate(regions):
+            if not isinstance(region, dict):
+                continue
+            copied = dict(region)
+            copied["source"] = "hakodate_best_method_pipeline"
+            canonical_regions.append(copied)
+        evidence_source_records = digit_records or canonical_regions
+        for index, region in enumerate(evidence_source_records):
+            accepted_candidate = region.get("recognizer_accepted_candidate")
+            accepted_candidate = accepted_candidate if isinstance(accepted_candidate, dict) else {}
+            accepted_candidate_digits = str(accepted_candidate.get("normalized_digits") or "").strip()
+            raw_text = str(
+                accepted_candidate_digits
+                or region.get("ocr_normalized")
+                or region.get("ocr_text")
+                or region.get("raw_text")
+                or region.get("pred_digits")
+                or ""
+            ).strip()
+            if not raw_text:
+                continue
+            confidence_source = (
+                accepted_candidate.get("score")
+                if str(region.get("recognizer_decision_source") or "").strip() == "topk_digits"
+                else region.get("recognizer_score")
+            )
+            if confidence_source is None:
+                confidence_source = region.get("score")
+            try:
+                confidence = float(confidence_source) if confidence_source is not None else None
+            except Exception:
+                confidence = None
+            box = region.get("bbox")
+            center = None
+            if isinstance(box, list) and len(box) == 4:
+                try:
+                    center = [(float(box[0]) + float(box[2])) / 2.0, (float(box[1]) + float(box[3])) / 2.0]
+                except Exception:
+                    center = None
+            raw_evidence_records.append(
+                {
+                    "text": raw_text,
+                    "normalized_value": hakodate_ocr_evidence_service.normalize_ocr_value(raw_text),
+                    "bbox": box,
+                    "center": center,
+                    "confidence": confidence,
+                    "evidence_id": f"hakodate-cell-{index}",
+                    "engine_metadata": {
+                        "source_region_id": region.get("region_id"),
+                        "sheet_cell": region.get("sheet_cell"),
+                        "ocr_contact_slot_index": region.get("ocr_contact_slot_index"),
+                        "source_artifact": "best_method_records" if digit_records else "best_method_ocr_regions",
+                        "recognizer_score": region.get("recognizer_score"),
+                        "recognizer_decision_source": region.get("recognizer_decision_source"),
+                        "recognizer_accepted_candidate": accepted_candidate or None,
+                    },
+                }
+            )
+        target_cells = hakodate_ocr_evidence_service.target_cells_from_regions(canonical_regions)
+        for cell in target_cells:
+            cell["source"] = "hakodate_best_method_pipeline"
+        evidence_records = hakodate_ocr_evidence_service.evidence_from_records(
+            raw_evidence_records,
+            run_id=f"{order_id}:hakodate-best-method",
+            engine=str(result.ocr_engine or hakodate_cell_ocr_batch_service.DEFAULT_CELL_OCR_ENGINE),
+            source_scope="hakodate_cell_crop_batch",
+            raw_payload_ref=outputs.get("ocr_regions"),
+        )
+        canonical_blockers: list[str] = []
+        if not target_cells:
+            canonical_blockers.append("hakodate_target_cell_map_missing")
+        if not evidence_records:
+            canonical_blockers.append("hakodate_ocr_evidence_missing")
+        assignment_result = (
+            hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
+                evidence_records=evidence_records,
+                target_cells=target_cells,
+            )
+            if target_cells and evidence_records
+            else {
+                "assignments": [],
+                "blockers": [],
+                "summary": {"assigned_target_count": 0},
             }
         )
-    return hakodate_ocr_evidence_service.evidence_from_records(
-        raw_records,
-        run_id=f"{order_id}:order-document",
-        engine="hakodate_full_page_tesseract",
-        source_scope="order_document_full_page",
-    )
+        canonical_blockers.extend(
+            str(item).strip()
+            for item in (assignment_result.get("blockers") or [])
+            if str(item).strip()
+        )
+        assigned_target_count = int((assignment_result.get("summary") or {}).get("assigned_target_count") or 0)
+        if assigned_target_count <= 0:
+            canonical_blockers.append("hakodate_assignment_missing")
+        canonical_blockers = list(dict.fromkeys(item for item in canonical_blockers if item))
+        overlay_fingerprint = _hakodate_overlay_fingerprint(
+            target_cells=target_cells,
+            assignments=[
+                item
+                for item in (assignment_result.get("assignments") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        overlay_uri = None
+        if overlay_path and Path(overlay_path).exists():
+            bucket = get_default_output_bucket()
+            if bucket:
+                overlay_uri = save_artifact_bytes_to_gcs(
+                    bucket,
+                    f"OCR-{order_id}",
+                    f"hakodate-overlay-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{uuid4().hex[:8]}.png",
+                    Path(overlay_path).read_bytes(),
+                    content_type="image/png",
+                )
+        return {
+            "hakodate_preprocessing": {
+                "target_cell_map": target_cells,
+                "source": "hakodate_best_method_pipeline",
+                "quality_gate": {
+                    "ok": not canonical_blockers,
+                    "target_cell_count": len(target_cells),
+                    "evidence_record_count": len(evidence_records),
+                    "assigned_target_count": assigned_target_count,
+                    "blockers": canonical_blockers,
+                },
+            },
+            "hakodate_ocr_evidence_records": evidence_records,
+            "hakodate_overlay": {
+                "uri": overlay_uri,
+                "fingerprint": overlay_fingerprint,
+                "producer": "hakodate_best_method_pipeline",
+                "version": HAKODATE_CANONICAL_PIPELINE_VERSION,
+                "generated_at": datetime.utcnow().isoformat(),
+                "content_type": "image/png",
+            }
+            if overlay_uri
+            else None,
+            "hakodate_canonical_pipeline": {
+                "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
+                "version": HAKODATE_CANONICAL_PIPELINE_VERSION,
+                "status": "ready" if not canonical_blockers else "blocked",
+                "blockers": canonical_blockers,
+                "source": str(runtime_item.get("source") or "live_order_facility_source_workbook"),
+                "manifest_path": None,
+                "manifest_order_id": None,
+                "manifest_facility_code": None,
+                "requested_order_id": order_id,
+                "requested_facility_id": facility_id,
+                "draft_sheet_source": "latest_saved_draft",
+                "week_sheet_name": runtime_item.get("week_sheet_name"),
+                "template_bbox": runtime_item.get("template_bbox"),
+                "target_cell_count": len(target_cells),
+                "evidence_record_count": len(evidence_records),
+                "assigned_target_count": assigned_target_count,
+                "outputs": outputs,
+            },
+        }
 
 
 def _augment_hakodate_ocr_payload_artifacts(
@@ -7593,48 +8032,113 @@ def _augment_hakodate_ocr_payload_artifacts(
     order_id: str,
     payload: dict[str, Any],
     template: dict[str, Any] | None,
+    force_hakodate: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(template, dict):
         return payload
-    if hakodate_assignment_service.resolve_quantity_assignment_strategy(template) != "hakodate":
+    if (
+        not force_hakodate
+        and hakodate_assignment_service.resolve_quantity_assignment_strategy(template) != "hakodate"
+    ):
         return payload
     next_payload = dict(payload)
-    if not _payload_has_hakodate_target_cells(next_payload):
-        target_cells = _hakodate_target_cell_map_from_order_document(
+    if (
+        not force_hakodate
+        and _payload_has_current_hakodate_canonical_pipeline(next_payload)
+        and _payload_has_hakodate_target_cells(next_payload)
+        and _payload_has_hakodate_evidence_records(
+            next_payload,
             order_id=order_id,
-            template=template,
         )
-        if target_cells:
-            preprocessing = dict(next_payload.get("hakodate_preprocessing") or {})
-            preprocessing["target_cell_map"] = target_cells
-            preprocessing["source"] = "order_document_grid"
-            preprocessing["quality_gate"] = {
-                "ok": True,
-                "target_cell_count": len(target_cells),
-                "blockers": [],
-            }
-            next_payload["hakodate_preprocessing"] = preprocessing
-    if not _payload_has_hakodate_evidence_records(next_payload, order_id=order_id):
-        evidence_records = _hakodate_tesseract_evidence_from_order_document(
+    ):
+        return next_payload
+    context = _hakodate_document_context(order_id)
+    facility_id = str((context or {}).get("facility_id") or "").strip() or None
+    try:
+        canonical_payload = _hakodate_canonical_payload_from_manifest_item(
             order_id=order_id,
-            template=template,
+            facility_id=facility_id,
+            item={"source": "live_order_facility_source_workbook"},
         )
-        if evidence_records:
-            next_payload["hakodate_ocr_evidence_records"] = evidence_records
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Hakodate canonical live pipeline failed", order_id=order_id, error=str(exc))
+        next_payload["hakodate_canonical_pipeline"] = {
+            "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
+            "status": "blocked",
+            "blockers": ["hakodate_canonical_pipeline_failed"],
+            "source": "live_order_facility_source_workbook",
+            "manifest_path": None,
+            "error": str(exc),
+        }
+        return next_payload
+    if not isinstance(canonical_payload, dict):
+        next_payload["hakodate_canonical_pipeline"] = {
+            "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
+            "status": "blocked",
+            "blockers": ["hakodate_canonical_pipeline_failed"],
+            "source": "live_order_facility_source_workbook",
+            "manifest_path": None,
+        }
+        return next_payload
+    for key, value in canonical_payload.items():
+        if value is not None:
+            next_payload[key] = value
     return next_payload
 
 
-def _save_order_ocr_cache(order_id: str, payload: dict) -> None:
+def _preserve_hakodate_artifacts_if_missing(
+    *,
+    order_id: str,
+    next_payload: dict[str, Any],
+    existing_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Prevent lightweight read payloads from deleting reusable Hakodate artifacts."""
+    if not isinstance(existing_payload, dict):
+        return next_payload
+    preserved = dict(next_payload)
+    if preserved.get("hakodate_artifacts_reset_at"):
+        return preserved
+    if not _payload_has_hakodate_target_cells(preserved) and _payload_has_hakodate_target_cells(existing_payload):
+        existing_preprocessing = existing_payload.get("hakodate_preprocessing")
+        if isinstance(existing_preprocessing, dict):
+            next_preprocessing = dict(preserved.get("hakodate_preprocessing") or {})
+            for key in ("target_cell_map", "target_cells", "source", "quality_gate"):
+                if key not in next_preprocessing and key in existing_preprocessing:
+                    next_preprocessing[key] = deepcopy(existing_preprocessing[key])
+            if next_preprocessing:
+                preserved["hakodate_preprocessing"] = next_preprocessing
+        for key in ("hakodate_target_cell_map",):
+            if key not in preserved and key in existing_payload:
+                preserved[key] = deepcopy(existing_payload[key])
+    if (
+        not _payload_has_hakodate_evidence_records(preserved, order_id=order_id)
+        and _payload_has_hakodate_evidence_records(existing_payload, order_id=order_id)
+    ):
+        for key in ("hakodate_ocr_evidence", "hakodate_ocr_evidence_records"):
+            if key not in preserved and key in existing_payload:
+                preserved[key] = deepcopy(existing_payload[key])
+    return preserved
+
+
+def _save_order_ocr_cache(
+    order_id: str,
+    payload: dict,
+    *,
+    augment_hakodate_artifacts: bool = True,
+    persist_evidence: bool = True,
+    refresh_workflow: bool = True,
+) -> None:
     next_payload = dict(payload) if isinstance(payload, dict) else {}
     template = _resolve_order_fax_template(order_id)
     annotated_payload = _annotate_payload_with_template_field_schema(next_payload, template)
     if isinstance(annotated_payload, dict):
         next_payload = annotated_payload
-    next_payload = _augment_hakodate_ocr_payload_artifacts(
-        order_id=order_id,
-        payload=next_payload,
-        template=template,
-    )
+    if augment_hakodate_artifacts:
+        next_payload = _augment_hakodate_ocr_payload_artifacts(
+            order_id=order_id,
+            payload=next_payload,
+            template=template,
+        )
     try:
         with session_scope() as session:
             cache = session.get(OrderOcrCache, order_id)
@@ -7655,25 +8159,34 @@ def _save_order_ocr_cache(order_id: str, payload: dict) -> None:
                 preserved_value = existing_payload.get(preserved_key)
                 if isinstance(preserved_value, dict) and preserved_key not in next_payload:
                     next_payload[preserved_key] = preserved_value
+            next_payload = _preserve_hakodate_artifacts_if_missing(
+                order_id=order_id,
+                next_payload=next_payload,
+                existing_payload=existing_payload,
+            )
             cache.payload = next_payload
             cache.updated_at = datetime.utcnow()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Order OCR cache save failed", order_id=order_id, error=str(exc))
-    try:
-        persist_ocr_evidence_run(
-            order_id,
-            next_payload,
-            schema_version="v1_legacy",
-            producer_version="legacy-cache-mirror/v1",
-            status=str(next_payload.get("status") or "ready").strip() or "ready",
-            refresh_workflow=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Order OCR evidence persistence failed", order_id=order_id, error=str(exc))
-    try:
-        workflow_state_service.refresh_workflow_state(order_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Workflow state refresh failed after OCR cache save", order_id=order_id, error=str(exc))
+    if persist_evidence and _payload_has_hakodate_output_content(next_payload, order_id=order_id):
+        persist_evidence = False
+    if persist_evidence:
+        try:
+            persist_ocr_evidence_run(
+                order_id,
+                next_payload,
+                schema_version="v1_legacy",
+                producer_version="legacy-cache-mirror/v1",
+                status=str(next_payload.get("status") or "ready").strip() or "ready",
+                refresh_workflow=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Order OCR evidence persistence failed", order_id=order_id, error=str(exc))
+    if refresh_workflow:
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Workflow state refresh failed after OCR cache save", order_id=order_id, error=str(exc))
 
 
 def _load_order_ocr_cache(order_id: str) -> Optional[dict]:
@@ -8661,6 +9174,271 @@ def get_latest_sheet_draft(
     return draft_sheet_service.get_latest_sheet_draft(order_id)
 
 
+def get_cached_hakodate_assignment_preview(order_id: str) -> Optional[dict[str, Any]]:
+    latest_payload = _load_hakodate_assignment_source_payload(order_id)
+    if (
+        _payload_has_current_hakodate_canonical_pipeline(latest_payload)
+        and _payload_has_hakodate_target_cells(latest_payload)
+        and _payload_has_hakodate_evidence_records(latest_payload, order_id=order_id)
+    ):
+        assignment, assignment_error = build_order_hakodate_assignment(
+            order_id,
+            strategy="hakodate",
+            allow_artifact_repair=False,
+        )
+        if isinstance(assignment, dict) and not assignment_error:
+            return assignment
+    cached_payload = _load_order_ocr_cache(order_id)
+    if not isinstance(cached_payload, dict):
+        return None
+    preview = cached_payload.get("hakodate_assignment_preview")
+    if not isinstance(preview, dict) or not isinstance(preview.get("assignment"), dict):
+        return None
+    if str(preview.get("version") or "").strip() != HAKODATE_CANONICAL_PIPELINE_VERSION:
+        return None
+    preview_fingerprint = str(preview.get("fingerprint") or "").strip()
+    if not preview_fingerprint:
+        return None
+    overlay = cached_payload.get("hakodate_overlay")
+    if isinstance(overlay, dict):
+        overlay_fingerprint = str(overlay.get("fingerprint") or "").strip()
+        overlay_producer = str(overlay.get("producer") or "").strip()
+        if overlay_fingerprint and overlay_fingerprint != preview_fingerprint:
+            return None
+        overlay_version = str(overlay.get("version") or "").strip()
+        if overlay_version and overlay_version != HAKODATE_CANONICAL_PIPELINE_VERSION:
+            return None
+        if overlay_producer and overlay_producer != "hakodate_best_method_pipeline":
+            return None
+    return preview["assignment"]
+
+
+def _load_hakodate_assignment_source_payload(order_id: str) -> dict[str, Any]:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
+    latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
+    if (
+        isinstance(latest_payload, dict)
+        and _payload_has_current_hakodate_canonical_pipeline(latest_payload)
+        and _payload_has_hakodate_target_cells(latest_payload)
+        and _payload_has_hakodate_evidence_records(latest_payload, order_id=order_id)
+    ):
+        return evidence_manifest_service.ensure_evidence_manifest(dict(latest_payload))
+    cached_payload = _load_order_ocr_cache(order_id)
+    return cached_payload if isinstance(cached_payload, dict) else {}
+
+
+def _load_latest_hakodate_overlay_source(
+    order_id: str,
+) -> tuple[dict[str, Any], str | None, bool]:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
+    latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
+    if (
+        isinstance(latest_payload, dict)
+        and _payload_has_current_hakodate_canonical_pipeline(latest_payload)
+        and _payload_has_hakodate_target_cells(latest_payload)
+    ):
+        return (
+            evidence_manifest_service.ensure_evidence_manifest(dict(latest_payload)),
+            str(latest_evidence.get("id") or "").strip() or None,
+            True,
+        )
+    cached_payload = _load_order_ocr_cache(order_id)
+    return cached_payload if isinstance(cached_payload, dict) else {}, None, False
+
+
+def _latest_hakodate_evidence_available(order_id: str) -> bool:
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
+    latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
+    return (
+        isinstance(latest_payload, dict)
+        and _payload_has_current_hakodate_canonical_pipeline(latest_payload)
+        and _payload_has_hakodate_target_cells(latest_payload)
+        and _payload_has_hakodate_evidence_records(latest_payload, order_id=order_id)
+    )
+
+
+def ensure_hakodate_evidence_draft_current(
+    order_id: str,
+    *,
+    edited_by: str | None = None,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Keep visible sheet surfaces on the Hakodate evidence projection when it exists."""
+    current_draft = get_latest_sheet_draft(
+        order_id,
+        backfill_from_revision=False,
+        upgrade_generic_from_sheet=False,
+    )
+    if _draft_payload_has_hakodate_evidence_projection(current_draft):
+        return current_draft, None
+
+    projected_bundle, projected_error = build_order_hakodate_projected_sheet(
+        order_id,
+        strategy="hakodate",
+    )
+    draft_payload = (
+        projected_bundle.get("projected_sheet")
+        if isinstance(projected_bundle, dict) and isinstance(projected_bundle.get("projected_sheet"), dict)
+        else None
+    )
+    if isinstance(draft_payload, dict):
+        latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
+        persisted = _persist_sheet_draft_with_base_evidence(
+            order_id=order_id,
+            draft_sheet_json=draft_payload,
+            draft_state="draft_blocked" if draft_payload.get("blockers") else "draft_ready",
+            blockers=[str(item).strip() for item in (draft_payload.get("blockers") or []) if str(item).strip()],
+            warnings=[str(item).strip() for item in (draft_payload.get("warnings") or []) if str(item).strip()],
+            evidence_run_override=latest_evidence if isinstance(latest_evidence, dict) else None,
+            edited_by=edited_by or "auto-hakodate-evidence-current-draft",
+        )
+        if isinstance(persisted, dict):
+            return persisted, None
+    if projected_error in {"order_not_found", "facility_missing", "facility_not_found", "template_unresolved"}:
+        return None, projected_error
+    return current_draft, None
+
+
+def get_hakodate_pipeline_job_status(order_id: str) -> dict[str, Any]:
+    normalized_order_id = str(order_id or "").strip()
+    job = get_ocr_job(f"OCR-{normalized_order_id}") if normalized_order_id else None
+    if not isinstance(job, dict):
+        return describe_ocr_job_state(None)
+    request_mode = get_job_request_mode(job)
+    if request_mode and request_mode not in {"ocr_rerun", "ocr_reparse", "llm_reparse"}:
+        return describe_ocr_job_state(None)
+    state = describe_ocr_job_state(job)
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    return {
+        **state,
+        "request_mode": request_mode or None,
+        "processing_stage": str(metrics.get("processing_stage") or "").strip() or None,
+        "result_state": str(metrics.get("result_state") or "").strip() or None,
+        "error": (
+            str(metrics.get("error") or "").strip()
+            or str(job.get("error_message") or "").strip()
+            or None
+        ),
+        "output_reference": str(job.get("output_reference") or "").strip() or None,
+    }
+
+
+def get_cached_hakodate_overlay_preview(order_id: str) -> dict[str, Any]:
+    job_status = get_hakodate_pipeline_job_status(order_id)
+    overlay_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id)
+    if not isinstance(overlay_payload, dict):
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_overlay_artifact_missing"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_overlay_artifact_missing"),
+            "overlay_url": None,
+            "overlay_uri": None,
+            "assignment": None,
+            "source_evidence_run_id": evidence_run_id,
+            "job_status": job_status,
+        }
+    overlay = overlay_payload.get("hakodate_overlay")
+    if not isinstance(overlay, dict):
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_overlay_artifact_missing"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_overlay_artifact_missing"),
+            "overlay_url": None,
+            "overlay_uri": None,
+            "assignment": get_cached_hakodate_assignment_preview(order_id),
+            "source_evidence_run_id": evidence_run_id,
+            "latest_hakodate_evidence": has_latest_hakodate_evidence,
+            "job_status": job_status,
+        }
+    overlay_producer = str(overlay.get("producer") or "").strip()
+    overlay_uri = str(overlay.get("uri") or "").strip()
+    overlay_fingerprint = str(overlay.get("fingerprint") or "").strip()
+    overlay_version = str(overlay.get("version") or "").strip()
+    if (
+        overlay_producer != "hakodate_best_method_pipeline"
+        or overlay_version != HAKODATE_CANONICAL_PIPELINE_VERSION
+    ):
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_overlay_render_unavailable"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_overlay_render_unavailable"),
+            "overlay_url": None,
+            "overlay_uri": overlay_uri or None,
+            "assignment": None,
+            "source_evidence_run_id": evidence_run_id,
+            "latest_hakodate_evidence": has_latest_hakodate_evidence,
+            "job_status": job_status,
+        }
+    if not overlay_uri or not overlay_fingerprint:
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_overlay_artifact_missing"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_overlay_artifact_missing"),
+            "overlay_url": None,
+            "overlay_uri": overlay_uri or None,
+            "assignment": get_cached_hakodate_assignment_preview(order_id),
+            "source_evidence_run_id": evidence_run_id,
+            "latest_hakodate_evidence": has_latest_hakodate_evidence,
+            "job_status": job_status,
+        }
+    assignment = get_cached_hakodate_assignment_preview(order_id)
+    if not isinstance(assignment, dict):
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_assignment_preview_missing"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_assignment_unavailable"),
+            "overlay_url": None,
+            "overlay_uri": overlay_uri,
+            "assignment": None,
+            "source_evidence_run_id": evidence_run_id,
+            "latest_hakodate_evidence": has_latest_hakodate_evidence,
+            "job_status": job_status,
+        }
+    overlay_url = _signed_url_from_uri(overlay_uri)
+    if not overlay_url:
+        return {
+            "status": "blocked",
+            "blockers": ["hakodate_overlay_render_unavailable"],
+            "message": _describe_hakodate_overlay_blocker("hakodate_overlay_render_unavailable"),
+            "overlay_url": None,
+            "overlay_uri": overlay_uri,
+            "assignment": assignment,
+            "source_evidence_run_id": evidence_run_id,
+            "latest_hakodate_evidence": has_latest_hakodate_evidence,
+            "job_status": job_status,
+        }
+    return {
+        "status": "ready",
+        "blockers": list(assignment.get("blockers") or []),
+        "message": "",
+        "overlay_uri": overlay_uri,
+        "overlay_url": overlay_url,
+        "assignment": assignment,
+        "source_evidence_run_id": evidence_run_id,
+        "latest_hakodate_evidence": has_latest_hakodate_evidence,
+        "job_status": job_status,
+    }
+
+
+def get_hakodate_overlay_preview(order_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            return {
+                "status": "blocked",
+                "blockers": ["order_not_found"],
+                "message": "order not found",
+                "overlay_url": None,
+                "overlay_uri": None,
+                "assignment": None,
+            }
+        document_uri = str(order.document_uri or "").strip() or None
+    return _build_hakodate_overlay_preview(
+        order_id=order_id,
+        document_uri=document_uri,
+    )
+
+
 def _build_initial_draft_from_sheet_payload(
     order_id: str,
     sheet_payload: dict[str, Any] | None,
@@ -9465,6 +10243,7 @@ _AUTHORITATIVE_CURRENT_SHEET_EDITORS = {
 }
 _AUTHORITATIVE_CURRENT_SHEET_SOURCES = {
     "edited_sheet_exact",
+    "hakodate_ocr_evidence_sheet",
     "manual_draft",
     "draft_sheet",
 }
@@ -9806,6 +10585,21 @@ def _persist_sheet_draft_with_base_evidence(
         latest_patch_candidate_id=latest_patch_candidate_id,
         edited_by=edited_by,
     )
+
+
+def _draft_payload_has_hakodate_evidence_projection(draft_record: dict[str, Any] | None) -> bool:
+    if not isinstance(draft_record, dict):
+        return False
+    payload = draft_record.get("draft_sheet_json")
+    if not isinstance(payload, dict):
+        payload = draft_record
+    projection = payload.get("hakodate_evidence_projection")
+    if not isinstance(projection, dict):
+        return False
+    if str(projection.get("version") or payload.get("hakodate_projection_version") or "").strip() != HAKODATE_EVIDENCE_PROJECTION_VERSION:
+        return False
+    metrics = projection.get("metrics")
+    return str(payload.get("source") or "").strip() == "hakodate_ocr_evidence_sheet" and isinstance(metrics, dict)
 
 
 def _rebase_draft_record_to_facility_schema(
@@ -10192,6 +10986,8 @@ def _draft_record_requires_current_sheet_semantic_rebase(
         else draft_record
     )
     if not isinstance(draft_sheet_json, dict):
+        return False, None
+    if str(draft_sheet_json.get("source") or "").strip() == "hakodate_ocr_evidence_sheet":
         return False, None
     rebuilt_sheet = _build_fresh_semantic_sheet_for_draft_rebase(order_id, draft_record)
     if not isinstance(rebuilt_sheet, dict):
@@ -11332,96 +12128,62 @@ def rerun_ocr_evidence_only(
         error_message=None,
         metrics_patch=base_metrics_patch,
     )
+
+    # OCR reruns use the same accepted Hakodate live pipeline as order previews.
+    # Do not fall back to the deprecated external OCR pipeline here.
     try:
-        output = _run_reparse_with_heartbeat(
-            ocr_job_id,
-            processing_stage="ocr_pipeline",
-            result_state="processing",
-            metrics_patch=base_metrics_patch,
-            timeout_seconds_override=_read_ocr_rerun_pipeline_stage_timeout_seconds(),
-            func=lambda: run_ocr_pipeline(
-                pdf_bytes=pdf_bytes,
-                job_id=ocr_job_id,
-                facility_id=facility_id,
-                input_reference=document_uri,
-                preferred_template_id=preferred_template_id,
-                preferred_template_ids=preferred_template_ids,
-                force_upload=True,
-                wait_for_output=False,
-            ),
+        output = _hakodate_canonical_payload_from_manifest_item(
+            order_id=normalized_order_id,
+            facility_id=facility_id,
+            item={"source": "live_order_facility_source_workbook"},
         )
-    except OCRPipelineOutputPendingError as exc:
-        _mark_reparse_job_awaiting_output(
-            ocr_job_id,
-            input_reference=str(exc.input_reference or document_uri or "").strip() or document_uri,
-            output_reference=exc.output_reference,
-            metrics_patch={
-                **pipeline_metrics_patch,
-                "error": "ocr_output_pending",
-            },
-            error_message=str(exc),
-        )
-        try:
-            workflow_state_service.refresh_workflow_state(order_id)
-        except Exception as refresh_exc:  # noqa: BLE001
-            logger.warning("Workflow state refresh failed after OCR rerun pending output", order_id=order_id, error=str(refresh_exc))
-        return {"status": "running", "output_reference": exc.output_reference}, None
+        if isinstance(output, dict):
+            output = {
+                **output,
+                "status": str(output.get("status") or "done").strip() or "done",
+                "stage": str(output.get("stage") or "done").strip() or "done",
+                "engine": str(output.get("engine") or "hakodate_best_method_pipeline").strip()
+                or "hakodate_best_method_pipeline",
+                "facility_id": facility_id,
+                "input_reference": str(output.get("input_reference") or document_uri).strip() or document_uri,
+                "template_id": str(output.get("template_id") or preferred_template_id).strip()
+                or preferred_template_id,
+            }
     except Exception as exc:  # noqa: BLE001
         _update_reparse_job_progress(
             ocr_job_id,
             status="failed",
-            processing_stage="ocr_pipeline",
+            processing_stage="hakodate_live_pipeline",
             result_state="hard_failed",
-            error_message=f"evidence_rerun_failed:{exc}",
+            error_message=f"hakodate_live_rerun_failed:{exc}",
             metrics_patch={
-                **base_metrics_patch,
-                "error": "evidence_rerun_failed",
+                **pipeline_metrics_patch,
+                "error": "hakodate_live_rerun_failed",
             },
         )
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as refresh_exc:  # noqa: BLE001
-            logger.warning("Workflow state refresh failed after OCR rerun failure", order_id=order_id, error=str(refresh_exc))
-        return None, "ocr_rerun_failed"
+            logger.warning("Workflow state refresh failed after Hakodate OCR rerun failure", order_id=order_id, error=str(refresh_exc))
+        return None, "hakodate_live_rerun_failed"
 
     if not isinstance(output, dict):
         _update_reparse_job_progress(
             ocr_job_id,
             status="failed",
-            processing_stage="ocr_pipeline",
+            processing_stage="hakodate_live_pipeline",
             result_state="hard_failed",
-            error_message="evidence_rerun_invalid_output",
-            metrics_patch={
-                **base_metrics_patch,
-                "error": "evidence_rerun_invalid_output",
-            },
-        )
-        try:
-            workflow_state_service.refresh_workflow_state(order_id)
-        except Exception as refresh_exc:  # noqa: BLE001
-            logger.warning("Workflow state refresh failed after OCR rerun invalid output", order_id=order_id, error=str(refresh_exc))
-        return None, "ocr_rerun_invalid_output"
-
-    if _output_is_pending(output):
-        output_reference = str(output.get("output_reference") or "").strip() or None
-        input_reference = str(output.get("input_reference") or document_uri or "").strip() or document_uri
-        trigger_error = str(output.get("trigger_error") or "").strip() or None
-        _mark_reparse_job_awaiting_output(
-            ocr_job_id,
-            input_reference=input_reference,
-            output_reference=output_reference,
+            error_message="hakodate_live_rerun_invalid_output",
             metrics_patch={
                 **pipeline_metrics_patch,
-                "error": "ocr_output_pending",
-                "trigger_error": trigger_error,
+                "error": "hakodate_live_rerun_invalid_output",
             },
-            error_message=trigger_error or "ocr_output_pending",
         )
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as refresh_exc:  # noqa: BLE001
-            logger.warning("Workflow state refresh failed after OCR rerun async trigger", order_id=order_id, error=str(refresh_exc))
-        return {"status": "running", "output_reference": output_reference}, None
+            logger.warning("Workflow state refresh failed after Hakodate OCR rerun invalid output", order_id=order_id, error=str(refresh_exc))
+        return None, "hakodate_live_rerun_invalid_output"
 
     payload_state = ocr_evidence_service.classify_evidence_payload(output)
     if not payload_state.get("persistable"):
@@ -11429,7 +12191,7 @@ def rerun_ocr_evidence_only(
         error_detail = str(payload_state.get("message") or "").strip()
         upstream_status = str(payload_state.get("status") or "").strip()
         upstream_stage = str(payload_state.get("stage") or "").strip()
-        failure_stage = upstream_stage or "ocr_pipeline"
+        failure_stage = upstream_stage or "hakodate_live_pipeline"
         error_message = f"{error_code}:{error_detail}" if error_detail else error_code
         _update_reparse_job_progress(
             ocr_job_id,
@@ -11438,7 +12200,7 @@ def rerun_ocr_evidence_only(
             result_state="hard_failed",
             error_message=error_message,
             metrics_patch={
-                **base_metrics_patch,
+                **pipeline_metrics_patch,
                 "error": error_code,
                 "upstream_status": upstream_status or None,
                 "upstream_stage": upstream_stage or None,
@@ -11448,7 +12210,7 @@ def rerun_ocr_evidence_only(
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as refresh_exc:  # noqa: BLE001
             logger.warning(
-                "Workflow state refresh failed after OCR rerun unusable payload",
+                "Workflow state refresh failed after Hakodate OCR rerun unusable payload",
                 order_id=order_id,
                 error=str(refresh_exc),
             )
@@ -11457,10 +12219,10 @@ def rerun_ocr_evidence_only(
     persisted = persist_ocr_evidence_run(
         order_id,
         output,
-        schema_version="v2_evidence_rerun",
-        producer_version="ocr_pipeline_rerun",
+        schema_version="v2_hakodate_evidence_rerun",
+        producer_version="hakodate_best_method_pipeline",
         status=str(output.get("status") or "ready").strip() or "ready",
-        source="ocr-rerun",
+        source="ocr-rerun-hakodate",
     )
     if not isinstance(persisted, dict):
         _update_reparse_job_progress(
@@ -11470,68 +12232,175 @@ def rerun_ocr_evidence_only(
             result_state="hard_failed",
             error_message="evidence_persist_failed",
             metrics_patch={
-                **base_metrics_patch,
+                **pipeline_metrics_patch,
                 "error": "evidence_persist_failed",
             },
         )
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as refresh_exc:  # noqa: BLE001
-            logger.warning("Workflow state refresh failed after OCR rerun persist failure", order_id=order_id, error=str(refresh_exc))
+            logger.warning("Workflow state refresh failed after Hakodate OCR rerun persist failure", order_id=order_id, error=str(refresh_exc))
         return None, "evidence_persist_failed"
+
+    _save_order_ocr_cache(
+        order_id,
+        output,
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+
+    current_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
+    projected_bundle, projected_error = build_order_hakodate_projected_sheet(
+        order_id,
+        strategy="hakodate",
+    )
+    projected_sheet = (
+        projected_bundle.get("projected_sheet")
+        if isinstance(projected_bundle, dict) and isinstance(projected_bundle.get("projected_sheet"), dict)
+        else None
+    )
+    if projected_error or not isinstance(projected_sheet, dict):
+        sync_error = projected_error or "hakodate_projected_sheet_unavailable"
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="project_hakodate_sheet",
+            result_state="hard_failed",
+            error_message=sync_error,
+            metrics_patch={
+                **pipeline_metrics_patch,
+                "error": sync_error,
+                "evidence_run_id": persisted.get("id"),
+                "hakodate_live_pipeline": True,
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning(
+                "Workflow state refresh failed after Hakodate OCR rerun projection failure",
+                order_id=order_id,
+                error=str(refresh_exc),
+            )
+        return None, sync_error
+
+    projected_blockers = [
+        str(item).strip()
+        for item in (projected_sheet.get("blockers") or [])
+        if str(item).strip()
+    ]
+    projected_warnings = [
+        str(item).strip()
+        for item in (projected_sheet.get("warnings") or [])
+        if str(item).strip()
+    ]
+    synced_draft = _persist_sheet_draft_with_base_evidence(
+        order_id=order_id,
+        draft_sheet_json=projected_sheet,
+        draft_state="draft_blocked" if projected_blockers else "draft_ready",
+        blockers=projected_blockers,
+        warnings=projected_warnings,
+        latest_patch_candidate_id=(
+            str((current_draft or {}).get("latest_patch_candidate_id") or "").strip() or None
+        )
+        if isinstance(current_draft, dict)
+        else None,
+        edited_by="rerun-ocr-evidence-hakodate",
+        evidence_run_override=persisted,
+    )
+    if not isinstance(synced_draft, dict):
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="failed",
+            processing_stage="project_hakodate_sheet",
+            result_state="hard_failed",
+            error_message="hakodate_current_sheet_sync_failed",
+            metrics_patch={
+                **pipeline_metrics_patch,
+                "error": "hakodate_current_sheet_sync_failed",
+                "evidence_run_id": persisted.get("id"),
+                "hakodate_live_pipeline": True,
+            },
+        )
+        try:
+            workflow_state_service.refresh_workflow_state(order_id)
+        except Exception as refresh_exc:  # noqa: BLE001
+            logger.warning(
+                "Workflow state refresh failed after Hakodate OCR rerun current-sheet sync failure",
+                order_id=order_id,
+                error=str(refresh_exc),
+        )
+        return None, "hakodate_current_sheet_sync_failed"
+
+    synced_base_evidence_run_id = str(synced_draft.get("base_evidence_run_id") or "").strip()
+    persisted_evidence_run_id = str(persisted.get("id") or "").strip()
+    if persisted_evidence_run_id and synced_base_evidence_run_id != persisted_evidence_run_id:
+        resynced_draft, resync_error = switch_draft_to_latest_evidence(
+            order_id,
+            edited_by="rerun-ocr-evidence-hakodate-current-sync",
+        )
+        resync_blocked_by_missing_sheet_source = resync_error in {
+            "menu_entries_missing",
+            "week_unresolved",
+            "sheet_week_dates_incomplete",
+        }
+        if resync_error and resync_error != "already_current" and not resync_blocked_by_missing_sheet_source:
+            _update_reparse_job_progress(
+                ocr_job_id,
+                status="failed",
+                processing_stage="project_hakodate_sheet",
+                result_state="hard_failed",
+                error_message=resync_error,
+                metrics_patch={
+                    **pipeline_metrics_patch,
+                    "error": resync_error,
+                    "evidence_run_id": persisted.get("id"),
+                    "hakodate_live_pipeline": True,
+                },
+            )
+            try:
+                workflow_state_service.refresh_workflow_state(order_id)
+            except Exception as refresh_exc:  # noqa: BLE001
+                logger.warning(
+                    "Workflow state refresh failed after Hakodate OCR rerun current-sheet resync failure",
+                    order_id=order_id,
+                    error=str(refresh_exc),
+                )
+            return None, resync_error
+        if isinstance(resynced_draft, dict):
+            synced_draft = resynced_draft
 
     update_job(
         ocr_job_id,
+        status="done",
         template_id=output.get("template_id"),
-        output_reference=output.get("output_reference"),
+        output_reference=(
+            ((output.get("hakodate_overlay") or {}).get("uri"))
+            if isinstance(output.get("hakodate_overlay"), dict)
+            else None
+        ),
         input_reference=document_uri,
+        error_message=None,
     )
-    current_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
-    if isinstance(current_draft, dict):
-        current_sheet_json = current_draft.get("draft_sheet_json")
-        if isinstance(current_sheet_json, dict):
-            _persist_sheet_draft_with_base_evidence(
-                order_id=order_id,
-                draft_sheet_json=current_sheet_json,
-                draft_state=str(current_draft.get("draft_state") or "draft_ready").strip() or "draft_ready",
-                blockers=[
-                    str(item).strip()
-                    for item in (current_draft.get("blockers_json") or [])
-                    if str(item).strip()
-                ],
-                warnings=[
-                    str(item).strip()
-                    for item in (current_draft.get("warnings_json") or [])
-                    if str(item).strip()
-                ],
-                latest_patch_candidate_id=(
-                    str(current_draft.get("latest_patch_candidate_id") or "").strip() or None
-                ),
-                edited_by="rerun-ocr-evidence",
-                evidence_run_override=persisted,
-                base_evidence_run_id_override=(
-                    str(current_draft.get("base_evidence_run_id") or "").strip() or None
-                ),
-                base_template_resolution_id_override=(
-                    str(current_draft.get("base_template_resolution_id") or "").strip() or None
-                ),
-            )
     _update_reparse_job_progress(
         ocr_job_id,
         status="done",
-        processing_stage="evidence_ready",
-        result_state="evidence_ready",
+        processing_stage="evidence_ready" if not projected_blockers else "draft_blocked",
+        result_state="evidence_ready" if not projected_blockers else "draft_blocked",
         error_message=None,
         metrics_patch={
-            **base_metrics_patch,
+            **pipeline_metrics_patch,
             "evidence_run_id": persisted.get("id"),
-            "new_evidence_available": True,
+            "new_evidence_available": False,
+            "hakodate_live_pipeline": True,
+            "projected_sheet_blockers": projected_blockers,
         },
     )
     try:
         workflow_state_service.refresh_workflow_state(order_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Workflow state refresh failed after OCR rerun success", order_id=order_id, error=str(exc))
+        logger.warning("Workflow state refresh failed after Hakodate OCR rerun success", order_id=order_id, error=str(exc))
     return persisted, None
 
 
@@ -11552,23 +12421,42 @@ def switch_draft_to_latest_evidence(
         if isinstance(current_draft, dict)
         else None
     )
-    if current_base_evidence_id == latest_evidence_id:
+    if current_base_evidence_id == latest_evidence_id and _draft_payload_has_hakodate_evidence_projection(current_draft):
         return current_draft, "already_current"
 
-    draft_payload = _build_best_available_semantic_draft(
-        order_id,
-        use_saved_draft=False,
-        evidence_run_override=latest_evidence,
-    )
+    latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
+    if (
+        isinstance(latest_payload, dict)
+        and _payload_has_hakodate_target_cells(latest_payload)
+        and _payload_has_hakodate_evidence_records(latest_payload, order_id=order_id)
+    ):
+        projected_bundle, projected_error = build_order_hakodate_projected_sheet(
+            order_id,
+            strategy="hakodate",
+        )
+        if projected_error:
+            return None, projected_error
+        draft_payload = (
+            projected_bundle.get("projected_sheet")
+            if isinstance(projected_bundle, dict) and isinstance(projected_bundle.get("projected_sheet"), dict)
+            else None
+        )
+    else:
+        draft_payload = _build_best_available_semantic_draft(
+            order_id,
+            use_saved_draft=False,
+            evidence_run_override=latest_evidence,
+        )
     if not isinstance(draft_payload, dict):
         return None, "switch_draft_unavailable"
 
-    persisted = persist_sheet_draft(
+    persisted = _persist_sheet_draft_with_base_evidence(
         order_id=order_id,
         draft_sheet_json=draft_payload,
-        draft_state="draft_ready",
-        blockers=[],
+        draft_state="draft_blocked" if draft_payload.get("blockers") else "draft_ready",
+        blockers=[str(item).strip() for item in (draft_payload.get("blockers") or []) if str(item).strip()],
         warnings=[str(item).strip() for item in (draft_payload.get("warnings") or []) if str(item).strip()],
+        evidence_run_override=latest_evidence,
         edited_by=edited_by or "switch-evidence",
     )
     if not isinstance(persisted, dict):
@@ -14650,6 +15538,7 @@ def _extract_order_draft_state(
         "auto_apply_blocked": auto_apply_blocked,
         "reject_reasons": reject_reasons,
         "latest_revision": latest_revision if has_saved_draft and isinstance(latest_revision, dict) else None,
+        "latest_draft_payload": latest_draft_payload if has_saved_draft and isinstance(latest_draft_payload, dict) else None,
     }
 
 
@@ -14939,7 +15828,19 @@ def get_order_review_summary(
     metrics = ocr_metrics if isinstance(ocr_metrics, dict) else {}
     latest_revision = draft_state.get("latest_revision") if isinstance(draft_state.get("latest_revision"), dict) else None
     latest_rows = latest_revision.get("rows") if isinstance(latest_revision, dict) else None
-    draft_row_count = len(latest_rows) if isinstance(latest_rows, list) else 0
+    latest_draft_payload = (
+        draft_state.get("latest_draft_payload")
+        if isinstance(draft_state.get("latest_draft_payload"), dict)
+        else None
+    )
+    latest_draft_rows = latest_draft_payload.get("rows") if isinstance(latest_draft_payload, dict) else None
+    draft_row_count = (
+        len(latest_rows)
+        if isinstance(latest_rows, list) and latest_rows
+        else len(latest_draft_rows)
+        if isinstance(latest_draft_rows, list)
+        else 0
+    )
     apply_blockers: list[str] = []
     if draft_state["has_saved_draft"] and draft_row_count <= 0:
         apply_blockers.append("draft_rows_empty")
@@ -17544,10 +18445,16 @@ def get_ocr_output(
     parsed = None
     parsed_source = ""
     order_job_pending = _job_is_pending(job)
-    if _payload_has_first_pass_ocr_content(active_evidence_payload):
+    if (
+        _payload_has_first_pass_ocr_content(active_evidence_payload)
+        or _payload_has_hakodate_output_content(active_evidence_payload, order_id=order_id)
+    ):
         parsed = active_evidence_payload
         parsed_source = "active_evidence"
-    elif _payload_has_first_pass_ocr_content(cached_payload):
+    elif (
+        _payload_has_first_pass_ocr_content(cached_payload)
+        or _payload_has_hakodate_output_content(cached_payload, order_id=order_id)
+    ):
         parsed = cached_payload
         parsed_source = "cache"
     else:
@@ -17556,7 +18463,10 @@ def get_ocr_output(
         order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
         if _output_is_pending(parsed):
             parsed = None
-        elif not _payload_has_first_pass_ocr_content(parsed):
+        elif not (
+            _payload_has_first_pass_ocr_content(parsed)
+            or _payload_has_hakodate_output_content(parsed, order_id=order_id)
+        ):
             parsed = None
     fallback_job = None
     if (
@@ -17568,7 +18478,10 @@ def get_ocr_output(
         fallback_parsed = _load_job_output(fallback_job, "message", wait_for_recovery=False)
         if _output_is_pending(fallback_parsed):
             fallback_parsed = None
-        if _payload_has_first_pass_ocr_content(fallback_parsed):
+        if (
+            _payload_has_first_pass_ocr_content(fallback_parsed)
+            or _payload_has_hakodate_output_content(fallback_parsed, order_id=order_id)
+        ):
             parsed = fallback_parsed
             parsed_source = "message"
     if parsed is None:
@@ -17856,7 +18769,365 @@ def _compact_ocr_preview_tables_for_page(
     return compact_tables
 
 
-def get_ocr_pages(order_id: str, *, preview_only: bool = False):
+def _describe_hakodate_overlay_blocker(code: object) -> str:
+    normalized = str(code or "").strip()
+    labels = {
+        "hakodate_target_cell_map_missing": "Hakodate target cell map がありません。",
+        "hakodate_ocr_evidence_missing": "Hakodate OCR quantity evidence がありません。",
+        "hakodate_assignment_unavailable": "Hakodate assignment を生成できませんでした。",
+        "hakodate_overlay_render_unavailable": "Hakodate overlay の描画に失敗しました。",
+        "template_unresolved": "Hakodate template を解決できませんでした。",
+        "facility_missing": "施設設定がないため Hakodate overlay を作れません。",
+        "facility_not_found": "施設設定を取得できないため Hakodate overlay を作れません。",
+    }
+    return labels.get(normalized, normalized or "Hakodate overlay blocker")
+
+
+def _compact_hakodate_assignment_for_client(assignment: object) -> dict[str, Any] | None:
+    if not isinstance(assignment, dict):
+        return None
+    def _compact_metadata(value: object) -> dict[str, Any]:
+        metadata = value if isinstance(value, dict) else {}
+        if isinstance(metadata.get("metadata"), dict):
+            metadata = metadata["metadata"]
+        stats = metadata.get("recognizer_ink_stats") if isinstance(metadata.get("recognizer_ink_stats"), dict) else {}
+        truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
+        compact_truth: dict[str, Any] = {}
+        for key in ("row_index", "field"):
+            if key in truth:
+                compact_truth[key] = truth.get(key)
+        compact: dict[str, Any] = {}
+        for key in (
+            "field_label",
+            "ocr_candidate",
+            "recognizer_candidate",
+            "recognizer_candidate_accepted",
+            "source",
+        ):
+            if key in metadata:
+                compact[key] = metadata.get(key)
+        compact_stats = {
+            key: stats.get(key)
+            for key in ("ink_area", "kept_component_count")
+            if key in stats
+        }
+        if compact_stats:
+            compact["recognizer_ink_stats"] = compact_stats
+        if compact_truth:
+            compact["truth"] = compact_truth
+        return compact
+
+    def _compact_target_cell(item: object) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        compact = {
+            key: item.get(key)
+            for key in (
+                "target_cell_id",
+                "region_id",
+                "sheet_cell",
+                "worksheet_row",
+                "worksheet_col",
+                "semantic_field",
+                "field",
+                "bbox",
+                "center",
+                "source",
+            )
+            if key in item
+        }
+        metadata = _compact_metadata(item.get("metadata"))
+        if metadata:
+            compact["metadata"] = metadata
+        return compact
+
+    def _compact_assignment_item(item: object) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        return {
+            key: item.get(key)
+            for key in (
+                "target_cell_id",
+                "sheet_cell",
+                "worksheet_row",
+                "worksheet_col",
+                "semantic_field",
+                "assigned_value",
+                "value_normalized",
+                "value_text",
+                "assignment_confidence",
+                "assignment_state",
+            )
+            if key in item
+        }
+
+    def _compact_sheet_cell(item: object) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        return {
+            key: item.get(key)
+            for key in (
+                "sheet_cell",
+                "worksheet_row",
+                "worksheet_col",
+                "semantic_field",
+                "value_text",
+                "value_normalized",
+                "assignment_state",
+                "assignment_confidence",
+                "target_cell_id",
+            )
+            if key in item
+        }
+
+    sheet_output = assignment.get("sheet_output") if isinstance(assignment.get("sheet_output"), dict) else {}
+    compact_sheet_output = {
+        "blockers": list(sheet_output.get("blockers") or []),
+        "warnings": list(sheet_output.get("warnings") or []),
+    }
+    cells = sheet_output.get("cells")
+    if isinstance(cells, dict):
+        compact_sheet_output["cells"] = {
+            str(key): compact
+            for key, value in cells.items()
+            if (compact := _compact_sheet_cell(value)) is not None
+        }
+    target_cells = [
+        compact
+        for item in list(assignment.get("target_cells") or [])
+        if (compact := _compact_target_cell(item)) is not None
+    ]
+    assignments = [
+        compact
+        for item in list(assignment.get("assignments") or [])
+        if (compact := _compact_assignment_item(item)) is not None
+    ]
+    return {
+        "status": assignment.get("status"),
+        "strategy": assignment.get("strategy"),
+        "quantity_assignment_strategy": assignment.get("quantity_assignment_strategy"),
+        "blockers": list(assignment.get("blockers") or []),
+        "warnings": list(assignment.get("warnings") or []),
+        "metrics": assignment.get("metrics") if isinstance(assignment.get("metrics"), dict) else {},
+        "target_cells": target_cells,
+        "assignments": assignments,
+        "sheet_output": compact_sheet_output,
+    }
+
+
+def _cache_hakodate_assignment_preview(
+    *,
+    order_id: str,
+    cached_payload: object,
+    fingerprint: str,
+    assignment: object,
+) -> dict[str, Any] | None:
+    compact = _compact_hakodate_assignment_for_client(assignment)
+    if not isinstance(compact, dict) or not isinstance(cached_payload, dict):
+        return compact
+    current = cached_payload.get("hakodate_assignment_preview")
+    if (
+        isinstance(current, dict)
+        and current.get("fingerprint") == fingerprint
+        and current.get("version") == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and isinstance(current.get("assignment"), dict)
+    ):
+        return current["assignment"]
+    next_payload = dict(cached_payload)
+    next_payload["hakodate_assignment_preview"] = {
+        "fingerprint": fingerprint,
+        "version": HAKODATE_CANONICAL_PIPELINE_VERSION,
+        "assignment": compact,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    _save_order_ocr_cache(
+        order_id,
+        next_payload,
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    return compact
+
+
+def _build_hakodate_overlay_preview(
+    *,
+    order_id: str,
+    document_uri: str | None,
+) -> dict[str, Any]:
+    job_status = get_hakodate_pipeline_job_status(order_id)
+    cached_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id)
+    cached_overlay = cached_payload.get("hakodate_overlay") if isinstance(cached_payload, dict) else None
+    cached_overlay_producer = str(cached_overlay.get("producer") or "").strip() if isinstance(cached_overlay, dict) else ""
+    cached_overlay_uri = str(cached_overlay.get("uri") or "").strip() if isinstance(cached_overlay, dict) else ""
+    cached_overlay_fingerprint = str(cached_overlay.get("fingerprint") or "").strip() if isinstance(cached_overlay, dict) else ""
+    cached_overlay_version = str(cached_overlay.get("version") or "").strip() if isinstance(cached_overlay, dict) else ""
+    cached_assignment_preview = (
+        cached_payload.get("hakodate_assignment_preview")
+        if isinstance(cached_payload, dict) and isinstance(cached_payload.get("hakodate_assignment_preview"), dict)
+        else None
+    )
+    if (
+        cached_overlay_uri
+        and cached_overlay_fingerprint
+        and cached_overlay_producer == "hakodate_best_method_pipeline"
+        and cached_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and isinstance(cached_assignment_preview, dict)
+        and cached_assignment_preview.get("version") == HAKODATE_CANONICAL_PIPELINE_VERSION
+        and cached_assignment_preview.get("fingerprint") == cached_overlay_fingerprint
+        and isinstance(cached_assignment_preview.get("assignment"), dict)
+    ):
+        cached_overlay_url = _signed_url_from_uri(cached_overlay_uri)
+        if cached_overlay_url:
+            cached_assignment = cached_assignment_preview["assignment"]
+            return {
+                "status": "ready",
+                "blockers": list(cached_assignment.get("blockers") or []),
+                "message": "",
+                "overlay_uri": cached_overlay_uri,
+                "overlay_url": cached_overlay_url,
+                "assignment": cached_assignment,
+                "source_evidence_run_id": evidence_run_id,
+                "latest_hakodate_evidence": has_latest_hakodate_evidence,
+                "job_status": job_status,
+            }
+
+    assignment, assignment_error = build_order_hakodate_assignment(
+        order_id,
+        strategy="hakodate",
+        allow_artifact_repair=True,
+    )
+    if assignment_error:
+        blockers = [assignment_error]
+        return {
+            "status": "blocked",
+            "blockers": blockers,
+            "message": " / ".join(_describe_hakodate_overlay_blocker(item) for item in blockers),
+            "overlay_url": None,
+            "job_status": job_status,
+        }
+    if not isinstance(assignment, dict):
+        blockers = ["hakodate_assignment_unavailable"]
+        return {
+            "status": "blocked",
+            "blockers": blockers,
+            "message": " / ".join(_describe_hakodate_overlay_blocker(item) for item in blockers),
+            "overlay_url": None,
+            "job_status": job_status,
+        }
+
+    target_cells = assignment.get("target_cells") if isinstance(assignment.get("target_cells"), list) else []
+    evidence_records = assignment.get("evidence_records") if isinstance(assignment.get("evidence_records"), list) else []
+    required_blockers: list[str] = []
+    if not target_cells:
+        required_blockers.append("hakodate_target_cell_map_missing")
+    if not evidence_records:
+        required_blockers.append("hakodate_ocr_evidence_missing")
+    if required_blockers:
+        return {
+            "status": "blocked",
+            "blockers": required_blockers,
+            "message": " / ".join(_describe_hakodate_overlay_blocker(item) for item in required_blockers),
+            "overlay_url": None,
+            "assignment": _compact_hakodate_assignment_for_client(assignment),
+            "job_status": job_status,
+        }
+
+    overlay_fingerprint = _hakodate_overlay_fingerprint(
+        target_cells=[
+            item
+            for item in target_cells
+            if isinstance(item, dict)
+        ],
+        assignments=[
+            item
+            for item in (assignment.get("assignments") if isinstance(assignment.get("assignments"), list) else [])
+            if isinstance(item, dict)
+        ],
+    )
+    refreshed_payload, refreshed_evidence_run_id, refreshed_has_latest_hakodate_evidence = (
+        _load_latest_hakodate_overlay_source(order_id)
+    )
+    refreshed_overlay = (
+        refreshed_payload.get("hakodate_overlay")
+        if isinstance(refreshed_payload, dict) and isinstance(refreshed_payload.get("hakodate_overlay"), dict)
+        else None
+    )
+    refreshed_overlay_uri = str((refreshed_overlay or {}).get("uri") or "").strip()
+    refreshed_overlay_producer = str((refreshed_overlay or {}).get("producer") or "").strip()
+    refreshed_overlay_fingerprint = str((refreshed_overlay or {}).get("fingerprint") or "").strip()
+    refreshed_overlay_version = str((refreshed_overlay or {}).get("version") or "").strip()
+    if (
+        refreshed_overlay_uri
+        and refreshed_overlay_fingerprint == overlay_fingerprint
+        and refreshed_overlay_producer == "hakodate_best_method_pipeline"
+        and refreshed_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+    ):
+        refreshed_overlay_url = _signed_url_from_uri(refreshed_overlay_uri)
+        if refreshed_overlay_url:
+            compact_assignment = _cache_hakodate_assignment_preview(
+                order_id=order_id,
+                cached_payload=refreshed_payload,
+                fingerprint=overlay_fingerprint,
+                assignment=assignment,
+            )
+            return {
+                "status": "ready",
+                "blockers": list(assignment.get("blockers") or []),
+                "message": "",
+                "overlay_uri": refreshed_overlay_uri,
+                "overlay_url": refreshed_overlay_url,
+                "assignment": compact_assignment,
+                "source_evidence_run_id": refreshed_evidence_run_id,
+                "latest_hakodate_evidence": refreshed_has_latest_hakodate_evidence,
+                "job_status": job_status,
+            }
+    if (
+        isinstance(cached_overlay, dict)
+        and cached_overlay.get("fingerprint") == overlay_fingerprint
+        and cached_overlay_producer == "hakodate_best_method_pipeline"
+        and cached_overlay_version == HAKODATE_CANONICAL_PIPELINE_VERSION
+    ):
+        if cached_overlay_uri:
+            cached_overlay_url = _signed_url_from_uri(cached_overlay_uri)
+            if cached_overlay_url:
+                compact_assignment = _cache_hakodate_assignment_preview(
+                    order_id=order_id,
+                    cached_payload=cached_payload,
+                    fingerprint=overlay_fingerprint,
+                    assignment=assignment,
+                )
+                return {
+                    "status": "ready",
+                    "blockers": list(assignment.get("blockers") or []),
+                    "message": "",
+                    "overlay_uri": cached_overlay_uri,
+                    "overlay_url": cached_overlay_url,
+                    "assignment": compact_assignment,
+                    "source_evidence_run_id": evidence_run_id,
+                    "latest_hakodate_evidence": has_latest_hakodate_evidence,
+                    "job_status": job_status,
+                }
+
+    blockers = ["hakodate_overlay_artifact_missing"]
+    return {
+        "status": "blocked",
+        "blockers": blockers,
+        "message": " / ".join(_describe_hakodate_overlay_blocker(item) for item in blockers),
+        "overlay_url": None,
+        "assignment": _compact_hakodate_assignment_for_client(assignment),
+        "source_evidence_run_id": evidence_run_id,
+        "latest_hakodate_evidence": has_latest_hakodate_evidence,
+        "job_status": job_status,
+    }
+
+
+def get_ocr_pages(
+    order_id: str,
+    *,
+    preview_only: bool = False,
+    quantity_assignment_strategy: str | None = None,
+):
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -17910,14 +19181,12 @@ def get_ocr_pages(order_id: str, *, preview_only: bool = False):
         if _payload_has_page_artifacts(fallback_parsed):
             parsed = fallback_parsed
             parsed_source = "message"
-            if isinstance(parsed, dict) and not _output_is_pending(parsed):
-                _save_order_ocr_cache(order_id, parsed)
     if parsed is None:
         parsed = cached_payload
         parsed_source = "cache"
     if parsed is not None and parsed_source != "cache":
         pages_payload = parsed.get("pages")
-        if not isinstance(pages_payload, list):
+        if not isinstance(pages_payload, list) and not _payload_has_hakodate_output_content(parsed, order_id=order_id):
             cached = _load_order_ocr_cache(order_id)
             if cached is not None:
                 parsed = cached
@@ -17938,7 +19207,6 @@ def get_ocr_pages(order_id: str, *, preview_only: bool = False):
             return None, "ocr_evidence_recovery_required"
     if isinstance(parsed, dict) and not _output_is_pending(parsed):
         parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
-        _save_order_ocr_cache(order_id, parsed)
     pages_payload = parsed.get("pages")
     pages: list[dict[str, object]] = []
     if isinstance(pages_payload, list):
@@ -17984,11 +19252,28 @@ def get_ocr_pages(order_id: str, *, preview_only: bool = False):
                     "pdf_variant_used": page.get("pdf_variant_used"),
                 }
             )
+    has_hakodate_output = _payload_has_hakodate_output_content(parsed if isinstance(parsed, dict) else None, order_id=order_id)
+    if has_hakodate_output and not pages:
+        pages = [
+            {
+                "page_index": 1,
+                "markdown_uri": None,
+                "markdown_text": None,
+                "ocr_overlay_uri": None,
+                "ocr_overlay_url": None,
+                "layout_overlay_uri": None,
+                "layout_overlay_url": None,
+                "figure_uris": [],
+                "figure_urls": [],
+                "tables": [],
+                "synthetic": True,
+                "synthetic_source": "hakodate_overlay_only",
+                "pdf_variant_used": None,
+            }
+        ]
     evidence_missing = _ocr_evidence_missing_artifacts(parsed if isinstance(parsed, dict) else None)
-    if "overlay_pages" in evidence_missing or not pages:
+    if (not has_hakodate_output and "overlay_pages" in evidence_missing) or not pages:
         return None, "ocr_evidence_recovery_required"
-    if isinstance(parsed, dict) and parsed_source != "cache":
-        _save_order_ocr_cache(order_id, parsed)
     combined_urls: dict[str, str | None] = {}
     if not preview_only:
         combined = parsed.get("combined") if isinstance(parsed.get("combined"), dict) else {}
@@ -18053,6 +19338,31 @@ def get_ocr_pages(order_id: str, *, preview_only: bool = False):
     if missing_grid_parts:
         grid_detection_status = "deferred"
         grid_detection_deferred_reason = f"missing_template_grid_metadata:{','.join(missing_grid_parts)}"
+    requested_strategy = hakodate_assignment_service.normalize_quantity_assignment_strategy(
+        quantity_assignment_strategy or "hakodate"
+    )
+    hakodate_preview = None
+    if requested_strategy == "hakodate":
+        hakodate_preview = _build_hakodate_overlay_preview(
+            order_id=order_id,
+            document_uri=str(document_uri or "").strip() or None,
+        )
+        hakodate_overlay_url = hakodate_preview.get("overlay_url")
+        for page_index, page in enumerate(pages):
+            if not isinstance(page, dict):
+                continue
+            # In Hakodate mode the backend-generated Hakodate overlay is the
+            # only preview image source. Do not expose legacy/yomitoku overlay
+            # URLs on this endpoint, otherwise old clients can accidentally
+            # render the wrong image under the Hakodate UI.
+            page["ocr_overlay_uri"] = None
+            page["ocr_overlay_url"] = None
+            page["hakodate_overlay_url"] = hakodate_overlay_url
+            page["hakodate_overlay_uri"] = hakodate_preview.get("overlay_uri")
+            page["hakodate_overlay_status"] = hakodate_preview.get("status")
+            page["hakodate_overlay_blockers"] = list(hakodate_preview.get("blockers") or [])
+            page["hakodate_overlay_message"] = hakodate_preview.get("message")
+
     page_indexes = [
         int(page.get("page_index"))
         for page in pages
@@ -18077,6 +19387,15 @@ def get_ocr_pages(order_id: str, *, preview_only: bool = False):
             "grid_params": grid_params,
             "grid_detection_status": grid_detection_status,
             "grid_detection_deferred_reason": grid_detection_deferred_reason,
+            "quantity_assignment_strategy": requested_strategy,
+            "hakodate_overlay_status": hakodate_preview.get("status") if isinstance(hakodate_preview, dict) else None,
+            "hakodate_overlay_blockers": (
+                list(hakodate_preview.get("blockers") or [])
+                if isinstance(hakodate_preview, dict)
+                else []
+            ),
+            "hakodate_overlay_message": hakodate_preview.get("message") if isinstance(hakodate_preview, dict) else None,
+            "hakodate_assignment": hakodate_preview.get("assignment") if isinstance(hakodate_preview, dict) else None,
         },
         None,
     )
@@ -21545,6 +22864,44 @@ def _empty_ocr_numeric_cell_summary() -> dict[str, int]:
         "weak_candidate_count": 0,
         "unresolved_count": 0,
     }
+
+
+def _hakodate_ocr_confidence_tier(confidence: object) -> str:
+    if confidence is None:
+        return "high"
+    try:
+        score = float(confidence)
+    except Exception:
+        return "high"
+    if score >= 0.45:
+        return "high"
+    if score >= 0.15:
+        return "medium"
+    if score >= 0.05:
+        return "low"
+    return ""
+
+
+def _hakodate_ocr_classification_for_confidence(confidence: object) -> str:
+    tier = _hakodate_ocr_confidence_tier(confidence)
+    if tier == "high":
+        return "accepted"
+    if tier == "medium":
+        return "deterministic_candidate"
+    if tier == "low":
+        return "weak_candidate"
+    return "unresolved"
+
+
+def _hakodate_ocr_placement_basis_for_confidence(confidence: object) -> str:
+    classification = _hakodate_ocr_classification_for_confidence(confidence)
+    if classification == "accepted":
+        return "hakodate_ocr_strict_threshold"
+    if classification == "deterministic_candidate":
+        return "hakodate_ocr_assisted_threshold"
+    if classification == "weak_candidate":
+        return "hakodate_ocr_suggestion_threshold"
+    return "hakodate_ocr_below_threshold"
 
 
 def _build_ocr_numeric_cell_item(
@@ -25069,6 +26426,38 @@ def get_ocr_sheet(
     position_fallback_partial = position_column_mapping_service.payload_uses_partial_position_fallback(
         ocr_payload
     )
+    if use_saved_draft and evidence_run_override is None:
+        hakodate_current_draft, hakodate_draft_error = ensure_hakodate_evidence_draft_current(
+            order_id,
+            edited_by="auto-hakodate-evidence-ocr-sheet",
+        )
+        if hakodate_draft_error and hakodate_draft_error != "already_current":
+            return build_recoverable_ocr_sheet_payload(
+                order_id,
+                hakodate_draft_error,
+                use_saved_draft=use_saved_draft,
+                evidence_run_override=evidence_run_override,
+                allow_current_surface_short_circuit=False,
+            )
+        if _draft_payload_has_hakodate_evidence_projection(hakodate_current_draft):
+            hakodate_payload = dict((hakodate_current_draft or {}).get("draft_sheet_json") or {})
+            hakodate_payload.setdefault("order_id", order_id)
+            hakodate_payload.setdefault("source", "hakodate_ocr_evidence_sheet")
+            hakodate_payload.setdefault("quantity_assignment_strategy", "hakodate")
+            hakodate_payload["draft_id"] = (hakodate_current_draft or {}).get("id")
+            hakodate_payload["base_evidence_run_id"] = (hakodate_current_draft or {}).get("base_evidence_run_id")
+            return (
+                _augment_sheet_review_payload(
+                    order_id=order_id,
+                    payload=hakodate_payload,
+                    lines_updated_at=lines_updated_at,
+                    ocr_payload=ocr_payload,
+                    ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
+                    draft_sheet=hakodate_current_draft if isinstance(hakodate_current_draft, dict) else None,
+                    position_fallback_semantics_ready=position_fallback_semantics_ready,
+                ),
+                None,
+            )
     current_sheet_context = (
         get_current_sheet_context(
             order_id,
@@ -26039,7 +27428,7 @@ def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str,
 def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
-    return _first_hakodate_payload_list(
+    raw_cells = _first_hakodate_payload_list(
         payload,
         [
             ("hakodate_preprocessing", "target_cell_map"),
@@ -26047,16 +27436,17 @@ def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) 
             ("hakodate_target_cell_map",),
         ],
     )
+    cells: list[dict[str, Any]] = []
+    for cell in raw_cells:
+        source = str(cell.get("source") or "").strip()
+        if source == "order_document_grid":
+            continue
+        cells.append(cell)
+    return cells
 
 
 def _hakodate_evidence_source_allowed(record: dict[str, Any]) -> bool:
-    source_scope = str(record.get("source_scope") or "").strip()
-    engine = str(record.get("engine") or "").strip()
-    if source_scope in {"order_document_full_page", "hakodate_cell_crop_batch", "hakodate_cell_crop_ocr"}:
-        return True
-    if engine.startswith("hakodate_") and "payload" not in engine:
-        return True
-    return not source_scope and not engine and not str(record.get("evidence_id") or "").strip()
+    return ocr_evidence_service.hakodate_evidence_record_allowed(record)
 
 
 def _extract_hakodate_ocr_evidence_records_from_payload(
@@ -26158,53 +27548,46 @@ def _build_hakodate_evidence_assignment_from_payload(
     }
 
 
-def _hakodate_sheet_row_identity_lookup(
-    *,
-    fields: list[str],
-    rows: list[list[Any]],
-) -> dict[tuple[str, str, str], int]:
-    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields)}
-    date_idx = field_index.get("date") if "date" in field_index else field_index.get("date_mmdd")
-    daypart_idx = field_index.get("daypart")
-    menu_idx = field_index.get("menu_name") if "menu_name" in field_index else field_index.get("menu")
-    if date_idx is None or daypart_idx is None or menu_idx is None:
-        return {}
-    lookup: dict[tuple[str, str, str], int] = {}
-    for row_index, row in enumerate(rows):
-        if not isinstance(row, list):
-            continue
-
-        def _cell(index: int) -> object:
-            return row[index] if index < len(row) else ""
-
-        key = _hakodate_sheet_identity(
-            _cell(date_idx),
-            _cell(daypart_idx),
-            _cell(menu_idx),
-        )
-        if all(key) and key not in lookup:
-            lookup[key] = row_index
-    return lookup
-
-
 def _hakodate_sheet_identity(date_value: object, daypart: object, menu_name: object) -> tuple[str, str, str]:
     parsed_date = _normalize_entry_date(date_value)
     date_key = f"{parsed_date.month:02d}/{parsed_date.day:02d}" if parsed_date else ""
     return date_key, _normalize_daypart_key(daypart), _normalize_menu_text(str(menu_name or ""))
 
 
-def _hakodate_fields_after_menu(fields: list[str]) -> list[str]:
-    menu_idx = next(
-        (
-            idx
-            for idx, field in enumerate(fields)
-            if str(field or "").strip() in {"menu", "menu_name"}
-        ),
-        None,
-    )
-    if menu_idx is None:
-        return []
-    return [field for field in fields[menu_idx + 1 :] if str(field or "").strip()]
+def _hakodate_projection_field_for_cell(
+    cell: dict[str, Any],
+    *,
+    field_index: dict[str, int],
+) -> str:
+    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
+    truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
+    for candidate in (
+        truth.get("field"),
+        cell.get("field"),
+        cell.get("semantic_field"),
+    ):
+        field = str(candidate or "").strip()
+        if field and field in field_index:
+            return field
+    return ""
+
+
+def _hakodate_projection_row_for_cell(
+    cell: dict[str, Any],
+    *,
+    row_count: int | None = None,
+) -> int | None:
+    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
+    truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
+    try:
+        truth_row_index = int(truth.get("row_index"))
+    except Exception:
+        truth_row_index = -1
+    if truth_row_index >= 0:
+        if row_count is None or truth_row_index < row_count:
+            return truth_row_index
+        return None
+    return None
 
 
 def _apply_hakodate_sheet_output_to_sheet_payload(
@@ -26215,11 +27598,24 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     projected = deepcopy(base_sheet)
     fields = [str(field or "").strip() for field in (projected.get("fields") or [])]
     rows = [list(row) for row in (projected.get("rows") or []) if isinstance(row, list)]
+    column_count = max(len(fields), max((len(row) for row in rows), default=0), 1)
+    cell_confidence_rows = [
+        ["" for _ in range(column_count)]
+        for _ in range(len(rows))
+    ]
+    cell_provenance_rows = [
+        ["" for _ in range(column_count)]
+        for _ in range(len(rows))
+    ]
     field_index = {field: idx for idx, field in enumerate(fields) if field}
-    identity_lookup = _hakodate_sheet_row_identity_lookup(fields=fields, rows=rows)
     sheet_output = assignment.get("sheet_output") if isinstance(assignment.get("sheet_output"), dict) else {}
     cells = sheet_output.get("cells") if isinstance(sheet_output, dict) else {}
     target_cells = assignment.get("target_cells") if isinstance(assignment.get("target_cells"), list) else []
+    target_by_sheet_cell = {
+        str(target.get("sheet_cell") or target.get("target_cell_id") or "").strip(): target
+        for target in target_cells
+        if isinstance(target, dict) and str(target.get("sheet_cell") or target.get("target_cell_id") or "").strip()
+    }
     cleared: list[dict[str, Any]] = []
     if target_cells:
         cleared_slots: set[tuple[int, int]] = set()
@@ -26229,22 +27625,23 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             logical_targets = target.get("logical_targets") if isinstance(target.get("logical_targets"), list) else []
             identity_sources = [target, *[item for item in logical_targets if isinstance(item, dict)]]
             for identity_source in identity_sources:
-                field = str(
-                    target.get("semantic_field")
-                    or target.get("field")
-                    or identity_source.get("semantic_field")
-                    or identity_source.get("field")
-                    or ""
-                ).strip()
+                source_for_field = dict(identity_source)
+                source_for_field.setdefault("semantic_field", target.get("semantic_field") or target.get("field"))
+                source_for_field.setdefault("worksheet_col", target.get("worksheet_col"))
+                field = _hakodate_projection_field_for_cell(
+                    source_for_field,
+                    field_index=field_index,
+                )
                 col_index = field_index.get(field)
                 if col_index is None:
                     continue
-                key = _hakodate_sheet_identity(
-                    identity_source.get("date"),
-                    identity_source.get("daypart"),
-                    identity_source.get("menu_name"),
+                source_for_row = dict(identity_source)
+                source_for_row.setdefault("sheet_cell", target.get("sheet_cell") or target.get("target_cell_id"))
+                source_for_row.setdefault("worksheet_row", target.get("worksheet_row"))
+                row_index = _hakodate_projection_row_for_cell(
+                    source_for_row,
+                    row_count=len(rows),
                 )
-                row_index = identity_lookup.get(key)
                 if row_index is None or (row_index, col_index) in cleared_slots:
                     continue
                 cleared_slots.add((row_index, col_index))
@@ -26260,76 +27657,145 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                             "previous": previous,
                             "reason": "hakodate_target_cell_reset",
                         }
-                    )
+                )
                 break
-    else:
-        for field in _hakodate_fields_after_menu(fields):
-            col_index = field_index.get(field)
-            if col_index is None:
-                continue
-            for row_index, row in enumerate(rows):
-                while len(row) < len(fields):
-                    row.append("")
-                previous = row[col_index]
-                row[col_index] = ""
-                if str(previous or "").strip():
-                    cleared.append(
-                        {
-                            "row_index": row_index,
-                            "field": field,
-                            "previous": previous,
-                            "reason": "hakodate_missing_target_map_reset",
-                        }
-                    )
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
+    ocr_numeric_cell_items: list[dict[str, Any]] = []
+    ocr_numeric_cell_summary = _empty_ocr_numeric_cell_summary()
     for sheet_cell, cell in sorted((cells or {}).items()):
         if not isinstance(cell, dict):
             continue
-        field = str(cell.get("semantic_field") or "").strip()
+        cell = dict(cell)
+        cell.setdefault("sheet_cell", sheet_cell)
+        source_target = target_by_sheet_cell.get(str(sheet_cell or "").strip())
+        if isinstance(source_target, dict):
+            merged_cell = dict(cell)
+            merged_cell.setdefault("sheet_cell", sheet_cell)
+            for key in ("date", "daypart", "menu_name", "semantic_field", "field", "worksheet_row", "worksheet_col"):
+                if not str(merged_cell.get(key) or "").strip() and source_target.get(key) is not None:
+                    merged_cell[key] = source_target.get(key)
+            if isinstance(source_target.get("metadata"), dict) and not isinstance(merged_cell.get("metadata"), dict):
+                merged_cell["metadata"] = dict(source_target.get("metadata") or {})
+            cell = merged_cell
+        value = str(cell.get("value_normalized") or cell.get("value_text") or "").strip()
+        field = _hakodate_projection_field_for_cell(
+            cell,
+            field_index=field_index,
+        )
         col_index = field_index.get(field)
         if col_index is None:
-            skipped.append({**cell, "skip_reason": "field_not_found"})
+            skipped.append({**cell, "skip_reason": "field_not_found", "value": value})
             continue
-        key = _hakodate_sheet_identity(cell.get("date"), cell.get("daypart"), cell.get("menu_name"))
-        row_index = identity_lookup.get(key)
+        row_index = _hakodate_projection_row_for_cell(
+            cell,
+            row_count=len(rows),
+        )
         if row_index is None:
-            skipped.append({**cell, "skip_reason": "row_identity_not_found"})
+            skipped.append({**cell, "skip_reason": "row_identity_not_found", "value": value})
             continue
         while len(rows[row_index]) < len(fields):
             rows[row_index].append("")
+        while len(cell_confidence_rows) <= row_index:
+            cell_confidence_rows.append(["" for _ in range(column_count)])
+            cell_provenance_rows.append(["" for _ in range(column_count)])
+        while len(cell_confidence_rows[row_index]) < column_count:
+            cell_confidence_rows[row_index].append("")
+            cell_provenance_rows[row_index].append("")
         previous = rows[row_index][col_index]
-        value = str(cell.get("value_normalized") or cell.get("value_text") or "").strip()
-        rows[row_index][col_index] = value
-        applied.append(
+        confidence = cell.get("assignment_confidence")
+        classification = _hakodate_ocr_classification_for_confidence(confidence)
+        confidence_tier = _hakodate_ocr_confidence_tier(confidence)
+        placement_basis = _hakodate_ocr_placement_basis_for_confidence(confidence)
+        if value:
+            ocr_numeric_cell_summary["raw_ocr_numeric_count"] += 1
+            summary_key = (
+                "accepted_count"
+                if classification == "accepted"
+                else "deterministic_candidate_count"
+                if classification == "deterministic_candidate"
+                else "weak_candidate_count"
+                if classification == "weak_candidate"
+                else "unresolved_count"
+            )
+            ocr_numeric_cell_summary[summary_key] += 1
+            ocr_numeric_cell_items.append(
+                _build_ocr_numeric_cell_item(
+                    classification=classification,
+                    value=value,
+                    confidence_tier=confidence_tier or "low",
+                    placement_basis=placement_basis,
+                    read_basis="hakodate_cell_ocr_confidence_threshold",
+                    source_row_index=row_index,
+                    source_col_index=col_index,
+                    target_row_index=row_index if classification != "unresolved" else None,
+                    target_col_index=col_index if classification != "unresolved" else None,
+                    date_key=str(cell.get("date") or ""),
+                    daypart_key=str(cell.get("daypart") or ""),
+                    menu_key=str(cell.get("menu_name") or ""),
+                    reason=None if classification != "unresolved" else "below_suggestion_threshold",
+                )
+            )
+        if classification == "accepted":
+            rows[row_index][col_index] = value
+            if col_index < len(cell_confidence_rows[row_index]):
+                cell_confidence_rows[row_index][col_index] = confidence_tier
+                cell_provenance_rows[row_index][col_index] = "hakodate_ocr_strict_threshold"
+            applied.append(
+                {
+                    "sheet_cell": sheet_cell,
+                    "row_index": row_index,
+                    "field": field,
+                    "previous": previous,
+                    "value": value,
+                    "confidence_tier": confidence_tier,
+                    "classification": classification,
+                    "assignment_cell": cell,
+                }
+            )
+            continue
+        deferred.append(
             {
-                "sheet_cell": sheet_cell,
+                **cell,
+                "defer_reason": "hakodate_ocr_confidence_below_strict_threshold",
                 "row_index": row_index,
                 "field": field,
-                "previous": previous,
                 "value": value,
-                "assignment_cell": cell,
+                "confidence_tier": confidence_tier,
+                "classification": classification,
             }
         )
     projected["rows"] = rows
     projected["fields"] = fields
+    projected["cell_confidence_rows"] = cell_confidence_rows
+    projected["cell_provenance_rows"] = cell_provenance_rows
+    projected["ocr_numeric_cell_items"] = ocr_numeric_cell_items
+    projected["ocr_numeric_cell_summary"] = ocr_numeric_cell_summary
     projected["source"] = "hakodate_ocr_evidence_sheet"
     projected["quantity_assignment_strategy"] = "hakodate"
+    projected["hakodate_projection_version"] = HAKODATE_EVIDENCE_PROJECTION_VERSION
     projected["hakodate_assignment_status"] = assignment.get("status")
     projected["hakodate_assignment_mode"] = assignment.get("assignment_mode")
     projected["hakodate_evidence_projection"] = {
+        "version": HAKODATE_EVIDENCE_PROJECTION_VERSION,
         "applied": applied,
         "skipped": skipped,
+        "deferred": deferred,
+        "ignored": ignored,
         "cleared": cleared,
         "metrics": {
             "assignment_count": len(cells or {}),
             "applied_count": len(applied),
             "skipped_count": len(skipped),
+            "deferred_count": len(deferred),
+            "ignored_count": len(ignored),
             "cleared_legacy_cell_count": len(cleared),
         },
     }
     blockers = list(assignment.get("blockers") or [])
-    if skipped:
+    if any(str(item.get("value") or item.get("value_normalized") or item.get("value_text") or "").strip() for item in skipped):
         blockers.append("hakodate_sheet_projection_incomplete")
     projected["blockers"] = sorted(set(str(item) for item in blockers if str(item).strip()))
     projected["warnings"] = sorted(
@@ -26418,6 +27884,7 @@ def build_order_hakodate_assignment(
     *,
     strategy: str | None = None,
     grid_params: Optional[dict] = None,
+    allow_artifact_repair: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
     _ = strategy
     _ = grid_params
@@ -26430,8 +27897,7 @@ def build_order_hakodate_assignment(
     if not facility_id:
         return None, "facility_missing"
 
-    payload = _load_order_ocr_cache(order_id)
-    payload = payload if isinstance(payload, dict) else {}
+    payload = _load_hakodate_assignment_source_payload(order_id)
     facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(
         order_id=order_id,
         facility_id=facility_id,
@@ -26450,6 +27916,31 @@ def build_order_hakodate_assignment(
         template_to_use["hakodate_week_sheet_name"] = order_form_service._format_week_sheet_name(week_start, week_end)  # noqa: SLF001
     elif month_id:
         template_to_use["hakodate_week_sheet_name"] = str(week_code or "").strip()
+
+    requested_strategy = hakodate_assignment_service.normalize_quantity_assignment_strategy(strategy)
+    if allow_artifact_repair and (
+        requested_strategy == "hakodate"
+        or not _payload_has_hakodate_target_cells(payload)
+        or not _payload_has_hakodate_evidence_records(payload, order_id=order_id)
+    ):
+        repaired_payload = _augment_hakodate_ocr_payload_artifacts(
+            order_id=order_id,
+            payload=payload,
+            template=template_to_use,
+            force_hakodate=requested_strategy == "hakodate",
+        )
+        if (
+            _payload_has_hakodate_target_cells(repaired_payload)
+            or _payload_has_hakodate_evidence_records(repaired_payload, order_id=order_id)
+        ):
+            payload = repaired_payload
+            _save_order_ocr_cache(
+                order_id,
+                payload,
+                augment_hakodate_artifacts=False,
+                persist_evidence=False,
+                refresh_workflow=False,
+            )
 
     baseline = _resolve_llm_review_baseline(
         order_id=order_id,
@@ -27070,12 +28561,18 @@ def detect_order_grid(
     )
 
 
+class RemovedOcrProviderError(ValueError):
+    pass
+
+
 def _normalize_reparse_provider(value: str | None) -> str | None:
     if not value:
         return None
     normalized = str(value).strip().lower()
-    if normalized in {"pipeline", "tesseract", "openai", "gemini"}:
+    if normalized in {"pipeline", "openai", "gemini"}:
         return normalized
+    if normalized == "tesseract":
+        raise RemovedOcrProviderError("ocr_provider=tesseract has been removed")
     return None
 
 
@@ -30292,7 +31789,10 @@ def reparse_order(
         facility_config.get("fax_template_override"),
     )
     template_to_use = dict(template)
-    requested_provider = _normalize_reparse_provider(ocr_provider)
+    try:
+        requested_provider = _normalize_reparse_provider(ocr_provider)
+    except RemovedOcrProviderError as exc:
+        return None, str(exc)
     inference_provider = _resolve_explicit_reparse_inference_provider(
         requested_provider=requested_provider,
         llm_assist=bool(llm_assist),

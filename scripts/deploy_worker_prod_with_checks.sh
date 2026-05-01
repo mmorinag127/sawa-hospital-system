@@ -96,13 +96,28 @@ gcloud run deploy "${SERVICE}" \
   --region="${REGION}" \
   --image="${IMAGE}" \
   --quiet
+DEPLOYED_REVISION="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestCreatedRevisionName)')"
+if [[ -z "${DEPLOYED_REVISION}" ]]; then
+  echo "deploy failed: latestCreatedRevisionName is empty"
+  exit 1
+fi
+gcloud run services update-traffic "${SERVICE}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --to-revisions="${DEPLOYED_REVISION}=100" \
+  --quiet
 
 echo "[3/9] verify latest revision/image"
 LATEST_REVISION="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)')"
-LATEST_IMAGE="$(gcloud run revisions describe "${LATEST_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(spec.containers[0].image)')"
+TRAFFIC_REVISION="$(
+  gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format=json \
+    | python3 -c 'import json, sys; data=json.load(sys.stdin); traffic=data.get("status",{}).get("traffic") or []; matches=[item.get("revisionName") for item in traffic if item.get("percent")==100 and item.get("revisionName")]; print(matches[0] if matches else "")'
+)"
+VERIFY_REVISION="${TRAFFIC_REVISION:-${LATEST_REVISION}}"
+LATEST_IMAGE="$(gcloud run revisions describe "${VERIFY_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(spec.containers[0].image)')"
 EXPECTED_REPO="${IMAGE%:*}"
 if [[ "${LATEST_IMAGE}" != "${IMAGE}" && "${LATEST_IMAGE}" != "${EXPECTED_REPO}@sha256:"* ]]; then
-  echo "deploy mismatch: latest image is ${LATEST_IMAGE}"
+  echo "deploy mismatch: traffic image is ${LATEST_IMAGE}"
   exit 1
 fi
 
@@ -265,6 +280,7 @@ ocr_can_apply = bool(ocr.get("can_apply"))
 ocr_apply_blockers = ocr.get("apply_blockers") or []
 apply_gate = workflow.get("apply_gate") or {}
 workflow_can_apply = bool(apply_gate.get("can_apply"))
+workflow_ocr_can_apply = bool(workflow.get("ocr_can_apply_draft", workflow_can_apply))
 workflow_blockers = apply_gate.get("blockers") or []
 
 if not draft_fields or not draft_rows:
@@ -299,7 +315,7 @@ if ocr_has_menu and ocr_has_qty and not (draft_has_menu and draft_has_qty):
         f"draft_fields={draft_fields} ocr_fields={ocr_fields}"
     )
 
-if ocr_can_apply and not workflow_can_apply:
+if ocr_can_apply and not workflow_ocr_can_apply:
     raise SystemExit(
         "surface parity failed: ocr-sheet can_apply=true but workflow-state blocks apply "
         f"workflow_blockers={workflow_blockers}"
@@ -314,7 +330,8 @@ if workflow_can_apply and ocr_apply_blockers:
 print(
     "ok: draft/ocr/workflow parity "
     f"draft_rows={len(draft_rows)} ocr_rows={len(ocr_rows)} "
-    f"workflow_can_apply={workflow_can_apply} ocr_can_apply={ocr_can_apply}"
+    f"workflow_can_apply={workflow_can_apply} workflow_ocr_can_apply={workflow_ocr_can_apply} "
+    f"ocr_can_apply={ocr_can_apply}"
 )
 PY
 
