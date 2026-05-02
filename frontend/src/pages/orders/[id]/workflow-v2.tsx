@@ -281,6 +281,9 @@ export default function OrderWorkflowV2Page() {
           <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
             再読込
           </button>
+          <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
+            確認専用ページ
+          </Link>
           <Link className="ghost-link" href={`/orders/${orderId}`}>
             旧詳細へ戻る
           </Link>

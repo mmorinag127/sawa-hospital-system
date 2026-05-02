@@ -456,6 +456,7 @@ Step4 の計算結果。
 - Step5 は output review artifact がある場合だけ final confirm し、同じ materialization candidate を `OrderLine` に反映してから workflow-v2 confirmed snapshot を保存する。
 - `OrderLine` は Step5 final confirm で初めて更新する。Step2/Step3 の current sheet source や fallback source には使わない。
 - frontend に `/orders/{id}/workflow-v2` を追加した。この画面は `workflow-v2` API だけを呼び、旧 `draft-sheet` / `ocr-sheet` / `ocr-apply` / `confirm` を呼ばない。
+- frontend に `/orders/{id}/inspection-v2` を追加した。この画面は原本 PDF と `/workflow-v2/inspection` を read-only で表示し、step 遷移 API を呼ばない。
 - 既存注文詳細には `新ワークフローで開く` リンクを追加した。旧詳細画面から旧 workflow endpoint を呼ぶと 410 で停止する。
 - 注文一覧の `詳細` は `/orders/{id}/workflow-v2` を指すように変更した。旧画面は `旧詳細` として明示的に分離した。
 
