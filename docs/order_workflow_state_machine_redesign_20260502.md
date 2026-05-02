@@ -440,7 +440,7 @@ Step4 の計算結果。
 
 この first cut の性質:
 
-- 旧 `workflow-state` / `critical-decisions` / `draft-sheet` / `ocr-sheet` / `ocr-pages` / `ocr-apply` / `confirm` 系 endpoint は workflow-v2 移行済みとして HTTP 410 を返す。
+- 旧 `workflow-state` / `critical-decisions` / `draft-sheet` / `ocr-sheet` / `ocr-pages` / `ocr-apply` / `confirm` / `reparse` / `ocr-rerun` / `ocr-recover` / `facility` / `week` / `lines` / `bags/rebuild` 系 endpoint は workflow-v2 移行済みとして HTTP 410 を返す。
 - 旧 endpoint は状態再生成、fallback 表示、重い overlay 生成を実行しない。
 - `OrderLine` fallback は新 workflow-v2 sheet read path では使わない。
 - OCR result selection は `OrderOcrEvidenceRun` を明示的に選択する。

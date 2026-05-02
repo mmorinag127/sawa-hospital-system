@@ -1374,6 +1374,7 @@ def get_bags(order_id: str):
 
 @router.post("/{order_id}/bags/rebuild", dependencies=[Depends(require_role("operator"))])
 def rebuild_bag_summary(order_id: str):
+    _raise_legacy_order_workflow_gone("bags/rebuild")
     try:
         return rebuild_bags(order_id)
     except ValueError:
@@ -2393,6 +2394,7 @@ def apply_patch_candidate(order_id: str, body: dict | None = None):
 
 @router.post("/{order_id}/ocr-review", dependencies=[Depends(require_role("operator"))])
 def review_ocr_sheet(order_id: str, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("ocr-review")
     ocr_prompt = None
     ocr_provider = None
     pdf_variant = None
@@ -2454,6 +2456,7 @@ def delete_orders_by_message_prefix(prefix: str):
 
 @router.post("/{order_id}/facility", status_code=status.HTTP_200_OK, dependencies=[Depends(require_role("operator"))])
 def set_facility(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("facility")
     fac = body.get("facility")
     if not fac:
         raise HTTPException(status_code=400, detail="facility missing")
@@ -2490,6 +2493,7 @@ def get_week_options(order_id: str):
 
 @router.post("/{order_id}/week", status_code=status.HTTP_200_OK, dependencies=[Depends(require_role("operator"))])
 def set_week(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("week")
     week = body.get("week")
     if not week:
         raise HTTPException(status_code=400, detail="week missing")
@@ -2521,6 +2525,7 @@ def set_week(order_id: str, body: dict):
 
 @router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("operator"))])
 def save_facility_template_columns(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("facility-template-columns")
     columns = body.get("columns") if isinstance(body, dict) else None
     result, error = order_service.save_order_facility_template_columns(order_id, columns)
     if error == "order_not_found":
@@ -2546,6 +2551,7 @@ def save_facility_template_columns(order_id: str, body: dict):
 
 @router.put("/{order_id}/lines", dependencies=[Depends(require_role("operator"))])
 def update_lines(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("lines")
     if "lines" not in body:
         raise HTTPException(status_code=400, detail="lines missing")
     result = order_service.update_lines(
@@ -2690,6 +2696,7 @@ def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
     dependencies=[Depends(require_role("operator"))],
 )
 async def reparse_order(order_id: str, background_tasks: BackgroundTasks, request: Request):
+    _raise_legacy_order_workflow_gone("reparse")
     body = await _json_body_dict(request)
     ocr_prompt = None
     prompt_preset = None
@@ -2772,6 +2779,7 @@ async def reparse_order(order_id: str, background_tasks: BackgroundTasks, reques
     dependencies=[Depends(require_role("operator"))],
 )
 async def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, request: Request):
+    _raise_legacy_order_workflow_gone("ocr-rerun")
     body = await _json_body_dict(request)
     stale_action = "retry"
     force = False
@@ -2807,6 +2815,7 @@ async def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, r
     dependencies=[Depends(require_role("operator"))],
 )
 def recover_ocr(order_id: str, background_tasks: BackgroundTasks):
+    _raise_legacy_order_workflow_gone("ocr-recover")
     result = _enqueue_order_evidence_rerun(
         order_id,
         background_tasks,
