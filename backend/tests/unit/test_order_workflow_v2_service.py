@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from src.db import Base, engine, session_scope
 from src.models.order import Order
+from src.models.order import OrderLine
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
@@ -52,6 +53,60 @@ def _create_order_with_evidence() -> tuple[str, str, str]:
                 )
             )
     return order_id, evidence_id_1, evidence_id_2
+
+
+def _install_fake_materialization(monkeypatch) -> None:
+    def fake_candidate(_order_id, *, draft_record, facility_id, existing_week_code, received_at):
+        _ = facility_id, existing_week_code, received_at
+        sheet = draft_record.get("draft_sheet_json") if isinstance(draft_record, dict) else {}
+        if isinstance(sheet, dict) and sheet.get("test_materialization_error"):
+            return {"error": "test_materialization_error", "lines": [], "line_count": 0}
+        lines = []
+        rows = sheet.get("rows") if isinstance(sheet, dict) else []
+        for row_idx, row in enumerate(rows if isinstance(rows, list) else []):
+            if isinstance(row, dict):
+                menu_name = str(row.get("menu_name") or row.get("menu") or "").strip()
+                for field in ["regular", "soft", "qty.regular"]:
+                    value = row.get(field)
+                    if value in {"", None}:
+                        continue
+                    lines.append(
+                        {
+                            "date": "2026-04-26",
+                            "daypart": "lunch",
+                            "menu_name": menu_name,
+                            "diet_type": field,
+                            "area_id": "main",
+                            "quantity_original": float(value),
+                            "quantity_corrected": None,
+                            "source_row_index": row_idx,
+                        }
+                    )
+        return {"error": None, "lines": lines, "line_count": len(lines), "derived_week_code": "2026-04@2026-04-26~2026-04-30"}
+
+    def fake_materialize(session, order, candidate):
+        for idx, line in enumerate(candidate.get("lines") or []):
+            session.add(
+                OrderLine(
+                    id=_id("OL"),
+                    order_id=order.id,
+                    line_id=f"line-{idx + 1}",
+                    date=datetime.fromisoformat(str(line["date"])).date(),
+                    daypart=line.get("daypart"),
+                    menu_name=line.get("menu_name"),
+                    diet_type=line.get("diet_type"),
+                    area_id=line.get("area_id"),
+                    quantity_original=line.get("quantity_original"),
+                    quantity_corrected=line.get("quantity_corrected"),
+                )
+            )
+        order.lines_updated_at = datetime.utcnow()
+
+    fake_order_service = SimpleNamespace(
+        _build_materialization_candidate_from_draft_record=fake_candidate,
+        _materialize_confirmed_lines_from_candidate=fake_materialize,
+    )
+    monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
 
 
 def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
@@ -226,7 +281,8 @@ def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1
         assert session.get(OrderSheetDraft, saved_sheet_id) is None
 
 
-def test_changing_selected_ocr_deletes_confirmed_snapshot_too() -> None:
+def test_changing_selected_ocr_deletes_confirmed_snapshot_too(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -328,7 +384,8 @@ def test_inspection_is_read_only_projection_of_current_lineage() -> None:
     assert any(item["ocr_result_id"] == evidence_id_1 and item["selected"] for item in inspection["ocr_results"])
 
 
-def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source() -> None:
+def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -362,9 +419,36 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source() -> None:
     assert bagging["workflow"]["state"] == "bagging_ready"
     assert bagging["bagging_result"]["source_saved_sheet_id"] == saved_sheet_id
     assert bagging["bagging_result"]["summary"]["total_quantity"] == 75.0
+    assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
 
 
-def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot() -> None:
+def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"test_materialization_error": True, "rows": [{"menu_name": "A", "regular": "1"}]},
+        edited_by="test",
+    )
+    assert error is None
+    assert saved is not None
+
+    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+
+    assert bagging is None
+    assert error == "test_materialization_error"
+
+
+def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -404,3 +488,4 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot() ->
         assert snapshot is not None
         assert snapshot.snapshot_json["source"] == "workflow_v2"
         assert snapshot.snapshot_json["bagging_result"]["bagging_result_id"] == bagging_result_id
+        assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 1

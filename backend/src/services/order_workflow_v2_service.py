@@ -443,23 +443,65 @@ def _quantity_values_from_row(row: dict[str, Any]) -> list[float]:
     return values
 
 
-def _build_bagging_result_payload(*, order_id: str, saved_sheet: OrderSheetDraft) -> dict[str, Any]:
-    sheet = saved_sheet.draft_sheet_json if isinstance(saved_sheet.draft_sheet_json, dict) else {}
-    rows = _sheet_rows(sheet)
+def _draft_record_from_saved_sheet(saved_sheet: OrderSheetDraft) -> dict[str, Any]:
+    return {
+        "id": saved_sheet.id,
+        "order_id": saved_sheet.order_id,
+        "base_evidence_run_id": saved_sheet.base_evidence_run_id,
+        "base_template_resolution_id": saved_sheet.base_template_resolution_id,
+        "base_menu_snapshot_id": saved_sheet.base_menu_snapshot_id,
+        "draft_sheet_json": saved_sheet.draft_sheet_json if isinstance(saved_sheet.draft_sheet_json, dict) else {},
+        "draft_state": str(saved_sheet.draft_state or "saved").strip() or "saved",
+        "blockers_json": list(saved_sheet.blockers_json or []),
+        "warnings_json": list(saved_sheet.warnings_json or []),
+    }
+
+
+def _build_materialization_candidate_for_saved_sheet(
+    *,
+    order: Order,
+    saved_sheet: OrderSheetDraft,
+) -> dict[str, Any]:
+    order_service_module = _get_order_service_module()
+    return order_service_module._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+        order.id,
+        draft_record=_draft_record_from_saved_sheet(saved_sheet),
+        facility_id=order.facility_code,
+        existing_week_code=order.week_code,
+        received_at=order.received_at,
+    )
+
+
+def _build_bagging_result_payload(
+    *,
+    order_id: str,
+    saved_sheet: OrderSheetDraft,
+    materialization_candidate: dict[str, Any],
+) -> dict[str, Any]:
+    lines = [
+        line
+        for line in (materialization_candidate.get("lines") or [])
+        if isinstance(line, dict)
+    ]
     quantity_cells = []
     total_quantity = 0.0
-    for row in rows:
-        values = _quantity_values_from_row(row)
-        if not values:
+    for line_idx, line in enumerate(lines):
+        numeric = _numeric_value(line.get("quantity_corrected"))
+        if numeric is None:
+            numeric = _numeric_value(line.get("quantity_original"))
+        if numeric is None:
             continue
-        row_total = sum(values)
-        total_quantity += row_total
+        total_quantity += numeric
         quantity_cells.append(
             {
-                "row_index": row.get("row_index"),
-                "menu_name": row.get("menu_name") or row.get("menu") or "",
-                "quantity_values": values,
-                "row_total": row_total,
+                "line_index": line_idx,
+                "source_row_index": line.get("source_row_index"),
+                "date": line.get("date"),
+                "daypart": line.get("daypart"),
+                "menu_name": line.get("menu_name") or "",
+                "diet_type": line.get("diet_type"),
+                "area_id": line.get("area_id"),
+                "quantity": numeric,
             }
         )
     return {
@@ -468,9 +510,10 @@ def _build_bagging_result_payload(*, order_id: str, saved_sheet: OrderSheetDraft
         "source_saved_sheet_id": saved_sheet.id,
         "source_ocr_result_id": saved_sheet.base_evidence_run_id,
         "status": "ready",
+        "materialization_candidate": materialization_candidate,
         "summary": {
-            "row_count": len(rows),
-            "quantity_row_count": len(quantity_cells),
+            "line_count": len(lines),
+            "quantity_line_count": len(quantity_cells),
             "total_quantity": total_quantity,
         },
         "quantity_cells": quantity_cells,
@@ -563,7 +606,17 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        bagging_result = _build_bagging_result_payload(order_id=order.id, saved_sheet=draft)
+        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        if not isinstance(materialization_candidate, dict):
+            return None, "saved_sheet_materialization_failed"
+        materialization_error = _normalize_id(materialization_candidate.get("error"))
+        if materialization_error:
+            return None, materialization_error
+        bagging_result = _build_bagging_result_payload(
+            order_id=order.id,
+            saved_sheet=draft,
+            materialization_candidate=materialization_candidate,
+        )
         meta = _workflow_meta(workflow)
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
         meta["bagging_result"] = bagging_result
@@ -653,6 +706,26 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
+        materialization_candidate = (
+            bagging_result.get("materialization_candidate")
+            if isinstance(bagging_result.get("materialization_candidate"), dict)
+            else _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        )
+        if not isinstance(materialization_candidate, dict):
+            return None, "saved_sheet_materialization_failed"
+        materialization_error = _normalize_id(materialization_candidate.get("error"))
+        if materialization_error:
+            return None, materialization_error
+        order_service_module = _get_order_service_module()
+        try:
+            order_service_module._materialize_confirmed_lines_from_candidate(  # noqa: SLF001
+                session,
+                order,
+                materialization_candidate,
+            )
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            return None, f"saved_sheet_materialization_failed:{exc}"
         snapshot_json = {
             "source": "workflow_v2",
             "order_id": order.id,
@@ -661,6 +734,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             "saved_sheet": draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
             "bagging_result": bagging_result,
             "output_bundle": output_bundle,
+            "materialization_candidate": materialization_candidate,
         }
         digest = hashlib.sha256(
             json.dumps(snapshot_json, ensure_ascii=False, sort_keys=True).encode("utf-8")

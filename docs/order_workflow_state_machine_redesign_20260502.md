@@ -452,8 +452,9 @@ Step4 の計算結果。
 - sheet は selected OCR がないと保存できない。
 - inspection は workflow / OCR results / saved sheet / artifact lineage の read-only projection を返す。
 - Step4 は saved sheet だけを入力に workflow-v2 bagging artifact を作る。
-- Step5 は output review artifact がある場合だけ final confirm し、workflow-v2 confirmed snapshot を保存する。
-- 既存 `OrderLine` への materialize はまだ行わない。旧袋分け実装へ接続する前に、SavedSheet -> bagging input の変換境界を固定する必要がある。
+- Step4 は saved sheet から materialization candidate を作り、materialize 不能なら blocker として停止する。
+- Step5 は output review artifact がある場合だけ final confirm し、同じ materialization candidate を `OrderLine` に反映してから workflow-v2 confirmed snapshot を保存する。
+- `OrderLine` は Step5 final confirm で初めて更新する。Step2/Step3 の current sheet source や fallback source には使わない。
 - frontend に `/orders/{id}/workflow-v2` を追加した。この画面は `workflow-v2` API だけを呼び、旧 `draft-sheet` / `ocr-sheet` / `ocr-apply` / `confirm` を呼ばない。
 - 既存注文詳細には `新ワークフローで開く` リンクを追加した。旧詳細画面から旧 workflow endpoint を呼ぶと 410 で停止する。
 - 注文一覧の `詳細` は `/orders/{id}/workflow-v2` を指すように変更した。旧画面は `旧詳細` として明示的に分離した。
@@ -461,7 +462,7 @@ Step4 の計算結果。
 検証:
 
 - `uv run --extra dev pytest tests/unit/test_order_workflow_v2_service.py -q`
-- 結果: 11 passed。
+- 結果: 12 passed。
 - `python -m py_compile backend/src/services/order_workflow_v2_service.py backend/src/api/orders.py`
 - 結果: passed。
 - `npx tsc --noEmit --pretty false`
