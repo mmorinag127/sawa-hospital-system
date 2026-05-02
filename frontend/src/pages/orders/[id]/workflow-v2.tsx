@@ -71,6 +71,17 @@ const defaultSheet = {
 
 const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
 
+const formatApiError = (err: any, fallback: string) => {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+    return JSON.stringify(detail);
+  }
+  return String(err?.message || fallback);
+};
+
 const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -162,7 +173,7 @@ export default function OrderWorkflowV2Page() {
   useEffect(() => {
     if (!router.isReady || !orderId) return;
     refreshAll().catch((err) => {
-      setError(String(err?.response?.data?.detail || err?.message || "workflow-v2 の取得に失敗しました"));
+      setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
 
@@ -175,7 +186,7 @@ export default function OrderWorkflowV2Page() {
       await refreshAll();
       setMessage(`${label} が完了しました`);
     } catch (err: any) {
-      setError(String(err?.response?.data?.detail || err?.message || `${label} に失敗しました`));
+      setError(formatApiError(err, `${label} に失敗しました`));
     } finally {
       setBusy("");
     }
