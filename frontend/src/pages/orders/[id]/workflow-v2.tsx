@@ -44,6 +44,14 @@ type InspectionPayload = {
   output_bundle?: Record<string, unknown> | null;
 };
 
+type SheetPayload = {
+  fields: string[];
+  header: string[];
+  rows: string[][];
+  row_ids?: string[];
+  [key: string]: unknown;
+};
+
 const emptyContext = {
   facility_id: "",
   week_start: "",
@@ -62,6 +70,36 @@ const defaultSheet = {
 };
 
 const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
+
+const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const rows = Array.isArray(raw.rows)
+    ? raw.rows
+        .filter((row): row is unknown[] => Array.isArray(row))
+        .map((row) => row.map((cell) => String(cell ?? "")))
+    : [];
+  const width = Math.max(
+    Array.isArray(raw.fields) ? raw.fields.length : 0,
+    Array.isArray(raw.header) ? raw.header.length : 0,
+    ...rows.map((row) => row.length),
+    1,
+  );
+  const fields = Array.from({ length: width }, (_, idx) => {
+    const valueAtIndex = Array.isArray(raw.fields) ? raw.fields[idx] : undefined;
+    return String(valueAtIndex ?? `col${idx + 1}`);
+  });
+  const header = Array.from({ length: width }, (_, idx) => {
+    const valueAtIndex = Array.isArray(raw.header) ? raw.header[idx] : undefined;
+    return String(valueAtIndex ?? fields[idx] ?? `col${idx + 1}`);
+  });
+  return {
+    ...raw,
+    fields,
+    header,
+    rows: rows.map((row) => Array.from({ length: width }, (_, idx) => String(row[idx] ?? ""))),
+  };
+};
 
 const stateLabel = (state?: string | null) => {
   const normalized = String(state || "").trim();
@@ -87,6 +125,7 @@ export default function OrderWorkflowV2Page() {
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
   const [contextForm, setContextForm] = useState(emptyContext);
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
+  const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
   const [busy, setBusy] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -108,7 +147,9 @@ export default function OrderWorkflowV2Page() {
     setInspection(inspectionRes.data);
     const savedSheet = inspectionRes.data.saved_sheet?.sheet;
     if (savedSheet) {
-      setSheetJson(formatJson(savedSheet));
+      const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
+      setSheetPayload(normalizedSavedSheet);
+      setSheetJson(formatJson(normalizedSavedSheet || savedSheet));
     }
     setContextForm({
       facility_id: workflowRes.data.facility_id || "",
@@ -162,9 +203,35 @@ export default function OrderWorkflowV2Page() {
       await apiClient.delete(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}`);
     });
 
+  const generateSheetFromSelectedOcr = () =>
+    runAction("Step3 sheet source", async () => {
+      const response = await apiClient.get<{ sheet?: Record<string, unknown> }>(`/orders/${orderId}/workflow-v2/sheet-source`);
+      const normalized = normalizeSheetPayload(response.data.sheet);
+      if (!normalized) {
+        throw new Error("選択OCRからシートを生成できませんでした");
+      }
+      setSheetPayload(normalized);
+      setSheetJson(formatJson(normalized));
+    });
+
+  const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row, idx) => (
+        idx === rowIndex ? row.map((cell, cellIdx) => (cellIdx === colIndex ? value : cell)) : row
+      ));
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+  };
+
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
-      const parsed = JSON.parse(sheetJson);
+      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      if (!parsed) {
+        throw new Error("保存できるシートがありません");
+      }
       await apiClient.put(`/orders/${orderId}/workflow-v2/sheet`, {
         sheet: parsed,
         edited_by: "operator",
@@ -306,10 +373,66 @@ export default function OrderWorkflowV2Page() {
         <section className="panel">
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
-          <textarea value={sheetJson} onChange={(event) => setSheetJson(event.target.value)} spellCheck={false} />
-          <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}>
-            シートを保存
-          </button>
+          <div className="row-actions">
+            <button
+              className="btn"
+              type="button"
+              onClick={generateSheetFromSelectedOcr}
+              disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}
+            >
+              選択OCRからシート生成
+            </button>
+            <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
+              シートを保存
+            </button>
+          </div>
+          {sheetPayload ? (
+            <div className="sheet-table-wrap">
+              <table className="sheet-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    {sheetPayload.header.map((label, colIdx) => (
+                      <th key={`${sheetPayload.fields[colIdx] || "col"}-${colIdx}`}>{label || sheetPayload.fields[colIdx]}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sheetPayload.rows.map((row, rowIdx) => (
+                    <tr key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
+                      <th>{rowIdx + 1}</th>
+                      {sheetPayload.fields.map((field, colIdx) => (
+                        <td key={`${field}-${colIdx}`}>
+                          <input
+                            value={row[colIdx] || ""}
+                            onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="subtle">Step2で正解OCRを選択してから、選択OCRだけを使ってシートを生成してください。</p>
+          )}
+          <details className="json-details">
+            <summary>保存予定JSONを確認</summary>
+            <textarea
+              value={sheetJson}
+              onChange={(event) => {
+                const nextJson = event.target.value;
+                setSheetJson(nextJson);
+                try {
+                  setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));
+                } catch {
+                  setSheetPayload(null);
+                }
+              }}
+              spellCheck={false}
+            />
+          </details>
         </section>
 
         <section className="panel">
@@ -434,6 +557,60 @@ export default function OrderWorkflowV2Page() {
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           min-height: 260px;
           width: 100%;
+        }
+        .sheet-table-wrap {
+          border: 1px solid #d7d1c0;
+          border-radius: 14px;
+          margin-top: 16px;
+          max-height: 520px;
+          overflow: auto;
+        }
+        .sheet-table {
+          border-collapse: separate;
+          border-spacing: 0;
+          min-width: 100%;
+          width: max-content;
+        }
+        .sheet-table th,
+        .sheet-table td {
+          border-bottom: 1px solid #e5dece;
+          border-right: 1px solid #e5dece;
+          padding: 0;
+        }
+        .sheet-table th {
+          background: #f4eddd;
+          color: #405045;
+          font-size: 12px;
+          min-width: 72px;
+          padding: 8px 10px;
+          position: sticky;
+          top: 0;
+          z-index: 1;
+        }
+        .sheet-table th:first-child {
+          left: 0;
+          min-width: 42px;
+          position: sticky;
+          z-index: 2;
+        }
+        .sheet-table tbody th {
+          top: auto;
+        }
+        .sheet-table td input {
+          background: #fffdf7;
+          border: 0;
+          border-radius: 0;
+          min-width: 92px;
+          padding: 8px 10px;
+        }
+        .json-details {
+          margin-top: 16px;
+        }
+        .json-details summary {
+          color: #687269;
+          cursor: pointer;
+          font-weight: 800;
+          margin-bottom: 10px;
         }
         .btn,
         .ghost-link {

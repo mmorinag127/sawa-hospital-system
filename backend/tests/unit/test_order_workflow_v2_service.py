@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 from src.db import Base, engine, session_scope
@@ -110,6 +111,59 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
     assert queued["saved_sheet_id"] is None
     with session_scope() as session:
         assert session.get(OrderSheetDraft, saved_sheet_id) is None
+
+
+def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
+    order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2)
+    with session_scope() as session:
+        evidence_1 = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        evidence_2 = session.get(OrderOcrEvidenceRun, evidence_id_2)
+        evidence_1.payload_json = {"selected_marker": "wrong"}
+        evidence_2.payload_json = {"selected_marker": "expected"}
+
+    captured: dict[str, object] = {}
+
+    def fake_assignment(**kwargs):
+        captured["payload"] = kwargs.get("payload")
+        return {"metrics": {}, "blockers": [], "warnings": [], "sheet_output": {"cells": {}}}
+
+    def fake_base_sheet(_order_id):
+        return {
+            "fields": ["date", "menu_name", "qty.regular"],
+            "header": ["日付", "メニュー", "常食"],
+            "rows": [["04/26", "大豆のトマト煮", ""]],
+            "row_ids": ["row-1"],
+        }, None
+
+    def fake_apply(*, base_sheet, assignment):
+        _ = assignment
+        projected = dict(base_sheet)
+        projected["rows"] = [["04/26", "大豆のトマト煮", "70"]]
+        projected["blockers"] = []
+        projected["warnings"] = []
+        return projected
+
+    fake_order_service = SimpleNamespace(
+        _build_hakodate_evidence_assignment_from_payload=fake_assignment,
+        _build_hakodate_weekly_menu_base_sheet=fake_base_sheet,
+        _apply_hakodate_sheet_output_to_sheet_payload=fake_apply,
+    )
+    monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
+
+    source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+
+    assert error is None
+    assert captured["payload"] == {"selected_marker": "expected"}
+    assert source["selected_ocr_result_id"] == evidence_id_2
+    assert source["sheet"]["rows"][0][2] == "70"
 
 
 def test_selecting_ocr_result_clears_downstream_sheet() -> None:

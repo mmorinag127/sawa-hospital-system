@@ -1652,6 +1652,11 @@ def get_order_workflow_v2_sheet(order_id: str):
     return _workflow_v2_or_404(order_workflow_v2_service.get_saved_sheet(order_id))
 
 
+@router.get("/{order_id}/workflow-v2/sheet-source", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_sheet_source(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.build_sheet_from_selected_ocr(order_id))
+
+
 @router.put("/{order_id}/workflow-v2/sheet", dependencies=[Depends(require_role("operator"))])
 def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
     return _workflow_v2_or_404(

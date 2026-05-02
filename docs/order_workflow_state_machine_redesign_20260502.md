@@ -428,6 +428,7 @@ Step4 の計算結果。
 - `GET /orders/{id}/workflow-v2/ocr-results`
 - `POST /orders/{id}/workflow-v2/ocr-results/{ocr_result_id}/select`
 - `DELETE /orders/{id}/workflow-v2/ocr-results/{ocr_result_id}`
+- `GET /orders/{id}/workflow-v2/sheet-source`
 - `GET /orders/{id}/workflow-v2/sheet`
 - `PUT /orders/{id}/workflow-v2/sheet`
 - `GET /orders/{id}/workflow-v2/inspection`
@@ -446,6 +447,8 @@ Step4 の計算結果。
 - selected OCR を変更または削除すると、派生 sheet draft と confirmed snapshot は削除される。
 - Step1 の OCR 実行は `/workflow-v2/ocr-runs` から行い、旧 `workflow-state` refresh を返さず、workflow-v2 状態だけを `ocr_running` に更新する。
 - Context 確定時は `Order.facility_code` と `Order.week_code` も更新し、OCR pipeline が workflow-v2 で確定した施設・週次を見るようにする。
+- Step3 の sheet source は、選択済み `OrderOcrEvidenceRun.payload_json` だけをHakodate投影に使う。latest evidence や cache は読まない。
+- frontend の Step3 は JSON textarea ではなく、生成された `fields/header/rows` を編集表として表示し、その内容を保存する。
 - sheet は selected OCR がないと保存できない。
 - inspection は workflow / OCR results / saved sheet / artifact lineage の read-only projection を返す。
 - Step4 は saved sheet だけを入力に workflow-v2 bagging artifact を作る。
@@ -458,7 +461,7 @@ Step4 の計算結果。
 検証:
 
 - `uv run --extra dev pytest tests/unit/test_order_workflow_v2_service.py -q`
-- 結果: 10 passed。
+- 結果: 11 passed。
 - `python -m py_compile backend/src/services/order_workflow_v2_service.py backend/src/api/orders.py`
 - 結果: passed。
 - `npx tsc --noEmit --pretty false`

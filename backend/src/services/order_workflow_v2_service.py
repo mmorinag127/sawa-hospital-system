@@ -59,6 +59,12 @@ def _serialize_datetime(value: object) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
+def _get_order_service_module() -> Any:
+    from src.services import order_service  # noqa: PLC0415
+
+    return order_service
+
+
 def _serialize_workflow(row: OrderWorkflowState) -> dict[str, Any]:
     meta = _workflow_meta(row)
     return {
@@ -490,6 +496,60 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
         return _serialize_saved_sheet(draft), None
+
+
+def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.evidence_run_id:
+            return None, "selected_ocr_required"
+        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        if evidence is None or evidence.order_id != order.id:
+            return None, "selected_ocr_missing"
+        payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else None
+        meta = _workflow_meta(workflow)
+        facility_id = _normalize_id(meta.get("facility_id") or order.facility_code)
+        template_id = _normalize_id(meta.get("template_id"))
+        selected_ocr_result_id = evidence.id
+    if not isinstance(payload, dict):
+        return None, "selected_ocr_payload_missing"
+    if not facility_id:
+        return None, "facility_id_required"
+
+    order_service_module = _get_order_service_module()
+    assignment = order_service_module._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+        order_id=order_id,
+        facility_id=facility_id,
+        template_id=template_id or None,
+        payload=payload,
+    )
+    if not isinstance(assignment, dict):
+        return None, "assignment_unavailable"
+    base_sheet, sheet_error = order_service_module._build_hakodate_weekly_menu_base_sheet(order_id)  # noqa: SLF001
+    if sheet_error:
+        return None, sheet_error
+    if not isinstance(base_sheet, dict):
+        return None, "sheet_unavailable"
+    projected = order_service_module._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+        base_sheet=base_sheet,
+        assignment=assignment,
+    )
+    projected["source"] = "workflow_v2_selected_ocr_projection"
+    projected["base_evidence_run_id"] = selected_ocr_result_id
+    projected["selected_ocr_result_id"] = selected_ocr_result_id
+    projected["template_id"] = template_id or projected.get("template_id")
+    return {
+        "order_id": order_id,
+        "selected_ocr_result_id": selected_ocr_result_id,
+        "sheet": projected,
+        "assignment_summary": assignment.get("metrics") if isinstance(assignment.get("metrics"), dict) else {},
+        "blockers": list(projected.get("blockers") or []),
+        "warnings": list(projected.get("warnings") or []),
+        "source": "workflow_v2_selected_ocr_projection",
+    }, None
 
 
 def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
