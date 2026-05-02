@@ -117,9 +117,11 @@ export default function OrderInspectionV2Page() {
           <p className="subtle">{inspection?.workflow?.headline || (loading ? "読み込み中です。" : "workflow-v2 状態は未取得です。")}</p>
         </div>
         <div className="row-actions">
-          <Link className="btn" href={`/orders/${orderId}/workflow-v2`}>
-            処理画面へ戻る
-          </Link>
+          {orderId ? (
+            <Link className="btn" href={`/orders/${orderId}/workflow-v2`}>
+              処理画面へ戻る
+            </Link>
+          ) : null}
         </div>
       </section>
 
