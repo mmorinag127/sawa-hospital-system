@@ -92,7 +92,7 @@ class WorkflowV2ContextConfirmBody(BaseModel):
     facility_id: str
     week_start: str
     week_end: str
-    template_id: str
+    template_id: str | None = None
 
 
 class WorkflowV2OcrRunBody(BaseModel):

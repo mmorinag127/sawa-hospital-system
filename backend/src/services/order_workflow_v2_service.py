@@ -13,6 +13,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.services import config_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -134,12 +135,11 @@ def confirm_context(
     facility_id: str,
     week_start: str,
     week_end: str,
-    template_id: str,
+    template_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_facility_id = _normalize_id(facility_id)
     normalized_week_start = _normalize_id(week_start)
     normalized_week_end = _normalize_id(week_end)
-    normalized_template_id = _normalize_id(template_id)
     if not normalized_facility_id:
         return None, "facility_id_required"
     if not normalized_week_start or not normalized_week_end:
@@ -147,8 +147,12 @@ def confirm_context(
     normalized_week_code = _format_week_code_from_range(normalized_week_start, normalized_week_end)
     if not normalized_week_code:
         return None, "week_range_invalid"
+    facility_config = config_service.get_facility_config(normalized_facility_id)
+    if not facility_config:
+        return None, "facility_not_found"
+    normalized_template_id = _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id"))
     if not normalized_template_id:
-        return None, "template_id_required"
+        return None, "facility_template_unresolved"
 
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)

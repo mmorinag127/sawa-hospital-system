@@ -4,6 +4,13 @@ import Link from "next/link";
 
 import { apiClient } from "../../../services/apiClient";
 import TopNav from "../../../components/TopNav";
+import {
+  deriveWeekValueFromCalendarRange,
+  formatWeekLabel,
+  isConcreteWeekValue,
+  normalizeConcreteWeekValue,
+  normalizeWeekValue,
+} from "../../../features/orders/orderDetailUtils";
 
 type WorkflowV2 = {
   order_id: string;
@@ -52,11 +59,23 @@ type SheetPayload = {
   [key: string]: unknown;
 };
 
+type FacilityOption = {
+  id: string;
+  name: string;
+};
+
+type WeekOption = {
+  week_id: string;
+  label: string;
+  date_from?: string | null;
+  date_to?: string | null;
+  selected?: boolean;
+};
+
 const emptyContext = {
   facility_id: "",
   week_start: "",
   week_end: "",
-  template_id: "",
 };
 
 const defaultSheet = {
@@ -146,6 +165,21 @@ const stepLabels = [
   { step: 5, label: "出力確認" },
 ];
 
+const formatFacilityLabel = (facility: FacilityOption) => {
+  if (!facility.name) return facility.id;
+  return `${facility.name} (${facility.id})`;
+};
+
+const weekValueFromRange = (weekStart?: string | null, weekEnd?: string | null) =>
+  normalizeConcreteWeekValue(deriveWeekValueFromCalendarRange(weekStart || "", weekEnd || ""));
+
+const weekRangeFromValue = (value?: string | null) => {
+  const normalized = normalizeConcreteWeekValue(value);
+  const match = normalized.match(/^\d{4}-\d{2}@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+  if (!match) return { week_start: "", week_end: "" };
+  return { week_start: match[1], week_end: match[2] };
+};
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -153,6 +187,15 @@ export default function OrderWorkflowV2Page() {
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
   const [contextForm, setContextForm] = useState(emptyContext);
+  const [weekDraft, setWeekDraft] = useState<string>("");
+  const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
+  const [weekOptionsLoading, setWeekOptionsLoading] = useState<boolean>(false);
+  const [weekOptionsError, setWeekOptionsError] = useState<string>("");
+  const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
+  const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
+  const [facilityOptionsError, setFacilityOptionsError] = useState("");
+  const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
+  const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
   const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
@@ -166,6 +209,23 @@ export default function OrderWorkflowV2Page() {
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
     [ocrResults, workflow?.selected_ocr_result_id],
   );
+
+  const selectedWeekValue = useMemo(
+    () => normalizeConcreteWeekValue(weekDraft) || weekValueFromRange(contextForm.week_start, contextForm.week_end),
+    [contextForm.week_end, contextForm.week_start, weekDraft],
+  );
+
+  const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+
+  const applyWeekValue = (value: string) => {
+    const range = weekRangeFromValue(value);
+    setWeekDraft(value);
+    setContextForm((current) => ({
+      ...current,
+      week_start: range.week_start,
+      week_end: range.week_end,
+    }));
+  };
 
   const refreshAll = async () => {
     if (!orderId) return;
@@ -187,8 +247,9 @@ export default function OrderWorkflowV2Page() {
       facility_id: workflowRes.data.facility_id || "",
       week_start: workflowRes.data.week_start || "",
       week_end: workflowRes.data.week_end || "",
-      template_id: workflowRes.data.template_id || "",
     });
+    const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
+    setWeekDraft(workflowWeekValue);
   };
 
   useEffect(() => {
@@ -197,6 +258,83 @@ export default function OrderWorkflowV2Page() {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
+
+  useEffect(() => {
+    let active = true;
+    const loadFacilities = async () => {
+      setFacilityOptionsLoading(true);
+      setFacilityOptionsError("");
+      try {
+        const res = await apiClient.get("/facilities");
+        if (!active) return;
+        const raw = Array.isArray(res.data?.facilities) ? res.data.facilities : [];
+        const normalized = raw
+          .map((item: any) => ({
+            id: String(item?.id || ""),
+            name: String(item?.name || ""),
+          }))
+          .filter((item: FacilityOption) => item.id);
+        normalized.sort((a: FacilityOption, b: FacilityOption) => (
+          a.name.localeCompare(b.name, "ja") || a.id.localeCompare(b.id, "ja")
+        ));
+        setFacilityOptions(normalized);
+      } catch {
+        if (!active) return;
+        setFacilityOptions([]);
+        setFacilityOptionsError("施設一覧の取得に失敗しました。");
+      } finally {
+        if (active) setFacilityOptionsLoading(false);
+      }
+    };
+    loadFacilities();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId) return;
+    let active = true;
+    const loadWeekOptions = async () => {
+      setWeekOptionsLoading(true);
+      setWeekOptionsError("");
+      try {
+        const res = await apiClient.get(`/orders/${orderId}/week-options`);
+        if (!active) return;
+        const options = Array.isArray(res.data?.options)
+          ? res.data.options
+              .map((item: any) => ({
+                week_id: normalizeWeekValue(item?.week_id),
+                label: String(item?.label || item?.week_id || ""),
+                date_from: typeof item?.date_from === "string" ? item.date_from : null,
+                date_to: typeof item?.date_to === "string" ? item.date_to : null,
+                selected: Boolean(item?.selected),
+              }))
+              .filter((item: WeekOption) => item.week_id)
+          : [];
+        setWeekOptions(options);
+        setWeekDraft((current) => {
+          const currentNormalized = normalizeWeekValue(current);
+          if (currentNormalized) return currentNormalized;
+          const workflowWeekValue = weekValueFromRange(workflow?.week_start, workflow?.week_end);
+          if (workflowWeekValue) return workflowWeekValue;
+          return options.find((item: WeekOption) => item.selected)?.week_id || "";
+        });
+      } catch (err: any) {
+        if (!active) return;
+        if (err?.response?.status !== 404) {
+          setWeekOptionsError("週候補の取得に失敗しました。必要なら例外範囲を設定してください。");
+        }
+        setWeekOptions([]);
+      } finally {
+        if (active) setWeekOptionsLoading(false);
+      }
+    };
+    loadWeekOptions();
+    return () => {
+      active = false;
+    };
+  }, [router.isReady, orderId, workflow?.week_end, workflow?.week_start]);
 
   useEffect(() => {
     if (workflow?.state) {
@@ -245,8 +383,23 @@ export default function OrderWorkflowV2Page() {
 
   const confirmContext = () =>
     runAction("Step1 context confirm", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/context`, contextForm);
+      await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
+        facility_id: contextForm.facility_id,
+        week_start: contextForm.week_start,
+        week_end: contextForm.week_end,
+      });
     });
+
+  const applyCustomWeekRange = () => {
+    const weekValue = deriveWeekValueFromCalendarRange(customWeekRangeStart, customWeekRangeEnd);
+    if (!weekValue) {
+      setError("例外範囲の日付が不正です。");
+      return;
+    }
+    applyWeekValue(weekValue);
+    setError("");
+    setMessage("例外範囲を設定しました。");
+  };
 
   const runOcr = () =>
     runAction("Step1 OCR run", async () => {
@@ -377,68 +530,148 @@ export default function OrderWorkflowV2Page() {
         {visibleStep === 1 ? (
         <section className="panel">
           <p className="step-tag">Step1</p>
-          <h2>PDF / 施設 / 週次 / テンプレート確定</h2>
+          <header className="panel-header">
+            <div>
+              <h2>注文書 (FAX PDF)</h2>
+              <p className="subtle">原本PDFを確認し、施設と週設定を完了してください。</p>
+            </div>
+            {pdfUrl ? (
+              <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
+                原本を開く
+              </a>
+            ) : (
+              <span className="subtle">{pdfError || "PDFを読み込み中..."}</span>
+            )}
+          </header>
+          <div className="step1-facility-block">
+            <div className="summary-grid summary-grid--compact">
+              <div className="summary-primary-card">
+                <span className="field-label">注文ID</span>
+                <p className="summary-value">{orderId || "-"}</p>
+              </div>
+              <div className="summary-primary-card">
+                <span className="field-label">現在の施設</span>
+                <p className="summary-value">{workflow?.facility_id || "未設定"}</p>
+              </div>
+              <div className="summary-primary-card">
+                <span className="field-label">現在の週</span>
+                <p className="summary-value">
+                  {formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "未設定"}
+                </p>
+              </div>
+              <div className="summary-primary-card">
+                <span className="field-label">施設テンプレート</span>
+                <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
+              </div>
+            </div>
+            <div className="summary-actions">
+              <label className="field">
+                <span className="field-label">施設 (Step1 必須)</span>
+                <select
+                  className="input"
+                  value={contextForm.facility_id}
+                  onChange={(event) => setContextForm((current) => ({ ...current, facility_id: event.target.value }))}
+                  disabled={facilityOptionsLoading || Boolean(busy)}
+                >
+                  <option value="">施設を選択</option>
+                  {contextForm.facility_id && !facilityOptions.some((option) => option.id === contextForm.facility_id) ? (
+                    <option value={contextForm.facility_id}>{contextForm.facility_id} (未登録)</option>
+                  ) : null}
+                  {facilityOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {formatFacilityLabel(option)}
+                    </option>
+                  ))}
+                </select>
+                {facilityOptionsError ? (
+                  <span className="subtle">{facilityOptionsError}</span>
+                ) : facilityOptionsLoading ? (
+                  <span className="subtle">施設一覧を取得中...</span>
+                ) : null}
+              </label>
+              <label className="field">
+                <span className="field-label">週 (Step1 必須)</span>
+                <select
+                  className="input"
+                  value={weekDraft}
+                  onChange={(event) => applyWeekValue(event.target.value)}
+                  disabled={weekOptionsLoading || Boolean(busy)}
+                >
+                  <option value="">週を選択</option>
+                  {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
+                    <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
+                  ) : null}
+                  {weekOptions.map((option) => (
+                    <option key={option.week_id} value={option.week_id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {weekOptionsError ? (
+                  <span className="subtle">{weekOptionsError}</span>
+                ) : weekOptionsLoading ? (
+                  <span className="subtle">週候補を取得中...</span>
+                ) : (
+                  <span className="subtle">日曜から土曜の固定週を表示します。</span>
+                )}
+                <div className="step1-week-range">
+                  <span className="subtle">例外時だけ範囲指定します。</span>
+                  <div className="summary-actions">
+                    <input
+                      className="input"
+                      type="date"
+                      value={customWeekRangeStart}
+                      onChange={(event) => setCustomWeekRangeStart(event.target.value)}
+                      disabled={Boolean(busy)}
+                    />
+                    <input
+                      className="input"
+                      type="date"
+                      value={customWeekRangeEnd}
+                      onChange={(event) => setCustomWeekRangeEnd(event.target.value)}
+                      disabled={Boolean(busy)}
+                    />
+                    <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={Boolean(busy)}>
+                      例外範囲を設定
+                    </button>
+                  </div>
+                  {selectedWeekValue ? (
+                    <span className="subtle">設定予定: {formatWeekLabel(selectedWeekValue) || selectedWeekValue}</span>
+                  ) : null}
+                </div>
+              </label>
+              <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady)}>
+                {contextReady ? "設定を保存" : "施設と週を選択"}
+              </button>
+              <button
+                className="btn"
+                type="button"
+                onClick={runOcr}
+                disabled={Boolean(busy || !workflow?.facility_id || !workflow?.week_start || !workflow?.week_end)}
+              >
+                OCRを実行
+              </button>
+            </div>
+            {!workflow?.facility_id || !workflow?.week_start || !workflow?.week_end ? (
+              <div className="warning-banner">
+                {!workflow?.facility_id ? <p>この注文は施設が未設定です。OCR実行前に施設設定が必要です。</p> : null}
+                {!workflow?.week_start || !workflow?.week_end ? <p>この注文は週が未設定です。OCR実行前に週設定が必要です。</p> : null}
+              </div>
+            ) : null}
+          </div>
           <div className="pdf-preview-panel">
             <div className="pdf-preview-header">
               <div>
                 <h3>原本PDF</h3>
-                <p className="subtle">原本PDFを確認して、施設・週次・テンプレートを確定します。</p>
+                <p className="subtle">施設と週次の確認用です。</p>
               </div>
-              {pdfUrl ? (
-                <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
-                  別タブで開く
-                </a>
-              ) : null}
             </div>
             {pdfUrl ? (
-              <iframe title="workflow-v2-original-pdf" src={pdfUrl} className="pdf-frame" />
+              <iframe title="workflow-v2-original-pdf" src={pdfUrl} className="pdf-frame pdf-frame-wide" />
             ) : (
               <div className="pdf-placeholder">{pdfError || "PDFを読み込み中..."}</div>
             )}
           </div>
-          <div className="form-grid">
-            <label>
-              施設ID
-              <input
-                value={contextForm.facility_id}
-                onChange={(event) => setContextForm((current) => ({ ...current, facility_id: event.target.value }))}
-              />
-            </label>
-            <label>
-              週開始
-              <input
-                placeholder="2026-04-26"
-                value={contextForm.week_start}
-                onChange={(event) => setContextForm((current) => ({ ...current, week_start: event.target.value }))}
-              />
-            </label>
-            <label>
-              週終了
-              <input
-                placeholder="2026-04-30"
-                value={contextForm.week_end}
-                onChange={(event) => setContextForm((current) => ({ ...current, week_end: event.target.value }))}
-              />
-            </label>
-            <label>
-              テンプレートID
-              <input
-                value={contextForm.template_id}
-                onChange={(event) => setContextForm((current) => ({ ...current, template_id: event.target.value }))}
-              />
-            </label>
-          </div>
-          <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy)}>
-            Step1を確定
-          </button>
-          <button
-            className="btn"
-            type="button"
-            onClick={runOcr}
-            disabled={Boolean(busy || !workflow?.facility_id || !workflow?.week_start || !workflow?.template_id)}
-          >
-            OCRを実行
-          </button>
         </section>
         ) : null}
 
@@ -583,6 +816,18 @@ export default function OrderWorkflowV2Page() {
       </section>
 
       <style jsx>{`
+        @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Noto+Sans+JP:wght@400;600;700;800&display=swap");
+
+        :global(body) {
+          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
+          color: #1f2a2a;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
+        }
+
+        :global(*) {
+          box-sizing: border-box;
+        }
+
         .workflow-v2-page {
           background:
             radial-gradient(circle at top left, rgba(62, 110, 89, 0.14), transparent 30%),
@@ -614,12 +859,24 @@ export default function OrderWorkflowV2Page() {
           margin: 8px 0 0;
         }
         .panel {
-          background: rgba(255, 255, 255, 0.86);
-          border: 1px solid rgba(54, 82, 68, 0.14);
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.08);
           border-radius: 18px;
-          box-shadow: 0 14px 36px rgba(28, 40, 34, 0.08);
+          box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
           margin: 16px 36px;
           padding: 22px;
+        }
+        .panel-header {
+          align-items: center;
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 12px;
+        }
+        .panel-header > div {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
         }
         .state-panel {
           align-items: center;
@@ -685,6 +942,77 @@ export default function OrderWorkflowV2Page() {
           grid-template-columns: repeat(2, minmax(0, 1fr));
           margin: 18px 0;
         }
+        .summary-grid {
+          display: grid;
+          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          align-items: end;
+        }
+        .summary-grid--compact {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          align-items: stretch;
+        }
+        .summary-primary-card {
+          background: #f8fbfa;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 12px;
+          padding: 10px 12px;
+        }
+        .summary-value {
+          font-weight: 700;
+          margin: 4px 0 0;
+        }
+        .summary-actions {
+          align-items: flex-end;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .summary-actions .field {
+          flex: 1;
+          min-width: 240px;
+        }
+        .step1-facility-block {
+          background: #f8fbfa;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          margin: 14px 0 16px;
+          padding: 12px;
+        }
+        .step1-week-range {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .field {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .field-label {
+          color: #5f7b74;
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .warning-banner {
+          background: #fff8e6;
+          border: 1px solid #ebd6a7;
+          border-radius: 12px;
+          color: #775316;
+          font-size: 13px;
+          margin-top: 12px;
+          padding: 10px 12px;
+        }
+        .warning-banner p {
+          margin: 0;
+        }
+        .warning-banner p + p {
+          margin-top: 6px;
+        }
         .pdf-preview-panel {
           border: 1px solid #d7d1c0;
           border-radius: 16px;
@@ -706,14 +1034,19 @@ export default function OrderWorkflowV2Page() {
         }
         .pdf-frame {
           background: #fff;
-          border: 0;
+          border: 1px solid #ddd;
+          border-radius: 12px;
           display: block;
-          height: min(76vh, 980px);
+          height: 520px;
           width: 100%;
+        }
+        .pdf-frame-wide {
+          min-height: 640px;
         }
         .pdf-placeholder {
           align-items: center;
           color: #687269;
+          background: #f9f7f2;
           display: flex;
           font-weight: 800;
           height: 420px;
@@ -727,6 +1060,7 @@ export default function OrderWorkflowV2Page() {
           gap: 6px;
         }
         input,
+        select,
         textarea {
           background: #fffdf7;
           border: 1px solid #d7d1c0;
