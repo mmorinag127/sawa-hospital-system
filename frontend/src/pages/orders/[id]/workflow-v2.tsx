@@ -128,6 +128,24 @@ const stateLabel = (state?: string | null) => {
   return labels[normalized] || normalized || "未開始";
 };
 
+const stepIndexForState = (state?: string | null) => {
+  const normalized = String(state || "").trim();
+  if (["uploaded", "context_confirmed", "ocr_running", "ocr_failed"].includes(normalized)) return 1;
+  if (["ocr_completed", "ocr_selected"].includes(normalized)) return 2;
+  if (["sheet_saved"].includes(normalized)) return 3;
+  if (["bagging_ready", "bagging_confirmed"].includes(normalized)) return 4;
+  if (["output_review", "confirmed"].includes(normalized)) return 5;
+  return 1;
+};
+
+const stepLabels = [
+  { step: 1, label: "PDF/施設/週次" },
+  { step: 2, label: "OCR選択" },
+  { step: 3, label: "シート編集" },
+  { step: 4, label: "袋分け" },
+  { step: 5, label: "出力確認" },
+];
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -137,6 +155,9 @@ export default function OrderWorkflowV2Page() {
   const [contextForm, setContextForm] = useState(emptyContext);
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
   const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
+  const [visibleStep, setVisibleStep] = useState(1);
+  const [pdfUrl, setPdfUrl] = useState<string>("");
+  const [pdfError, setPdfError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -175,6 +196,36 @@ export default function OrderWorkflowV2Page() {
     refreshAll().catch((err) => {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
+  }, [router.isReady, orderId]);
+
+  useEffect(() => {
+    if (workflow?.state) {
+      setVisibleStep(stepIndexForState(workflow.state));
+    }
+  }, [workflow?.state]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId) return;
+    let active = true;
+    let objectUrl = "";
+    setPdfUrl("");
+    setPdfError("");
+    apiClient
+      .get<Blob>(`/orders/${orderId}/document`, { responseType: "blob" })
+      .then((res) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(res.data);
+        setPdfUrl(objectUrl);
+      })
+      .catch((err) => {
+        if (!active) return;
+        const status = err?.response?.status;
+        setPdfError(status === 404 ? "原本FAX PDFを現在取得できません。" : "PDFの取得に失敗しました。");
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
   }, [router.isReady, orderId]);
 
   const runAction = async (label: string, action: () => Promise<void>) => {
@@ -308,10 +359,43 @@ export default function OrderWorkflowV2Page() {
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
 
-      <section className="step-grid">
+      <nav className="step-nav" aria-label="workflow steps">
+        {stepLabels.map((item) => (
+          <button
+            key={item.step}
+            className={`step-nav-btn ${visibleStep === item.step ? "active" : ""}`}
+            type="button"
+            onClick={() => setVisibleStep(item.step)}
+          >
+            <span>Step{item.step}</span>
+            <strong>{item.label}</strong>
+          </button>
+        ))}
+      </nav>
+
+      <section className="step-page">
+        {visibleStep === 1 ? (
         <section className="panel">
           <p className="step-tag">Step1</p>
           <h2>PDF / 施設 / 週次 / テンプレート確定</h2>
+          <div className="pdf-preview-panel">
+            <div className="pdf-preview-header">
+              <div>
+                <h3>原本PDF</h3>
+                <p className="subtle">原本PDFを確認して、施設・週次・テンプレートを確定します。</p>
+              </div>
+              {pdfUrl ? (
+                <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
+                  別タブで開く
+                </a>
+              ) : null}
+            </div>
+            {pdfUrl ? (
+              <iframe title="workflow-v2-original-pdf" src={pdfUrl} className="pdf-frame" />
+            ) : (
+              <div className="pdf-placeholder">{pdfError || "PDFを読み込み中..."}</div>
+            )}
+          </div>
           <div className="form-grid">
             <label>
               施設ID
@@ -356,7 +440,9 @@ export default function OrderWorkflowV2Page() {
             OCRを実行
           </button>
         </section>
+        ) : null}
 
+        {visibleStep === 2 ? (
         <section className="panel">
           <p className="step-tag">Step2</p>
           <h2>正解 OCR を一つ選ぶ</h2>
@@ -387,7 +473,9 @@ export default function OrderWorkflowV2Page() {
             )}
           </div>
         </section>
+        ) : null}
 
+        {visibleStep === 3 ? (
         <section className="panel">
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
@@ -452,7 +540,9 @@ export default function OrderWorkflowV2Page() {
             />
           </details>
         </section>
+        ) : null}
 
+        {visibleStep === 4 ? (
         <section className="panel">
           <p className="step-tag">Step4</p>
           <h2>保存済みシートから袋分け</h2>
@@ -467,7 +557,9 @@ export default function OrderWorkflowV2Page() {
           </div>
           <pre>{formatJson(inspection?.bagging_result || null)}</pre>
         </section>
+        ) : null}
 
+        {visibleStep === 5 ? (
         <section className="panel">
           <p className="step-tag">Step5</p>
           <h2>出力確認 / 確定</h2>
@@ -481,6 +573,7 @@ export default function OrderWorkflowV2Page() {
           </div>
           <pre>{formatJson(inspection?.output_bundle || null)}</pre>
         </section>
+        ) : null}
       </section>
 
       <section className="panel">
@@ -539,9 +632,46 @@ export default function OrderWorkflowV2Page() {
           flex-wrap: wrap;
           gap: 10px;
         }
-        .step-grid {
+        .step-page {
+          display: block;
+        }
+        .step-nav {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          margin: 16px 36px;
+        }
+        .step-nav-btn {
+          background: rgba(255, 255, 255, 0.74);
+          border: 1px solid rgba(54, 82, 68, 0.14);
+          border-radius: 16px;
+          color: #526258;
+          cursor: pointer;
+          display: grid;
+          gap: 4px;
+          min-height: 68px;
+          padding: 12px 14px;
+          text-align: left;
+        }
+        .step-nav-btn span {
+          color: #a15f2d;
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .step-nav-btn strong {
+          color: #1c2822;
+          font-size: 14px;
+        }
+        .step-nav-btn.active {
+          background: #1c2822;
+          border-color: #1c2822;
+          box-shadow: 0 12px 28px rgba(28, 40, 34, 0.16);
+        }
+        .step-nav-btn.active span,
+        .step-nav-btn.active strong {
+          color: #fffdf7;
         }
         .step-tag {
           color: #a15f2d;
@@ -554,6 +684,40 @@ export default function OrderWorkflowV2Page() {
           gap: 12px;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           margin: 18px 0;
+        }
+        .pdf-preview-panel {
+          border: 1px solid #d7d1c0;
+          border-radius: 16px;
+          margin: 18px 0;
+          overflow: hidden;
+          background: #fffdf7;
+        }
+        .pdf-preview-header {
+          align-items: center;
+          border-bottom: 1px solid #e5dece;
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          padding: 14px 16px;
+        }
+        .pdf-preview-header h3 {
+          color: #1c2822;
+          margin: 0;
+        }
+        .pdf-frame {
+          background: #fff;
+          border: 0;
+          display: block;
+          height: min(76vh, 980px);
+          width: 100%;
+        }
+        .pdf-placeholder {
+          align-items: center;
+          color: #687269;
+          display: flex;
+          font-weight: 800;
+          height: 420px;
+          justify-content: center;
         }
         label {
           color: #455248;
@@ -714,7 +878,7 @@ export default function OrderWorkflowV2Page() {
           .state-panel {
             display: block;
           }
-          .step-grid,
+          .step-nav,
           .form-grid {
             grid-template-columns: 1fr;
           }
