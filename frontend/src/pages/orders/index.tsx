@@ -842,9 +842,6 @@ export default function OrdersPage() {
           <Link href={`/orders/${order.id}/workflow-v2`} className="list-link">
             詳細
           </Link>
-          <Link href={`/orders/${order.id}`} className="list-link">
-            旧詳細
-          </Link>
           {weekMenuId(order) ? (
             <Link href={`/menus/${weekMenuId(order)}`} className="list-link">
               メニュー

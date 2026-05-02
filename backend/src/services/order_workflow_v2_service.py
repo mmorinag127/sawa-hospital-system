@@ -50,7 +50,7 @@ def _workflow_meta(row: OrderWorkflowState | None) -> dict[str, Any]:
 
 
 def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
-    existing = dict(row.secondary_actions_json or {})
+    existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
     existing[WORKFLOW_V2_META_KEY] = dict(meta)
     row.secondary_actions_json = existing
 

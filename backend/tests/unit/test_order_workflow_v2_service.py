@@ -135,6 +135,40 @@ def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
         assert order.week_code == "2026-04@2026-04-26~2026-04-30"
 
 
+def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                state="uploaded",
+                headline="legacy",
+                primary_action="confirm_context",
+                secondary_actions_json="confirm_context",
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["state"] == "context_confirmed"
+    assert workflow["template_id"] == "template-fac00001"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert isinstance(row.secondary_actions_json, dict)
+        assert row.secondary_actions_json["workflow_v2"]["facility_id"] == "FAC00001"
+
+
 def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 

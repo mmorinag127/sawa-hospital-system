@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
 import TopNav from "../../components/TopNav";
@@ -2835,6 +2836,16 @@ const isGsUri = (value?: string | null) =>
 
 const toFixedOrEmpty = (value: number | null, decimals: number) =>
   value == null || Number.isNaN(value) ? "" : value.toFixed(decimals);
+
+export const getServerSideProps: GetServerSideProps = async ({ params }) => {
+  const id = typeof params?.id === "string" ? params.id : "";
+  return {
+    redirect: {
+      destination: id ? `/orders/${encodeURIComponent(id)}/workflow-v2` : "/orders",
+      permanent: false,
+    },
+  };
+};
 
 export default function OrderDetailPage() {
   const router = useRouter();

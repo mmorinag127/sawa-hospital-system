@@ -286,8 +286,8 @@ export default function OrderWorkflowV2Page() {
               <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
                 確認専用ページ
               </Link>
-              <Link className="ghost-link" href={`/orders/${orderId}`}>
-                旧詳細へ戻る
+              <Link className="ghost-link" href="/orders">
+                注文一覧へ戻る
               </Link>
             </>
           ) : null}

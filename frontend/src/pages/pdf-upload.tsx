@@ -483,7 +483,7 @@ export default function PdfUploadPage() {
               )}
               <div className="actions" style={{ marginBottom: 12 }}>
                 {primaryResult.order_id || primaryResult.existing_order_id ? (
-                  <Link href={`/orders/${primaryResult.order_id || primaryResult.existing_order_id}`} className="btn primary">
+                  <Link href={`/orders/${primaryResult.order_id || primaryResult.existing_order_id}/workflow-v2`} className="btn primary">
                     注文詳細を開く
                   </Link>
                 ) : (
@@ -548,7 +548,7 @@ export default function PdfUploadPage() {
                     </div>
                     <div className="actions">
                       {orderId ? (
-                        <Link href={`/orders/${orderId}`} className="btn secondary">
+                        <Link href={`/orders/${orderId}/workflow-v2`} className="btn secondary">
                           注文詳細を開く
                         </Link>
                       ) : item.message_id ? (
@@ -665,7 +665,7 @@ export default function PdfUploadPage() {
                   ) : null}
                   <div className="actions">
                     {linkedOrderId ? (
-                      <Link href={`/orders/${linkedOrderId}`} className="btn secondary">
+                      <Link href={`/orders/${linkedOrderId}/workflow-v2`} className="btn secondary">
                         注文詳細を開く
                       </Link>
                     ) : row.message_id ? (
