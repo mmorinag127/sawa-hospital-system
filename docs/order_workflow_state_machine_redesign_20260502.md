@@ -627,6 +627,31 @@ stg の注文関連データは一旦破棄対象にする。
 
 - 5/1-5/2 の注文 PDF はローカルにダウンロードして保存する。
 
+実行方法:
+
+- `backend/scripts/cleanup_order_operational_data.py` を使う。
+- 既定は dry-run で、削除件数と保持対象件数だけを表示する。
+- PDF 退避は `--export-pdfs-dir <dir>` を付けたときだけ実行する。
+- 削除は `--apply --confirm CLEAN_ORDER_DATA` が両方ある場合だけ実行する。
+- Python は 3.11+ 前提なので `uv run python scripts/cleanup_order_operational_data.py ...` で実行する。
+
+例:
+
+```bash
+uv run python scripts/cleanup_order_operational_data.py \
+  --received-from 2026-05-01 \
+  --received-to 2026-05-02 \
+  --export-pdfs-dir /tmp/sawa-stg-order-pdf-backup-20260502
+
+uv run python scripts/cleanup_order_operational_data.py \
+  --all-orders \
+  --export-pdfs-dir /tmp/sawa-stg-order-pdf-backup-20260502 \
+  --apply \
+  --confirm CLEAN_ORDER_DATA
+```
+
+この cleanup は注文系データだけを対象にする。施設、施設テンプレート、メニュー、メニューマスタは削除対象にしない。
+
 ## What This Solves
 
 この設計は、これまで別チャットを含めて繰り返した以下の問題を根本的に解消する。
