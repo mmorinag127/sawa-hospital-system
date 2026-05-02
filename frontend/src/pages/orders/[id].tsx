@@ -10026,6 +10026,9 @@ export default function OrderDetailPage() {
               </div>
               <div className="panel-actions">
                 <span className="status-pill">{order.status}</span>
+                <Link className="btn ghost" href={`/orders/${order.id}/workflow-v2`}>
+                  新ワークフローで開く
+                </Link>
                 {order.is_archived ? (
                   <button
                     className="btn ghost"

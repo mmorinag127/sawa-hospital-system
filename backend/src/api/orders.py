@@ -9,6 +9,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from src.services import order_service, config_service, candidate_resolution_service, workflow_state_service, uploaded_pdf_service
+from src.services import order_workflow_v2_service
 from src.services import shipping_status_store
 from src.services.output_builder import rebuild_bags
 from src.services.ocr_job_service import (
@@ -85,6 +86,27 @@ class DailyOutputOverrideBulkUpsertBody(BaseModel):
 class WeekArchiveBody(BaseModel):
     week_value: str
     order_ids: list[str] | None = None
+
+
+class WorkflowV2ContextConfirmBody(BaseModel):
+    facility_id: str
+    week_start: str
+    week_end: str
+    template_id: str
+
+
+class WorkflowV2OcrRunBody(BaseModel):
+    stale_action: str | None = None
+    force: bool = False
+
+
+class WorkflowV2SheetSaveBody(BaseModel):
+    sheet: dict
+    edited_by: str | None = None
+
+
+class WorkflowV2FinalConfirmBody(BaseModel):
+    confirmed_by: str | None = None
 
 
 def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
@@ -1461,6 +1483,216 @@ def _hakodate_blocked_draft_sheet_payload(order_id: str, error: str, data: dict 
     }
 
 
+def _workflow_v2_or_404(result: tuple[dict | None, str | None]) -> dict:
+    payload, error = result
+    if error == "order_not_found":
+        raise HTTPException(status_code=404, detail=error)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return payload or {}
+
+
+def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "legacy_order_workflow_disabled",
+            "endpoint": endpoint,
+            "message": "注文処理は workflow-v2 に移行しました。この旧 order workflow endpoint は使用できません。",
+            "replacement": "workflow-v2",
+        },
+    )
+
+
+def _enqueue_workflow_v2_evidence_rerun(
+    order_id: str,
+    background_tasks: BackgroundTasks,
+    *,
+    stale_action: str = "retry",
+    force: bool = False,
+) -> dict:
+    workflow = _workflow_v2_or_404(order_workflow_v2_service.get_workflow(order_id))
+    if not workflow.get("facility_id") or not workflow.get("week_start") or not workflow.get("template_id"):
+        raise HTTPException(status_code=400, detail="context_not_confirmed")
+    if stale_action not in {"retry", "wait"}:
+        raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
+
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    if not order.get("facility"):
+        raise HTTPException(status_code=400, detail="facility missing")
+    if not order.get("document"):
+        raise HTTPException(status_code=404, detail="document not found")
+    if not config_service.get_facility_config(order.get("facility")):
+        raise HTTPException(status_code=404, detail="facility not found")
+
+    ocr_job_id = f"OCR-{order_id}"
+    existing_job = get_ocr_job(ocr_job_id)
+    existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(existing_job, order_id) else None)
+    if existing_job_state.get("status") == "stalled":
+        stale_at = get_ocr_job_stale_at(existing_job)
+        if stale_action == "wait":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "ocr_rerun_in_progress",
+                    "message": "stale OCR rerun requires retry",
+                    "recoverable": True,
+                    "ocr_job_id": ocr_job_id,
+                    "stale_at": (
+                        stale_at.isoformat()
+                        if isinstance(stale_at, datetime)
+                        else existing_job_state.get("stale_at")
+                    ),
+                    "stale_threshold_seconds": existing_job_state.get("stale_threshold_seconds"),
+                },
+            )
+        existing_job = _mark_stale_order_reparse_job(order, existing_job)
+    if force and _is_active_order_reparse_job(existing_job, order_id):
+        existing_job = _mark_stale_order_reparse_job(order, existing_job, force=True)
+    if _is_active_order_reparse_job(existing_job, order_id):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "ocr_rerun_in_progress",
+                "message": "OCR rerun already running",
+                "recoverable": False,
+                "ocr_job_id": ocr_job_id,
+            },
+        )
+
+    input_reference = str(order.get("document") or "")
+    _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
+    if not created:
+        existing_job = get_ocr_job(ocr_job_id)
+        if _is_active_order_reparse_job(existing_job, order_id):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "ocr_rerun_in_progress",
+                    "message": "OCR rerun already running",
+                    "recoverable": False,
+                    "ocr_job_id": ocr_job_id,
+                },
+            )
+    update_ocr_job(
+        ocr_job_id,
+        status="running",
+        error_message=None,
+        template_id=None,
+        output_reference=None,
+        input_reference=input_reference,
+        metrics={
+            "job_id": ocr_job_id,
+            "workflow_version": "v2",
+            "processing_stage": "queued",
+            "result_state": "processing",
+            "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+            "request_mode": "ocr_rerun",
+            "status": "running",
+        },
+    )
+    queued_workflow = _workflow_v2_or_404(order_workflow_v2_service.mark_ocr_run_queued(order_id, ocr_job_id))
+    background_tasks.add_task(_run_ocr_rerun_background, order_id, ocr_job_id)
+    return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
+
+
+@router.get("/{order_id}/workflow-v2", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_workflow(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/context", dependencies=[Depends(require_role("operator"))])
+def confirm_order_workflow_v2_context(order_id: str, body: WorkflowV2ContextConfirmBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.confirm_context(
+            order_id=order_id,
+            facility_id=body.facility_id,
+            week_start=body.week_start,
+            week_end=body.week_end,
+            template_id=body.template_id,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/workflow-v2/ocr-runs",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_role("operator"))],
+)
+def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, body: WorkflowV2OcrRunBody | None = None):
+    stale_action = str((body.stale_action if body else None) or "retry").strip().lower()
+    force = bool(body.force) if body else False
+    return _enqueue_workflow_v2_evidence_rerun(
+        order_id,
+        background_tasks,
+        stale_action=stale_action,
+        force=force,
+    )
+
+
+@router.get("/{order_id}/workflow-v2/ocr-results", dependencies=[Depends(require_role("operator"))])
+def list_order_workflow_v2_ocr_results(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.list_ocr_results(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}/select", dependencies=[Depends(require_role("operator"))])
+def select_order_workflow_v2_ocr_result(order_id: str, ocr_result_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.select_ocr_result(order_id, ocr_result_id))
+
+
+@router.delete("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}", dependencies=[Depends(require_role("operator"))])
+def delete_order_workflow_v2_ocr_result(order_id: str, ocr_result_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.delete_ocr_result(order_id, ocr_result_id))
+
+
+@router.get("/{order_id}/workflow-v2/sheet", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_sheet(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_saved_sheet(order_id))
+
+
+@router.put("/{order_id}/workflow-v2/sheet", dependencies=[Depends(require_role("operator"))])
+def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.save_sheet(
+            order_id=order_id,
+            sheet=body.sheet,
+            edited_by=body.edited_by,
+        )
+    )
+
+
+@router.post("/{order_id}/workflow-v2/bagging", dependencies=[Depends(require_role("operator"))])
+def run_order_workflow_v2_bagging(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.run_bagging(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/bagging/confirm", dependencies=[Depends(require_role("operator"))])
+def confirm_order_workflow_v2_bagging(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.confirm_bagging(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/outputs/review", dependencies=[Depends(require_role("operator"))])
+def prepare_order_workflow_v2_output_review(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.prepare_output_review(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/confirm", dependencies=[Depends(require_role("operator"))])
+def confirm_order_workflow_v2(order_id: str, body: WorkflowV2FinalConfirmBody | None = None):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.final_confirm(
+            order_id,
+            confirmed_by=body.confirmed_by if body else None,
+        )
+    )
+
+
+@router.get("/{order_id}/workflow-v2/inspection", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_inspection(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(order_id))
+
+
 @router.get("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
 def get_draft_sheet(
     order_id: str,
@@ -1468,6 +1700,7 @@ def get_draft_sheet(
     quantity_assignment_strategy: str | None = Query(default=None),
     sheet_mode: str | None = Query(default=None),
 ):
+    _raise_legacy_order_workflow_gone("draft-sheet")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -1522,6 +1755,7 @@ def get_draft_sheet(
 
 @router.get("/{order_id}/workflow-state", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_state(order_id: str, refresh: bool = Query(default=True)):
+    _raise_legacy_order_workflow_gone("workflow-state")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -1533,6 +1767,7 @@ def get_order_workflow_state(order_id: str, refresh: bool = Query(default=True))
 
 @router.get("/{order_id}/critical-decisions", dependencies=[Depends(require_role("operator"))])
 def get_order_critical_decisions(order_id: str):
+    _raise_legacy_order_workflow_gone("critical-decisions")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -1541,6 +1776,7 @@ def get_order_critical_decisions(order_id: str):
 
 @router.post("/{order_id}/critical-decisions/{decision_type}", dependencies=[Depends(require_role("operator"))])
 def choose_order_critical_decision(order_id: str, decision_type: str, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("critical-decisions")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -1576,6 +1812,7 @@ def get_ocr_pages(
     preview_only: bool = Query(default=False),
     quantity_assignment_strategy: str | None = Query(default=None),
 ):
+    _raise_legacy_order_workflow_gone("ocr-pages")
     data, error = order_service.get_ocr_pages(
         order_id,
         preview_only=preview_only,
@@ -1599,6 +1836,7 @@ def get_ocr_pages(
 
 @router.get("/{order_id}/ocr-sheet", dependencies=[Depends(require_role("operator"))])
 def get_ocr_sheet(order_id: str):
+    _raise_legacy_order_workflow_gone("ocr-sheet")
     data, error = order_service.get_ocr_sheet(order_id)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")
@@ -1843,6 +2081,7 @@ def build_hakodate_projected_sheet(order_id: str, body: dict | None = None):
 
 @router.post("/{order_id}/ocr-apply", dependencies=[Depends(require_role("operator"))])
 def apply_ocr_markdown(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("ocr-apply")
     markdown = body.get("markdown") if isinstance(body, dict) else None
     header = body.get("header") if isinstance(body, dict) else None
     rows = body.get("rows") if isinstance(body, dict) else None
@@ -1960,6 +2199,7 @@ def apply_ocr_markdown(order_id: str, body: dict):
 
 @router.post("/{order_id}/ocr-sheet-save", dependencies=[Depends(require_role("operator"))])
 def save_ocr_sheet(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("ocr-sheet-save")
     header = body.get("header") if isinstance(body, dict) else None
     rows = body.get("rows") if isinstance(body, dict) else None
     fields = body.get("fields") if isinstance(body, dict) else None
@@ -2000,11 +2240,13 @@ def save_ocr_sheet(order_id: str, body: dict):
 
 @router.post("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
 def save_draft_sheet(order_id: str, body: dict):
+    _raise_legacy_order_workflow_gone("draft-sheet")
     return save_ocr_sheet(order_id, body)
 
 
 @router.post("/{order_id}/draft-sheet/switch-evidence", dependencies=[Depends(require_role("operator"))])
 def switch_draft_sheet_evidence(order_id: str):
+    _raise_legacy_order_workflow_gone("draft-sheet/switch-evidence")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -2031,6 +2273,7 @@ def switch_draft_sheet_evidence(order_id: str):
 
 @router.post("/{order_id}/draft-sheet/keep-current", dependencies=[Depends(require_role("operator"))])
 def keep_current_draft_sheet(order_id: str):
+    _raise_legacy_order_workflow_gone("draft-sheet/keep-current")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -2049,6 +2292,7 @@ def keep_current_draft_sheet(order_id: str):
 
 @router.get("/{order_id}/draft-sheet/candidate-preview", dependencies=[Depends(require_role("operator"))])
 def get_candidate_draft_sheet_preview(order_id: str):
+    _raise_legacy_order_workflow_gone("draft-sheet/candidate-preview")
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
@@ -2070,6 +2314,7 @@ def get_candidate_draft_sheet_preview(order_id: str):
 
 @router.post("/{order_id}/draft-sheet/force-weekly-menu", dependencies=[Depends(require_role("operator"))])
 def force_draft_sheet_weekly_menu(order_id: str, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("draft-sheet/force-weekly-menu")
     blank_quantities = False
     if isinstance(body, dict) and "blank_quantities" in body:
         blank_quantities = bool(body.get("blank_quantities"))
@@ -2097,6 +2342,7 @@ def force_draft_sheet_weekly_menu(order_id: str, body: dict | None = None):
 
 @router.post("/{order_id}/draft-sheet/force-facility-schema", dependencies=[Depends(require_role("operator"))])
 def force_draft_sheet_facility_schema(order_id: str, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("draft-sheet/force-facility-schema")
     blank_quantities = True
     if isinstance(body, dict) and "blank_quantities" in body:
         blank_quantities = bool(body.get("blank_quantities"))
@@ -2122,6 +2368,7 @@ def force_draft_sheet_facility_schema(order_id: str, body: dict | None = None):
 
 @router.post("/{order_id}/draft-sheet/apply-patch-candidate", dependencies=[Depends(require_role("operator"))])
 def apply_patch_candidate(order_id: str, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("draft-sheet/apply-patch-candidate")
     candidate_id = str((body or {}).get("candidate_id") or "").strip() or None
     result, error = order_service.apply_patch_candidate_to_draft(
         order_id,
@@ -2330,6 +2577,7 @@ def _enqueue_outputs_after_confirm(order_id: str) -> None:
 
 @router.post("/{order_id}/confirm", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
 def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
+    _raise_legacy_order_workflow_gone("confirm")
     expected_revision_id = str((body or {}).get("expected_revision_id") or "").strip() or None
     expected_lines_updated_at = str((body or {}).get("expected_lines_updated_at") or "").strip() or None
     has_expected_revision = isinstance(body, dict) and "expected_revision_id" in body

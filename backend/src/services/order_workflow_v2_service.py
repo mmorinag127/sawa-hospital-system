@@ -1,0 +1,668 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import date, datetime
+from typing import Any
+from uuid import uuid4
+
+from src.db import Base, engine, session_scope
+from src.models.order import Order
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_workflow_state import OrderWorkflowState
+
+
+Base.metadata.create_all(bind=engine)
+
+WORKFLOW_V2_META_KEY = "workflow_v2"
+
+
+def _now() -> datetime:
+    return datetime.utcnow()
+
+
+def _normalize_id(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}{uuid4().hex[:16]}"
+
+
+def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
+    try:
+        start_date = date.fromisoformat(week_start)
+        end_date = date.fromisoformat(week_end)
+    except ValueError:
+        return None
+    if end_date < start_date:
+        return None
+    return f"{start_date.strftime('%Y-%m')}@{start_date.isoformat()}~{end_date.isoformat()}"
+
+
+def _workflow_meta(row: OrderWorkflowState | None) -> dict[str, Any]:
+    if row is None or not isinstance(row.secondary_actions_json, dict):
+        return {}
+    meta = row.secondary_actions_json.get(WORKFLOW_V2_META_KEY)
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
+    existing = dict(row.secondary_actions_json or {})
+    existing[WORKFLOW_V2_META_KEY] = dict(meta)
+    row.secondary_actions_json = existing
+
+
+def _serialize_datetime(value: object) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _serialize_workflow(row: OrderWorkflowState) -> dict[str, Any]:
+    meta = _workflow_meta(row)
+    return {
+        "order_id": row.order_id,
+        "state": row.state,
+        "headline": row.headline,
+        "primary_action": row.primary_action,
+        "selected_ocr_result_id": row.evidence_run_id,
+        "saved_sheet_id": row.draft_id,
+        "confirmed_snapshot_id": row.confirmed_snapshot_id,
+        "facility_id": meta.get("facility_id"),
+        "week_start": meta.get("week_start"),
+        "week_end": meta.get("week_end"),
+        "template_id": meta.get("template_id"),
+        "bagging_result_id": meta.get("bagging_result_id"),
+        "output_bundle_id": meta.get("output_bundle_id"),
+        "blockers": list(row.blockers_json or []),
+        "warnings": list(row.warnings_json or []),
+        "updated_at": _serialize_datetime(row.last_transition_at),
+        "source": "workflow_v2",
+    }
+
+
+def _get_order_or_error(session: Any, order_id: str) -> tuple[Order | None, str | None]:
+    normalized_order_id = _normalize_id(order_id)
+    if not normalized_order_id:
+        return None, "order_id_required"
+    order = session.get(Order, normalized_order_id)
+    if order is None:
+        return None, "order_not_found"
+    return order, None
+
+
+def _get_or_create_workflow(session: Any, order_id: str) -> OrderWorkflowState:
+    row = session.get(OrderWorkflowState, order_id)
+    if row is not None:
+        return row
+    row = OrderWorkflowState(
+        order_id=order_id,
+        state="uploaded",
+        headline="PDFと施設・週次を確認してください",
+        primary_action="confirm_context",
+        secondary_actions_json={WORKFLOW_V2_META_KEY: {}},
+        blockers_json=[],
+        warnings_json=[],
+        confidence_band=None,
+        last_transition_at=_now(),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        row = _get_or_create_workflow(session, order.id)
+        return _serialize_workflow(row), None
+
+
+def confirm_context(
+    *,
+    order_id: str,
+    facility_id: str,
+    week_start: str,
+    week_end: str,
+    template_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_facility_id = _normalize_id(facility_id)
+    normalized_week_start = _normalize_id(week_start)
+    normalized_week_end = _normalize_id(week_end)
+    normalized_template_id = _normalize_id(template_id)
+    if not normalized_facility_id:
+        return None, "facility_id_required"
+    if not normalized_week_start or not normalized_week_end:
+        return None, "week_range_required"
+    normalized_week_code = _format_week_code_from_range(normalized_week_start, normalized_week_end)
+    if not normalized_week_code:
+        return None, "week_range_invalid"
+    if not normalized_template_id:
+        return None, "template_id_required"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        order.facility_code = normalized_facility_id
+        order.week_code = normalized_week_code
+        row = _get_or_create_workflow(session, order.id)
+        row.state = "context_confirmed"
+        row.headline = "施設・週次・テンプレートが確定しました"
+        row.primary_action = "run_ocr"
+        row.evidence_run_id = None
+        row.draft_id = None
+        row.confirmed_snapshot_id = None
+        row.blockers_json = []
+        row.warnings_json = []
+        row.last_transition_at = _now()
+        _write_workflow_meta(
+            row,
+            {
+                "facility_id": normalized_facility_id,
+                "week_start": normalized_week_start,
+                "week_end": normalized_week_end,
+                "week_code": normalized_week_code,
+                "template_id": normalized_template_id,
+                "bagging_result_id": None,
+                "output_bundle_id": None,
+            },
+        )
+        return _serialize_workflow(row), None
+
+
+def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_job_id = _normalize_id(job_id)
+    if not normalized_job_id:
+        return None, "ocr_job_id_required"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        if not meta.get("facility_id") or not meta.get("week_start") or not meta.get("template_id"):
+            return None, "context_not_confirmed"
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        session.flush()
+        _delete_downstream_after_ocr_change(session, order.id)
+        workflow.state = "ocr_running"
+        workflow.headline = "OCR処理を実行中です"
+        workflow.primary_action = "wait_ocr"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        meta["ocr_job_id"] = normalized_job_id
+        meta["bagging_result_id"] = None
+        meta["output_bundle_id"] = None
+        _write_workflow_meta(workflow, meta)
+        return _serialize_workflow(workflow), None
+
+
+def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[str, Any]:
+    payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}
+    return {
+        "ocr_result_id": row.id,
+        "order_id": row.order_id,
+        "schema_version": row.schema_version,
+        "producer_version": row.producer_version,
+        "source": row.source,
+        "status": row.status,
+        "selected": selected,
+        "artifact_manifest": manifest,
+        "artifact_digest": row.artifact_digest,
+        "pipeline_version": payload.get("pipeline_version") or row.producer_version,
+        "created_at": _serialize_datetime(row.created_at),
+    }
+
+
+def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order.id)
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .all()
+        )
+        return {
+            "order_id": order.id,
+            "selected_ocr_result_id": workflow.evidence_run_id,
+            "results": [
+                _serialize_ocr_result(row, selected=row.id == workflow.evidence_run_id)
+                for row in rows
+            ],
+        }, None
+
+
+def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+    session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
+
+
+def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_ocr_result_id = _normalize_id(ocr_result_id)
+    if not normalized_ocr_result_id:
+        return None, "ocr_result_id_required"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
+        if ocr_result is None or ocr_result.order_id != order.id:
+            return None, "ocr_result_not_found"
+        workflow = _get_or_create_workflow(session, order.id)
+        if workflow.evidence_run_id != normalized_ocr_result_id:
+            workflow.draft_id = None
+            workflow.confirmed_snapshot_id = None
+            session.flush()
+            _delete_downstream_after_ocr_change(session, order.id)
+        workflow.evidence_run_id = normalized_ocr_result_id
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        workflow.state = "ocr_selected"
+        workflow.headline = "正解OCRが選択されました"
+        workflow.primary_action = "edit_sheet"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        meta = _workflow_meta(workflow)
+        meta["bagging_result_id"] = None
+        meta["output_bundle_id"] = None
+        _write_workflow_meta(workflow, meta)
+        return _serialize_workflow(workflow), None
+
+
+def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_ocr_result_id = _normalize_id(ocr_result_id)
+    if not normalized_ocr_result_id:
+        return None, "ocr_result_id_required"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
+        if ocr_result is None or ocr_result.order_id != order.id:
+            return None, "ocr_result_not_found"
+        workflow = _get_or_create_workflow(session, order.id)
+        if workflow.evidence_run_id == normalized_ocr_result_id:
+            workflow.draft_id = None
+            workflow.confirmed_snapshot_id = None
+            session.flush()
+            _delete_downstream_after_ocr_change(session, order.id)
+            workflow.evidence_run_id = None
+            workflow.draft_id = None
+            workflow.confirmed_snapshot_id = None
+            workflow.state = "context_confirmed" if _workflow_meta(workflow).get("template_id") else "uploaded"
+            workflow.headline = "正解OCRが削除されました。OCRを再実行してください"
+            workflow.primary_action = "run_ocr"
+            workflow.blockers_json = []
+            workflow.warnings_json = []
+            meta = _workflow_meta(workflow)
+            meta["bagging_result_id"] = None
+            meta["output_bundle_id"] = None
+            _write_workflow_meta(workflow, meta)
+        session.delete(ocr_result)
+        workflow.last_transition_at = _now()
+        return _serialize_workflow(workflow), None
+
+
+def save_sheet(
+    *,
+    order_id: str,
+    sheet: dict[str, Any],
+    edited_by: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(sheet, dict):
+        return None, "sheet_required"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.evidence_run_id:
+            return None, "selected_ocr_required"
+        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        if evidence is None or evidence.order_id != order.id:
+            return None, "selected_ocr_missing"
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        session.flush()
+        _delete_downstream_after_sheet_change(session, order.id)
+        draft = OrderSheetDraft(
+            id=_new_id("ODS"),
+            order_id=order.id,
+            base_evidence_run_id=evidence.id,
+            base_template_resolution_id=_workflow_meta(workflow).get("template_id"),
+            base_menu_snapshot_id=None,
+            draft_sheet_json=dict(sheet),
+            draft_state="saved",
+            blockers_json=[],
+            warnings_json=[],
+            latest_patch_candidate_id=None,
+            edited_by=_normalize_id(edited_by) or None,
+            edited_at=_now(),
+            created_at=_now(),
+        )
+        session.add(draft)
+        workflow.draft_id = draft.id
+        workflow.confirmed_snapshot_id = None
+        workflow.state = "sheet_saved"
+        workflow.headline = "シートが保存されました"
+        workflow.primary_action = "run_bagging"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        meta = _workflow_meta(workflow)
+        meta["bagging_result_id"] = None
+        meta["output_bundle_id"] = None
+        _write_workflow_meta(workflow, meta)
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "saved_sheet": _serialize_saved_sheet(draft),
+        }, None
+
+
+def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
+    session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
+
+
+def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
+    return {
+        "saved_sheet_id": row.id,
+        "order_id": row.order_id,
+        "source_ocr_result_id": row.base_evidence_run_id,
+        "sheet": row.draft_sheet_json if isinstance(row.draft_sheet_json, dict) else {},
+        "state": row.draft_state,
+        "edited_by": row.edited_by,
+        "edited_at": _serialize_datetime(row.edited_at),
+        "created_at": _serialize_datetime(row.created_at),
+    }
+
+
+def _sheet_rows(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = sheet.get("rows") if isinstance(sheet, dict) else None
+    if not isinstance(rows, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if isinstance(row, dict):
+            normalized.append({"row_index": index, **row})
+        elif isinstance(row, list):
+            normalized.append({"row_index": index, "cells": list(row)})
+    return normalized
+
+
+def _numeric_value(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().translate(str.maketrans("０１２３４５６７８９．", "0123456789."))
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _quantity_values_from_row(row: dict[str, Any]) -> list[float]:
+    values: list[float] = []
+    for key, value in row.items():
+        key_text = str(key or "").strip().lower()
+        if key_text in {"row_index", "date", "daypart", "menu", "menu_name", "cells"}:
+            continue
+        numeric = _numeric_value(value)
+        if numeric is not None:
+            values.append(numeric)
+    cells = row.get("cells")
+    if isinstance(cells, list):
+        for value in cells:
+            numeric = _numeric_value(value)
+            if numeric is not None:
+                values.append(numeric)
+    return values
+
+
+def _build_bagging_result_payload(*, order_id: str, saved_sheet: OrderSheetDraft) -> dict[str, Any]:
+    sheet = saved_sheet.draft_sheet_json if isinstance(saved_sheet.draft_sheet_json, dict) else {}
+    rows = _sheet_rows(sheet)
+    quantity_cells = []
+    total_quantity = 0.0
+    for row in rows:
+        values = _quantity_values_from_row(row)
+        if not values:
+            continue
+        row_total = sum(values)
+        total_quantity += row_total
+        quantity_cells.append(
+            {
+                "row_index": row.get("row_index"),
+                "menu_name": row.get("menu_name") or row.get("menu") or "",
+                "quantity_values": values,
+                "row_total": row_total,
+            }
+        )
+    return {
+        "bagging_result_id": _new_id("OBG"),
+        "order_id": order_id,
+        "source_saved_sheet_id": saved_sheet.id,
+        "source_ocr_result_id": saved_sheet.base_evidence_run_id,
+        "status": "ready",
+        "summary": {
+            "row_count": len(rows),
+            "quantity_row_count": len(quantity_cells),
+            "total_quantity": total_quantity,
+        },
+        "quantity_cells": quantity_cells,
+        "created_at": _now().isoformat(),
+    }
+
+
+def _current_bagging_result(row: OrderWorkflowState) -> dict[str, Any] | None:
+    meta = _workflow_meta(row)
+    result = meta.get("bagging_result")
+    return dict(result) if isinstance(result, dict) else None
+
+
+def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.draft_id:
+            return None, "saved_sheet_missing"
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order.id:
+            return None, "saved_sheet_missing"
+        return _serialize_saved_sheet(draft), None
+
+
+def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.draft_id:
+            return None, "saved_sheet_required"
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order.id:
+            return None, "saved_sheet_missing"
+        bagging_result = _build_bagging_result_payload(order_id=order.id, saved_sheet=draft)
+        meta = _workflow_meta(workflow)
+        meta["bagging_result_id"] = bagging_result["bagging_result_id"]
+        meta["bagging_result"] = bagging_result
+        meta["output_bundle_id"] = None
+        meta["output_bundle"] = None
+        _write_workflow_meta(workflow, meta)
+        workflow.state = "bagging_ready"
+        workflow.headline = "袋分け結果を確認してください"
+        workflow.primary_action = "confirm_bagging"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "bagging_result": bagging_result,
+        }, None
+
+
+def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        bagging_result = _current_bagging_result(workflow)
+        if not bagging_result:
+            return None, "bagging_result_required"
+        workflow.state = "bagging_confirmed"
+        workflow.headline = "袋分け結果が確認されました"
+        workflow.primary_action = "review_outputs"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "bagging_result": bagging_result,
+        }, None
+
+
+def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        bagging_result = _current_bagging_result(workflow)
+        if not bagging_result:
+            return None, "bagging_result_required"
+        output_bundle = {
+            "output_bundle_id": _new_id("OOB"),
+            "order_id": order.id,
+            "source_bagging_result_id": bagging_result.get("bagging_result_id"),
+            "status": "review_ready",
+            "artifacts": [],
+            "created_at": _now().isoformat(),
+        }
+        meta = _workflow_meta(workflow)
+        meta["output_bundle_id"] = output_bundle["output_bundle_id"]
+        meta["output_bundle"] = output_bundle
+        _write_workflow_meta(workflow, meta)
+        workflow.state = "output_review"
+        workflow.headline = "出力内容を確認してください"
+        workflow.primary_action = "final_confirm"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "bagging_result": bagging_result,
+            "output_bundle": output_bundle,
+        }, None
+
+
+def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+        bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
+        if not output_bundle:
+            return None, "output_review_required"
+        if not workflow.draft_id:
+            return None, "saved_sheet_required"
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order.id:
+            return None, "saved_sheet_missing"
+        snapshot_json = {
+            "source": "workflow_v2",
+            "order_id": order.id,
+            "selected_ocr_result_id": workflow.evidence_run_id,
+            "saved_sheet_id": draft.id,
+            "saved_sheet": draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
+            "bagging_result": bagging_result,
+            "output_bundle": output_bundle,
+        }
+        digest = hashlib.sha256(
+            json.dumps(snapshot_json, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        snapshot = OrderConfirmedSnapshot(
+            id=_new_id("OCS"),
+            order_id=order.id,
+            draft_id=draft.id,
+            snapshot_digest=digest,
+            snapshot_json=snapshot_json,
+            confirmed_by=_normalize_id(confirmed_by) or None,
+            confirmed_at=_now(),
+            created_at=_now(),
+        )
+        session.add(snapshot)
+        workflow.confirmed_snapshot_id = snapshot.id
+        workflow.state = "confirmed"
+        workflow.headline = "注文が確定されました"
+        workflow.primary_action = None
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "confirmed_snapshot_id": snapshot.id,
+            "snapshot_digest": digest,
+        }, None
+
+
+def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        ocr_results = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order.id)
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .all()
+        )
+        saved_sheet = None
+        if workflow.draft_id:
+            draft = session.get(OrderSheetDraft, workflow.draft_id)
+            if draft is not None and draft.order_id == order.id:
+                saved_sheet = _serialize_saved_sheet(draft)
+        return {
+            "order_id": order.id,
+            "source": "workflow_v2_inspection",
+            "workflow": _serialize_workflow(workflow),
+            "ocr_results": [
+                _serialize_ocr_result(row, selected=row.id == workflow.evidence_run_id)
+                for row in ocr_results
+            ],
+            "saved_sheet": saved_sheet,
+            "artifact_lineage": {
+                "selected_ocr_result_id": workflow.evidence_run_id,
+                "saved_sheet_id": workflow.draft_id,
+                "confirmed_snapshot_id": workflow.confirmed_snapshot_id,
+                "bagging_result_id": _workflow_meta(workflow).get("bagging_result_id"),
+                "output_bundle_id": _workflow_meta(workflow).get("output_bundle_id"),
+            },
+            "bagging_result": _workflow_meta(workflow).get("bagging_result"),
+            "output_bundle": _workflow_meta(workflow).get("output_bundle"),
+        }, None
