@@ -766,9 +766,25 @@ def _run_reparse_background(
 
 def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
     try:
-        _, error = order_service.rerun_ocr_evidence_only(order_id, job_id=ocr_job_id)
+        evidence, error = order_service.rerun_ocr_evidence_only(
+            order_id,
+            job_id=ocr_job_id,
+            project_sheet=False,
+            refresh_workflow=False,
+        )
         if error:
             logger.warning("OCR evidence-only rerun failed", order_id=order_id, error=error)
+            order_workflow_v2_service.mark_ocr_run_completed(
+                order_id,
+                job_id=ocr_job_id,
+                error=error,
+            )
+            return
+        order_workflow_v2_service.mark_ocr_run_completed(
+            order_id,
+            job_id=ocr_job_id,
+            evidence_run_id=str((evidence or {}).get("id") or "").strip() or None,
+        )
     except BaseException as exc:  # noqa: BLE001
         current_order = order_service.get_order_by_id(order_id)
         retained_lines = bool(current_order.get("lines_updated_at")) if isinstance(current_order, dict) else False
@@ -787,6 +803,14 @@ def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
             )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to update OCR rerun status after crash", order_id=order_id)
+        try:
+            order_workflow_v2_service.mark_ocr_run_completed(
+                order_id,
+                job_id=ocr_job_id,
+                error=f"ocr_rerun_crashed:{exc}",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to update workflow-v2 status after OCR rerun crash", order_id=order_id)
         logger.exception("OCR evidence-only rerun crashed", order_id=order_id, error=str(exc))
 
 

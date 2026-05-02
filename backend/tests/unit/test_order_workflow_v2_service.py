@@ -202,6 +202,38 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
         assert session.get(OrderSheetDraft, saved_sheet_id) is None
 
 
+def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
+
+    completed, error = order_workflow_v2_service.mark_ocr_run_completed(
+        order_id,
+        job_id="OCR-job",
+        evidence_run_id=evidence_id_1,
+    )
+
+    assert error is None
+    assert completed["state"] == "ocr_completed"
+    assert completed["facility_id"] == "FAC00001"
+    assert completed["week_start"] == "2026-04-26"
+    assert completed["week_end"] == "2026-04-30"
+    assert completed["template_id"] == "template-fac00001"
+    assert completed["selected_ocr_result_id"] is None
+    assert completed["saved_sheet_id"] is None
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row.evidence_run_id is None
+        assert row.draft_id is None
+        assert row.secondary_actions_json["workflow_v2"]["latest_ocr_result_id"] == evidence_id_1
+
+
 def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(

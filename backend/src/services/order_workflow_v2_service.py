@@ -211,6 +211,52 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         return _serialize_workflow(workflow), None
 
 
+def mark_ocr_run_completed(
+    order_id: str,
+    *,
+    job_id: str,
+    evidence_run_id: str | None = None,
+    error: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_job_id = _normalize_id(job_id)
+    if not normalized_job_id:
+        return None, "ocr_job_id_required"
+    normalized_evidence_run_id = _normalize_id(evidence_run_id)
+    normalized_error = _normalize_id(error)
+
+    with session_scope() as session:
+        order, order_error = _get_order_or_error(session, order_id)
+        if order_error:
+            return None, order_error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        if not meta.get("facility_id") or not meta.get("week_start") or not meta.get("template_id"):
+            return None, "context_not_confirmed"
+        if normalized_error:
+            workflow.state = "ocr_failed"
+            workflow.headline = "OCR処理に失敗しました。Step1から再実行してください"
+            workflow.primary_action = "run_ocr"
+            workflow.blockers_json = [normalized_error]
+            workflow.warnings_json = []
+        else:
+            workflow.state = "ocr_completed"
+            workflow.headline = "OCR結果が作成されました。正解OCRを一つ選択してください"
+            workflow.primary_action = "select_ocr"
+            workflow.blockers_json = []
+            workflow.warnings_json = []
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        workflow.last_transition_at = _now()
+        meta["ocr_job_id"] = normalized_job_id
+        meta["latest_ocr_result_id"] = normalized_evidence_run_id or None
+        meta["latest_ocr_error"] = normalized_error or None
+        meta["bagging_result_id"] = None
+        meta["output_bundle_id"] = None
+        _write_workflow_meta(workflow, meta)
+        return _serialize_workflow(workflow), None
+
+
 def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[str, Any]:
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}

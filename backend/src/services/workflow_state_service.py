@@ -40,6 +40,7 @@ _WORKFLOW_REFRESH_STACK: ContextVar[tuple[str, ...]] = ContextVar(
 
 
 def _serialize(row: OrderWorkflowState) -> dict[str, Any]:
+    secondary_actions = row.secondary_actions_json
     return {
         "order_id": row.order_id,
         "evidence_run_id": row.evidence_run_id,
@@ -48,7 +49,11 @@ def _serialize(row: OrderWorkflowState) -> dict[str, Any]:
         "state": row.state,
         "headline": row.headline,
         "primary_action": row.primary_action,
-        "secondary_actions_json": list(row.secondary_actions_json or []),
+        "secondary_actions_json": (
+            dict(secondary_actions)
+            if isinstance(secondary_actions, dict)
+            else list(secondary_actions or [])
+        ),
         "blockers_json": list(row.blockers_json or []),
         "warnings_json": list(row.warnings_json or []),
         "confidence_band": row.confidence_band,
@@ -1129,6 +1134,19 @@ def _build_workflow_state_projection(
     evidence_run_id = str((active_evidence_run or {}).get("id") or "").strip() or None
     draft_id = str((draft_sheet or {}).get("id") or "").strip() or None
     confirmed_snapshot_id = _latest_confirmed_snapshot_id(normalized_order_id)
+    stored_secondary_actions: object = secondary_actions
+    if persist:
+        existing_workflow = get_workflow_state(normalized_order_id)
+        existing_secondary = (
+            existing_workflow.get("secondary_actions_json")
+            if isinstance(existing_workflow, dict)
+            else None
+        )
+        if isinstance(existing_secondary, dict) and isinstance(existing_secondary.get("workflow_v2"), dict):
+            stored_secondary_actions = {
+                **existing_secondary,
+                "legacy_actions": secondary_actions,
+            }
     update_payload = {
         "evidence_run_id": evidence_run_id,
         "draft_id": draft_id,
@@ -1136,7 +1154,7 @@ def _build_workflow_state_projection(
         "state": state,
         "headline": headline,
         "primary_action": primary_action,
-        "secondary_actions_json": secondary_actions,
+        "secondary_actions_json": stored_secondary_actions,
         "blockers_json": blockers,
         "warnings_json": warnings,
         "confidence_band": confidence_band,

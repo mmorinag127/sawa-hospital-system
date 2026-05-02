@@ -12075,6 +12075,8 @@ def rerun_ocr_evidence_only(
     order_id: str,
     *,
     job_id: str | None = None,
+    project_sheet: bool = True,
+    refresh_workflow: bool = True,
 ) -> tuple[Optional[dict], Optional[str]]:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -12244,6 +12246,7 @@ def rerun_ocr_evidence_only(
         producer_version="hakodate_best_method_pipeline",
         status=str(output.get("status") or "ready").strip() or "ready",
         source="ocr-rerun-hakodate",
+        refresh_workflow=refresh_workflow,
     )
     if not isinstance(persisted, dict):
         _update_reparse_job_progress(
@@ -12268,8 +12271,37 @@ def rerun_ocr_evidence_only(
         output,
         augment_hakodate_artifacts=False,
         persist_evidence=False,
-        refresh_workflow=False,
+        refresh_workflow=refresh_workflow,
     )
+
+    if not project_sheet:
+        update_job(
+            ocr_job_id,
+            status="done",
+            template_id=output.get("template_id"),
+            output_reference=(
+                ((output.get("hakodate_overlay") or {}).get("uri"))
+                if isinstance(output.get("hakodate_overlay"), dict)
+                else None
+            ),
+            input_reference=document_uri,
+            error_message=None,
+        )
+        _update_reparse_job_progress(
+            ocr_job_id,
+            status="done",
+            processing_stage="evidence_ready",
+            result_state="evidence_ready",
+            error_message=None,
+            metrics_patch={
+                **pipeline_metrics_patch,
+                "evidence_run_id": persisted.get("id"),
+                "new_evidence_available": True,
+                "hakodate_live_pipeline": True,
+                "projected_sheet_blockers": [],
+            },
+        )
+        return persisted, None
 
     current_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
     projected_bundle, projected_error = build_order_hakodate_projected_sheet(
