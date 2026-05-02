@@ -9,6 +9,7 @@ from uuid import uuid4
 from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
+from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
@@ -298,7 +299,12 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+    current_state = session.get(OrderCurrentState, order_id)
+    if current_state is not None:
+        current_state.draft_id = None
+        current_state.evidence_run_id = None
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 

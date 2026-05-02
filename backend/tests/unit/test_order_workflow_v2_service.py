@@ -6,6 +6,7 @@ from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order import OrderLine
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
+from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
@@ -191,6 +192,17 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
+    with session_scope() as session:
+        session.add(
+            OrderCurrentState(
+                order_id=order_id,
+                draft_id=saved_sheet_id,
+                evidence_run_id=evidence_id_1,
+                snapshot_version="v1",
+                state_json={"source": "test-current-state"},
+                updated_at=datetime.utcnow(),
+            )
+        )
 
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
 
@@ -200,6 +212,10 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
     assert queued["saved_sheet_id"] is None
     with session_scope() as session:
         assert session.get(OrderSheetDraft, saved_sheet_id) is None
+        current_state = session.get(OrderCurrentState, order_id)
+        assert current_state is not None
+        assert current_state.draft_id is None
+        assert current_state.evidence_run_id is None
 
 
 def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result() -> None:
