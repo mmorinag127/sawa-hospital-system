@@ -16,6 +16,7 @@ def main() -> int:
     manifest = Path(sys.argv[3])
     items = json.loads(manifest.read_text(encoding="utf-8")).get("results", [])
     local_prefix = str(workspace) + "/"
+    deploy_anchor = Path("tmp/outer_quad_eval_correct_20260426")
 
     for item in items:
         if not isinstance(item, dict):
@@ -33,7 +34,17 @@ def main() -> int:
             if raw.startswith(local_prefix):
                 rel = Path(raw[len(local_prefix):])
             else:
-                rel = src.relative_to(workspace)
+                parts = src.parts
+                anchor_parts = deploy_anchor.parts
+                anchor_index = None
+                for idx in range(0, len(parts) - len(anchor_parts) + 1):
+                    if parts[idx : idx + len(anchor_parts)] == anchor_parts:
+                        anchor_index = idx
+                        break
+                if anchor_index is None:
+                    rel = src.relative_to(workspace)
+                else:
+                    rel = Path(*parts[anchor_index:])
             dst = dest_backend / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
