@@ -46,7 +46,12 @@ mkdir -p \
   "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/preprocess_v10_template_snap_real_orders_20260425_0430/templates" \
   "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427"
 
-MANIFEST="${WORKSPACE_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json"
+MANIFEST="${HAKODATE_DEPLOY_MANIFEST:-${WORKSPACE_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json}"
+if [[ ! -f "$MANIFEST" ]]; then
+  printf 'missing Hakodate deploy manifest: %s\n' "$MANIFEST" >&2
+  printf 'set HAKODATE_DEPLOY_MANIFEST to an explicit manifest path before building this backend image.\n' >&2
+  exit 1
+fi
 rsync -a "$MANIFEST" "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json"
 
 python3 "${SCRIPT_DIR}/materialize_hakodate_deploy_artifacts.py" "$WORKSPACE_DIR" "$DEST_BACKEND_DIR" "$MANIFEST"
