@@ -17,6 +17,7 @@ RUN_LOCAL_REGRESSION="${RUN_LOCAL_REGRESSION:-1}"
 STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-1}"
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-1}"
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}"
+WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO="${OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO:-0.99}"
 OCR_SHEET_GATE_ABS_MAX_QTY="${OCR_SHEET_GATE_ABS_MAX_QTY:-50}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
@@ -122,6 +123,91 @@ if [[ "${LATEST_IMAGE}" != "${IMAGE}" && "${LATEST_IMAGE}" != "${EXPECTED_REPO}@
 fi
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')"
+
+if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
+  echo "[4/9] call worker workflow-v2 APIs"
+  WORKER_WORKFLOW_V2_JSON="$(mktemp)"
+  HTTP_CODE="$(
+    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+      -o "${WORKER_WORKFLOW_V2_JSON}" \
+      -w "%{http_code}" \
+      "${SERVICE_URL}/orders/${ORDER_ID}/workflow-v2"
+  )"
+  if [[ "${HTTP_CODE}" != "200" ]]; then
+    echo "workflow-v2 check failed: status=${HTTP_CODE}"
+    cat "${WORKER_WORKFLOW_V2_JSON}"
+    exit 1
+  fi
+
+  WORKER_INSPECTION_V2_JSON="$(mktemp)"
+  HTTP_CODE="$(
+    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+      -o "${WORKER_INSPECTION_V2_JSON}" \
+      -w "%{http_code}" \
+      "${SERVICE_URL}/orders/${ORDER_ID}/workflow-v2/inspection"
+  )"
+  if [[ "${HTTP_CODE}" != "200" ]]; then
+    echo "workflow-v2 inspection check failed: status=${HTTP_CODE}"
+    cat "${WORKER_INSPECTION_V2_JSON}"
+    exit 1
+  fi
+
+  if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
+    echo "[5/9] verify web proxy workflow-v2 parity"
+    WEB_WORKFLOW_V2_JSON="$(mktemp)"
+    WEB_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WEB_WORKFLOW_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2"
+    )"
+    if [[ "${WEB_CODE}" != "200" ]]; then
+      echo "web proxy workflow-v2 check failed: status=${WEB_CODE}"
+      cat "${WEB_WORKFLOW_V2_JSON}"
+      exit 1
+    fi
+
+    WEB_INSPECTION_V2_JSON="$(mktemp)"
+    WEB_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WEB_INSPECTION_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2/inspection"
+    )"
+    if [[ "${WEB_CODE}" != "200" ]]; then
+      echo "web proxy workflow-v2 inspection check failed: status=${WEB_CODE}"
+      cat "${WEB_INSPECTION_V2_JSON}"
+      exit 1
+    fi
+
+    if ! cmp -s "${WORKER_WORKFLOW_V2_JSON}" "${WEB_WORKFLOW_V2_JSON}"; then
+      echo "worker/web mismatch: workflow-v2 differs"
+      exit 1
+    fi
+    if ! cmp -s "${WORKER_INSPECTION_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"; then
+      echo "worker/web mismatch: workflow-v2 inspection differs"
+      exit 1
+    fi
+    rm -f "${WEB_WORKFLOW_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"
+  fi
+
+  echo "[6/9] run system predeploy checks"
+  WEB_URL="${WEB_URL}" \
+  WORKER_URL="${SERVICE_URL}" \
+  WEB_SERVICE="${WEB_SERVICE}" \
+  WORKER_SERVICE="${SERVICE}" \
+  PROJECT_ID="${PROJECT_ID}" \
+  REGION="${REGION}" \
+  OPERATOR_USER="${OPERATOR_USER}" \
+  OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" \
+  STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY}" \
+  CHECK_WEB_PROXY="${CHECK_WEB_PROXY}" \
+  "${PREDEPLOY_SCRIPT}"
+
+  rm -f "${WORKER_WORKFLOW_V2_JSON}" "${WORKER_INSPECTION_V2_JSON}"
+  echo "deploy verification passed: ${LATEST_REVISION}"
+  exit 0
+fi
 
 echo "[4/9] call worker current-order APIs"
 WORKER_JSON="$(mktemp)"

@@ -355,9 +355,25 @@ tasks:
         ORDER_ID="${ORDER_ID:-}"
         OPERATOR_USER="${OPERATOR_USER}" OPERATOR_PASSWORD="${OPERATOR_PASSWORD}"
         STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
+        WORKFLOW_V2_DEPLOY_CHECK="1"
         ALLOW_BASIC_ONLY_AUTH="1"
         TAG_PREFIX="stg-frontend"
         ./scripts/deploy_web_with_checks.sh
+
+  build_stg_backend:
+    desc: Build the staging backend image from a fresh deploy source and write last_backend_image.txt.
+    cmds:
+      - >-
+        deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh stg-backend)";
+        tag="stg-backend-$(date +%Y%m%d-%H%M%S)";
+        image="asia-northeast2-docker.pkg.dev/{{.STG_PROJECT_ID}}/backend/backend:${tag}";
+        build_config="$(mktemp)";
+        printf "%s\n" "steps:" > "$build_config";
+        printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'" >> "$build_config";
+        printf "%s\n" "    args: ['build', '-t', '${image}', '.']" >> "$build_config";
+        printf "%s\n" "images: ['${image}']" >> "$build_config";
+        gcloud builds submit "$deploy_dir" --project="{{.STG_PROJECT_ID}}" --config="$build_config";
+        echo "$image" | tee last_backend_image.txt
 
   deploy_prod_worker:
     desc: Deploy worker-prod with mandatory regression, OCR sheet quality, and exact-order Step2 parity gates.
@@ -392,6 +408,7 @@ tasks:
         STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-0}"
         STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
         CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}"
+        WORKFLOW_V2_DEPLOY_CHECK="1"
         ALLOW_BASIC_ONLY_AUTH="1"
         ./scripts/deploy_worker_prod_with_checks.sh "$image" "${ORDER_ID}"
 

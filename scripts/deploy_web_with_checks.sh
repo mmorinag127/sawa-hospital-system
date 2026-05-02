@@ -21,6 +21,7 @@ else
   GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-$DEFAULT_GOOGLE_CLIENT_ID}"
 fi
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
+WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 IMAGE_REPO="${IMAGE_REPO:-asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend}"
 TAG_PREFIX="${TAG_PREFIX:-frontend}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
@@ -138,6 +139,74 @@ STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
   "$PREDEPLOY_SCRIPT"
 
 if [[ -n "${ORDER_ID}" ]]; then
+  if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
+    echo "[5/7] verify exact-order workflow-v2 worker/web parity"
+    WORKER_WORKFLOW_V2_JSON="$(mktemp)"
+    WEB_WORKFLOW_V2_JSON="$(mktemp)"
+    WORKER_INSPECTION_V2_JSON="$(mktemp)"
+    WEB_INSPECTION_V2_JSON="$(mktemp)"
+
+    WORKER_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WORKER_WORKFLOW_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WORKER_URL}/orders/${ORDER_ID}/workflow-v2"
+    )"
+    if [[ "${WORKER_CODE}" != "200" ]]; then
+      echo "worker workflow-v2 check failed: status=${WORKER_CODE}"
+      cat "${WORKER_WORKFLOW_V2_JSON}"
+      exit 1
+    fi
+    WEB_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WEB_WORKFLOW_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2"
+    )"
+    if [[ "${WEB_CODE}" != "200" ]]; then
+      echo "web workflow-v2 check failed: status=${WEB_CODE}"
+      cat "${WEB_WORKFLOW_V2_JSON}"
+      exit 1
+    fi
+
+    WORKER_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WORKER_INSPECTION_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WORKER_URL}/orders/${ORDER_ID}/workflow-v2/inspection"
+    )"
+    if [[ "${WORKER_CODE}" != "200" ]]; then
+      echo "worker workflow-v2 inspection check failed: status=${WORKER_CODE}"
+      cat "${WORKER_INSPECTION_V2_JSON}"
+      exit 1
+    fi
+    WEB_CODE="$(
+      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+        -o "${WEB_INSPECTION_V2_JSON}" \
+        -w "%{http_code}" \
+        "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2/inspection"
+    )"
+    if [[ "${WEB_CODE}" != "200" ]]; then
+      echo "web workflow-v2 inspection check failed: status=${WEB_CODE}"
+      cat "${WEB_INSPECTION_V2_JSON}"
+      exit 1
+    fi
+
+    if ! cmp -s "${WORKER_WORKFLOW_V2_JSON}" "${WEB_WORKFLOW_V2_JSON}"; then
+      echo "worker/web mismatch: workflow-v2 differs"
+      exit 1
+    fi
+    if ! cmp -s "${WORKER_INSPECTION_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"; then
+      echo "worker/web mismatch: workflow-v2 inspection differs"
+      exit 1
+    fi
+    rm -f "${WORKER_WORKFLOW_V2_JSON}" "${WEB_WORKFLOW_V2_JSON}" "${WORKER_INSPECTION_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"
+    echo "ok: exact-order workflow-v2 parity"
+    echo "[6/7] done"
+    echo "deploy verification passed: service=${WEB_SERVICE} image=${IMAGE}"
+    exit 0
+  fi
+
   echo "[5/7] verify exact-order worker/web current-state parity"
   OCR_WORKER_JSON="$(mktemp)"
   OCR_WEB_JSON="$(mktemp)"
