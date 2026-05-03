@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
-import TopNav from "../../../components/TopNav";
 import { apiClient } from "../../../services/apiClient";
 
 type WorkflowV2 = {
@@ -175,7 +174,9 @@ export default function OrderInspectionV2Page() {
               処理画面へ戻る
             </Link>
           ) : null}
-          <TopNav />
+          <Link className="ghost-link" href="/orders">
+            注文一覧へ戻る
+          </Link>
         </div>
       </header>
 

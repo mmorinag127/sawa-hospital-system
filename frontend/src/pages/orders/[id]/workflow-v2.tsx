@@ -1583,7 +1583,42 @@ export default function OrderWorkflowV2Page() {
       <section className="panel">
         <p className="step-tag">Read Only Inspection</p>
         <h2>状態と lineage</h2>
-        <pre>{formatJson(inspection || workflow)}</pre>
+        <p className="subtle">現在の workflow state と、この注文に紐づく成果物 ID だけを表示します。詳細確認は確認専用ページを使います。</p>
+        <div className="summary-grid summary-grid--compact lineage-summary">
+          <div className="summary-primary-card">
+            <span>現在状態</span>
+            <p className="summary-value">{stateLabel(workflow?.state)}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span>正解OCR</span>
+            <p className="summary-value">{workflow?.selected_ocr_result_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span>保存シート</span>
+            <p className="summary-value">{workflow?.saved_sheet_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span>袋分け</span>
+            <p className="summary-value">{workflow?.bagging_result_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span>出力</span>
+            <p className="summary-value">{workflow?.output_bundle_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span>確定snapshot</span>
+            <p className="summary-value">{workflow?.confirmed_snapshot_id || "-"}</p>
+          </div>
+        </div>
+        {orderId ? (
+          <Link className="ghost-link lineage-link" href={`/orders/${orderId}/inspection-v2`}>
+            確認専用ページで見る
+          </Link>
+        ) : null}
+        <details className="json-details">
+          <summary>デバッグ用 raw JSON を開く</summary>
+          <pre>{formatJson(inspection || workflow)}</pre>
+        </details>
       </section>
 
       <style jsx>{`
