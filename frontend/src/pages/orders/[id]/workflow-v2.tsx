@@ -119,6 +119,14 @@ type LlmPromptPreset =
   | "merged_cell_quantity_spans"
   | "freeform";
 
+const HAKODATE_REVIEW_CANVAS = {
+  canvasXPadding: 40,
+  pastedImageX: 20,
+  pastedImageYGap: 20,
+  rectifiedCanvasWidth: 2362,
+  rectifiedCanvasHeight: 4273,
+};
+
 type FacilityOption = {
   id: string;
   name: string;
@@ -446,12 +454,77 @@ export default function OrderWorkflowV2Page() {
     return { x: maxX, y: maxY };
   }, [overlayImageSize.naturalHeight, overlayImageSize.naturalWidth, targetCells]);
 
+  const overlayCoordinateTransform = useMemo(() => {
+    if (!overlayImageSize.naturalWidth || !overlayImageSize.naturalHeight) {
+      return null;
+    }
+    const targetCoordinatesExceedReviewCanvas =
+      overlayCoordinateMax.x > overlayImageSize.naturalWidth
+      || overlayCoordinateMax.y > overlayImageSize.naturalHeight;
+    if (!targetCoordinatesExceedReviewCanvas) {
+      return null;
+    }
+    const innerImageWidth = overlayImageSize.naturalWidth - HAKODATE_REVIEW_CANVAS.canvasXPadding;
+    if (innerImageWidth <= 0) {
+      return null;
+    }
+    const rawToReviewScale = innerImageWidth / HAKODATE_REVIEW_CANVAS.rectifiedCanvasWidth;
+    const reviewHeaderHeight = overlayImageSize.naturalHeight - (HAKODATE_REVIEW_CANVAS.rectifiedCanvasHeight * rawToReviewScale);
+    const offsetY = reviewHeaderHeight - HAKODATE_REVIEW_CANVAS.pastedImageYGap;
+    if (!Number.isFinite(rawToReviewScale) || !Number.isFinite(offsetY) || rawToReviewScale <= 0) {
+      return null;
+    }
+    const renderScaleX = overlayImageSize.width / overlayImageSize.naturalWidth;
+    const renderScaleY = overlayImageSize.height / overlayImageSize.naturalHeight;
+    return {
+      offsetX: HAKODATE_REVIEW_CANVAS.pastedImageX,
+      offsetY,
+      rawToReviewScale,
+      renderScaleX,
+      renderScaleY,
+    };
+  }, [
+    overlayCoordinateMax.x,
+    overlayCoordinateMax.y,
+    overlayImageSize.height,
+    overlayImageSize.naturalHeight,
+    overlayImageSize.naturalWidth,
+    overlayImageSize.width,
+  ]);
+
   const resolveTargetOverlayBox = (item: TargetCellMapItem | null | undefined): OverlayBox | null => {
     const bbox = item?.bbox;
     if (!bbox || bbox.length !== 4 || !overlayImageSize.width || !overlayImageSize.height) return null;
     const center = Array.isArray(item?.center) && item.center.length >= 2 ? item.center : null;
     const values = [...bbox, ...(center || [])];
     const normalized = values.every((value) => value >= -0.02 && value <= 1.2);
+    if (!normalized && overlayCoordinateTransform) {
+      const mapX = (value: number) => (
+        (overlayCoordinateTransform.offsetX + value * overlayCoordinateTransform.rawToReviewScale)
+        * overlayCoordinateTransform.renderScaleX
+      );
+      const mapY = (value: number) => (
+        (overlayCoordinateTransform.offsetY + value * overlayCoordinateTransform.rawToReviewScale)
+        * overlayCoordinateTransform.renderScaleY
+      );
+      const left = mapX(bbox[0]);
+      const top = mapY(bbox[1]);
+      const right = mapX(bbox[2]);
+      const bottom = mapY(bbox[3]);
+      const width = Math.max(right - left, 1);
+      const height = Math.max(bottom - top, 1);
+      if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) {
+        return null;
+      }
+      return {
+        left,
+        top,
+        width,
+        height,
+        centerLeft: center ? mapX(center[0]) : left + width / 2,
+        centerTop: center ? mapY(center[1]) : top + height / 2,
+      };
+    }
     const coordinateWidth = overlayCoordinateMax.x || overlayImageSize.naturalWidth || 1;
     const coordinateHeight = overlayCoordinateMax.y || overlayImageSize.naturalHeight || 1;
     const scaleX = normalized ? overlayImageSize.width : overlayImageSize.width / coordinateWidth;
@@ -1407,7 +1480,7 @@ export default function OrderWorkflowV2Page() {
                   <table className="sheet-table compact-sheet-table">
                     <thead>
                       <tr>
-                        <th>#</th>
+                        <th className="sheet-row-index-col">#</th>
                         {sheetPayload.header.map((label, colIdx) => (
                           <th
                             key={`${sheetPayload.fields[colIdx] || "col"}-${colIdx}`}
@@ -1425,7 +1498,7 @@ export default function OrderWorkflowV2Page() {
                     <tbody>
                       {sheetPayload.rows.map((row, rowIdx) => (
                         <tr key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
-                          <th>{rowIdx + 1}</th>
+                          <th className="sheet-row-index-col">{rowIdx + 1}</th>
                           {sheetPayload.fields.map((field, colIdx) => {
                             const confidenceTier = String(sheetPayload.cell_confidence_rows?.[rowIdx]?.[colIdx] || "").trim();
                             const belowThreshold = confidenceTier && !confidenceTierVisible(confidenceTier, ocrConfidenceDisplayMode);
@@ -2034,6 +2107,11 @@ export default function OrderWorkflowV2Page() {
           min-width: 34px;
           position: sticky;
           z-index: 2;
+        }
+        .sheet-table .sheet-row-index-col {
+          max-width: 34px;
+          min-width: 34px;
+          width: 34px;
         }
         .sheet-table tbody th {
           top: auto;
