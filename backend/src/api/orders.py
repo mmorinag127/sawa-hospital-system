@@ -98,6 +98,12 @@ class WorkflowV2ContextConfirmBody(BaseModel):
 class WorkflowV2OcrRunBody(BaseModel):
     stale_action: str | None = None
     force: bool = False
+    mode: str | None = None
+    ocr_prompt: str | None = None
+    prompt_preset: str | None = None
+    ocr_provider: str | None = None
+    ocr_model: str | None = None
+    llm_assist: bool | None = None
 
 
 class WorkflowV2SheetSaveBody(BaseModel):
@@ -765,6 +771,7 @@ def _run_reparse_background(
 
 
 def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
+    started_at = datetime.utcnow()
     try:
         evidence, error = order_service.rerun_ocr_evidence_only(
             order_id,
@@ -774,32 +781,63 @@ def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
         )
         if error:
             logger.warning("OCR evidence-only rerun failed", order_id=order_id, error=error)
+            finished_at = datetime.utcnow()
+            existing_job = get_ocr_job(ocr_job_id) or {}
+            metrics = dict(existing_job.get("metrics") or {})
+            metrics.update(
+                {
+                    "ocr_started_at": started_at.isoformat(),
+                    "ocr_finished_at": finished_at.isoformat(),
+                    "ocr_elapsed_seconds": round((finished_at - started_at).total_seconds(), 3),
+                }
+            )
+            update_ocr_job(ocr_job_id, metrics=metrics)
             order_workflow_v2_service.mark_ocr_run_completed(
                 order_id,
                 job_id=ocr_job_id,
                 error=error,
             )
             return
+        finished_at = datetime.utcnow()
+        existing_job = get_ocr_job(ocr_job_id) or {}
+        metrics = dict(existing_job.get("metrics") or {})
+        metrics.update(
+            {
+                "ocr_started_at": started_at.isoformat(),
+                "ocr_finished_at": finished_at.isoformat(),
+                "ocr_elapsed_seconds": round((finished_at - started_at).total_seconds(), 3),
+            }
+        )
+        update_ocr_job(ocr_job_id, metrics=metrics)
         order_workflow_v2_service.mark_ocr_run_completed(
             order_id,
             job_id=ocr_job_id,
             evidence_run_id=str((evidence or {}).get("id") or "").strip() or None,
         )
     except BaseException as exc:  # noqa: BLE001
+        finished_at = datetime.utcnow()
         current_order = order_service.get_order_by_id(order_id)
         retained_lines = bool(current_order.get("lines_updated_at")) if isinstance(current_order, dict) else False
+        existing_job = get_ocr_job(ocr_job_id) or {}
+        metrics = dict(existing_job.get("metrics") or {})
+        metrics.update(
+            {
+                "error": str(exc),
+                "request_mode": "ocr_rerun",
+                "processing_stage": "crashed",
+                "result_state": "hard_failed",
+                "confirmed_lines_retained": retained_lines,
+                "ocr_started_at": started_at.isoformat(),
+                "ocr_finished_at": finished_at.isoformat(),
+                "ocr_elapsed_seconds": round((finished_at - started_at).total_seconds(), 3),
+            }
+        )
         try:
             update_ocr_job(
                 ocr_job_id,
                 status="failed",
                 error_message=f"ocr_rerun_crashed:{exc}",
-                metrics={
-                    "error": str(exc),
-                    "request_mode": "ocr_rerun",
-                    "processing_stage": "crashed",
-                    "result_state": "hard_failed",
-                    "confirmed_lines_retained": retained_lines,
-                },
+                metrics=metrics,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to update OCR rerun status after crash", order_id=order_id)
@@ -868,6 +906,7 @@ def _enqueue_order_evidence_rerun(
         )
 
     input_reference = str(order.get("document") or "")
+    run_requested_at = datetime.utcnow().isoformat()
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
@@ -1616,6 +1655,9 @@ def _enqueue_workflow_v2_evidence_rerun(
             "confirmed_lines_retained": bool(order.get("lines_updated_at")),
             "request_mode": "ocr_rerun",
             "status": "running",
+            "ocr_started_at": run_requested_at,
+            "ocr_finished_at": None,
+            "ocr_elapsed_seconds": None,
         },
     )
     queued_workflow = _workflow_v2_or_404(order_workflow_v2_service.mark_ocr_run_queued(order_id, ocr_job_id))
@@ -1649,6 +1691,24 @@ def confirm_order_workflow_v2_context(order_id: str, body: WorkflowV2ContextConf
 def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, body: WorkflowV2OcrRunBody | None = None):
     stale_action = str((body.stale_action if body else None) or "retry").strip().lower()
     force = bool(body.force) if body else False
+    mode = str((body.mode if body else None) or "hakodate").strip().lower()
+    if mode == "llm":
+        result = _enqueue_order_reparse_job(
+            order_id,
+            background_tasks,
+            ocr_prompt=(body.ocr_prompt.strip() if body and isinstance(body.ocr_prompt, str) and body.ocr_prompt.strip() else None),
+            prompt_preset=(body.prompt_preset.strip().lower() if body and isinstance(body.prompt_preset, str) and body.prompt_preset.strip() else None),
+            ocr_provider=(body.ocr_provider.strip().lower() if body and isinstance(body.ocr_provider, str) and body.ocr_provider.strip() else None),
+            ocr_model=(body.ocr_model.strip() if body and isinstance(body.ocr_model, str) and body.ocr_model.strip() else None),
+            llm_assist=True if body is None or body.llm_assist is None else bool(body.llm_assist),
+            force=force,
+            stale_action=stale_action,
+            request_mode="llm_reparse",
+        )
+        queued_workflow = _workflow_v2_or_404(order_workflow_v2_service.mark_ocr_run_queued(order_id, result.get("ocr_job_id")))
+        result["workflow"] = queued_workflow
+        result["mode"] = "llm_reparse"
+        return result
     return _enqueue_workflow_v2_evidence_rerun(
         order_id,
         background_tasks,

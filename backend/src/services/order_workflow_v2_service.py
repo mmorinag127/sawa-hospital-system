@@ -62,6 +62,27 @@ def _serialize_datetime(value: object) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _coerce_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_order_service_module() -> Any:
     from src.services import order_service  # noqa: PLC0415
 
@@ -71,15 +92,23 @@ def _get_order_service_module() -> Any:
 def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     if job is None:
         return None
-    elapsed_seconds = None
-    if isinstance(job.created_at, datetime) and isinstance(job.updated_at, datetime):
-        elapsed_seconds = max((job.updated_at - job.created_at).total_seconds(), 0.0)
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    elapsed_seconds = _coerce_float(metrics.get("ocr_elapsed_seconds") or metrics.get("elapsed_seconds"))
+    started_at = _coerce_datetime(metrics.get("ocr_started_at") or metrics.get("run_started_at"))
+    finished_at = _coerce_datetime(
+        metrics.get("ocr_finished_at")
+        or metrics.get("run_finished_at")
+        or (metrics.get("stage_updated_at") if job.status in {"done", "failed"} else None)
+    )
+    if elapsed_seconds is None and isinstance(started_at, datetime) and isinstance(finished_at, datetime):
+        elapsed_seconds = max((finished_at - started_at).total_seconds(), 0.0)
     return {
         "ocr_job_id": job.id,
         "status": job.status,
         "created_at": _serialize_datetime(job.created_at),
         "updated_at": _serialize_datetime(job.updated_at),
+        "started_at": _serialize_datetime(started_at),
+        "finished_at": _serialize_datetime(finished_at),
         "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
         "processing_stage": metrics.get("processing_stage"),
         "result_state": metrics.get("result_state"),
@@ -312,6 +341,48 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "overlay_message": None if overlay_url else "このOCR結果には表示可能なoverlay成果物がありません。",
         "created_at": _serialize_datetime(row.created_at),
     }
+
+
+def _compact_target_cell_map_for_sheet(
+    *,
+    target_cells: list[Any],
+    fields: list[str],
+    row_count: int,
+) -> list[dict[str, Any]]:
+    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields) if str(field or "").strip()}
+    compact: list[dict[str, Any]] = []
+    for target in target_cells:
+        if not isinstance(target, dict):
+            continue
+        metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
+        field = str(
+            truth.get("field")
+            or target.get("field")
+            or target.get("semantic_field")
+            or ""
+        ).strip()
+        col_index = field_index.get(field)
+        try:
+            row_index = int(truth.get("row_index"))
+        except (TypeError, ValueError):
+            row_index = -1
+        bbox = target.get("bbox") if isinstance(target.get("bbox"), list) else None
+        center = target.get("center") if isinstance(target.get("center"), list) else None
+        if row_index < 0 or row_index >= row_count or col_index is None or not bbox or len(bbox) != 4:
+            continue
+        compact.append(
+            {
+                "target_row_index": row_index,
+                "target_col_index": col_index,
+                "field": field,
+                "sheet_cell": target.get("sheet_cell") or target.get("target_cell_id"),
+                "target_cell_id": target.get("target_cell_id"),
+                "bbox": [float(value) for value in bbox],
+                "center": [float(value) for value in center[:2]] if center and len(center) >= 2 else None,
+            }
+        )
+    return compact
 
 
 def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -674,10 +745,17 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     projected["base_evidence_run_id"] = selected_ocr_result_id
     projected["selected_ocr_result_id"] = selected_ocr_result_id
     projected["template_id"] = template_id or projected.get("template_id")
+    target_cell_map = _compact_target_cell_map_for_sheet(
+        target_cells=list(assignment.get("target_cells") or []),
+        fields=[str(field or "").strip() for field in (projected.get("fields") or [])],
+        row_count=len(projected.get("rows") or []),
+    )
+    projected["target_cell_map"] = target_cell_map
     return {
         "order_id": order_id,
         "selected_ocr_result_id": selected_ocr_result_id,
         "sheet": projected,
+        "target_cell_map": target_cell_map,
         "assignment_summary": assignment.get("metrics") if isinstance(assignment.get("metrics"), dict) else {},
         "blockers": list(projected.get("blockers") or []),
         "warnings": list(projected.get("warnings") or []),

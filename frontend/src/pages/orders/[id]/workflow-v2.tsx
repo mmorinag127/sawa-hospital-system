@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
@@ -31,6 +31,8 @@ type WorkflowV2 = {
     status?: string | null;
     created_at?: string | null;
     updated_at?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
     elapsed_seconds?: number | null;
     processing_stage?: string | null;
     result_state?: string | null;
@@ -57,6 +59,8 @@ type InspectionPayload = {
     saved_sheet_id: string;
     source_ocr_result_id?: string | null;
     sheet?: Record<string, unknown>;
+    edited_at?: string | null;
+    created_at?: string | null;
   } | null;
   artifact_lineage?: Record<string, unknown>;
   bagging_result?: Record<string, unknown> | null;
@@ -68,8 +72,43 @@ type SheetPayload = {
   header: string[];
   rows: string[][];
   row_ids?: string[];
+  cell_confidence_rows?: string[][];
+  cell_provenance_rows?: string[][];
+  ocr_numeric_cell_items?: OcrNumericCellItem[];
+  ocr_numeric_cell_summary?: Record<string, unknown>;
+  target_cell_map?: TargetCellMapItem[];
   [key: string]: unknown;
 };
+
+type OcrNumericCellItem = {
+  classification?: string | null;
+  value?: string | null;
+  confidence_tier?: string | null;
+  target_row_index?: number | null;
+  target_col_index?: number | null;
+  placement_basis?: string | null;
+};
+
+type TargetCellMapItem = {
+  target_row_index: number;
+  target_col_index: number;
+  field?: string | null;
+  sheet_cell?: string | null;
+  target_cell_id?: string | null;
+  bbox?: number[] | null;
+  center?: number[] | null;
+};
+
+type ConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
+type Step3LayoutMode = "side-by-side" | "stacked";
+type OcrRunMode = "hakodate" | "llm";
+type LlmPromptPreset =
+  | "numeric_verification"
+  | "column_missing"
+  | "row_alignment"
+  | "special_diet_semantics"
+  | "merged_cell_quantity_spans"
+  | "freeform";
 
 type FacilityOption = {
   id: string;
@@ -140,6 +179,25 @@ const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
     fields,
     header,
     rows: rows.map((row) => Array.from({ length: width }, (_, idx) => String(row[idx] ?? ""))),
+    cell_confidence_rows: Array.isArray(raw.cell_confidence_rows)
+      ? raw.cell_confidence_rows
+          .filter((row): row is unknown[] => Array.isArray(row))
+          .map((row) => Array.from({ length: width }, (_, idx) => String(row[idx] ?? "")))
+      : undefined,
+    cell_provenance_rows: Array.isArray(raw.cell_provenance_rows)
+      ? raw.cell_provenance_rows
+          .filter((row): row is unknown[] => Array.isArray(row))
+          .map((row) => Array.from({ length: width }, (_, idx) => String(row[idx] ?? "")))
+      : undefined,
+    ocr_numeric_cell_items: Array.isArray(raw.ocr_numeric_cell_items)
+      ? raw.ocr_numeric_cell_items.filter((item): item is OcrNumericCellItem => Boolean(item && typeof item === "object"))
+      : undefined,
+    ocr_numeric_cell_summary: raw.ocr_numeric_cell_summary && typeof raw.ocr_numeric_cell_summary === "object"
+      ? raw.ocr_numeric_cell_summary as Record<string, unknown>
+      : undefined,
+    target_cell_map: Array.isArray(raw.target_cell_map)
+      ? raw.target_cell_map.filter((item): item is TargetCellMapItem => Boolean(item && typeof item === "object"))
+      : undefined,
   };
 };
 
@@ -213,6 +271,33 @@ const formatDateTime = (value?: string | null) => {
   });
 };
 
+const confidenceTierVisible = (tier: string | null | undefined, mode: ConfidenceDisplayMode) => {
+  const normalized = String(tier || "").trim().toLowerCase();
+  if (!normalized) return true;
+  if (mode === "suggestion") return ["high", "medium", "low"].includes(normalized);
+  if (mode === "assisted") return ["high", "medium"].includes(normalized);
+  return normalized === "high";
+};
+
+const classificationVisible = (classification: string | null | undefined, mode: ConfidenceDisplayMode) => {
+  const normalized = String(classification || "").trim().toLowerCase();
+  if (!normalized || normalized === "accepted") return true;
+  if (mode === "suggestion") return ["deterministic_candidate", "weak_candidate"].includes(normalized);
+  if (mode === "assisted") return normalized === "deterministic_candidate";
+  return false;
+};
+
+const isLockedSheetField = (field: string) => ["date_mmdd", "date", "daypart", "menu", "menu_name"].includes(String(field || "").trim());
+
+const llmPromptPresetLabels: Record<LlmPromptPreset, string> = {
+  numeric_verification: "数字検証優先",
+  column_missing: "列欠損・見切れ補完",
+  row_alignment: "行ずれ・区分ずれ補正",
+  special_diet_semantics: "特殊食・禁食優先",
+  merged_cell_quantity_spans: "結合セルまたがり数量",
+  freeform: "自由入力中心",
+};
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -237,6 +322,21 @@ export default function OrderWorkflowV2Page() {
   const [busy, setBusy] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
+  const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
+  const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
+  const [columnFillTarget, setColumnFillTarget] = useState<string>("");
+  const [columnFillValue, setColumnFillValue] = useState<string>("");
+  const [swapLeftColumn, setSwapLeftColumn] = useState<string>("");
+  const [swapRightColumn, setSwapRightColumn] = useState<string>("");
+  const [ocrRunMode, setOcrRunMode] = useState<OcrRunMode>("hakodate");
+  const [llmProvider, setLlmProvider] = useState<string>("openai");
+  const [llmPromptPreset, setLlmPromptPreset] = useState<LlmPromptPreset>("numeric_verification");
+  const [llmModelMode, setLlmModelMode] = useState<"flash" | "pro" | "other">("flash");
+  const [llmCustomModel, setLlmCustomModel] = useState<string>("");
+  const [ocrPrompt, setOcrPrompt] = useState<string>("");
+  const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
+  const overlayImageRef = useRef<HTMLImageElement | null>(null);
 
   const selectedOcr = useMemo(
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
@@ -249,6 +349,51 @@ export default function OrderWorkflowV2Page() {
   );
 
   const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+
+  const quantityColumnOptions = useMemo(() => {
+    if (!sheetPayload) return [];
+    return sheetPayload.fields
+      .map((field, idx) => ({ field, idx, label: sheetPayload.header[idx] || field }))
+      .filter((item) => !isLockedSheetField(item.field));
+  }, [sheetPayload]);
+
+  const ocrOverlayItemMap = useMemo(() => {
+    const map = new Map<string, OcrNumericCellItem>();
+    for (const item of sheetPayload?.ocr_numeric_cell_items || []) {
+      if (typeof item.target_row_index !== "number" || typeof item.target_col_index !== "number") continue;
+      if (!classificationVisible(item.classification, ocrConfidenceDisplayMode)) continue;
+      map.set(`${item.target_row_index}:${item.target_col_index}`, item);
+    }
+    return map;
+  }, [ocrConfidenceDisplayMode, sheetPayload]);
+
+  const targetCellMap = useMemo(() => {
+    const map = new Map<string, TargetCellMapItem>();
+    for (const item of sheetPayload?.target_cell_map || []) {
+      if (typeof item.target_row_index !== "number" || typeof item.target_col_index !== "number") continue;
+      map.set(`${item.target_row_index}:${item.target_col_index}`, item);
+    }
+    return map;
+  }, [sheetPayload]);
+
+  const focusedTargetCell = focusedSheetCell
+    ? targetCellMap.get(`${focusedSheetCell.rowIndex}:${focusedSheetCell.colIndex}`) || null
+    : null;
+
+  const overlayScale = overlayImageSize.naturalWidth > 0 && overlayImageSize.naturalHeight > 0
+    ? {
+        x: overlayImageSize.width / overlayImageSize.naturalWidth,
+        y: overlayImageSize.height / overlayImageSize.naturalHeight,
+      }
+    : { x: 0, y: 0 };
+
+  const resolvedLlmModel = llmProvider === "gemini"
+    ? llmModelMode === "pro"
+      ? "gemini-1.5-pro"
+      : llmModelMode === "other"
+        ? llmCustomModel.trim()
+        : "gemini-1.5-flash"
+    : "";
 
   const applyWeekValue = (value: string) => {
     const range = weekRangeFromValue(value);
@@ -445,12 +590,27 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step1 OCR run",
       async () => {
-        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+        const payload: Record<string, unknown> = {
           stale_action: "retry",
+          mode: ocrRunMode,
+        };
+        if (ocrRunMode === "llm") {
+          payload.llm_assist = true;
+          payload.prompt_preset = llmPromptPreset;
+          payload.ocr_provider = llmProvider;
+          if (resolvedLlmModel) {
+            payload.ocr_model = resolvedLlmModel;
+          }
+          if (ocrPrompt.trim()) {
+            payload.ocr_prompt = ocrPrompt.trim();
+          }
+        }
+        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+          ...payload,
         });
       },
       {
-        successMessage: "Step1 OCR run が開始しました",
+        successMessage: ocrRunMode === "llm" ? "Step1 LLM OCR run が開始しました" : "Step1 OCR run が開始しました",
         nextStep: 2,
       },
     );
@@ -488,6 +648,55 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
+  const fillQuantityColumn = () => {
+    const colIndex = Number(columnFillTarget);
+    if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => row.map((cell, idx) => (idx === colIndex ? columnFillValue : cell)));
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+  };
+
+  const swapQuantityColumns = () => {
+    const left = Number(swapLeftColumn);
+    const right = Number(swapRightColumn);
+    if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => {
+        const next = [...row];
+        const temp = next[left] || "";
+        next[left] = next[right] || "";
+        next[right] = temp;
+        return next;
+      });
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+  };
+
+  const applyVisibleOcrSuggestions = () => {
+    if (!sheetPayload || !ocrOverlayItemMap.size) return;
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row, rowIdx) =>
+        row.map((cell, colIdx) => {
+          if (String(cell || "").trim()) return cell;
+          const item = ocrOverlayItemMap.get(`${rowIdx}:${colIdx}`);
+          const value = String(item?.value || "").trim();
+          return value || cell;
+        }),
+      );
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+  };
+
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
       const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
@@ -498,6 +707,9 @@ export default function OrderWorkflowV2Page() {
         sheet: parsed,
         edited_by: "operator",
       });
+    }, {
+      successMessage: "シートを保存しました",
+      nextStep: 4,
     });
 
   const runBagging = () =>
@@ -605,8 +817,12 @@ export default function OrderWorkflowV2Page() {
           <div className="summary-primary-card">
             <span className="field-label">OCR開始/更新</span>
             <p className="summary-value">
-              {formatDateTime(workflow?.ocr_job?.created_at)} / {formatDateTime(workflow?.ocr_job?.updated_at)}
+              {formatDateTime(workflow?.ocr_job?.started_at)} / {formatDateTime(workflow?.ocr_job?.finished_at || workflow?.ocr_job?.updated_at)}
             </p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">シート最終保存</span>
+            <p className="summary-value">{formatDateTime(inspection?.saved_sheet?.edited_at || inspection?.saved_sheet?.created_at)}</p>
           </div>
         </div>
       </section>
@@ -742,11 +958,72 @@ export default function OrderWorkflowV2Page() {
               <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady)}>
                 {contextReady ? "設定を保存" : "施設と週を選択"}
               </button>
+              <div className="ocr-run-options">
+                <label className="toolbar-field">
+                  <span>OCR実行方式</span>
+                  <select value={ocrRunMode} onChange={(event) => setOcrRunMode(event.target.value as OcrRunMode)} disabled={Boolean(busy)}>
+                    <option value="hakodate">箱館方式</option>
+                    <option value="llm">AIに任せる</option>
+                  </select>
+                </label>
+                {ocrRunMode === "llm" ? (
+                  <>
+                    <label className="toolbar-field">
+                      <span>自動調整プリセット</span>
+                      <select value={llmPromptPreset} onChange={(event) => setLlmPromptPreset(event.target.value as LlmPromptPreset)} disabled={Boolean(busy)}>
+                        {(Object.keys(llmPromptPresetLabels) as LlmPromptPreset[]).map((preset) => (
+                          <option key={preset} value={preset}>{llmPromptPresetLabels[preset]}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="toolbar-field">
+                      <span>AI provider</span>
+                      <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)} disabled={Boolean(busy)}>
+                        <option value="openai">OpenAI</option>
+                        <option value="gemini">Gemini</option>
+                      </select>
+                    </label>
+                    {llmProvider === "gemini" ? (
+                      <label className="toolbar-field">
+                        <span>Gemini model</span>
+                        <select value={llmModelMode} onChange={(event) => setLlmModelMode(event.target.value as "flash" | "pro" | "other")} disabled={Boolean(busy)}>
+                          <option value="flash">Flash</option>
+                          <option value="pro">Pro</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {llmProvider === "gemini" && llmModelMode === "other" ? (
+                      <input
+                        className="compact-input llm-model-input"
+                        value={llmCustomModel}
+                        onChange={(event) => setLlmCustomModel(event.target.value)}
+                        placeholder="gemini model"
+                      />
+                    ) : null}
+                    <details className="inline-details">
+                      <summary>LLM追加指示（任意）</summary>
+                      <textarea
+                        className="ocr-llm-prompt-textarea"
+                        value={ocrPrompt}
+                        onChange={(event) => setOcrPrompt(event.target.value)}
+                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                      />
+                    </details>
+                  </>
+                ) : null}
+              </div>
               <button
                 className="btn"
                 type="button"
                 onClick={runOcr}
-                disabled={Boolean(busy || !workflow?.facility_id || !workflow?.week_start || !workflow?.week_end)}
+                disabled={Boolean(
+                  busy
+                  || !workflow?.facility_id
+                  || !workflow?.week_start
+                  || !workflow?.week_end
+                  || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
+                )}
               >
                 OCRを実行
               </button>
@@ -828,10 +1105,10 @@ export default function OrderWorkflowV2Page() {
         ) : null}
 
         {visibleStep === 3 ? (
-        <section className="panel">
+        <section className="panel step3-panel">
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
-          <div className="row-actions">
+          <div className="row-actions step3-top-actions">
             <button
               className="btn"
               type="button"
@@ -841,36 +1118,190 @@ export default function OrderWorkflowV2Page() {
               選択OCRからシート生成
             </button>
             <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
-              シートを保存
+              {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
+            </button>
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => setStep3LayoutMode((current) => (current === "side-by-side" ? "stacked" : "side-by-side"))}
+            >
+              {step3LayoutMode === "side-by-side" ? "上下表示に切替" : "左右表示に切替"}
             </button>
           </div>
           {sheetPayload ? (
-            <div className="sheet-table-wrap">
-              <table className="sheet-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    {sheetPayload.header.map((label, colIdx) => (
-                      <th key={`${sheetPayload.fields[colIdx] || "col"}-${colIdx}`}>{label || sheetPayload.fields[colIdx]}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {sheetPayload.rows.map((row, rowIdx) => (
-                    <tr key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
-                      <th>{rowIdx + 1}</th>
-                      {sheetPayload.fields.map((field, colIdx) => (
-                        <td key={`${field}-${colIdx}`}>
-                          <input
-                            value={row[colIdx] || ""}
-                            onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
+            <div className={`step3-workspace ${step3LayoutMode}`}>
+              <div className="step3-overlay-pane">
+                <div className="preview-header">
+                  <div>
+                    <span className="field-label">OCR Overlay</span>
+                    <p className="subtle">現在セルに対応する行・列をoverlay上に表示します。</p>
+                  </div>
+                  {selectedOcr?.overlay_url ? (
+                    <a className="ghost-link" href={selectedOcr.overlay_url} target="_blank" rel="noreferrer">
+                      別タブで開く
+                    </a>
+                  ) : null}
+                </div>
+                <div className="step3-overlay-canvas">
+                  {selectedOcr?.overlay_url ? (
+                    <>
+                      <img
+                        ref={overlayImageRef}
+                        className="step3-overlay-image"
+                        src={selectedOcr.overlay_url}
+                        alt={`${selectedOcr.ocr_result_id} overlay`}
+                        onLoad={(event) => {
+                          const image = event.currentTarget;
+                          setOverlayImageSize({
+                            naturalWidth: image.naturalWidth,
+                            naturalHeight: image.naturalHeight,
+                            width: image.clientWidth,
+                            height: image.clientHeight,
+                          });
+                        }}
+                      />
+                      {focusedTargetCell?.bbox && overlayScale.x > 0 && overlayScale.y > 0 ? (
+                        <>
+                          <span
+                            className="overlay-row-highlight"
+                            style={{
+                              top: `${focusedTargetCell.bbox[1] * overlayScale.y}px`,
+                              height: `${Math.max(6, (focusedTargetCell.bbox[3] - focusedTargetCell.bbox[1]) * overlayScale.y)}px`,
+                            }}
                           />
-                        </td>
+                          <span
+                            className="overlay-col-highlight"
+                            style={{
+                              left: `${focusedTargetCell.bbox[0] * overlayScale.x}px`,
+                              width: `${Math.max(6, (focusedTargetCell.bbox[2] - focusedTargetCell.bbox[0]) * overlayScale.x)}px`,
+                            }}
+                          />
+                          <span
+                            className="overlay-cell-highlight"
+                            style={{
+                              left: `${focusedTargetCell.bbox[0] * overlayScale.x}px`,
+                              top: `${focusedTargetCell.bbox[1] * overlayScale.y}px`,
+                              width: `${Math.max(6, (focusedTargetCell.bbox[2] - focusedTargetCell.bbox[0]) * overlayScale.x)}px`,
+                              height: `${Math.max(6, (focusedTargetCell.bbox[3] - focusedTargetCell.bbox[1]) * overlayScale.y)}px`,
+                            }}
+                          />
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="preview-placeholder">{selectedOcr?.overlay_message || "overlay成果物がありません。"}</div>
+                  )}
+                </div>
+              </div>
+              <div className="step3-sheet-pane">
+                <div className="sheet-toolbar">
+                  <div className="toolbar-row">
+                    <button className="btn ghost" type="button" onClick={applyVisibleOcrSuggestions} disabled={!ocrOverlayItemMap.size || Boolean(busy)}>
+                      表示中提案を採用
+                    </button>
+                    <label className="toolbar-field">
+                      <span>OCR信頼度表示</span>
+                      <select value={ocrConfidenceDisplayMode} onChange={(event) => setOcrConfidenceDisplayMode(event.target.value as ConfidenceDisplayMode)}>
+                        <option value="strict">厳格表示</option>
+                        <option value="assisted">補助表示</option>
+                        <option value="suggestion">提案表示</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="toolbar-row">
+                    <label className="toolbar-field">
+                      <span>入替元数量列</span>
+                      <select value={swapLeftColumn} onChange={(event) => setSwapLeftColumn(event.target.value)}>
+                        <option value="">数量列</option>
+                        {quantityColumnOptions.map((option) => (
+                          <option key={`swap-left-${option.idx}`} value={option.idx}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="toolbar-field">
+                      <span>入替先数量列</span>
+                      <select value={swapRightColumn} onChange={(event) => setSwapRightColumn(event.target.value)}>
+                        <option value="">数量列</option>
+                        {quantityColumnOptions.map((option) => (
+                          <option key={`swap-right-${option.idx}`} value={option.idx}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <button className="btn ghost" type="button" onClick={swapQuantityColumns} disabled={!swapLeftColumn || !swapRightColumn || Boolean(busy)}>
+                      数量列を入替
+                    </button>
+                    <label className="toolbar-field">
+                      <span>数量列一括入力</span>
+                      <select value={columnFillTarget} onChange={(event) => setColumnFillTarget(event.target.value)}>
+                        <option value="">数量列</option>
+                        {quantityColumnOptions.map((option) => (
+                          <option key={`fill-${option.idx}`} value={option.idx}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <input className="compact-input" value={columnFillValue} onChange={(event) => setColumnFillValue(event.target.value)} placeholder="数字" />
+                    <button className="btn ghost" type="button" onClick={fillQuantityColumn} disabled={!columnFillTarget || !columnFillValue.trim() || Boolean(busy)}>
+                      列全体へ入力
+                    </button>
+                  </div>
+                  <p className="subtle">
+                    raw {Number(sheetPayload.ocr_numeric_cell_summary?.raw_ocr_numeric_count || 0)} / accepted {Number(sheetPayload.ocr_numeric_cell_summary?.accepted_count || 0)} / deterministic {Number(sheetPayload.ocr_numeric_cell_summary?.deterministic_candidate_count || 0)} / weak {Number(sheetPayload.ocr_numeric_cell_summary?.weak_candidate_count || 0)}
+                  </p>
+                </div>
+                <div className="sheet-table-wrap">
+                  <table className="sheet-table compact-sheet-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        {sheetPayload.header.map((label, colIdx) => (
+                          <th
+                            key={`${sheetPayload.fields[colIdx] || "col"}-${colIdx}`}
+                            className={isLockedSheetField(sheetPayload.fields[colIdx]) ? "sticky-structural-col" : ""}
+                            style={isLockedSheetField(sheetPayload.fields[colIdx]) ? { left: `${42 + Math.min(colIdx, 2) * 98}px` } : undefined}
+                          >
+                            {label || sheetPayload.fields[colIdx]}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sheetPayload.rows.map((row, rowIdx) => (
+                        <tr key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
+                          <th>{rowIdx + 1}</th>
+                          {sheetPayload.fields.map((field, colIdx) => {
+                            const confidenceTier = String(sheetPayload.cell_confidence_rows?.[rowIdx]?.[colIdx] || "").trim();
+                            const belowThreshold = confidenceTier && !confidenceTierVisible(confidenceTier, ocrConfidenceDisplayMode);
+                            const overlayItem = !String(row[colIdx] || "").trim() ? ocrOverlayItemMap.get(`${rowIdx}:${colIdx}`) : null;
+                            const overlayValue = String(overlayItem?.value || "").trim();
+                            return (
+                              <td
+                                key={`${field}-${colIdx}`}
+                                className={[
+                                  isLockedSheetField(field) ? "sticky-structural-col" : "",
+                                  confidenceTier ? `confidence-${confidenceTier}` : "",
+                                  belowThreshold ? "below-confidence-threshold" : "",
+                                  overlayValue ? "has-overlay-suggestion" : "",
+                                ].filter(Boolean).join(" ")}
+                                style={isLockedSheetField(field) ? { left: `${42 + Math.min(colIdx, 2) * 98}px` } : undefined}
+                              >
+                                <div className="sheet-input-wrap">
+                                  {overlayValue ? <span className="sheet-overlay-suggestion">{overlayValue}</span> : null}
+                                  <input
+                                    value={row[colIdx] || ""}
+                                    readOnly={isLockedSheetField(field)}
+                                    onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
+                                    onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
+                                  />
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           ) : (
             <p className="subtle">Step2で正解OCRを選択してから、選択OCRだけを使ってシートを生成してください。</p>
@@ -907,7 +1338,52 @@ export default function OrderWorkflowV2Page() {
               袋分けを確認
             </button>
           </div>
-          <pre>{formatJson(inspection?.bagging_result || null)}</pre>
+          {inspection?.bagging_result ? (
+            <div className="result-summary">
+              <div className="summary-grid summary-grid--compact">
+                <div className="summary-primary-card">
+                  <span className="field-label">行数</span>
+                  <p className="summary-value">{Number((inspection.bagging_result.summary as any)?.line_count || 0)}件</p>
+                </div>
+                <div className="summary-primary-card">
+                  <span className="field-label">数量行</span>
+                  <p className="summary-value">{Number((inspection.bagging_result.summary as any)?.quantity_line_count || 0)}件</p>
+                </div>
+                <div className="summary-primary-card">
+                  <span className="field-label">合計数量</span>
+                  <p className="summary-value">{Number((inspection.bagging_result.summary as any)?.total_quantity || 0)}</p>
+                </div>
+              </div>
+              <div className="sheet-table-wrap result-table-wrap">
+                <table className="sheet-table compact-sheet-table">
+                  <thead>
+                    <tr>
+                      <th>日付</th>
+                      <th>区分</th>
+                      <th>メニュー</th>
+                      <th>食種</th>
+                      <th>エリア</th>
+                      <th>数量</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.isArray(inspection.bagging_result.quantity_cells) ? inspection.bagging_result.quantity_cells.map((item: any, idx: number) => (
+                      <tr key={`bag-q-${idx}`}>
+                        <td>{item.date || "-"}</td>
+                        <td>{item.daypart || "-"}</td>
+                        <td>{item.menu_name || "-"}</td>
+                        <td>{item.diet_type || "-"}</td>
+                        <td>{item.area_id || "-"}</td>
+                        <td>{item.quantity ?? "-"}</td>
+                      </tr>
+                    )) : null}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <p className="subtle">袋分け結果はまだありません。</p>
+          )}
         </section>
         ) : null}
 
@@ -923,7 +1399,24 @@ export default function OrderWorkflowV2Page() {
               確定
             </button>
           </div>
-          <pre>{formatJson(inspection?.output_bundle || null)}</pre>
+          {inspection?.output_bundle ? (
+            <div className="result-summary">
+              <div className="summary-grid summary-grid--compact">
+                {Object.entries(inspection.output_bundle).slice(0, 8).map(([key, value]) => (
+                  <div key={key} className="summary-primary-card">
+                    <span className="field-label">{key}</span>
+                    <p className="summary-value">{typeof value === "object" ? JSON.stringify(value).slice(0, 80) : String(value ?? "-")}</p>
+                  </div>
+                ))}
+              </div>
+              <details className="json-details">
+                <summary>出力JSONを確認</summary>
+                <pre>{formatJson(inspection.output_bundle)}</pre>
+              </details>
+            </div>
+          ) : (
+            <p className="subtle">出力確認はまだ作成されていません。</p>
+          )}
         </section>
         ) : null}
       </section>
@@ -1197,14 +1690,117 @@ export default function OrderWorkflowV2Page() {
           border: 1px solid #d7d1c0;
           border-radius: 14px;
           margin-top: 16px;
-          max-height: 520px;
+          max-height: 72vh;
           overflow: auto;
+        }
+        .step3-workspace {
+          display: grid;
+          gap: 16px;
+          margin-top: 16px;
+        }
+        .step3-workspace.side-by-side {
+          grid-template-columns: minmax(560px, 1.08fr) minmax(560px, 1fr);
+        }
+        .step3-workspace.stacked {
+          grid-template-columns: 1fr;
+        }
+        .step3-overlay-pane,
+        .step3-sheet-pane {
+          border: 1px solid #d7d1c0;
+          border-radius: 16px;
+          overflow: hidden;
+          background: #fffdf7;
+          min-width: 0;
+        }
+        .step3-overlay-canvas {
+          background: #fff;
+          max-height: 82vh;
+          overflow: auto;
+          position: relative;
+        }
+        .step3-overlay-image {
+          display: block;
+          min-width: 920px;
+          width: 100%;
+        }
+        .overlay-row-highlight,
+        .overlay-col-highlight,
+        .overlay-cell-highlight {
+          pointer-events: none;
+          position: absolute;
+          z-index: 3;
+        }
+        .overlay-row-highlight {
+          background: rgba(255, 192, 64, 0.22);
+          left: 0;
+          right: 0;
+        }
+        .overlay-col-highlight {
+          background: rgba(69, 142, 255, 0.18);
+          bottom: 0;
+          top: 0;
+        }
+        .overlay-cell-highlight {
+          border: 3px solid #e6532e;
+          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.78);
+        }
+        .sheet-toolbar {
+          border-bottom: 1px solid #e5dece;
+          display: grid;
+          gap: 10px;
+          padding: 12px;
+        }
+        .toolbar-row {
+          align-items: end;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+        .toolbar-field {
+          display: grid;
+          gap: 5px;
+          min-width: 150px;
+        }
+        .toolbar-field span {
+          color: #5f7b74;
+          font-size: 11px;
+          font-weight: 800;
+        }
+        .compact-input {
+          max-width: 120px;
+          min-height: 38px;
+          padding: 8px 10px;
+        }
+        .ocr-run-options {
+          background: #f8fbfa;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          padding: 10px;
+          width: 100%;
+        }
+        .inline-details {
+          flex-basis: 100%;
+        }
+        .inline-details summary {
+          cursor: pointer;
+          font-weight: 800;
+        }
+        .ocr-llm-prompt-textarea {
+          margin-top: 8px;
+          min-height: 120px;
+          width: 100%;
         }
         .sheet-table {
           border-collapse: separate;
           border-spacing: 0;
           min-width: 100%;
           width: max-content;
+        }
+        .compact-sheet-table {
+          font-size: 12px;
         }
         .sheet-table th,
         .sheet-table td {
@@ -1231,12 +1827,59 @@ export default function OrderWorkflowV2Page() {
         .sheet-table tbody th {
           top: auto;
         }
+        .sheet-table td.sticky-structural-col,
+        .sheet-table th.sticky-structural-col {
+          background: #fffaf0;
+          position: sticky;
+          z-index: 2;
+        }
+        .sheet-table thead th.sticky-structural-col {
+          z-index: 3;
+        }
+        .sheet-input-wrap {
+          min-width: 86px;
+          position: relative;
+        }
         .sheet-table td input {
           background: #fffdf7;
           border: 0;
           border-radius: 0;
-          min-width: 92px;
-          padding: 8px 10px;
+          min-width: 86px;
+          padding: 5px 7px;
+        }
+        .sheet-table td.sticky-structural-col input {
+          background: #fffaf0;
+          min-width: 98px;
+        }
+        .sheet-table td.sticky-structural-col:nth-child(4) input {
+          min-width: 180px;
+        }
+        .sheet-table input[readonly] {
+          color: #344238;
+          cursor: default;
+          font-weight: 700;
+        }
+        .confidence-high input {
+          color: #111827;
+          font-weight: 800;
+        }
+        .confidence-medium input {
+          color: #0a6b89;
+        }
+        .confidence-low input {
+          color: #a15f2d;
+        }
+        .below-confidence-threshold {
+          opacity: 0.5;
+        }
+        .sheet-overlay-suggestion {
+          color: #d7351d;
+          font-size: 11px;
+          font-weight: 900;
+          position: absolute;
+          right: 2px;
+          top: -8px;
+          z-index: 2;
         }
         .json-details {
           margin-top: 16px;
@@ -1359,8 +2002,12 @@ export default function OrderWorkflowV2Page() {
             display: block;
           }
           .step-nav,
-          .form-grid {
+          .form-grid,
+          .step3-workspace.side-by-side {
             grid-template-columns: 1fr;
+          }
+          .step3-overlay-image {
+            min-width: 720px;
           }
           .panel,
           .notice {
