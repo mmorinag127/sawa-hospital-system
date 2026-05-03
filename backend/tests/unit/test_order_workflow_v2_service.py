@@ -189,6 +189,59 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     assert workflow["template_id"] == "fax_layout_regular_forbidden_v1"
 
 
+def test_context_confirm_accepts_facility_resolved_template_without_template_id(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "fax_template": {
+                "columns": [
+                    {"index": 0, "role": "date", "header": "日付"},
+                    {"index": 1, "role": "daypart", "header": "区分"},
+                    {"index": 2, "role": "menu_name", "header": "メニュー"},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "header": "常食2F",
+                    },
+                    {
+                        "index": 4,
+                        "role": "quantity",
+                        "diet_type": "regular",
+                        "area_id": "3F",
+                        "header": "常食3F",
+                    },
+                    {"index": 5, "role": "note", "header": "備考"},
+                ],
+            },
+        },
+    )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC_FLOOR",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["state"] == "context_confirmed"
+    assert workflow["template_id"] is None
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row.secondary_actions_json["workflow_v2"]["template_source"] == "facility_resolved_template"
+
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
+
+    assert error is None
+    assert queued["state"] == "ocr_running"
+
+
 def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
     order_id, _, _ = _create_order_with_evidence()
     with session_scope() as session:

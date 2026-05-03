@@ -15,6 +15,7 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
 from src.services import config_service
+from src.services.template_field_schema_service import derive_row_fields_from_template
 
 
 Base.metadata.create_all(bind=engine)
@@ -56,6 +57,58 @@ def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
     existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
     existing[WORKFLOW_V2_META_KEY] = dict(meta)
     row.secondary_actions_json = existing
+
+
+def _facility_config_has_resolved_fax_template(
+    facility_config: dict[str, Any] | None,
+    *,
+    template_id: str | None = None,
+) -> bool:
+    if not isinstance(facility_config, dict):
+        return False
+    if _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id")):
+        return True
+    template = facility_config.get("fax_template")
+    if not isinstance(template, dict):
+        return False
+    fields = derive_row_fields_from_template(template)
+    if not fields:
+        return False
+    return any(str(field or "").strip().startswith("qty.") for field in fields)
+
+
+def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
+    return bool(
+        _normalize_id(meta.get("facility_id"))
+        and _normalize_id(meta.get("week_start"))
+        and _normalize_id(meta.get("week_end"))
+    )
+
+
+def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
+    template_id = _normalize_id(meta.get("template_id")) or None
+    if template_id:
+        return True
+    facility_id = _normalize_id(meta.get("facility_id"))
+    if not facility_id:
+        return False
+    try:
+        facility_config = config_service.get_facility_config(facility_id)
+    except Exception:
+        return False
+    return _facility_config_has_resolved_fax_template(facility_config)
+
+
+def workflow_has_confirmed_ocr_context(workflow: dict[str, Any] | None) -> bool:
+    if not isinstance(workflow, dict):
+        return False
+    meta = {
+        "facility_id": workflow.get("facility_id"),
+        "week_start": workflow.get("week_start"),
+        "week_end": workflow.get("week_end"),
+        "template_id": workflow.get("template_id"),
+    }
+    return _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta)
 
 
 def _serialize_datetime(value: object) -> str | None:
@@ -203,6 +256,10 @@ def confirm_context(
     if not facility_config:
         return None, "facility_not_found"
     normalized_template_id = _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id"))
+    template_ready = _facility_config_has_resolved_fax_template(
+        facility_config,
+        template_id=normalized_template_id or None,
+    )
 
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -211,7 +268,7 @@ def confirm_context(
         order.facility_code = normalized_facility_id
         order.week_code = normalized_week_code
         row = _get_or_create_workflow(session, order.id)
-        if not normalized_template_id:
+        if not template_ready:
             row.state = "facility_template_unresolved"
             row.headline = "施設テンプレートが未登録です"
             row.primary_action = "register_facility_template"
@@ -229,6 +286,7 @@ def confirm_context(
                     "week_end": normalized_week_end,
                     "week_code": normalized_week_code,
                     "template_id": None,
+                    "template_source": None,
                     "bagging_result_id": None,
                     "output_bundle_id": None,
                 },
@@ -251,7 +309,8 @@ def confirm_context(
                 "week_start": normalized_week_start,
                 "week_end": normalized_week_end,
                 "week_code": normalized_week_code,
-                "template_id": normalized_template_id,
+                "template_id": normalized_template_id or None,
+                "template_source": "registered_template_id" if normalized_template_id else "facility_resolved_template",
                 "bagging_result_id": None,
                 "output_bundle_id": None,
             },
@@ -270,8 +329,10 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(workflow)
-        if not meta.get("facility_id") or not meta.get("week_start") or not meta.get("template_id"):
+        if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
+        if not _workflow_meta_has_resolved_template(meta):
+            return None, "facility_template_unresolved"
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -309,8 +370,10 @@ def mark_ocr_run_completed(
             return None, order_error
         workflow = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(workflow)
-        if not meta.get("facility_id") or not meta.get("week_start") or not meta.get("template_id"):
+        if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
+        if not _workflow_meta_has_resolved_template(meta):
+            return None, "facility_template_unresolved"
         if normalized_error:
             workflow.state = "ocr_failed"
             workflow.headline = "OCR処理に失敗しました。Step1から再実行してください"
@@ -494,12 +557,16 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
             workflow.evidence_run_id = None
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
-            workflow.state = "context_confirmed" if _workflow_meta(workflow).get("template_id") else "uploaded"
+            meta = _workflow_meta(workflow)
+            workflow.state = (
+                "context_confirmed"
+                if _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta)
+                else "uploaded"
+            )
             workflow.headline = "正解OCRが削除されました。OCRを再実行してください"
             workflow.primary_action = "run_ocr"
             workflow.blockers_json = []
             workflow.warnings_json = []
-            meta = _workflow_meta(workflow)
             meta["bagging_result_id"] = None
             meta["output_bundle_id"] = None
             _write_workflow_meta(workflow, meta)

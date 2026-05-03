@@ -1636,8 +1636,10 @@ def _enqueue_workflow_v2_evidence_rerun(
     force: bool = False,
 ) -> dict:
     workflow = _workflow_v2_or_404(order_workflow_v2_service.get_workflow(order_id))
-    if not workflow.get("facility_id") or not workflow.get("week_start") or not workflow.get("template_id"):
+    if not workflow.get("facility_id") or not workflow.get("week_start") or not workflow.get("week_end"):
         raise HTTPException(status_code=400, detail="context_not_confirmed")
+    if not order_workflow_v2_service.workflow_has_confirmed_ocr_context(workflow):
+        raise HTTPException(status_code=400, detail="facility_template_unresolved")
     if stale_action not in {"retry", "wait"}:
         raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
 
