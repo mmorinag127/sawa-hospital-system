@@ -26,6 +26,15 @@ type WorkflowV2 = {
   template_id?: string | null;
   bagging_result_id?: string | null;
   output_bundle_id?: string | null;
+  ocr_job?: {
+    ocr_job_id?: string | null;
+    status?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+    elapsed_seconds?: number | null;
+    processing_stage?: string | null;
+    result_state?: string | null;
+  } | null;
 };
 
 type OcrResult = {
@@ -35,6 +44,9 @@ type OcrResult = {
   selected?: boolean;
   artifact_digest?: string | null;
   artifact_manifest?: Record<string, unknown> | null;
+  overlay_url?: string | null;
+  overlay_status?: string | null;
+  overlay_message?: string | null;
   created_at?: string | null;
 };
 
@@ -178,6 +190,27 @@ const weekRangeFromValue = (value?: string | null) => {
   const match = normalized.match(/^\d{4}-\d{2}@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
   if (!match) return { week_start: "", week_end: "" };
   return { week_start: match[1], week_end: match[2] };
+};
+
+const formatElapsedSeconds = (value?: number | null) => {
+  if (typeof value !== "number" || Number.isNaN(value)) return "未計測";
+  if (value < 60) return `${value.toFixed(1)}秒`;
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.round(value - minutes * 60);
+  return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+};
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("ja-JP", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 };
 
 export default function OrderWorkflowV2Page() {
@@ -366,14 +399,21 @@ export default function OrderWorkflowV2Page() {
     };
   }, [router.isReady, orderId]);
 
-  const runAction = async (label: string, action: () => Promise<void>) => {
+  const runAction = async (
+    label: string,
+    action: () => Promise<void>,
+    options: { successMessage?: string; nextStep?: number } = {},
+  ) => {
     setBusy(label);
     setError("");
     setMessage("");
     try {
       await action();
       await refreshAll();
-      setMessage(`${label} が完了しました`);
+      if (options.nextStep) {
+        setVisibleStep(options.nextStep);
+      }
+      setMessage(options.successMessage || `${label} が完了しました`);
     } catch (err: any) {
       setError(formatApiError(err, `${label} に失敗しました`));
     } finally {
@@ -402,11 +442,18 @@ export default function OrderWorkflowV2Page() {
   };
 
   const runOcr = () =>
-    runAction("Step1 OCR run", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
-        stale_action: "retry",
-      });
-    });
+    runAction(
+      "Step1 OCR run",
+      async () => {
+        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+          stale_action: "retry",
+        });
+      },
+      {
+        successMessage: "Step1 OCR run が開始しました",
+        nextStep: 2,
+      },
+    );
 
   const selectOcr = (ocrResultId: string) =>
     runAction("Step2 OCR select", async () => {
@@ -511,6 +558,58 @@ export default function OrderWorkflowV2Page() {
 
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
+
+      <section className="panel order-info-panel">
+        <div className="panel-header">
+          <div>
+            <p className="step-tag">Order Info</p>
+            <h2>注文情報</h2>
+            <p className="subtle">前工程と照合するための基本情報です。</p>
+          </div>
+        </div>
+        <div className="summary-grid summary-grid--compact">
+          <div className="summary-primary-card">
+            <span className="field-label">注文ID</span>
+            <p className="summary-value">{orderId || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">処理状態</span>
+            <p className="summary-value">{stateLabel(workflow?.state)}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">施設</span>
+            <p className="summary-value">{workflow?.facility_id || "未設定"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">週次</span>
+            <p className="summary-value">
+              {formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "未設定"}
+            </p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">テンプレート</span>
+            <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCR結果</span>
+            <p className="summary-value">{ocrResults.length}件</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCRジョブ</span>
+            <p className="summary-value">{workflow?.ocr_job?.ocr_job_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCR処理時間</span>
+            <p className="summary-value">{formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCR開始/更新</span>
+            <p className="summary-value">
+              {formatDateTime(workflow?.ocr_job?.created_at)} / {formatDateTime(workflow?.ocr_job?.updated_at)}
+            </p>
+          </div>
+        </div>
+      </section>
 
       <nav className="step-nav" aria-label="workflow steps">
         {stepLabels.map((item) => (
@@ -684,12 +783,32 @@ export default function OrderWorkflowV2Page() {
             {ocrResults.length ? (
               ocrResults.map((item) => (
                 <div key={item.ocr_result_id} className={`ocr-card ${item === selectedOcr ? "selected" : ""}`}>
-                  <div>
-                    <strong>{item.ocr_result_id}</strong>
-                    <p className="subtle">
-                      {item.status || "unknown"} / {item.source || "-"} / {item.created_at || "-"}
-                    </p>
-                    <p className="digest">{item.artifact_digest || ""}</p>
+                  <div className="ocr-card-body">
+                    <div>
+                      <strong>{item.ocr_result_id}</strong>
+                      <p className="subtle">
+                        {item.status || "unknown"} / {item.source || "-"} / {formatDateTime(item.created_at)}
+                      </p>
+                      <p className="digest">{item.artifact_digest || ""}</p>
+                    </div>
+                    <div className="ocr-overlay-preview-card">
+                      <div className="preview-header">
+                        <div>
+                          <span className="field-label">OCR Overlay</span>
+                          <p className="subtle">このOCR結果に紐づくoverlay成果物です。</p>
+                        </div>
+                        {item.overlay_url ? (
+                          <a className="ghost-link" href={item.overlay_url} target="_blank" rel="noreferrer">
+                            別タブで開く
+                          </a>
+                        ) : null}
+                      </div>
+                      {item.overlay_url ? (
+                        <img className="ocr-overlay-preview-image" src={item.overlay_url} alt={`${item.ocr_result_id} overlay`} />
+                      ) : (
+                        <div className="preview-placeholder">{item.overlay_message || "overlay成果物がありません。"}</div>
+                      )}
+                    </div>
                   </div>
                   <div className="row-actions">
                     <button className="btn" type="button" onClick={() => selectOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
@@ -1178,7 +1297,7 @@ export default function OrderWorkflowV2Page() {
           margin-top: 16px;
         }
         .ocr-card {
-          align-items: center;
+          align-items: flex-start;
           background: #fffdf7;
           border: 1px solid #ddd5c2;
           border-radius: 14px;
@@ -1190,6 +1309,33 @@ export default function OrderWorkflowV2Page() {
         .ocr-card.selected {
           border-color: #2f7d52;
           box-shadow: inset 4px 0 0 #2f7d52;
+        }
+        .ocr-card-body {
+          display: grid;
+          gap: 12px;
+          min-width: 0;
+          flex: 1;
+        }
+        .ocr-overlay-preview-card {
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 14px;
+          overflow: hidden;
+        }
+        .preview-header {
+          align-items: center;
+          border-bottom: 1px solid #e5dece;
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 10px 12px;
+        }
+        .ocr-overlay-preview-image {
+          background: #ffffff;
+          display: block;
+          max-height: 520px;
+          object-fit: contain;
+          width: 100%;
         }
         .digest {
           color: #8a826e;

@@ -13,6 +13,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.ocr_job import OcrJob
 from src.services import config_service
 
 
@@ -67,7 +68,25 @@ def _get_order_service_module() -> Any:
     return order_service
 
 
-def _serialize_workflow(row: OrderWorkflowState) -> dict[str, Any]:
+def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    elapsed_seconds = None
+    if isinstance(job.created_at, datetime) and isinstance(job.updated_at, datetime):
+        elapsed_seconds = max((job.updated_at - job.created_at).total_seconds(), 0.0)
+    metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    return {
+        "ocr_job_id": job.id,
+        "status": job.status,
+        "created_at": _serialize_datetime(job.created_at),
+        "updated_at": _serialize_datetime(job.updated_at),
+        "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
+        "processing_stage": metrics.get("processing_stage"),
+        "result_state": metrics.get("result_state"),
+    }
+
+
+def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = None) -> dict[str, Any]:
     meta = _workflow_meta(row)
     return {
         "order_id": row.order_id,
@@ -83,6 +102,7 @@ def _serialize_workflow(row: OrderWorkflowState) -> dict[str, Any]:
         "template_id": meta.get("template_id"),
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
+        "ocr_job": _serialize_ocr_job(ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
         "updated_at": _serialize_datetime(row.last_transition_at),
@@ -126,7 +146,10 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if error:
             return None, error
         row = _get_or_create_workflow(session, order.id)
-        return _serialize_workflow(row), None
+        meta = _workflow_meta(row)
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
 def confirm_context(
@@ -265,6 +288,13 @@ def mark_ocr_run_completed(
 def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[str, Any]:
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}
+    hakodate_overlay = payload.get("hakodate_overlay") if isinstance(payload.get("hakodate_overlay"), dict) else {}
+    overlay_uri = _normalize_id(hakodate_overlay.get("uri") or hakodate_overlay.get("overlay_uri"))
+    overlay_url = _normalize_id(hakodate_overlay.get("url") or hakodate_overlay.get("overlay_url"))
+    if overlay_uri and not overlay_url:
+        signed_url = getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None)(overlay_uri)
+        overlay_url = _normalize_id(signed_url)
+    overlay_status = "ready" if overlay_url else "missing"
     return {
         "ocr_result_id": row.id,
         "order_id": row.order_id,
@@ -276,6 +306,10 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "artifact_manifest": manifest,
         "artifact_digest": row.artifact_digest,
         "pipeline_version": payload.get("pipeline_version") or row.producer_version,
+        "overlay_url": overlay_url or None,
+        "overlay_uri": overlay_uri or None,
+        "overlay_status": overlay_status,
+        "overlay_message": None if overlay_url else "このOCR結果には表示可能なoverlay成果物がありません。",
         "created_at": _serialize_datetime(row.created_at),
     }
 
