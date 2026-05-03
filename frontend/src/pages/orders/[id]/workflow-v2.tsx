@@ -138,6 +138,23 @@ type FacilityOption = {
   name: string;
 };
 
+type FaxTemplateOption = {
+  template_id: string;
+  label?: string | null;
+  description?: string | null;
+  template_family?: string | null;
+  template_version?: number | string | null;
+  quantity_headers?: string[];
+};
+
+type FacilityTemplateStatus = {
+  facilityId: string;
+  templateId: string;
+  templateIds: string[];
+  loading: boolean;
+  error: string;
+};
+
 type WeekOption = {
   week_id: string;
   label: string;
@@ -166,13 +183,25 @@ const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
 
 const formatApiError = (err: any, fallback: string) => {
   const detail = err?.response?.data?.detail;
+  if (detail === "facility_template_unresolved") {
+    return "施設テンプレートが未登録です。下の「施設テンプレート登録」で帳票レイアウトを登録してから、Step1を保存してください。";
+  }
+  if (detail === "fax_template_id_required") return "帳票レイアウトを選択してください。";
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
+    const error = (detail as { error?: unknown }).error;
+    if (error === "fax_template_not_found") return "存在しない帳票レイアウトが指定されています。";
     const message = (detail as { message?: unknown }).message;
     if (typeof message === "string" && message.trim()) return message;
     return JSON.stringify(detail);
   }
   return String(err?.message || fallback);
+};
+
+const formatFaxTemplateOptionLabel = (option: FaxTemplateOption | null | undefined) => {
+  if (!option) return "";
+  const main = option.description || option.label || option.template_family || option.template_id;
+  return main === option.template_id ? option.template_id : `${main} (${option.template_id})`;
 };
 
 const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
@@ -526,6 +555,17 @@ export default function OrderWorkflowV2Page() {
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
+  const [faxTemplateOptions, setFaxTemplateOptions] = useState<FaxTemplateOption[]>([]);
+  const [faxTemplateOptionsLoading, setFaxTemplateOptionsLoading] = useState(false);
+  const [faxTemplateOptionsError, setFaxTemplateOptionsError] = useState("");
+  const [facilityTemplateStatus, setFacilityTemplateStatus] = useState<FacilityTemplateStatus>({
+    facilityId: "",
+    templateId: "",
+    templateIds: [],
+    loading: false,
+    error: "",
+  });
+  const [selectedFacilityTemplateId, setSelectedFacilityTemplateId] = useState("");
   const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
   const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
@@ -567,6 +607,24 @@ export default function OrderWorkflowV2Page() {
   );
 
   const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+  const selectedFacility = useMemo(
+    () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
+    [contextForm.facility_id, facilityOptions],
+  );
+  const selectedFacilityTemplateOption = useMemo(
+    () => faxTemplateOptions.find((option) => option.template_id === selectedFacilityTemplateId) || null,
+    [faxTemplateOptions, selectedFacilityTemplateId],
+  );
+  const selectedFacilityRegisteredTemplateOption = useMemo(
+    () => faxTemplateOptions.find((option) => option.template_id === facilityTemplateStatus.templateId) || null,
+    [facilityTemplateStatus.templateId, faxTemplateOptions],
+  );
+  const facilityTemplateMissing = Boolean(
+    contextForm.facility_id
+      && !facilityTemplateStatus.loading
+      && facilityTemplateStatus.facilityId === contextForm.facility_id
+      && !facilityTemplateStatus.templateId,
+  );
 
   const quantityColumnOptions = useMemo(() => {
     if (!sheetPayload) return [];
@@ -802,6 +860,51 @@ export default function OrderWorkflowV2Page() {
     });
   }, [router.isReady, orderId]);
 
+  const loadFacilityTemplateStatus = async (facilityId: string) => {
+    const normalizedFacilityId = facilityId.trim();
+    if (!normalizedFacilityId) {
+      setFacilityTemplateStatus({
+        facilityId: "",
+        templateId: "",
+        templateIds: [],
+        loading: false,
+        error: "",
+      });
+      setSelectedFacilityTemplateId("");
+      return;
+    }
+    setFacilityTemplateStatus((current) => ({
+      ...current,
+      facilityId: normalizedFacilityId,
+      loading: true,
+      error: "",
+    }));
+    try {
+      const res = await apiClient.get(`/facilities/${normalizedFacilityId}`);
+      const resolved = res.data?.resolved_config || {};
+      const templateId = String(resolved?.fax_template_id || "").trim();
+      const templateIds = Array.isArray(resolved?.fax_template_ids)
+        ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+        : [];
+      setFacilityTemplateStatus({
+        facilityId: normalizedFacilityId,
+        templateId,
+        templateIds,
+        loading: false,
+        error: "",
+      });
+      setSelectedFacilityTemplateId(templateId || "");
+    } catch (err: any) {
+      setFacilityTemplateStatus({
+        facilityId: normalizedFacilityId,
+        templateId: "",
+        templateIds: [],
+        loading: false,
+        error: formatApiError(err, "施設テンプレート設定を取得できませんでした"),
+      });
+    }
+  };
+
   useEffect(() => {
     let active = true;
     const loadFacilities = async () => {
@@ -834,6 +937,46 @@ export default function OrderWorkflowV2Page() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadFaxTemplateOptions = async () => {
+      setFaxTemplateOptionsLoading(true);
+      setFaxTemplateOptionsError("");
+      try {
+        const res = await apiClient.get("/facilities/fax-template-options");
+        if (!active) return;
+        const raw = Array.isArray(res.data?.templates) ? res.data.templates : [];
+        const normalized = raw
+          .map((item: any) => ({
+            template_id: String(item?.template_id || ""),
+            label: typeof item?.label === "string" ? item.label : null,
+            description: typeof item?.description === "string" ? item.description : null,
+            template_family: typeof item?.template_family === "string" ? item.template_family : null,
+            template_version: item?.template_version ?? null,
+            quantity_headers: Array.isArray(item?.quantity_headers)
+              ? item.quantity_headers.map((value: unknown) => String(value || "")).filter(Boolean)
+              : [],
+          }))
+          .filter((item: FaxTemplateOption) => item.template_id);
+        setFaxTemplateOptions(normalized);
+      } catch {
+        if (!active) return;
+        setFaxTemplateOptions([]);
+        setFaxTemplateOptionsError("帳票レイアウト候補を取得できませんでした。");
+      } finally {
+        if (active) setFaxTemplateOptionsLoading(false);
+      }
+    };
+    loadFaxTemplateOptions();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    void loadFacilityTemplateStatus(contextForm.facility_id);
+  }, [contextForm.facility_id]);
 
   useEffect(() => {
     if (!router.isReady || !orderId) return;
@@ -943,6 +1086,11 @@ export default function OrderWorkflowV2Page() {
       }
       setMessage(options.successMessage || `${label} が完了しました`);
     } catch (err: any) {
+      if (err?.response?.data?.detail === "facility_template_unresolved") {
+        setVisibleStep(1);
+        await refreshAll().catch(() => undefined);
+        await loadFacilityTemplateStatus(contextForm.facility_id).catch(() => undefined);
+      }
       setError(formatApiError(err, `${label} に失敗しました`));
     } finally {
       setBusy("");
@@ -957,6 +1105,50 @@ export default function OrderWorkflowV2Page() {
         week_end: contextForm.week_end,
       });
     });
+
+  const registerFacilityTemplate = () =>
+    runAction(
+      "施設テンプレート登録",
+      async () => {
+        const facilityId = contextForm.facility_id.trim();
+        const templateId = selectedFacilityTemplateId.trim();
+        if (!facilityId) {
+          throw new Error("施設を選択してください");
+        }
+        if (!templateId) {
+          throw new Error("帳票レイアウトを選択してください");
+        }
+        const res = await apiClient.put(`/facilities/${facilityId}/fax-template`, {
+          fax_template_id: templateId,
+          fax_template_ids: [templateId],
+        });
+        const resolved = res.data?.resolved_config || {};
+        setFacilityTemplateStatus({
+          facilityId,
+          templateId: String(resolved?.fax_template_id || templateId),
+          templateIds: Array.isArray(resolved?.fax_template_ids)
+            ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+            : [templateId],
+          loading: false,
+          error: "",
+        });
+        if (contextReady) {
+          await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
+            facility_id: contextForm.facility_id,
+            week_start: contextForm.week_start,
+            week_end: contextForm.week_end,
+          });
+        } else {
+          await loadFacilityTemplateStatus(facilityId);
+        }
+      },
+      {
+        successMessage: contextReady
+          ? "施設テンプレートを登録し、Step1設定を保存しました"
+          : "施設テンプレートを登録しました。施設と週を確認してStep1を保存してください。",
+        refreshAfter: contextReady,
+      },
+    );
 
   const applyCustomWeekRange = () => {
     const weekValue = deriveWeekValueFromCalendarRange(customWeekRangeStart, customWeekRangeEnd);
@@ -1471,8 +1663,8 @@ export default function OrderWorkflowV2Page() {
                   ) : null}
                 </div>
               </label>
-              <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady)}>
-                {contextReady ? "設定を保存" : "施設と週を選択"}
+              <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady || facilityTemplateMissing)}>
+                {facilityTemplateMissing ? "先にテンプレート登録" : contextReady ? "設定を保存" : "施設と週を選択"}
               </button>
               <div className="ocr-run-options">
                 <label className="toolbar-field">
@@ -1538,12 +1730,62 @@ export default function OrderWorkflowV2Page() {
                   || !workflow?.facility_id
                   || !workflow?.week_start
                   || !workflow?.week_end
+                  || !workflow?.template_id
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
                 )}
               >
                 OCRを実行
               </button>
             </div>
+            {contextForm.facility_id ? (
+              <div className={`facility-template-resolution ${facilityTemplateMissing ? "blocked" : "resolved"}`}>
+                <div className="facility-template-resolution-copy">
+                  <strong>施設テンプレート登録</strong>
+                  <p>
+                    {facilityTemplateStatus.loading
+                      ? "施設テンプレート設定を確認中です。"
+                      : facilityTemplateStatus.templateId
+                        ? `登録済み: ${formatFaxTemplateOptionLabel(selectedFacilityRegisteredTemplateOption) || facilityTemplateStatus.templateId}`
+                        : "この施設には帳票レイアウトが登録されていません。未登録のままOCRは実行できません。"}
+                  </p>
+                  {selectedFacility ? (
+                    <p className="subtle">対象施設: {formatFacilityLabel(selectedFacility)}</p>
+                  ) : null}
+                  {facilityTemplateStatus.error ? <p className="subtle">{facilityTemplateStatus.error}</p> : null}
+                </div>
+                {facilityTemplateMissing ? (
+                  <div className="facility-template-register">
+                    <label className="toolbar-field">
+                      <span>帳票レイアウト</span>
+                      <select
+                        value={selectedFacilityTemplateId}
+                        onChange={(event) => setSelectedFacilityTemplateId(event.target.value)}
+                        disabled={Boolean(busy || faxTemplateOptionsLoading)}
+                      >
+                        <option value="">レイアウトを選択</option>
+                        {faxTemplateOptions.map((option) => (
+                          <option key={option.template_id} value={option.template_id}>
+                            {formatFaxTemplateOptionLabel(option)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {selectedFacilityTemplateOption?.quantity_headers?.length ? (
+                      <p className="subtle">数量列: {selectedFacilityTemplateOption.quantity_headers.join(" / ")}</p>
+                    ) : null}
+                    {faxTemplateOptionsError ? <p className="subtle">{faxTemplateOptionsError}</p> : null}
+                    <button
+                      className="btn primary"
+                      type="button"
+                      onClick={registerFacilityTemplate}
+                      disabled={Boolean(busy || faxTemplateOptionsLoading || !selectedFacilityTemplateId)}
+                    >
+                      施設テンプレートに登録してStep1を保存
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {!workflow?.facility_id || !workflow?.week_start || !workflow?.week_end ? (
               <div className="warning-banner">
                 {!workflow?.facility_id ? <p>この注文は施設が未設定です。OCR実行前に施設設定が必要です。</p> : null}
@@ -2445,6 +2687,51 @@ export default function OrderWorkflowV2Page() {
         }
         .warning-banner p + p {
           margin-top: 6px;
+        }
+        .facility-template-resolution {
+          align-items: flex-start;
+          border-radius: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 14px;
+          justify-content: space-between;
+          margin-top: 12px;
+          padding: 14px;
+        }
+        .facility-template-resolution.blocked {
+          background: #fff1e8;
+          border: 1px solid #e8b48f;
+        }
+        .facility-template-resolution.resolved {
+          background: #eef8f1;
+          border: 1px solid #b8dbc4;
+        }
+        .facility-template-resolution-copy {
+          min-width: 260px;
+          flex: 1;
+        }
+        .facility-template-resolution-copy strong {
+          color: #1c2822;
+          display: block;
+          font-size: 14px;
+          margin-bottom: 4px;
+        }
+        .facility-template-resolution-copy p {
+          margin: 0;
+        }
+        .facility-template-register {
+          display: flex;
+          flex: 1;
+          flex-wrap: wrap;
+          gap: 10px;
+          min-width: 320px;
+        }
+        .facility-template-register .toolbar-field {
+          flex: 1;
+          min-width: 260px;
+        }
+        .facility-template-register .subtle {
+          flex-basis: 100%;
         }
         .pdf-preview-panel {
           border: 1px solid #d7d1c0;

@@ -203,8 +203,6 @@ def confirm_context(
     if not facility_config:
         return None, "facility_not_found"
     normalized_template_id = _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id"))
-    if not normalized_template_id:
-        return None, "facility_template_unresolved"
 
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -213,6 +211,30 @@ def confirm_context(
         order.facility_code = normalized_facility_id
         order.week_code = normalized_week_code
         row = _get_or_create_workflow(session, order.id)
+        if not normalized_template_id:
+            row.state = "facility_template_unresolved"
+            row.headline = "施設テンプレートが未登録です"
+            row.primary_action = "register_facility_template"
+            row.evidence_run_id = None
+            row.draft_id = None
+            row.confirmed_snapshot_id = None
+            row.blockers_json = ["facility_template_unresolved"]
+            row.warnings_json = []
+            row.last_transition_at = _now()
+            _write_workflow_meta(
+                row,
+                {
+                    "facility_id": normalized_facility_id,
+                    "week_start": normalized_week_start,
+                    "week_end": normalized_week_end,
+                    "week_code": normalized_week_code,
+                    "template_id": None,
+                    "bagging_result_id": None,
+                    "output_bundle_id": None,
+                },
+            )
+            return None, "facility_template_unresolved"
+
         row.state = "context_confirmed"
         row.headline = "施設・週次・テンプレートが確定しました"
         row.primary_action = "run_ocr"

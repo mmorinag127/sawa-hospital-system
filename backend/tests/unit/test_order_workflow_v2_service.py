@@ -136,6 +136,59 @@ def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
         assert order.week_code == "2026-04@2026-04-26~2026-04-30"
 
 
+def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {"facility_id": facility_id, "fax_template": {"columns": []}},
+    )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC_TEMPLATELESS",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+
+    assert workflow is None
+    assert error == "facility_template_unresolved"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        order = session.get(Order, order_id)
+        assert row is not None
+        assert row.state == "facility_template_unresolved"
+        assert row.primary_action == "register_facility_template"
+        assert row.blockers_json == ["facility_template_unresolved"]
+        assert row.secondary_actions_json["workflow_v2"]["facility_id"] == "FAC_TEMPLATELESS"
+        assert row.secondary_actions_json["workflow_v2"]["template_id"] is None
+        assert order.facility_code == "FAC_TEMPLATELESS"
+
+
+def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "fax_template_id": "fax_layout_regular_forbidden_v1",
+        },
+    )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC_TEMPLATE_READY",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["state"] == "context_confirmed"
+    assert workflow["template_id"] == "fax_layout_regular_forbidden_v1"
+
+
 def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
     order_id, _, _ = _create_order_with_evidence()
     with session_scope() as session:
