@@ -561,6 +561,56 @@ def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
     }
 
 
+def _saved_sheet_with_target_cell_map(
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    saved_sheet: OrderSheetDraft,
+    evidence_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    serialized = _serialize_saved_sheet(saved_sheet)
+    sheet = serialized.get("sheet") if isinstance(serialized.get("sheet"), dict) else {}
+    if isinstance(sheet.get("target_cell_map"), list) and sheet.get("target_cell_map"):
+        return serialized
+
+    if not isinstance(evidence_payload, dict):
+        return serialized
+
+    fields = [str(field or "").strip() for field in (sheet.get("fields") or [])]
+    row_count = len(sheet.get("rows") or [])
+    if not fields or row_count <= 0:
+        return serialized
+
+    meta = _workflow_meta(workflow)
+    facility_id = _normalize_id(meta.get("facility_id") or order.facility_code)
+    template_id = _normalize_id(meta.get("template_id"))
+    if not facility_id:
+        return serialized
+
+    try:
+        assignment = _get_order_service_module()._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+            order_id=order.id,
+            facility_id=facility_id,
+            template_id=template_id or None,
+            payload=evidence_payload,
+        )
+    except Exception:
+        return serialized
+    if not isinstance(assignment, dict):
+        return serialized
+
+    target_cell_map = _compact_target_cell_map_for_sheet(
+        target_cells=list(assignment.get("target_cells") or []),
+        fields=fields,
+        row_count=row_count,
+    )
+    if target_cell_map:
+        enriched_sheet = dict(sheet)
+        enriched_sheet["target_cell_map"] = target_cell_map
+        serialized["sheet"] = enriched_sheet
+    return serialized
+
+
 def _sheet_rows(sheet: dict[str, Any]) -> list[dict[str, Any]]:
     rows = sheet.get("rows") if isinstance(sheet, dict) else None
     if not isinstance(rows, list):
@@ -948,7 +998,18 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if workflow.draft_id:
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is not None and draft.order_id == order.id:
-                saved_sheet = _serialize_saved_sheet(draft)
+                evidence_payload = None
+                evidence_id = _normalize_id(draft.base_evidence_run_id or workflow.evidence_run_id)
+                if evidence_id:
+                    evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+                    if evidence is not None and evidence.order_id == order.id and isinstance(evidence.payload_json, dict):
+                        evidence_payload = evidence.payload_json
+                saved_sheet = _saved_sheet_with_target_cell_map(
+                    order=order,
+                    workflow=workflow,
+                    saved_sheet=draft,
+                    evidence_payload=evidence_payload,
+                )
         return {
             "order_id": order.id,
             "source": "workflow_v2_inspection",

@@ -289,6 +289,22 @@ const classificationVisible = (classification: string | null | undefined, mode: 
 
 const isLockedSheetField = (field: string) => ["date_mmdd", "date", "daypart", "menu", "menu_name"].includes(String(field || "").trim());
 
+const stickyLeftForSheetField = (field: string, colIdx: number) => {
+  const normalized = String(field || "").trim();
+  if (!isLockedSheetField(normalized)) return undefined;
+  if (normalized === "date_mmdd" || normalized === "date" || colIdx === 0) return 34;
+  if (normalized === "daypart" || colIdx === 1) return 86;
+  return 128;
+};
+
+const sheetWidthClass = (field: string) => {
+  const normalized = String(field || "").trim();
+  if (normalized === "date_mmdd" || normalized === "date") return "sheet-col-date";
+  if (normalized === "daypart") return "sheet-col-daypart";
+  if (normalized === "menu" || normalized === "menu_name") return "sheet-col-menu";
+  return "sheet-col-quantity";
+};
+
 const llmPromptPresetLabels: Record<LlmPromptPreset, string> = {
   numeric_verification: "数字検証優先",
   column_missing: "列欠損・見切れ補完",
@@ -519,6 +535,22 @@ export default function OrderWorkflowV2Page() {
       setVisibleStep(stepIndexForState(workflow.state));
     }
   }, [workflow?.state]);
+
+  useEffect(() => {
+    const syncOverlayImageSize = () => {
+      const image = overlayImageRef.current;
+      if (!image) return;
+      setOverlayImageSize({
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        width: image.clientWidth,
+        height: image.clientHeight,
+      });
+    };
+    syncOverlayImageSize();
+    window.addEventListener("resize", syncOverlayImageSize);
+    return () => window.removeEventListener("resize", syncOverlayImageSize);
+  }, [selectedOcr?.overlay_url, step3LayoutMode, visibleStep]);
 
   useEffect(() => {
     if (!router.isReady || !orderId) return;
@@ -1187,6 +1219,12 @@ export default function OrderWorkflowV2Page() {
                           />
                         </>
                       ) : null}
+                      {focusedSheetCell ? (
+                        <span className={`overlay-cursor-caption ${focusedTargetCell?.bbox ? "ready" : "missing"}`}>
+                          現在セル: R{focusedSheetCell.rowIndex + 1} C{focusedSheetCell.colIndex + 1}
+                          {focusedTargetCell?.bbox ? " / overlay対応あり" : " / overlay対応なし"}
+                        </span>
+                      ) : null}
                     </>
                   ) : (
                     <div className="preview-placeholder">{selectedOcr?.overlay_message || "overlay成果物がありません。"}</div>
@@ -1256,8 +1294,11 @@ export default function OrderWorkflowV2Page() {
                         {sheetPayload.header.map((label, colIdx) => (
                           <th
                             key={`${sheetPayload.fields[colIdx] || "col"}-${colIdx}`}
-                            className={isLockedSheetField(sheetPayload.fields[colIdx]) ? "sticky-structural-col" : ""}
-                            style={isLockedSheetField(sheetPayload.fields[colIdx]) ? { left: `${42 + Math.min(colIdx, 2) * 98}px` } : undefined}
+                            className={[
+                              sheetWidthClass(sheetPayload.fields[colIdx]),
+                              isLockedSheetField(sheetPayload.fields[colIdx]) ? "sticky-structural-col" : "",
+                            ].filter(Boolean).join(" ")}
+                            style={isLockedSheetField(sheetPayload.fields[colIdx]) ? { left: `${stickyLeftForSheetField(sheetPayload.fields[colIdx], colIdx)}px` } : undefined}
                           >
                             {label || sheetPayload.fields[colIdx]}
                           </th>
@@ -1278,11 +1319,12 @@ export default function OrderWorkflowV2Page() {
                                 key={`${field}-${colIdx}`}
                                 className={[
                                   isLockedSheetField(field) ? "sticky-structural-col" : "",
+                                  sheetWidthClass(field),
                                   confidenceTier ? `confidence-${confidenceTier}` : "",
                                   belowThreshold ? "below-confidence-threshold" : "",
                                   overlayValue ? "has-overlay-suggestion" : "",
                                 ].filter(Boolean).join(" ")}
-                                style={isLockedSheetField(field) ? { left: `${42 + Math.min(colIdx, 2) * 98}px` } : undefined}
+                                style={isLockedSheetField(field) ? { left: `${stickyLeftForSheetField(field, colIdx)}px` } : undefined}
                               >
                                 <div className="sheet-input-wrap">
                                   {overlayValue ? <span className="sheet-overlay-suggestion">{overlayValue}</span> : null}
@@ -1699,7 +1741,7 @@ export default function OrderWorkflowV2Page() {
           margin-top: 16px;
         }
         .step3-workspace.side-by-side {
-          grid-template-columns: minmax(560px, 1.08fr) minmax(560px, 1fr);
+          grid-template-columns: minmax(680px, 1.18fr) minmax(470px, 0.82fr);
         }
         .step3-workspace.stacked {
           grid-template-columns: 1fr;
@@ -1743,6 +1785,25 @@ export default function OrderWorkflowV2Page() {
         .overlay-cell-highlight {
           border: 3px solid #e6532e;
           box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.78);
+        }
+        .overlay-cursor-caption {
+          border-radius: 999px;
+          box-shadow: 0 6px 18px rgba(21, 28, 24, 0.16);
+          font-size: 13px;
+          font-weight: 900;
+          left: 12px;
+          padding: 7px 10px;
+          position: sticky;
+          top: 12px;
+          z-index: 4;
+        }
+        .overlay-cursor-caption.ready {
+          background: rgba(255, 247, 209, 0.94);
+          color: #b53018;
+        }
+        .overlay-cursor-caption.missing {
+          background: rgba(232, 238, 244, 0.94);
+          color: #46515a;
         }
         .sheet-toolbar {
           border-bottom: 1px solid #e5dece;
@@ -1800,7 +1861,7 @@ export default function OrderWorkflowV2Page() {
           width: max-content;
         }
         .compact-sheet-table {
-          font-size: 12px;
+          font-size: 11px;
         }
         .sheet-table th,
         .sheet-table td {
@@ -1811,16 +1872,16 @@ export default function OrderWorkflowV2Page() {
         .sheet-table th {
           background: #f4eddd;
           color: #405045;
-          font-size: 12px;
-          min-width: 72px;
-          padding: 8px 10px;
+          font-size: 11px;
+          min-width: 52px;
+          padding: 6px 6px;
           position: sticky;
           top: 0;
           z-index: 1;
         }
         .sheet-table th:first-child {
           left: 0;
-          min-width: 42px;
+          min-width: 34px;
           position: sticky;
           z-index: 2;
         }
@@ -1837,22 +1898,46 @@ export default function OrderWorkflowV2Page() {
           z-index: 3;
         }
         .sheet-input-wrap {
-          min-width: 86px;
           position: relative;
         }
         .sheet-table td input {
           background: #fffdf7;
           border: 0;
           border-radius: 0;
-          min-width: 86px;
-          padding: 5px 7px;
+          min-width: 48px;
+          padding: 4px 5px;
+          width: 100%;
+        }
+        .sheet-table th.sheet-col-date,
+        .sheet-table td.sheet-col-date,
+        .sheet-table td.sheet-col-date .sheet-input-wrap,
+        .sheet-table td.sheet-col-date input {
+          min-width: 52px;
+          width: 52px;
+        }
+        .sheet-table th.sheet-col-daypart,
+        .sheet-table td.sheet-col-daypart,
+        .sheet-table td.sheet-col-daypart .sheet-input-wrap,
+        .sheet-table td.sheet-col-daypart input {
+          min-width: 42px;
+          width: 42px;
+        }
+        .sheet-table th.sheet-col-menu,
+        .sheet-table td.sheet-col-menu,
+        .sheet-table td.sheet-col-menu .sheet-input-wrap,
+        .sheet-table td.sheet-col-menu input {
+          min-width: 170px;
+          width: 170px;
+        }
+        .sheet-table th.sheet-col-quantity,
+        .sheet-table td.sheet-col-quantity,
+        .sheet-table td.sheet-col-quantity .sheet-input-wrap,
+        .sheet-table td.sheet-col-quantity input {
+          min-width: 58px;
+          width: 58px;
         }
         .sheet-table td.sticky-structural-col input {
           background: #fffaf0;
-          min-width: 98px;
-        }
-        .sheet-table td.sticky-structural-col:nth-child(4) input {
-          min-width: 180px;
         }
         .sheet-table input[readonly] {
           color: #344238;
@@ -1956,6 +2041,7 @@ export default function OrderWorkflowV2Page() {
         .ocr-card-body {
           display: grid;
           gap: 12px;
+          grid-template-columns: minmax(220px, 0.34fr) minmax(680px, 1fr);
           min-width: 0;
           flex: 1;
         }
@@ -1976,7 +2062,7 @@ export default function OrderWorkflowV2Page() {
         .ocr-overlay-preview-image {
           background: #ffffff;
           display: block;
-          max-height: 520px;
+          max-height: 78vh;
           object-fit: contain;
           width: 100%;
         }
@@ -2003,7 +2089,8 @@ export default function OrderWorkflowV2Page() {
           }
           .step-nav,
           .form-grid,
-          .step3-workspace.side-by-side {
+          .step3-workspace.side-by-side,
+          .ocr-card-body {
             grid-template-columns: 1fr;
           }
           .step3-overlay-image {
