@@ -681,6 +681,7 @@ def _enqueue_order_reparse_job(
         )
 
     input_reference = str(order.get("document") or "")
+    run_requested_at = datetime.utcnow().isoformat()
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
@@ -1627,6 +1628,7 @@ def _enqueue_workflow_v2_evidence_rerun(
         )
 
     input_reference = str(order.get("document") or "")
+    run_requested_at = datetime.utcnow().isoformat()
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
         existing_job = get_ocr_job(ocr_job_id)

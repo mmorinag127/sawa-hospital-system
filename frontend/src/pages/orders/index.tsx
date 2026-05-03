@@ -116,6 +116,12 @@ const compareOrdersByReceivedAt = (left: Order, right: Order) => {
   return String(right.id || "").localeCompare(String(left.id || ""), "ja");
 };
 
+const effectiveOrderStatus = (order: Order) => {
+  const workflowState = String(order.workflow_state?.state || "").trim().toLowerCase();
+  if (workflowState === "confirmed") return "確定";
+  return String(order.status || "").trim();
+};
+
 const normalizeWeekGroup = (order: Order) => {
   const candidateWeek = order.candidate_resolution?.resolutions?.week;
   const candidateValue = String(candidateWeek?.resolved_value || "").trim();
@@ -561,7 +567,8 @@ export default function OrdersPage() {
           facilitySlots: [],
           unmatchedOrders: [],
         };
-      if (current.counts[order.status] !== undefined) current.counts[order.status] += 1;
+      const displayStatus = effectiveOrderStatus(order);
+      if (current.counts[displayStatus] !== undefined) current.counts[displayStatus] += 1;
       if (hasRegisteredFacility(order)) {
         current.registeredFacilityCount += 1;
       } else {
@@ -800,6 +807,7 @@ export default function OrdersPage() {
   const renderOrderCard = (order: Order) => {
     const badges = visibleReviewBadges(order);
     const weekBucket = normalizeWeekGroup(order);
+    const displayStatus = effectiveOrderStatus(order);
     return (
       <article key={order.id || order.document} className={`order-card ${reviewToneClass(order)}`.trim()}>
         <div className="order-card-top">
@@ -807,7 +815,7 @@ export default function OrdersPage() {
             <p className="order-card-facility">{facilityLabel(order)}</p>
             <p className="order-card-title">{order.id || "注文ID未発行"}</p>
           </div>
-          <span className={`status-pill ${statusClass(order.status)}`}>{order.status}</span>
+          <span className={`status-pill ${statusClass(displayStatus)}`}>{displayStatus}</span>
         </div>
         <p className="order-card-week">{weekBucket.label}</p>
         {workflowHeadlineText(order) ? (

@@ -683,9 +683,68 @@ def _build_materialization_candidate_for_saved_sheet(
     )
 
 
+def _build_order_payload_for_outputs(*, order: Order, lines: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "id": order.id,
+        "facility": order.facility_code,
+        "facility_code": order.facility_code,
+        "week": order.week_code,
+        "week_code": order.week_code,
+        "stored_week_value": order.week_code,
+        "received_at": order.received_at.isoformat() if order.received_at else None,
+        "lines": lines,
+    }
+
+
+def _build_basic_bag_rows_for_candidate(*, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        numeric = _numeric_value(line.get("quantity_corrected"))
+        if numeric is None:
+            numeric = _numeric_value(line.get("quantity_original"))
+        if numeric is None:
+            continue
+        rows.append(
+            {
+                "date": line.get("date"),
+                "daypart": line.get("daypart"),
+                "menu_name": line.get("menu_name") or "",
+                "menu_category": line.get("menu_category"),
+                "diet_type": line.get("diet_type"),
+                "area_id": line.get("area_id"),
+                "bag_type": line.get("bag_type") or "standard",
+                "quantity": numeric,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            str(row.get("date") or ""),
+            str(row.get("daypart") or ""),
+            str(row.get("menu_name") or ""),
+            str(row.get("diet_type") or ""),
+            str(row.get("area_id") or ""),
+            str(row.get("bag_type") or ""),
+        )
+    )
+    return rows
+
+
+def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    order_payload = _build_order_payload_for_outputs(order=order, lines=lines)
+    try:
+        from src.services import output_builder  # noqa: PLC0415
+
+        enriched_lines = output_builder.build_order_lines_for_outputs(order_payload)
+        return output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines)
+    except Exception:
+        # Bagging preview must not block when optional menu/portion enrichment is unavailable.
+        # The raw candidate still gives the operator a visible bagging result.
+        return _build_basic_bag_rows_for_candidate(lines=lines)
+
+
 def _build_bagging_result_payload(
     *,
-    order_id: str,
+    order: Order,
     saved_sheet: OrderSheetDraft,
     materialization_candidate: dict[str, Any],
 ) -> dict[str, Any]:
@@ -715,9 +774,10 @@ def _build_bagging_result_payload(
                 "quantity": numeric,
             }
         )
+    bag_rows = _build_bag_rows_for_candidate(order=order, lines=lines)
     return {
         "bagging_result_id": _new_id("OBG"),
-        "order_id": order_id,
+        "order_id": order.id,
         "source_saved_sheet_id": saved_sheet.id,
         "source_ocr_result_id": saved_sheet.base_evidence_run_id,
         "status": "ready",
@@ -726,8 +786,21 @@ def _build_bagging_result_payload(
             "line_count": len(lines),
             "quantity_line_count": len(quantity_cells),
             "total_quantity": total_quantity,
+            "bag_row_count": len(bag_rows),
         },
         "quantity_cells": quantity_cells,
+        "bag_rows": bag_rows,
+        "created_at": _now().isoformat(),
+    }
+
+
+def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "output_bundle_id": _new_id("OOB"),
+        "order_id": order.id,
+        "source_bagging_result_id": bagging_result.get("bagging_result_id"),
+        "status": "review_ready",
+        "artifacts": [],
         "created_at": _now().isoformat(),
     }
 
@@ -831,7 +904,7 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if materialization_error:
             return None, materialization_error
         bagging_result = _build_bagging_result_payload(
-            order_id=order.id,
+            order=order,
             saved_sheet=draft,
             materialization_candidate=materialization_candidate,
         )
@@ -862,15 +935,21 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
-        workflow.state = "bagging_confirmed"
-        workflow.headline = "袋分け結果が確認されました"
-        workflow.primary_action = "review_outputs"
+        output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        meta = _workflow_meta(workflow)
+        meta["output_bundle_id"] = output_bundle["output_bundle_id"]
+        meta["output_bundle"] = output_bundle
+        _write_workflow_meta(workflow, meta)
+        workflow.state = "output_review"
+        workflow.headline = "出力内容を確認してください"
+        workflow.primary_action = "final_confirm"
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
+            "output_bundle": output_bundle,
         }, None
 
 
@@ -883,14 +962,7 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
-        output_bundle = {
-            "output_bundle_id": _new_id("OOB"),
-            "order_id": order.id,
-            "source_bagging_result_id": bagging_result.get("bagging_result_id"),
-            "status": "review_ready",
-            "artifacts": [],
-            "created_at": _now().isoformat(),
-        }
+        output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
         meta["output_bundle"] = output_bundle
@@ -944,6 +1016,10 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         except Exception as exc:  # noqa: BLE001
             session.rollback()
             return None, f"saved_sheet_materialization_failed:{exc}"
+        order.status = "確定"
+        invalidate_orders_cache = getattr(order_service_module, "_invalidate_orders_cache", None)
+        if callable(invalidate_orders_cache):
+            invalidate_orders_cache()
         snapshot_json = {
             "source": "workflow_v2",
             "order_id": order.id,

@@ -502,6 +502,8 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     assert bagging["bagging_result"]["source_saved_sheet_id"] == saved_sheet_id
     assert bagging["bagging_result"]["summary"]["total_quantity"] == 75.0
     assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
+    assert bagging["bagging_result"]["summary"]["bag_row_count"] >= 1
+    assert bagging["bagging_result"]["bag_rows"]
 
 
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:
@@ -554,11 +556,8 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
     bagging_result_id = bagging["bagging_result"]["bagging_result_id"]
     confirmed_bagging, error = order_workflow_v2_service.confirm_bagging(order_id)
     assert error is None
-    assert confirmed_bagging["workflow"]["state"] == "bagging_confirmed"
-    output_review, error = order_workflow_v2_service.prepare_output_review(order_id)
-    assert error is None
-    assert output_review["workflow"]["state"] == "output_review"
-    assert output_review["output_bundle"]["source_bagging_result_id"] == bagging_result_id
+    assert confirmed_bagging["workflow"]["state"] == "output_review"
+    assert confirmed_bagging["output_bundle"]["source_bagging_result_id"] == bagging_result_id
 
     confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
 
@@ -571,3 +570,4 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert snapshot.snapshot_json["source"] == "workflow_v2"
         assert snapshot.snapshot_json["bagging_result"]["bagging_result_id"] == bagging_result_id
         assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 1
+        assert session.get(Order, order_id).status == "確定"

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
@@ -111,6 +111,12 @@ type OverlayBox = {
 type ConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
 type Step3LayoutMode = "side-by-side" | "stacked";
 type OcrRunMode = "hakodate" | "llm";
+type OutputPreviewType = "labels" | "delivery" | "aggregate";
+type OutputPreview = {
+  type: OutputPreviewType;
+  headers: string[];
+  rows: string[][];
+};
 type LlmPromptPreset =
   | "numeric_verification"
   | "column_missing"
@@ -239,8 +245,9 @@ const stepIndexForState = (state?: string | null) => {
   if (["uploaded", "context_confirmed", "ocr_running", "ocr_failed"].includes(normalized)) return 1;
   if (["ocr_completed"].includes(normalized)) return 2;
   if (["ocr_selected"].includes(normalized)) return 3;
-  if (["sheet_saved"].includes(normalized)) return 3;
-  if (["bagging_ready", "bagging_confirmed"].includes(normalized)) return 4;
+  if (["sheet_saved"].includes(normalized)) return 4;
+  if (["bagging_ready"].includes(normalized)) return 4;
+  if (["bagging_confirmed"].includes(normalized)) return 5;
   if (["output_review", "confirmed"].includes(normalized)) return 5;
   return 1;
 };
@@ -361,6 +368,123 @@ const sheetRowClassName = (sheet: SheetPayload, rowIndex: number) => {
   ].filter(Boolean).join(" ");
 };
 
+const normalizeDietLabel = (value?: unknown) => {
+  const raw = String(value || "").trim();
+  const normalized = raw.toLowerCase().replace(/[\s　_()-]+/g, "");
+  if (!raw) return "-";
+  if (["regular", "常食"].includes(normalized)) return "常食";
+  if (["diabetes", "糖尿"].includes(normalized)) return "糖尿";
+  if (["staff", "職員"].includes(normalized)) return "職員";
+  if (["daycare", "通所"].includes(normalized)) return "通所";
+  if (["nomeat", "肉禁"].includes(normalized)) return "肉禁";
+  if (["nofish", "魚禁"].includes(normalized)) return "魚禁";
+  if (["nofried", "揚げ物禁", "揚禁"].includes(normalized)) return "揚げ物禁";
+  if (["change1", "変更1"].includes(normalized)) return "変更1";
+  if (["change2", "変更2"].includes(normalized)) return "変更2";
+  if (["remarks", "note", "備考"].includes(normalized)) return "備考";
+  return raw;
+};
+
+const formatWorkflowQuantity = (value?: unknown) => {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return numeric.toLocaleString("ja-JP", { maximumFractionDigits: 2 });
+};
+
+const formatWorkflowBagType = (value?: unknown) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "標準";
+  if (raw === "standard") return "標準";
+  if (raw === "condiment") return "付属品";
+  return raw;
+};
+
+const extractWorkflowBagRows = (baggingResult?: Record<string, unknown> | null) => {
+  const raw = Array.isArray(baggingResult?.bag_rows)
+    ? baggingResult.bag_rows
+    : Array.isArray(baggingResult?.quantity_cells)
+      ? baggingResult.quantity_cells
+      : [];
+  return raw
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item, idx) => ({
+      id: String(item.line_index ?? item.source_row_index ?? idx),
+      date: String(item.date || "-"),
+      daypart: String(item.daypart || "-"),
+      menu_name: String(item.menu_name || "-"),
+      diet_type: String(item.diet_type || ""),
+      area_id: String(item.area_id || ""),
+      bag_type: String(item.bag_type || "standard"),
+      quantity: item.quantity,
+    }));
+};
+
+const buildWorkflowBagSummaryRows = (bagRows: ReturnType<typeof extractWorkflowBagRows>) => {
+  const map = new Map<string, {
+    id: string;
+    date: string;
+    daypart: string;
+    menu_name: string;
+    diet_type: string;
+    area_id: string;
+    bag_type: string;
+    total_quantity: number;
+    bag_count: number;
+    breakdowns: string[];
+  }>();
+  bagRows.forEach((row) => {
+    const key = [row.date, row.daypart, row.menu_name, row.diet_type, row.area_id, row.bag_type].join("\u0000");
+    const quantity = typeof row.quantity === "number" ? row.quantity : Number(row.quantity);
+    const current = map.get(key) || {
+      id: key,
+      date: row.date,
+      daypart: row.daypart,
+      menu_name: row.menu_name,
+      diet_type: row.diet_type,
+      area_id: row.area_id,
+      bag_type: row.bag_type,
+      total_quantity: 0,
+      bag_count: 0,
+      breakdowns: [],
+    };
+    current.bag_count += 1;
+    if (Number.isFinite(quantity)) {
+      current.total_quantity += quantity;
+      current.breakdowns.push(formatWorkflowQuantity(quantity));
+    }
+    map.set(key, current);
+  });
+  return Array.from(map.values()).sort((a, b) => (
+    a.date.localeCompare(b.date, "ja")
+    || a.daypart.localeCompare(b.daypart, "ja")
+    || a.menu_name.localeCompare(b.menu_name, "ja")
+    || a.diet_type.localeCompare(b.diet_type, "ja")
+    || a.area_id.localeCompare(b.area_id, "ja")
+    || a.bag_type.localeCompare(b.bag_type, "ja")
+  ));
+};
+
+const groupWorkflowBagRowsByDate = (rows: ReturnType<typeof buildWorkflowBagSummaryRows>) => {
+  const map = new Map<string, typeof rows>();
+  rows.forEach((row) => {
+    const key = row.date || "-";
+    const current = map.get(key) || [];
+    current.push(row);
+    map.set(key, current);
+  });
+  return Array.from(map.entries()).map(([date, rows]) => ({ date, rows }));
+};
+
+const isBagColumnHeader = (header?: string) => {
+  const normalized = String(header || "").trim().toLowerCase();
+  return Boolean(normalized && (normalized.includes("bag") || normalized.includes("袋")));
+};
+
+const formatOutputPreviewCell = (cell: string, header?: string) => {
+  if (!isBagColumnHeader(header)) return cell;
+  return formatWorkflowBagType(cell);
+};
+
 const unionOverlayBoxes = (items: Array<{ box: OverlayBox }>): OverlayBox | null => {
   if (!items.length) return null;
   const left = Math.min(...items.map((item) => item.box.left));
@@ -425,6 +549,10 @@ export default function OrderWorkflowV2Page() {
   const [llmModelMode, setLlmModelMode] = useState<"flash" | "pro" | "other">("flash");
   const [llmCustomModel, setLlmCustomModel] = useState<string>("");
   const [ocrPrompt, setOcrPrompt] = useState<string>("");
+  const [downloadMessage, setDownloadMessage] = useState<string>("");
+  const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
+  const [outputPreviewMessage, setOutputPreviewMessage] = useState<string>("");
+  const [outputPreviewLoading, setOutputPreviewLoading] = useState<boolean>(false);
   const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
 
@@ -446,6 +574,21 @@ export default function OrderWorkflowV2Page() {
       .map((field, idx) => ({ field, idx, label: sheetPayload.header[idx] || field }))
       .filter((item) => !isLockedSheetField(item.field));
   }, [sheetPayload]);
+
+  const bagRows = useMemo(
+    () => extractWorkflowBagRows(inspection?.bagging_result),
+    [inspection?.bagging_result],
+  );
+
+  const bagSummaryRows = useMemo(
+    () => buildWorkflowBagSummaryRows(bagRows),
+    [bagRows],
+  );
+
+  const bagSummaryGroups = useMemo(
+    () => groupWorkflowBagRowsByDate(bagSummaryRows),
+    [bagSummaryRows],
+  );
 
   const ocrOverlayItemMap = useMemo(() => {
     const map = new Map<string, OcrNumericCellItem>();
@@ -898,6 +1041,23 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
+  const focusSheetInput = (rowIndex: number, colIndex: number) => {
+    requestAnimationFrame(() => {
+      const selector = `[data-sheet-row="${rowIndex}"][data-sheet-col="${colIndex}"]`;
+      const nextInput = document.querySelector<HTMLInputElement>(selector);
+      nextInput?.focus();
+      nextInput?.select();
+    });
+  };
+
+  const handleSheetInputKeyDown = (event: KeyboardEvent<HTMLInputElement>, rowIndex: number, colIndex: number) => {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    const nextRowIndex = rowIndex + 1;
+    if (!sheetPayload?.rows[nextRowIndex]) return;
+    focusSheetInput(nextRowIndex, colIndex);
+  };
+
   const fillQuantityColumn = () => {
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
@@ -968,21 +1128,127 @@ export default function OrderWorkflowV2Page() {
     });
 
   const confirmBagging = () =>
-    runAction("Step4 bagging confirm", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/bagging/confirm`);
-    });
+    runAction(
+      "Step4 bagging confirm",
+      async () => {
+        await apiClient.post(`/orders/${orderId}/workflow-v2/bagging/confirm`);
+      },
+      {
+        successMessage: "袋分けを確定しました",
+        nextStep: 5,
+      },
+    );
 
   const prepareOutputReview = () =>
-    runAction("Step5 output review", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/outputs/review`);
-    });
+    runAction(
+      "Step5 output review",
+      async () => {
+        await apiClient.post(`/orders/${orderId}/workflow-v2/outputs/review`);
+      },
+      {
+        successMessage: "出力確認を作成しました",
+        nextStep: 5,
+      },
+    );
 
   const finalConfirm = () =>
-    runAction("Step5 final confirm", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
-        confirmed_by: "operator",
+    runAction(
+      "Step5 final confirm",
+      async () => {
+        await apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
+          confirmed_by: "operator",
+        });
+        await router.push("/orders");
+      },
+      {
+        successMessage: "注文を確定しました",
+        refreshAfter: false,
+      },
+    );
+
+  const extractFilename = (contentDisposition?: string | null) => {
+    if (!contentDisposition) return "";
+    const utfMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const rawName = utfMatch?.[1] || contentDisposition.match(/filename="?([^";]+)"?/i)?.[1] || "";
+    if (!rawName) return "";
+    try {
+      return decodeURIComponent(rawName);
+    } catch {
+      return rawName;
+    }
+  };
+
+  const openOutput = async (path: string, label: string) => {
+    const timestamp = new Date().toLocaleString("ja-JP");
+    setDownloadMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
+    let popup: Window | null = null;
+    try {
+      popup = window.open("", "_blank");
+      if (popup) {
+        popup.document.title = `${label} ダウンロード`;
+        popup.document.body.innerHTML = "<p>ダウンロードを準備中...</p>";
+      }
+    } catch {
+      popup = null;
+    }
+    try {
+      const res = await apiClient.get(path, { responseType: "blob" });
+      const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
+      const filename = extractFilename(contentDisposition) || "output";
+      const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
+      const url = URL.createObjectURL(blob);
+      if (popup) {
+        popup.location.href = url;
+      } else {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setDownloadMessage(`${label}をダウンロードしました。 (${timestamp})`);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const suffix = status ? ` (${status})` : "";
+      setDownloadMessage(`${label}のダウンロードに失敗しました。${suffix}`);
+      if (popup) {
+        popup.close();
+      }
+    }
+  };
+
+  const outputPreviewLabels: Record<OutputPreviewType, string> = {
+    labels: "ラベルCSV",
+    delivery: "納品書Excel",
+    aggregate: "総量CSV",
+  };
+
+  const loadOutputPreview = async (type: OutputPreviewType) => {
+    if (!orderId) return;
+    setOutputPreviewLoading(true);
+    setOutputPreviewMessage("プレビューを取得中...");
+    try {
+      const res = await apiClient.get("/outputs/preview", {
+        params: { order_id: orderId, type, limit: 10 },
       });
-    });
+      const headers = Array.isArray(res.data?.headers) ? res.data.headers.map((item: unknown) => String(item ?? "")) : [];
+      const rows = Array.isArray(res.data?.rows)
+        ? res.data.rows
+            .filter((row: unknown): row is unknown[] => Array.isArray(row))
+            .slice(0, 10)
+            .map((row: unknown[]) => row.map((cell) => String(cell ?? "")))
+        : [];
+      setOutputPreview({ type, headers, rows });
+      setOutputPreviewMessage(rows.length ? "" : "プレビューが空です。");
+    } catch {
+      setOutputPreview(null);
+      setOutputPreviewMessage("プレビューの取得に失敗しました。");
+    } finally {
+      setOutputPreviewLoading(false);
+    }
+  };
 
   return (
     <main className="page workflow-v2-page">
@@ -1557,9 +1823,12 @@ export default function OrderWorkflowV2Page() {
                                 <div className="sheet-input-wrap">
                                   {overlayValue ? <span className="sheet-overlay-suggestion">{overlayValue}</span> : null}
                                   <input
+                                    data-sheet-row={rowIdx}
+                                    data-sheet-col={colIdx}
                                     value={row[colIdx] || ""}
                                     readOnly={isLockedSheetField(field)}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
+                                    onKeyDown={(event) => handleSheetInputKeyDown(event, rowIdx, colIdx)}
                                     onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
                                   />
                                 </div>
@@ -1598,21 +1867,25 @@ export default function OrderWorkflowV2Page() {
         {visibleStep === 4 ? (
         <section className="panel">
           <p className="step-tag">Step4</p>
-          <h2>保存済みシートから袋分け</h2>
-          <p className="subtle">この step は saved_sheet_id だけを入力にします。</p>
-          <div className="row-actions">
-            <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
-              袋分けを計算
-            </button>
-            <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
-              袋分けを確認
-            </button>
-          </div>
+          <header className="panel-header">
+            <div>
+              <h2>袋分け結果</h2>
+              <p className="subtle">保存済みシートから作成した袋分け対象を、日付ごとに確認します。</p>
+            </div>
+            <div className="row-actions">
+              <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
+                袋分けを計算
+              </button>
+              <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
+                確定して次へ
+              </button>
+            </div>
+          </header>
           {inspection?.bagging_result ? (
             <div className="result-summary">
               <div className="summary-grid summary-grid--compact">
                 <div className="summary-primary-card">
-                  <span className="field-label">行数</span>
+                  <span className="field-label">対象行</span>
                   <p className="summary-value">{Number((inspection.bagging_result.summary as any)?.line_count || 0)}件</p>
                 </div>
                 <div className="summary-primary-card">
@@ -1621,38 +1894,70 @@ export default function OrderWorkflowV2Page() {
                 </div>
                 <div className="summary-primary-card">
                   <span className="field-label">合計数量</span>
-                  <p className="summary-value">{Number((inspection.bagging_result.summary as any)?.total_quantity || 0)}</p>
+                  <p className="summary-value">{formatWorkflowQuantity((inspection.bagging_result.summary as any)?.total_quantity)}</p>
+                </div>
+                <div className="summary-primary-card">
+                  <span className="field-label">袋数</span>
+                  <p className="summary-value">{bagRows.length}袋</p>
                 </div>
               </div>
-              <div className="sheet-table-wrap result-table-wrap">
-                <table className="sheet-table compact-sheet-table">
-                  <thead>
-                    <tr>
-                      <th>日付</th>
-                      <th>区分</th>
-                      <th>メニュー</th>
-                      <th>食種</th>
-                      <th>エリア</th>
-                      <th>数量</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Array.isArray(inspection.bagging_result.quantity_cells) ? inspection.bagging_result.quantity_cells.map((item: any, idx: number) => (
-                      <tr key={`bag-q-${idx}`}>
-                        <td>{item.date || "-"}</td>
-                        <td>{item.daypart || "-"}</td>
-                        <td>{item.menu_name || "-"}</td>
-                        <td>{item.diet_type || "-"}</td>
-                        <td>{item.area_id || "-"}</td>
-                        <td>{item.quantity ?? "-"}</td>
-                      </tr>
-                    )) : null}
-                  </tbody>
-                </table>
-              </div>
+              {bagSummaryGroups.length ? (
+                <div className="wrap-grid workflow-bag-groups">
+                  <p className="bag-summary-note subtle">
+                    同じ日付の数量セルをまとめて表示します。区分・メニュー・食種・エリアを確認してから確定してください。
+                  </p>
+                  {bagSummaryGroups.map((group) => (
+                    <div key={`workflow-bag-${group.date}`} className="date-group">
+                      <div className="date-group-header">
+                        <span className="date-group-title">{group.date}</span>
+                        <span className="group-count">{group.rows.length}件</span>
+                      </div>
+                      <div className="table-wrap">
+                        <table className="bag-summary-table">
+                          <thead>
+                            <tr>
+                              <th>食区</th>
+                              <th>メニュー</th>
+                              <th>区分</th>
+                              <th>エリア</th>
+                              <th>袋種</th>
+                              <th>注文数</th>
+                              <th>計算結果</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {group.rows.map((bag) => (
+                              <tr key={`${group.date}-${bag.id}`}>
+                                <td>{bag.daypart || "-"}</td>
+                                <td>{bag.menu_name || "-"}</td>
+                                <td>{normalizeDietLabel(bag.diet_type)}</td>
+                                <td>{bag.area_id || "-"}</td>
+                                <td>{formatWorkflowBagType(bag.bag_type)}</td>
+                                <td className="bag-total-qty">{formatWorkflowQuantity(bag.total_quantity)}</td>
+                                <td className="bag-calc-result-cell">
+                                  <span className={`bag-count-badge${bag.bag_count > 1 ? " split" : ""}`}>
+                                    {bag.bag_count}袋
+                                  </span>
+                                  {bag.bag_count > 1 ? (
+                                    <span className="bag-calc-breakdown">{bag.breakdowns.join(" + ")}</span>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="subtle">数量行がありません。</p>
+              )}
             </div>
           ) : (
-            <p className="subtle">袋分け結果はまだありません。</p>
+            <div className="empty-result-panel">
+              <p className="subtle">袋分け結果はまだありません。保存済みシートから袋分けを計算してください。</p>
+            </div>
           )}
         </section>
         ) : null}
@@ -1660,32 +1965,104 @@ export default function OrderWorkflowV2Page() {
         {visibleStep === 5 ? (
         <section className="panel">
           <p className="step-tag">Step5</p>
-          <h2>出力確認 / 確定</h2>
-          <div className="row-actions">
-            <button className="btn" type="button" onClick={prepareOutputReview} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
-              出力確認を作成
-            </button>
-            <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || !workflow?.output_bundle_id)}>
-              確定
-            </button>
-          </div>
+          <header className="panel-header">
+            <div>
+              <h2>出力確認</h2>
+              <p className="subtle">出力対象を確認して、問題なければ注文を確定します。</p>
+            </div>
+            <div className="row-actions">
+              <button className="btn" type="button" onClick={prepareOutputReview} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
+                出力確認を作成
+              </button>
+              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || !workflow?.output_bundle_id)}>
+                確定して一覧にもどる
+              </button>
+            </div>
+          </header>
           {inspection?.output_bundle ? (
             <div className="result-summary">
               <div className="summary-grid summary-grid--compact">
-                {Object.entries(inspection.output_bundle).slice(0, 8).map(([key, value]) => (
-                  <div key={key} className="summary-primary-card">
-                    <span className="field-label">{key}</span>
-                    <p className="summary-value">{typeof value === "object" ? JSON.stringify(value).slice(0, 80) : String(value ?? "-")}</p>
-                  </div>
-                ))}
+                <div className="summary-primary-card">
+                  <span className="field-label">出力状態</span>
+                  <p className="summary-value">{String(inspection.output_bundle.status || "-")}</p>
+                </div>
+                <div className="summary-primary-card">
+                  <span className="field-label">出力ID</span>
+                  <p className="summary-value">{String(inspection.output_bundle.output_bundle_id || "-")}</p>
+                </div>
+                <div className="summary-primary-card">
+                  <span className="field-label">作成日時</span>
+                  <p className="summary-value">{formatDateTime(String(inspection.output_bundle.created_at || ""))}</p>
+                </div>
               </div>
-              <details className="json-details">
-                <summary>出力JSONを確認</summary>
-                <pre>{formatJson(inspection.output_bundle)}</pre>
-              </details>
+              <div className="outputs">
+                <div className="output-card">
+                  <span className="output-link">ラベルCSV</span>
+                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/labels?order_id=${orderId}`, "ラベルCSV")}>
+                    ダウンロード
+                  </button>
+                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("labels")} disabled={outputPreviewLoading}>
+                    プレビュー
+                  </button>
+                </div>
+                <div className="output-card">
+                  <span className="output-link">納品書Excel</span>
+                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/delivery-notes?order_id=${orderId}`, "納品書Excel")}>
+                    ダウンロード
+                  </button>
+                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("delivery")} disabled={outputPreviewLoading}>
+                    プレビュー
+                  </button>
+                </div>
+                <div className="output-card">
+                  <span className="output-link">総量CSV</span>
+                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${orderId}`, "総量CSV")}>
+                    ダウンロード
+                  </button>
+                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("aggregate")} disabled={outputPreviewLoading}>
+                    プレビュー
+                  </button>
+                </div>
+              </div>
+              {downloadMessage ? <p className="subtle">{downloadMessage}</p> : null}
+              {outputPreviewMessage ? <p className="subtle">{outputPreviewMessage}</p> : null}
+              {outputPreview ? (
+                <details className="output-preview" open>
+                  <summary>
+                    プレビュー: {outputPreviewLabels[outputPreview.type]}
+                    {outputPreview.rows.length ? ` (${outputPreview.rows.length}件)` : ""}
+                  </summary>
+                  <div className="table-wrap">
+                    <table>
+                      {outputPreview.headers.length ? (
+                        <thead>
+                          <tr>
+                            {outputPreview.headers.map((header, idx) => (
+                              <th key={`preview-head-${idx}`}>{header}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                      ) : null}
+                      <tbody>
+                        {outputPreview.rows.map((row, rowIdx) => (
+                          <tr key={`preview-row-${rowIdx}`}>
+                            {row.map((cell, idx) => (
+                              <td key={`preview-cell-${rowIdx}-${idx}`}>
+                                {formatOutputPreviewCell(cell, outputPreview.headers[idx])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              ) : null}
             </div>
           ) : (
-            <p className="subtle">出力確認はまだ作成されていません。</p>
+            <div className="empty-result-panel">
+              <p className="subtle">出力確認はまだ作成されていません。袋分けを確定してから、出力確認を作成してください。</p>
+            </div>
           )}
         </section>
         ) : null}
@@ -1878,6 +2255,145 @@ export default function OrderWorkflowV2Page() {
         .summary-value {
           font-weight: 700;
           margin: 4px 0 0;
+        }
+        .wrap-grid {
+          display: grid;
+          gap: 16px;
+          grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+          align-items: start;
+          margin-top: 16px;
+        }
+        .bag-summary-note {
+          grid-column: 1 / -1;
+          margin: 0;
+        }
+        .date-group {
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 14px;
+          padding: 12px;
+        }
+        .date-group-header {
+          align-items: center;
+          color: #354341;
+          display: flex;
+          font-size: 13px;
+          font-weight: 700;
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+        .date-group-title {
+          white-space: nowrap;
+        }
+        .group-count {
+          background: #edf3ef;
+          border-radius: 999px;
+          color: #355047;
+          font-size: 12px;
+          font-weight: 800;
+          padding: 3px 9px;
+        }
+        .date-group .table-wrap,
+        .output-preview .table-wrap {
+          max-height: 360px;
+          overflow: auto;
+        }
+        .date-group table,
+        .output-preview table {
+          border-collapse: collapse;
+          min-width: 620px;
+          width: 100%;
+        }
+        .date-group th,
+        .date-group td,
+        .output-preview th,
+        .output-preview td {
+          border-bottom: 1px solid #e6dfcf;
+          font-size: 12px;
+          padding: 7px 8px;
+          text-align: left;
+          white-space: nowrap;
+        }
+        .date-group th,
+        .output-preview th {
+          background: #f7f4eb;
+          color: #344238;
+          font-weight: 800;
+          position: sticky;
+          top: 0;
+          z-index: 1;
+        }
+        .bag-total-qty {
+          color: #1f2a2a;
+          font-weight: 800;
+        }
+        .bag-count-badge {
+          align-items: center;
+          background: #edf3ef;
+          border-radius: 999px;
+          color: #355047;
+          display: inline-flex;
+          font-size: 12px;
+          font-weight: 800;
+          justify-content: center;
+          min-width: 70px;
+          padding: 4px 10px;
+        }
+        .bag-count-badge.split {
+          background: #efe6d6;
+          color: #7d4a18;
+        }
+        .bag-calc-breakdown {
+          color: #566663;
+          display: inline-block;
+          font-size: 12px;
+          margin-left: 8px;
+        }
+        .bag-calc-result-cell {
+          min-width: 112px;
+        }
+        .outputs {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          margin-top: 16px;
+        }
+        .output-card {
+          align-items: center;
+          background: rgba(255, 255, 255, 0.9);
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          padding: 8px;
+        }
+        .output-link {
+          background: #fbfbf9;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 12px;
+          color: inherit;
+          font-weight: 800;
+          padding: 10px 16px;
+        }
+        .output-preview,
+        .empty-result-panel {
+          background: #fffdf7;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 14px;
+          margin-top: 16px;
+          padding: 12px;
+        }
+        .output-preview summary {
+          color: #354341;
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 800;
+          list-style: none;
+          margin-bottom: 10px;
+        }
+        .output-preview summary::-webkit-details-marker {
+          display: none;
         }
         .summary-actions {
           align-items: flex-end;
