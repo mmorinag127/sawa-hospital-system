@@ -952,9 +952,12 @@ def list_orders(
     include_archived: bool | None = None,
     include_runtime: bool | None = None,
     include_candidate_summary: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=1000),
 ):
     include_archived_flag = True if include_archived is None else include_archived
     orders = order_service.list_orders(status=status, include_archived=include_archived_flag)
+    if limit is not None:
+        orders = orders[:limit]
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return {"orders": orders}

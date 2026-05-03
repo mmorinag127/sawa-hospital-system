@@ -499,6 +499,7 @@ def evaluate_sheet_gate(
             apply_blockers.append(warning)
             confirm_blockers.append(warning)
     if draft_newer_than_lines:
+        confirm_blockers.append("draft_newer_than_lines")
         confirm_warnings.append("draft_newer_than_lines")
     if auto_apply_blocked:
         confirm_blockers.append("auto_apply_blocked")

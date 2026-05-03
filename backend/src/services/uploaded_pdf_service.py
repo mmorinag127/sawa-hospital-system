@@ -618,6 +618,7 @@ def _link_current_entities(session, row: UploadedPdf) -> None:
             session.execute(
                 select(Order)
                 .where(Order.current_document_id == document.id)
+                .where(Order.archived_at.is_(None))
                 .order_by(Order.received_at.desc(), Order.id.desc())
             )
             .scalars()
@@ -628,6 +629,7 @@ def _link_current_entities(session, row: UploadedPdf) -> None:
             session.execute(
                 select(Order)
                 .where(Order.message_id == row.message_id)
+                .where(Order.archived_at.is_(None))
                 .order_by(Order.received_at.desc(), Order.id.desc())
             )
             .scalars()
@@ -647,6 +649,10 @@ def _is_linked_order_ready(session, row: UploadedPdf) -> bool:
         return False
     order = session.get(Order, row.current_order_id)
     if order is None:
+        return False
+    if order.archived_at is not None:
+        row.current_order_id = None
+        session.flush()
         return False
     return bool(str(order.week_code or "").strip())
 

@@ -18,7 +18,6 @@ FORBIDDEN_DOWNSTREAM_METHODS = [
 ]
 ORDER_FORM_TEMPLATE_Y_EDGE_COUNT = 59
 TWO_STAGE_HEADER_BOUNDARY_MIN_WIDTH_RATIO = 0.12
-TWO_STAGE_HEADER_BOUNDARY_Y_OFFSET_RANGE = (40, 110)
 
 
 @dataclass(frozen=True)
@@ -421,6 +420,60 @@ def cluster_projection(values: np.ndarray, threshold: float) -> list[tuple[int, 
     return clusters
 
 
+def _fill_missing_table_y_edges_by_gap(
+    *,
+    strong_ys: list[int],
+    weak_ys: list[int],
+    table_y0: float,
+    expected_count: int,
+) -> list[int]:
+    table_ys = sorted(y for y in strong_ys if y >= table_y0 - 5)
+    if len(table_ys) >= expected_count:
+        return table_ys[:expected_count]
+
+    missing_count = expected_count - len(table_ys)
+    if missing_count <= 0:
+        return table_ys
+
+    existing = set(table_ys)
+    weak_candidates = sorted(
+        y
+        for y in weak_ys
+        if y >= table_y0 - 5 and all(abs(y - existing_y) > 3 for existing_y in existing)
+    )
+    if not weak_candidates:
+        return table_ys
+
+    gaps = np.diff(np.array(table_ys, dtype=np.float32)) if len(table_ys) >= 2 else np.array([], dtype=np.float32)
+    positive_gaps = gaps[gaps > 0]
+    if len(positive_gaps) == 0:
+        return table_ys
+    typical_gap = float(np.median(positive_gaps))
+
+    scored: list[tuple[float, int]] = []
+    for y in weak_candidates:
+        insert_at = int(np.searchsorted(np.array(table_ys, dtype=np.int32), y))
+        if insert_at <= 0 or insert_at >= len(table_ys):
+            continue
+        prev_y = table_ys[insert_at - 1]
+        next_y = table_ys[insert_at]
+        original_gap = float(next_y - prev_y)
+        left_gap = float(y - prev_y)
+        right_gap = float(next_y - y)
+        if left_gap <= 0 or right_gap <= 0:
+            continue
+        # A partial header ruling should explain an unusually large gap by
+        # splitting it into two normal-looking neighboring row gaps.
+        if original_gap < typical_gap * 1.55:
+            continue
+        split_score = abs(left_gap - typical_gap) + abs(right_gap - typical_gap)
+        split_score += abs((left_gap + right_gap) - original_gap) * 0.01
+        scored.append((float(split_score), int(y)))
+
+    selected = [y for _score, y in sorted(scored)[:missing_count]]
+    return sorted(table_ys + selected)
+
+
 def extract_template_axes_from_image(
     template_image: np.ndarray,
     *,
@@ -442,40 +495,31 @@ def extract_template_axes_from_image(
     vertical_clusters = cluster_projection(vertical.sum(axis=0) / 255, height * 0.25)
     horizontal_clusters = cluster_projection(horizontal.sum(axis=1) / 255, width * 0.25)
     xs = [int(round((start + end) / 2)) for start, end in vertical_clusters]
-    ys_all = [int(round((start + end) / 2)) for start, end in horizontal_clusters]
-    if not xs or not ys_all:
+    strong_ys = [int(round((start + end) / 2)) for start, end in horizontal_clusters]
+    if not xs or not strong_ys:
         raise ValueError("template axes not found")
 
-    manifest_y0 = float(manifest_template_bbox[1])
     weak_horizontal_clusters = cluster_projection(
         horizontal.sum(axis=1) / 255,
         max(50.0, width * TWO_STAGE_HEADER_BOUNDARY_MIN_WIDTH_RATIO),
     )
     weak_ys = [int(round((start + end) / 2)) for start, end in weak_horizontal_clusters]
-    offset_min, offset_max = TWO_STAGE_HEADER_BOUNDARY_Y_OFFSET_RANGE
-    header_boundaries = [
-        y
-        for y in weak_ys
-        if manifest_y0 + offset_min <= y <= manifest_y0 + offset_max
-    ]
-    for y in header_boundaries:
-        if all(abs(y - existing) > 3 for existing in ys_all):
-            ys_all.append(y)
-    ys_all = sorted(ys_all)
+    ys_all = sorted(set(strong_ys + weak_ys))
 
-    # Preserve the approved order-form structure: two header row bands plus
-    # 56 body row bands require 59 y-edges. Some source templates have one
-    # or two extra title/header ruling lines above the table, so keep the
-    # bottom 59 structure edges instead of trusting a per-render bbox cutoff.
-    ys_from_table = [y for y in ys_all if y >= manifest_y0 - 5]
-    if len(ys_from_table) >= ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
-        ys = ys_from_table[:ORDER_FORM_TEMPLATE_Y_EDGE_COUNT]
-    elif len(ys_all) >= ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
-        ys = ys_all[-ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:]
-    else:
-        ys = [y for y in ys_all if y >= manifest_y0 - 5]
+    manifest_y0 = float(manifest_template_bbox[1])
+    ys = _fill_missing_table_y_edges_by_gap(
+        strong_ys=strong_ys,
+        weak_ys=weak_ys,
+        table_y0=manifest_y0,
+        expected_count=ORDER_FORM_TEMPLATE_Y_EDGE_COUNT,
+    )
     if not ys:
         raise ValueError("template table y axes not found")
+    if len(ys) != ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
+        raise ValueError(
+            "template table y axes incomplete: "
+            f"expected={ORDER_FORM_TEMPLATE_Y_EDGE_COUNT} actual={len(ys)}"
+        )
     return xs, ys, [int(v) for v in xs], [int(v) for v in ys_all]
 
 

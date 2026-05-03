@@ -330,6 +330,55 @@ def test_process_uploaded_pdf_job_reuses_existing_message_order_and_fills_week_f
         assert order.superseded_document_ids == ["DOC-UPL-NULL-WEEK"]
 
 
+def test_uploaded_pdf_linking_ignores_archived_orders_with_same_message() -> None:
+    order_service.clear_all()
+    saved = _saved_file(
+        message_id="upload:sha256:archived-order-link",
+        filename="17.fax000355472_0405_.pdf",
+    )
+    uploaded_pdf, _ = create_uploaded_pdf_from_upload(
+        saved=saved,
+        facility_hint=None,
+        week_hint=None,
+        facility_name=None,
+        skip_ocr=False,
+        source_kind="manual_upload",
+    )
+
+    with session_scope() as session:
+        document = OrderDocument(
+            id="DOC-ARCHIVED-UPLOAD-LINK",
+            facility_code="FAC00001",
+            week_code="2026-04@2026-04-05~2026-04-11",
+            storage_uri=saved.pdf_uri,
+            source_email_id=saved.message_id,
+            received_at=saved.received_at,
+            ocr_attempts=1,
+            status="processed",
+        )
+        order = Order(
+            id="ORD-ARCHIVED-UPLOAD-LINK",
+            facility_code="FAC00001",
+            week_code="2026-04@2026-04-05~2026-04-11",
+            status="アーカイブ",
+            current_document_id=document.id,
+            superseded_document_ids=[],
+            document_uri=saved.pdf_uri,
+            message_id=saved.message_id,
+            received_at=saved.received_at,
+            archived_at=datetime.utcnow(),
+            archived_by="test",
+        )
+        session.add(document)
+        session.add(order)
+
+    linked = get_uploaded_pdf(uploaded_pdf["id"])
+
+    assert linked is not None
+    assert linked["current_document_id"] == "DOC-ARCHIVED-UPLOAD-LINK"
+    assert linked["current_order_id"] is None
+
+
 def test_process_uploaded_pdf_job_creates_placeholder_order_before_ingest_finishes(monkeypatch):
     order_service.clear_all()
     saved = _saved_file(
