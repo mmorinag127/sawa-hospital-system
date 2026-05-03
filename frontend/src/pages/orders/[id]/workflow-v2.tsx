@@ -99,6 +99,15 @@ type TargetCellMapItem = {
   center?: number[] | null;
 };
 
+type OverlayBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  centerLeft: number;
+  centerTop: number;
+};
+
 type ConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
 type Step3LayoutMode = "side-by-side" | "stacked";
 type OcrRunMode = "hakodate" | "llm";
@@ -220,7 +229,8 @@ const stateLabel = (state?: string | null) => {
 const stepIndexForState = (state?: string | null) => {
   const normalized = String(state || "").trim();
   if (["uploaded", "context_confirmed", "ocr_running", "ocr_failed"].includes(normalized)) return 1;
-  if (["ocr_completed", "ocr_selected"].includes(normalized)) return 2;
+  if (["ocr_completed"].includes(normalized)) return 2;
+  if (["ocr_selected"].includes(normalized)) return 3;
   if (["sheet_saved"].includes(normalized)) return 3;
   if (["bagging_ready", "bagging_confirmed"].includes(normalized)) return 4;
   if (["output_review", "confirmed"].includes(normalized)) return 5;
@@ -305,6 +315,24 @@ const sheetWidthClass = (field: string) => {
   return "sheet-col-quantity";
 };
 
+const unionOverlayBoxes = (items: Array<{ box: OverlayBox }>): OverlayBox | null => {
+  if (!items.length) return null;
+  const left = Math.min(...items.map((item) => item.box.left));
+  const top = Math.min(...items.map((item) => item.box.top));
+  const right = Math.max(...items.map((item) => item.box.left + item.box.width));
+  const bottom = Math.max(...items.map((item) => item.box.top + item.box.height));
+  const width = Math.max(right - left, 1);
+  const height = Math.max(bottom - top, 1);
+  return {
+    left,
+    top,
+    width,
+    height,
+    centerLeft: left + width / 2,
+    centerTop: top + height / 2,
+  };
+};
+
 const llmPromptPresetLabels: Record<LlmPromptPreset, string> = {
   numeric_verification: "数字検証優先",
   column_missing: "列欠損・見切れ補完",
@@ -383,25 +411,89 @@ export default function OrderWorkflowV2Page() {
     return map;
   }, [ocrConfidenceDisplayMode, sheetPayload]);
 
+  const targetCells = useMemo(
+    () => (sheetPayload?.target_cell_map || []).filter((item) => (
+      typeof item.target_row_index === "number"
+      && typeof item.target_col_index === "number"
+      && Array.isArray(item.bbox)
+      && item.bbox.length === 4
+      && item.bbox.every((value) => typeof value === "number" && Number.isFinite(value))
+    )),
+    [sheetPayload],
+  );
+
   const targetCellMap = useMemo(() => {
     const map = new Map<string, TargetCellMapItem>();
-    for (const item of sheetPayload?.target_cell_map || []) {
-      if (typeof item.target_row_index !== "number" || typeof item.target_col_index !== "number") continue;
+    for (const item of targetCells) {
       map.set(`${item.target_row_index}:${item.target_col_index}`, item);
     }
     return map;
-  }, [sheetPayload]);
+  }, [targetCells]);
 
   const focusedTargetCell = focusedSheetCell
     ? targetCellMap.get(`${focusedSheetCell.rowIndex}:${focusedSheetCell.colIndex}`) || null
     : null;
 
-  const overlayScale = overlayImageSize.naturalWidth > 0 && overlayImageSize.naturalHeight > 0
-    ? {
-        x: overlayImageSize.width / overlayImageSize.naturalWidth,
-        y: overlayImageSize.height / overlayImageSize.naturalHeight,
-      }
-    : { x: 0, y: 0 };
+  const overlayCoordinateMax = useMemo(() => {
+    const maxX = Math.max(
+      overlayImageSize.naturalWidth || 0,
+      ...targetCells.map((cell) => Number(cell.bbox?.[2] ?? 0)).filter(Number.isFinite),
+    );
+    const maxY = Math.max(
+      overlayImageSize.naturalHeight || 0,
+      ...targetCells.map((cell) => Number(cell.bbox?.[3] ?? 0)).filter(Number.isFinite),
+    );
+    return { x: maxX, y: maxY };
+  }, [overlayImageSize.naturalHeight, overlayImageSize.naturalWidth, targetCells]);
+
+  const resolveTargetOverlayBox = (item: TargetCellMapItem | null | undefined): OverlayBox | null => {
+    const bbox = item?.bbox;
+    if (!bbox || bbox.length !== 4 || !overlayImageSize.width || !overlayImageSize.height) return null;
+    const center = Array.isArray(item?.center) && item.center.length >= 2 ? item.center : null;
+    const values = [...bbox, ...(center || [])];
+    const normalized = values.every((value) => value >= -0.02 && value <= 1.2);
+    const coordinateWidth = overlayCoordinateMax.x || overlayImageSize.naturalWidth || 1;
+    const coordinateHeight = overlayCoordinateMax.y || overlayImageSize.naturalHeight || 1;
+    const scaleX = normalized ? overlayImageSize.width : overlayImageSize.width / coordinateWidth;
+    const scaleY = normalized ? overlayImageSize.height : overlayImageSize.height / coordinateHeight;
+    const left = bbox[0] * scaleX;
+    const top = bbox[1] * scaleY;
+    const right = bbox[2] * scaleX;
+    const bottom = bbox[3] * scaleY;
+    const width = Math.max(right - left, 1);
+    const height = Math.max(bottom - top, 1);
+    if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) {
+      return null;
+    }
+    return {
+      left,
+      top,
+      width,
+      height,
+      centerLeft: center ? center[0] * scaleX : left + width / 2,
+      centerTop: center ? center[1] * scaleY : top + height / 2,
+    };
+  };
+
+  const renderedTargetCells = targetCells
+    .map((item) => ({ item, box: resolveTargetOverlayBox(item) }))
+    .filter((entry): entry is { item: TargetCellMapItem; box: OverlayBox } => Boolean(entry.box));
+
+  const focusedTargetBox = resolveTargetOverlayBox(focusedTargetCell);
+  const focusedField = focusedSheetCell ? String(sheetPayload?.fields?.[focusedSheetCell.colIndex] || "").trim() : "";
+  const focusedFieldAliases = new Set(
+    [
+      focusedField,
+      focusedField === "qty.placeholder_x" ? "post_menu.F" : "",
+      focusedField === "remarks" ? "note" : "",
+    ].filter(Boolean),
+  );
+  const focusedRowBox = focusedSheetCell
+    ? unionOverlayBoxes(renderedTargetCells.filter((entry) => entry.item.target_row_index === focusedSheetCell.rowIndex))
+    : null;
+  const focusedColumnBox = focusedSheetCell && focusedFieldAliases.size
+    ? unionOverlayBoxes(renderedTargetCells.filter((entry) => focusedFieldAliases.has(String(entry.item.field || "").trim())))
+    : null;
 
   const resolvedLlmModel = llmProvider === "gemini"
     ? llmModelMode === "pro"
@@ -436,6 +528,9 @@ export default function OrderWorkflowV2Page() {
       const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
       setSheetPayload(normalizedSavedSheet);
       setSheetJson(formatJson(normalizedSavedSheet || savedSheet));
+    } else {
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
     }
     setContextForm({
       facility_id: workflowRes.data.facility_id || "",
@@ -579,14 +674,16 @@ export default function OrderWorkflowV2Page() {
   const runAction = async (
     label: string,
     action: () => Promise<void>,
-    options: { successMessage?: string; nextStep?: number } = {},
+    options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean } = {},
   ) => {
     setBusy(label);
     setError("");
     setMessage("");
     try {
       await action();
-      await refreshAll();
+      if (options.refreshAfter !== false) {
+        await refreshAll();
+      }
       if (options.nextStep) {
         setVisibleStep(options.nextStep);
       }
@@ -648,9 +745,16 @@ export default function OrderWorkflowV2Page() {
     );
 
   const selectOcr = (ocrResultId: string) =>
-    runAction("Step2 OCR select", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}/select`);
-    });
+    runAction(
+      "Step2 OCR select",
+      async () => {
+        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}/select`);
+      },
+      {
+        successMessage: "正解OCRを選択しました",
+        nextStep: 3,
+      },
+    );
 
   const deleteOcr = (ocrResultId: string) =>
     runAction("OCR result delete", async () => {
@@ -666,6 +770,9 @@ export default function OrderWorkflowV2Page() {
       }
       setSheetPayload(normalized);
       setSheetJson(formatJson(normalized));
+    }, {
+      successMessage: "選択OCRからシートを生成しました",
+      refreshAfter: false,
     });
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
@@ -1192,37 +1299,47 @@ export default function OrderWorkflowV2Page() {
                           });
                         }}
                       />
-                      {focusedTargetCell?.bbox && overlayScale.x > 0 && overlayScale.y > 0 ? (
+                      {focusedSheetCell && (focusedRowBox || focusedColumnBox || focusedTargetBox) ? (
                         <>
-                          <span
-                            className="overlay-row-highlight"
-                            style={{
-                              top: `${focusedTargetCell.bbox[1] * overlayScale.y}px`,
-                              height: `${Math.max(6, (focusedTargetCell.bbox[3] - focusedTargetCell.bbox[1]) * overlayScale.y)}px`,
-                            }}
-                          />
-                          <span
-                            className="overlay-col-highlight"
-                            style={{
-                              left: `${focusedTargetCell.bbox[0] * overlayScale.x}px`,
-                              width: `${Math.max(6, (focusedTargetCell.bbox[2] - focusedTargetCell.bbox[0]) * overlayScale.x)}px`,
-                            }}
-                          />
-                          <span
-                            className="overlay-cell-highlight"
-                            style={{
-                              left: `${focusedTargetCell.bbox[0] * overlayScale.x}px`,
-                              top: `${focusedTargetCell.bbox[1] * overlayScale.y}px`,
-                              width: `${Math.max(6, (focusedTargetCell.bbox[2] - focusedTargetCell.bbox[0]) * overlayScale.x)}px`,
-                              height: `${Math.max(6, (focusedTargetCell.bbox[3] - focusedTargetCell.bbox[1]) * overlayScale.y)}px`,
-                            }}
-                          />
+                          {focusedRowBox ? (
+                            <span
+                              className="overlay-row-highlight"
+                              style={{
+                                left: `${focusedRowBox.left}px`,
+                                top: `${focusedRowBox.top}px`,
+                                width: `${focusedRowBox.width}px`,
+                                height: `${focusedRowBox.height}px`,
+                              }}
+                            />
+                          ) : null}
+                          {focusedColumnBox ? (
+                            <span
+                              className="overlay-col-highlight"
+                              style={{
+                                left: `${focusedColumnBox.left}px`,
+                                top: `${focusedColumnBox.top}px`,
+                                width: `${focusedColumnBox.width}px`,
+                                height: `${focusedColumnBox.height}px`,
+                              }}
+                            />
+                          ) : null}
+                          {focusedTargetBox ? (
+                            <span
+                              className="overlay-cell-highlight"
+                              style={{
+                                left: `${focusedTargetBox.left}px`,
+                                top: `${focusedTargetBox.top}px`,
+                                width: `${focusedTargetBox.width}px`,
+                                height: `${focusedTargetBox.height}px`,
+                              }}
+                            />
+                          ) : null}
                         </>
                       ) : null}
                       {focusedSheetCell ? (
-                        <span className={`overlay-cursor-caption ${focusedTargetCell?.bbox ? "ready" : "missing"}`}>
+                        <span className={`overlay-cursor-caption ${focusedTargetBox ? "ready" : "missing"}`}>
                           現在セル: R{focusedSheetCell.rowIndex + 1} C{focusedSheetCell.colIndex + 1}
-                          {focusedTargetCell?.bbox ? " / overlay対応あり" : " / overlay対応なし"}
+                          {focusedTargetBox ? " / overlay対応あり" : " / overlay対応なし"}
                         </span>
                       ) : null}
                     </>
@@ -1774,13 +1891,11 @@ export default function OrderWorkflowV2Page() {
         }
         .overlay-row-highlight {
           background: rgba(255, 192, 64, 0.22);
-          left: 0;
-          right: 0;
+          border: 2px solid rgba(222, 139, 28, 0.5);
         }
         .overlay-col-highlight {
           background: rgba(69, 142, 255, 0.18);
-          bottom: 0;
-          top: 0;
+          border: 2px solid rgba(38, 110, 214, 0.45);
         }
         .overlay-cell-highlight {
           border: 3px solid #e6532e;
