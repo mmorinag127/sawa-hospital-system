@@ -57,6 +57,13 @@
 - Stg uploaded PDFs: `14`; prod uploaded PDFs: `94`.
 - Stg ingest jobs: `14`; prod ingest jobs: `127`.
 - Stg DB quota used rows: `618`; prod DB quota used rows: `68509`.
+- Cloud SQL instances:
+  - stg: `orders-stg`, `POSTGRES_15`, `db-f1-micro`, automated backup disabled.
+  - prod: `orders-prod`, `POSTGRES_15`, `db-g1-small`, automated backup enabled.
+- Latest observed prod automated backup: `1777741200000`, `SUCCESSFUL`, started `2026-05-02T19:28:24Z`.
+- Raw bucket footprint:
+  - stg: `gs://sawahospitalsystem-stg-raw`, about `3.16GB`, about `5647` listed objects.
+  - prod: `gs://sawahospitalsystem-prod-raw`, about `7.12GB`, about `12518` listed objects.
 - Prod has existing order history and must not be cleaned like stg.
 - Prod has `13` archived orders in the light order list.
 
