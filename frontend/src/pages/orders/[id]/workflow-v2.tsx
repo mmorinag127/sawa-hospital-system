@@ -323,6 +323,44 @@ const sheetWidthClass = (field: string) => {
   return "sheet-col-quantity";
 };
 
+const sheetFieldIndex = (fields: string[], candidates: string[]) => {
+  const normalizedCandidates = new Set(candidates.map((value) => String(value || "").trim()));
+  return fields.findIndex((field) => normalizedCandidates.has(String(field || "").trim()));
+};
+
+const effectiveSheetValue = (rows: string[][], rowIndex: number, colIndex: number) => {
+  if (colIndex < 0) return "";
+  for (let idx = rowIndex; idx >= 0; idx -= 1) {
+    const value = String(rows[idx]?.[colIndex] || "").trim();
+    if (value) return value;
+  }
+  return "";
+};
+
+const daypartToneClass = (value: string) => {
+  const normalized = String(value || "").trim();
+  if (normalized.includes("朝")) return "sheet-row-morning";
+  if (normalized.includes("昼")) return "sheet-row-noon";
+  if (normalized.includes("夕") || normalized.includes("夜")) return "sheet-row-evening";
+  return "";
+};
+
+const sheetRowClassName = (sheet: SheetPayload, rowIndex: number) => {
+  const dateIndex = sheetFieldIndex(sheet.fields, ["date_mmdd", "date"]);
+  const daypartIndex = sheetFieldIndex(sheet.fields, ["daypart"]);
+  const dateValue = effectiveSheetValue(sheet.rows, rowIndex, dateIndex);
+  const previousDateValue = rowIndex > 0 ? effectiveSheetValue(sheet.rows, rowIndex - 1, dateIndex) : "";
+  const daypartValue = effectiveSheetValue(sheet.rows, rowIndex, daypartIndex);
+  const previousDaypartValue = rowIndex > 0 ? effectiveSheetValue(sheet.rows, rowIndex - 1, daypartIndex) : "";
+  const dateChanged = rowIndex > 0 && Boolean(dateValue && previousDateValue && dateValue !== previousDateValue);
+  const daypartChanged = rowIndex > 0 && !dateChanged && Boolean(daypartValue && previousDaypartValue && daypartValue !== previousDaypartValue);
+  return [
+    daypartToneClass(daypartValue),
+    dateChanged ? "sheet-row-date-boundary" : "",
+    daypartChanged ? "sheet-row-daypart-boundary" : "",
+  ].filter(Boolean).join(" ");
+};
+
 const unionOverlayBoxes = (items: Array<{ box: OverlayBox }>): OverlayBox | null => {
   if (!items.length) return null;
   const left = Math.min(...items.map((item) => item.box.left));
@@ -1497,7 +1535,7 @@ export default function OrderWorkflowV2Page() {
                     </thead>
                     <tbody>
                       {sheetPayload.rows.map((row, rowIdx) => (
-                        <tr key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
+                        <tr className={sheetRowClassName(sheetPayload, rowIdx)} key={sheetPayload.row_ids?.[rowIdx] || `row-${rowIdx}`}>
                           <th className="sheet-row-index-col">{rowIdx + 1}</th>
                           {sheetPayload.fields.map((field, colIdx) => {
                             const confidenceTier = String(sheetPayload.cell_confidence_rows?.[rowIdx]?.[colIdx] || "").trim();
@@ -2113,12 +2151,34 @@ export default function OrderWorkflowV2Page() {
           min-width: 34px;
           width: 34px;
         }
+        .sheet-table tbody tr.sheet-row-date-boundary th,
+        .sheet-table tbody tr.sheet-row-date-boundary td {
+          border-top: 3px solid #7f8790;
+        }
+        .sheet-table tbody tr.sheet-row-daypart-boundary th,
+        .sheet-table tbody tr.sheet-row-daypart-boundary td {
+          border-top: 2px solid #aeb7bf;
+        }
+        .sheet-table tbody tr.sheet-row-morning th,
+        .sheet-table tbody tr.sheet-row-morning td,
+        .sheet-table tbody tr.sheet-row-morning td input {
+          background: #fff7e8;
+        }
+        .sheet-table tbody tr.sheet-row-noon th,
+        .sheet-table tbody tr.sheet-row-noon td,
+        .sheet-table tbody tr.sheet-row-noon td input {
+          background: #edf7ff;
+        }
+        .sheet-table tbody tr.sheet-row-evening th,
+        .sheet-table tbody tr.sheet-row-evening td,
+        .sheet-table tbody tr.sheet-row-evening td input {
+          background: #eff9ee;
+        }
         .sheet-table tbody th {
           top: auto;
         }
         .sheet-table td.sticky-structural-col,
         .sheet-table th.sticky-structural-col {
-          background: #fffaf0;
           position: sticky;
           z-index: 2;
         }
@@ -2165,7 +2225,7 @@ export default function OrderWorkflowV2Page() {
           width: 58px;
         }
         .sheet-table td.sticky-structural-col input {
-          background: #fffaf0;
+          background: inherit;
         }
         .sheet-table input[readonly] {
           color: #344238;
