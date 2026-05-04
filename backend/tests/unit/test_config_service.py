@@ -57,3 +57,23 @@ def test_normalize_fax_template_columns_preserves_operator_display_header() -> N
     assert columns[0]["diet_type"] == "regular"
     assert columns[0]["area_id"] == "2F"
     assert columns[0]["name"] == "qty.regular_2f"
+
+
+def test_normalize_fax_template_columns_rewrites_legacy_unknown_spacer() -> None:
+    columns = normalize_fax_template_columns(
+        [
+            {
+                "index": 0,
+                "role": "quantity",
+                "header": "不明",
+                "diet_type": "unknown",
+                "area_id": "X",
+                "name": "qty.unknown_x",
+            }
+        ]
+    )
+
+    assert columns[0]["header"] == "-"
+    assert columns[0]["diet_type"] == "placeholder"
+    assert columns[0]["area_id"] == "X"
+    assert columns[0]["name"] == "qty.placeholder_x"
