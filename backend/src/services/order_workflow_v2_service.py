@@ -413,12 +413,31 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
         "processing_stage": metrics.get("processing_stage"),
         "result_state": metrics.get("result_state"),
+        "error_message": _normalize_id(job.error_message) or None,
+        "error": _normalize_id(metrics.get("error")) or None,
         **progress,
     }
 
 
+def _effective_workflow_template_id(meta: dict[str, Any]) -> str | None:
+    template_id = _normalize_id(meta.get("template_id"))
+    if template_id:
+        return template_id
+    facility_id = _normalize_id(meta.get("facility_id"))
+    if not facility_id:
+        return None
+    try:
+        facility_config = config_service.get_facility_config(facility_id)
+    except Exception:
+        return None
+    if not isinstance(facility_config, dict):
+        return None
+    return _normalize_id(facility_config.get("fax_template_id")) or None
+
+
 def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = None) -> dict[str, Any]:
     meta = _workflow_meta(row)
+    effective_template_id = _effective_workflow_template_id(meta)
     return {
         "order_id": row.order_id,
         "state": row.state,
@@ -430,7 +449,8 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
         "facility_id": meta.get("facility_id"),
         "week_start": meta.get("week_start"),
         "week_end": meta.get("week_end"),
-        "template_id": meta.get("template_id"),
+        "template_id": effective_template_id,
+        "template_source": meta.get("template_source") or ("facility_resolved_template" if effective_template_id else None),
         "expanded_cell_copy_mode": _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode")),
         "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
         or None,

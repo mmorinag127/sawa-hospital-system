@@ -229,6 +229,45 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     assert workflow["template_id"] == "fax_layout_regular_forbidden_v1"
 
 
+def test_workflow_serializes_effective_template_for_legacy_meta(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "fax_template_id": "fax_layout_floor_2f3f_v1",
+        },
+    )
+    with session_scope() as session:
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                state="context_confirmed",
+                headline="legacy context",
+                primary_action="run_ocr",
+                secondary_actions_json={
+                    "workflow_v2": {
+                        "facility_id": "FAC_LEGACY",
+                        "week_start": "2026-04-26",
+                        "week_end": "2026-04-30",
+                        "template_id": None,
+                    }
+                },
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["template_id"] == "fax_layout_floor_2f3f_v1"
+    assert workflow["template_source"] == "facility_resolved_template"
+
+
 def test_context_confirm_blocks_facility_columns_without_template_id(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(
@@ -414,6 +453,8 @@ def test_workflow_ocr_job_serializes_progress_from_processing_stage(monkeypatch)
     assert queued["ocr_job"]["progress_step"] == 3
     assert queued["ocr_job"]["progress_total"] == 6
     assert queued["ocr_job"]["progress_label"] == "位置合わせ/OCR"
+    assert queued["ocr_job"]["error_message"] is None
+    assert queued["ocr_job"]["error"] is None
 
 
 def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result(monkeypatch) -> None:
