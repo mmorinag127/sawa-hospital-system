@@ -2167,9 +2167,15 @@ export default function OrderWorkflowV2Page() {
           </header>
           <div className="step1-facility-block">
             <div className="step1-current-strip">
-              <span>現在: {workflowFacilityLabel}</span>
-              <span>{formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "週未設定"}</span>
-              <span>{workflow?.template_id || "テンプレートは施設設定から自動解決"}</span>
+              <div className="step1-current-pills">
+                <span>現在: {workflowFacilityLabel}</span>
+                <span>{formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "週未設定"}</span>
+                <span>{workflow?.template_id || "テンプレートは施設設定から自動解決"}</span>
+              </div>
+              <div className="step1-selection-summary">
+                <strong>選択中: {contextFacilityLabel}</strong>
+                <span>{formatWeekLabel(selectedWeekValue || "") || "週未選択"}</span>
+              </div>
             </div>
             <div className="step1-control-grid">
               <div className="step1-control-column">
@@ -2231,9 +2237,7 @@ export default function OrderWorkflowV2Page() {
                     <span className="subtle">{facilityOptionsError}</span>
                   ) : facilityOptionsLoading ? (
                     <span className="subtle">施設一覧を取得中...</span>
-                  ) : (
-                    <span className="subtle">選択中: {contextFacilityLabel}</span>
-                  )}
+                  ) : null}
                 </label>
               </div>
               <div className="step1-control-column">
@@ -3300,8 +3304,26 @@ export default function OrderWorkflowV2Page() {
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           align-items: stretch;
         }
+        .order-info-panel {
+          padding: 14px 22px;
+        }
+        .order-info-panel .panel-header {
+          margin-bottom: 8px;
+        }
+        .order-info-panel h2 {
+          font-size: 22px;
+          line-height: 1.15;
+        }
+        .order-info-panel .step-tag {
+          margin-bottom: 2px;
+        }
+        .order-info-panel .subtle {
+          font-size: 13px;
+          margin-top: 2px;
+        }
         .summary-grid--order-info {
-          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+          gap: 8px;
+          grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
         }
         .summary-primary-card {
           background: #f8fbfa;
@@ -3309,15 +3331,33 @@ export default function OrderWorkflowV2Page() {
           border-radius: 12px;
           padding: 10px 12px;
         }
+        .summary-grid--order-info .summary-primary-card {
+          min-height: 62px;
+          padding: 8px 10px;
+        }
+        .summary-grid--order-info .field-label {
+          font-size: 11px;
+          letter-spacing: 0.04em;
+        }
         .summary-value {
           font-weight: 700;
           margin: 4px 0 0;
+        }
+        .summary-grid--order-info .summary-value {
+          font-size: 16px;
+          line-height: 1.15;
+          margin-top: 2px;
         }
         .summary-subline {
           color: #687269;
           font-size: 12px;
           font-weight: 700;
           margin: 4px 0 0;
+        }
+        .summary-grid--order-info .summary-subline {
+          font-size: 11px;
+          line-height: 1.2;
+          margin-top: 2px;
         }
         .wrap-grid {
           display: grid;
@@ -3480,7 +3520,7 @@ export default function OrderWorkflowV2Page() {
           padding: 12px;
         }
         .step1-current-strip {
-          align-items: center;
+          align-items: flex-end;
           background: #fffdf7;
           border: 1px solid #e5dece;
           border-radius: 12px;
@@ -3490,13 +3530,32 @@ export default function OrderWorkflowV2Page() {
           font-size: 12px;
           font-weight: 800;
           gap: 8px;
+          justify-content: space-between;
           margin-bottom: 12px;
           padding: 8px 10px;
         }
-        .step1-current-strip span {
+        .step1-current-pills {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .step1-current-pills span,
+        .step1-selection-summary {
           background: #eef3ef;
           border-radius: 999px;
           padding: 4px 9px;
+        }
+        .step1-selection-summary {
+          align-items: center;
+          background: #f7f4eb;
+          color: #354341;
+          display: flex;
+          gap: 8px;
+          margin-left: auto;
+        }
+        .step1-selection-summary span {
+          color: #687269;
+          font-weight: 800;
         }
         .step1-control-grid {
           display: grid;
