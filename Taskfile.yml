@@ -495,35 +495,35 @@ tasks:
     desc: Create standard Git Flow branches if missing. Uses master/develop and optionally release/prod-YYYYMMDD.
     cmds:
       - >-
-        PROD_BRANCH="${PROD_BRANCH:-master}"
-        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
-        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
-        CREATE_RELEASE_BRANCH="${CREATE_RELEASE_BRANCH:-0}"
+        PROD_BRANCH="{{if .PROD_BRANCH}}{{.PROD_BRANCH}}{{else}}master{{end}}"
+        DEVELOP_BRANCH="{{if .DEVELOP_BRANCH}}{{.DEVELOP_BRANCH}}{{else}}develop{{end}}"
+        RELEASE_DATE="{{if .RELEASE_DATE}}{{.RELEASE_DATE}}{{else}}{{now | date "20060102"}}{{end}}"
+        CREATE_RELEASE_BRANCH="{{if .CREATE_RELEASE_BRANCH}}{{.CREATE_RELEASE_BRANCH}}{{else}}0{{end}}"
         ./scripts/git_flow_bootstrap_branches.sh
 
   git_flow_status:
     desc: Show release-source status for Git Flow operations without requiring a pass.
     cmds:
       - >-
-        STRICT="${STRICT:-0}"
-        TARGET_ENV="${TARGET_ENV:-prod}"
-        RELEASE_BRANCH="${RELEASE_BRANCH:-}"
+        STRICT="{{if .STRICT}}{{.STRICT}}{{else}}0{{end}}"
+        TARGET_ENV="{{if .TARGET_ENV}}{{.TARGET_ENV}}{{else}}prod{{end}}"
+        RELEASE_BRANCH="{{if .RELEASE_BRANCH}}{{.RELEASE_BRANCH}}{{end}}"
         ./scripts/git_flow_release_preflight.sh
 
   prod_release_prepare:
     desc: Create release/prod-YYYYMMDD from develop after stg validation.
     cmds:
       - >-
-        PROD_BRANCH="${PROD_BRANCH:-master}"
-        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
-        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
+        PROD_BRANCH="{{if .PROD_BRANCH}}{{.PROD_BRANCH}}{{else}}master{{end}}"
+        DEVELOP_BRANCH="{{if .DEVELOP_BRANCH}}{{.DEVELOP_BRANCH}}{{else}}develop{{end}}"
+        RELEASE_DATE="{{if .RELEASE_DATE}}{{.RELEASE_DATE}}{{else}}{{now | date "20060102"}}{{end}}"
         ./scripts/git_flow_prepare_prod_release.sh
 
   prod_release_worktree:
     desc: Create a dedicated worktree for release/prod-YYYYMMDD.
     cmds:
       - >-
-        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
+        RELEASE_DATE="{{if .RELEASE_DATE}}{{.RELEASE_DATE}}{{else}}{{now | date "20060102"}}{{end}}"
         WORKTREE_ROOT="{{.WORKTREE_ROOT}}"
         ./scripts/git_flow_add_release_worktree.sh
 
@@ -533,9 +533,9 @@ tasks:
       - >-
         STRICT="1"
         TARGET_ENV="prod"
-        PROD_BRANCH="${PROD_BRANCH:-master}"
-        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
-        RELEASE_BRANCH="${RELEASE_BRANCH:-release/prod-$(date +%Y%m%d)}"
+        PROD_BRANCH="{{if .PROD_BRANCH}}{{.PROD_BRANCH}}{{else}}master{{end}}"
+        DEVELOP_BRANCH="{{if .DEVELOP_BRANCH}}{{.DEVELOP_BRANCH}}{{else}}develop{{end}}"
+        RELEASE_BRANCH="{{if .RELEASE_BRANCH}}{{.RELEASE_BRANCH}}{{else}}release/prod-{{now | date "20060102"}}{{end}}"
         ./scripts/git_flow_release_preflight.sh
 
   ops_script_check:
