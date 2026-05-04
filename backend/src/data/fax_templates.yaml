@@ -94,6 +94,7 @@ templates:
     main_ocr_provider: pipeline
     main_ocr_row_fields:
       - date_mmdd
+      - daypart
       - menu
       - qty.regular_2f
       - qty.regular_3f
@@ -102,6 +103,60 @@ templates:
       - qty.mixer_2f
       - qty.mixer_3f
       - remarks
+    columns:
+      - index: 0
+        source_index: 0
+        role: date
+        header: 日付
+        format: MM/DD
+      - index: 1
+        source_index: 1
+        role: daypart
+        header: 区分
+      - index: 2
+        source_index: 3
+        role: menu_name
+        header: メニュー
+      - index: 3
+        source_index: 4
+        role: quantity
+        header: 常食2F
+        diet_type: regular
+        area_id: 2F
+      - index: 4
+        source_index: 5
+        role: quantity
+        header: 常食3F
+        diet_type: regular
+        area_id: 3F
+      - index: 5
+        source_index: 6
+        role: quantity
+        header: 軟菜2F
+        diet_type: soft
+        area_id: 2F
+      - index: 6
+        source_index: 7
+        role: quantity
+        header: 軟菜3F
+        diet_type: soft
+        area_id: 3F
+      - index: 7
+        source_index: 8
+        role: quantity
+        header: ミキサー2F
+        diet_type: mixer
+        area_id: 2F
+      - index: 8
+        source_index: 9
+        role: quantity
+        header: ミキサー3F
+        diet_type: mixer
+        area_id: 3F
+      - index: 9
+        source_index: 10
+        role: note
+        header: 備考
     grid_line_min_ratio: 0.35
     grid_line_scale: 30
     grid_header_rows: 1

@@ -971,6 +971,23 @@ export default function OrderWorkflowV2Page() {
       .filter(Boolean),
     [facilityTemplateColumns],
   );
+  const facilityTemplateColumnsUnresolved = Boolean(
+    contextForm.facility_id
+      && !facilityTemplateStatus.loading
+      && facilityTemplateStatus.facilityId === contextForm.facility_id
+      && facilityTemplateStatus.templateId
+      && facilityTemplateColumns.length === 0,
+  );
+  const facilityTemplateReadyForOcr = Boolean(
+    contextForm.facility_id
+      && !facilityTemplateStatus.loading
+      && facilityTemplateStatus.facilityId === contextForm.facility_id
+      && facilityTemplateStatus.templateId
+      && facilityTemplateColumns.length > 0
+      && !facilityTemplateMissing
+      && !facilityTemplateColumnsUnresolved
+      && !facilityTemplateDirty,
+  );
 
   const quantityColumnOptions = useMemo(() => {
     if (!sheetPayload) return [];
@@ -2247,6 +2264,7 @@ export default function OrderWorkflowV2Page() {
                 disabled={Boolean(
                   busy
                   || !workflowContextConfirmed
+                  || !facilityTemplateReadyForOcr
                   || ocrPrerequisiteBlockers.length > 0
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
                 )}
@@ -2254,6 +2272,17 @@ export default function OrderWorkflowV2Page() {
                 OCRを実行
               </button>
             </div>
+            {!facilityTemplateReadyForOcr && contextForm.facility_id ? (
+              <p className="workflow-warning">
+                {facilityTemplateMissing
+                  ? "施設テンプレートが未登録です。OCR実行前に帳票レイアウトを登録してください。"
+                  : facilityTemplateColumnsUnresolved
+                    ? "施設テンプレートの列定義が未解決です。OCR実行前に施設区分列を確認してください。"
+                    : facilityTemplateDirty
+                      ? "施設区分列に未保存の変更があります。保存してからOCRを実行してください。"
+                      : "施設テンプレートを確認してからOCRを実行してください。"}
+              </p>
+            ) : null}
             {ocrRunMode === "llm" ? (
               <div className="ocr-run-options compact">
                 <label className="toolbar-field">
@@ -2301,7 +2330,7 @@ export default function OrderWorkflowV2Page() {
               </div>
             ) : null}
             {contextForm.facility_id ? (
-              <div className={`facility-template-resolution ${facilityTemplateMissing ? "blocked" : "resolved"}`}>
+              <div className={`facility-template-resolution ${facilityTemplateReadyForOcr ? "resolved" : "blocked"}`}>
                 <div className="facility-template-resolution-copy">
                   <strong>施設テンプレート登録</strong>
                   <p>
@@ -2313,6 +2342,9 @@ export default function OrderWorkflowV2Page() {
                   </p>
                   {selectedFacility ? (
                     <p className="subtle">対象施設: {formatFacilityLabel(selectedFacility)}</p>
+                  ) : null}
+                  {facilityTemplateQuantitySummary.length ? (
+                    <p className="subtle">OCR前確認: {facilityTemplateQuantitySummary.join(" / ")}</p>
                   ) : null}
                   {facilityTemplateStatus.error ? <p className="subtle">{facilityTemplateStatus.error}</p> : null}
                 </div>
@@ -3534,6 +3566,16 @@ export default function OrderWorkflowV2Page() {
         }
         .ocr-mode-field {
           min-width: 170px;
+        }
+        .workflow-warning {
+          background: #fff8e6;
+          border: 1px solid #ebd6a7;
+          border-radius: 12px;
+          color: #775316;
+          font-size: 13px;
+          font-weight: 700;
+          margin: 10px 0 0;
+          padding: 10px 12px;
         }
         .field-label {
           color: #5f7b74;

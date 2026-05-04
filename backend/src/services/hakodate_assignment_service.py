@@ -18,7 +18,10 @@ from openpyxl.utils import range_boundaries
 
 from src.services.grid_detector import GridDetectionResult, detect_table_grid
 from src.services import order_form_service
-from src.services.template_field_schema_service import derive_row_fields_from_template
+from src.services.template_field_schema_service import (
+    canonical_field_name_from_template_column,
+    derive_row_fields_from_template,
+)
 from src.services import workbook_pdf_renderer
 from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf
 
@@ -1141,8 +1144,92 @@ def _effective_cell_value(
     return merged_values.get((row, col))
 
 
-def _column_slots_from_worksheet(worksheet: Any, *, col_count: int) -> list[dict[str, Any]]:
+def _template_slot_label(column: dict[str, Any], field: str) -> str:
+    label = str(column.get("header") or column.get("label") or "").strip()
+    if label:
+        return label
+    role = str(column.get("role") or "").strip().lower()
+    if role == "date":
+        return "日付"
+    if role == "daypart":
+        return "区分"
+    if role == "menu_name":
+        return "献立"
+    if role == "note" or field == "remarks":
+        return "備考欄"
+    if field.startswith("qty."):
+        return field.removeprefix("qty.")
+    return field or role or "unknown"
+
+
+def _canonical_column_slots_from_template(
+    template: dict[str, Any] | None,
+    *,
+    col_count: int,
+) -> dict[int, dict[str, Any]]:
+    if not isinstance(template, dict):
+        return {}
+    raw_columns = template.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        raw_columns = template.get("grid_columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        return {}
+
+    slots: dict[int, dict[str, Any]] = {}
+    ordered = sorted(
+        [column for column in raw_columns if isinstance(column, dict)],
+        key=lambda column: int(column.get("index") or 0),
+    )
+    for fallback_index, column in enumerate(ordered):
+        field = canonical_field_name_from_template_column(column, fallback_index=fallback_index)
+        role = str(column.get("role") or "").strip().lower()
+        if not field:
+            continue
+        if role == "note":
+            slot_role = "note"
+            slot_name = "note"
+        elif field == "date_mmdd":
+            slot_role = "date"
+            slot_name = "date"
+        elif field == "daypart":
+            slot_role = "daypart"
+            slot_name = "daypart"
+        elif field == "menu":
+            slot_role = "menu_name"
+            slot_name = "menu_name"
+        elif field.startswith("qty."):
+            slot_role = "quantity"
+            slot_name = field
+        else:
+            slot_role = role or "unknown"
+            slot_name = field
+        source_index = column.get("source_index")
+        if source_index is None:
+            source_index = column.get("index")
+        try:
+            worksheet_col = int(source_index) + 1
+        except Exception:
+            worksheet_col = fallback_index + 1
+        if worksheet_col <= 0 or worksheet_col > col_count:
+            continue
+        slots[worksheet_col] = {
+            "role": slot_role,
+            "slot_name": slot_name,
+            "label": _template_slot_label(column, field),
+            "canonical_field": field,
+            "canonical_source": "facility_fax_template",
+        }
+    return slots
+
+
+def _column_slots_from_worksheet(
+    worksheet: Any,
+    *,
+    col_count: int,
+    template: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     merged_values = _merged_value_map(worksheet)
+    canonical_slots = _canonical_column_slots_from_template(template, col_count=col_count)
     slots: list[dict[str, Any]] = []
     for raw_col_index in range(col_count):
         worksheet_col = raw_col_index + 1
@@ -1199,17 +1286,20 @@ def _column_slots_from_worksheet(worksheet: Any, *, col_count: int) -> list[dict
             role, slot_name, label = "note", "note", "備考欄"
         elif not header_blob and not body_samples:
             role, slot_name, label = "spacer", "spacer", "spacer"
-        slots.append(
-            {
-                "raw_col_index": raw_col_index,
-                "worksheet_col_index": worksheet_col,
-                "role": role,
-                "slot_name": slot_name,
-                "label": label,
-                "header_values": header_values,
-                "body_samples": body_samples,
-            }
-        )
+        slot = {
+            "raw_col_index": raw_col_index,
+            "worksheet_col_index": worksheet_col,
+            "role": role,
+            "slot_name": slot_name,
+            "label": label,
+            "header_values": header_values,
+            "body_samples": body_samples,
+            "source": "worksheet_header_inference",
+        }
+        canonical = canonical_slots.get(worksheet_col)
+        if canonical:
+            slot.update(canonical)
+        slots.append(slot)
     return slots
 
 
@@ -1842,7 +1932,11 @@ def build_structure_slot_assignment_from_pdf(
                 },
             },
         )
-    column_slots = _column_slots_from_worksheet(worksheet, col_count=len(structure_columns) - 1)
+    column_slots = _column_slots_from_worksheet(
+        worksheet,
+        col_count=len(structure_columns) - 1,
+        template=template,
+    )
     physical_row_map = _workbook_physical_row_map(worksheet, row_count=len(structure_rows) - 1)
     merged_cells = _worksheet_merged_cell_map(worksheet)
     quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
