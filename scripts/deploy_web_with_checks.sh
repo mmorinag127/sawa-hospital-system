@@ -44,6 +44,33 @@ resolve_service_url() {
     --format='value(status.url)'
 }
 
+normalize_workflow_v2_json() {
+  jq -S '
+    walk(
+      if type == "object" then
+        (if has("overlay_url") then .overlay_url = "<signed-url>" else . end)
+        | (if has("preview_url") then .preview_url = "<signed-url>" else . end)
+        | (if has("pdf_url") then .pdf_url = "<signed-url>" else . end)
+      else
+        .
+      end
+    )
+  ' "$1"
+}
+
+compare_workflow_v2_json() {
+  local left="$1"
+  local right="$2"
+  local diff_file
+  diff_file="$(mktemp)"
+  if ! diff -u <(normalize_workflow_v2_json "$left") <(normalize_workflow_v2_json "$right") >"$diff_file"; then
+    cat "$diff_file"
+    rm -f "$diff_file"
+    return 1
+  fi
+  rm -f "$diff_file"
+}
+
 if [ -z "$WEB_SERVICE" ]; then
   echo "WEB_SERVICE is required"
   exit 1
@@ -192,11 +219,11 @@ if [[ -n "${ORDER_ID}" ]]; then
       exit 1
     fi
 
-    if ! cmp -s "${WORKER_WORKFLOW_V2_JSON}" "${WEB_WORKFLOW_V2_JSON}"; then
+    if ! compare_workflow_v2_json "${WORKER_WORKFLOW_V2_JSON}" "${WEB_WORKFLOW_V2_JSON}"; then
       echo "worker/web mismatch: workflow-v2 differs"
       exit 1
     fi
-    if ! cmp -s "${WORKER_INSPECTION_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"; then
+    if ! compare_workflow_v2_json "${WORKER_INSPECTION_V2_JSON}" "${WEB_INSPECTION_V2_JSON}"; then
       echo "worker/web mismatch: workflow-v2 inspection differs"
       exit 1
     fi
