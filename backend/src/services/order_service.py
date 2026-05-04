@@ -14263,6 +14263,7 @@ def _field_label(field: str) -> str:
             "no_fish": "禁食(魚禁)",
             "change_1": "変更1",
             "change_2": "変更2",
+            "placeholder": "-",
             "unknown": "不明",
         }.get(diet, diet)
         if area == "X":
@@ -14290,6 +14291,9 @@ def _is_hakodate_spacer_sheet_field(field: object) -> bool:
 
 def _normalize_hakodate_sheet_field(field: object) -> str:
     token = str(field or "").strip()
+    normalized_token = _normalize_sheet_text(token).lower()
+    if normalized_token in {"qty.unknown_x", "unknown_x"}:
+        return "qty.placeholder_x"
     if _normalize_sheet_text(token).lower() == "note":
         return "remarks"
     return token

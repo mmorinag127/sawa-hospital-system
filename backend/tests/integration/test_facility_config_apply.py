@@ -187,6 +187,52 @@ def test_hakodate_assignment_blocks_target_fields_not_in_facility_template():
     assert "hakodate_target_field_unmapped" in assignment["blockers"]
 
 
+def test_hakodate_assignment_accepts_legacy_unknown_spacer_target_field():
+    _clear_facilities()
+    facility_service.list_facilities()
+    config_service.reload_configs()
+    payload = {
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "target_cell_id": "E11",
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                    "semantic_field": "qty.unknown_x",
+                    "bbox": [10, 10, 30, 30],
+                    "center": [20, 20],
+                    "metadata": {
+                        "truth": {
+                            "row_index": 0,
+                            "field": "qty.unknown_x",
+                        }
+                    },
+                }
+            ]
+        },
+        "hakodate_ocr_evidence_records": [
+            {
+                "evidence_id": "ev1",
+                "raw_text": "1",
+                "normalized_value": "1",
+                "source_bbox": [12, 12, 18, 18],
+                "center": [15, 15],
+                "confidence": 0.99,
+            }
+        ],
+    }
+
+    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+        order_id="ORD-test-legacy-spacer",
+        facility_id="FAC00001",
+        template_id="template-FAC00001",
+        payload=payload,
+    )
+
+    assert "hakodate_target_field_unmapped" not in assignment["blockers"]
+
+
 def test_explicit_quantity_diet_type_wins_over_unrecognized_japanese_header():
     _clear_facilities()
     fac = facility_service.create_facility("Diet Override Facility", [])
