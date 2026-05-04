@@ -3,6 +3,8 @@ import sys
 from datetime import date
 from datetime import datetime
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
@@ -59,6 +61,35 @@ def test_menu_upload_records_menu():
     index = {item["name"]: item for item in merged}
     assert index[first_name]["unit_type"] == "g"
     assert index[first_name]["qty_per_serving"] == 80
+
+
+def test_create_menu_blocks_file_month_mismatch(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+    def _parse_april_menu(*_args, **_kwargs):
+        return date(2026, 4, 1), None, [{"name": "April Menu"}], [
+            {"menu_date": date(2026, 4, 26), "daypart": "朝", "name": "April Menu", "slot_index": 0},
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_april_menu)
+
+    with pytest.raises(ValueError, match="menu_month_mismatch:2026-03!=2026-04"):
+        menu_service.create_menu(
+            "2026-03",
+            b"dummy",
+            "menu-2026-04.xlsx",
+            menu_master_resolutions=[_create_resolution("April Menu")],
+        )
+
+    with session_scope() as session:
+        assert session.get(MonthlyMenu, "2026-03") is None
+        assert session.query(MonthlyMenuEntry).count() == 0
 
 
 def test_menu_upload_history_lists_and_downloads_saved_file(tmp_path):

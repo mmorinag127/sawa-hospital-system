@@ -111,6 +111,16 @@ def _install_fake_materialization(monkeypatch) -> None:
     monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
 
 
+def _install_fake_ocr_prerequisite(monkeypatch, error: str | None = None) -> None:
+    fake_order_service = SimpleNamespace(
+        _build_hakodate_weekly_menu_base_sheet=lambda _order_id: (
+            None if error else {"fields": ["date", "daypart", "menu", "qty.regular"], "rows": [["04/26", "朝", "A", ""]]},
+            error,
+        ),
+    )
+    monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
+
+
 def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
     order_id, _, _ = _create_order_with_evidence()
 
@@ -266,6 +276,7 @@ def test_context_confirm_accepts_facility_resolved_template_without_template_id(
         row = session.get(OrderWorkflowState, order_id)
         assert row.secondary_actions_json["workflow_v2"]["template_source"] == "facility_resolved_template"
 
+    _install_fake_ocr_prerequisite(monkeypatch)
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
 
     assert error is None
@@ -306,7 +317,7 @@ def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
         assert row.secondary_actions_json["workflow_v2"]["facility_id"] == "FAC00001"
 
 
-def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
+def test_mark_ocr_run_queued_requires_context_and_clears_downstream(monkeypatch) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
@@ -320,6 +331,7 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
         week_end="2026-04-30",
         template_id="template-fac00001",
     )
+    _install_fake_ocr_prerequisite(monkeypatch)
     order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
@@ -354,7 +366,30 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
         assert current_state.evidence_run_id is None
 
 
-def test_workflow_ocr_job_serializes_progress_from_processing_stage() -> None:
+def test_mark_ocr_run_queued_blocks_when_weekly_menu_is_missing(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _install_fake_ocr_prerequisite(monkeypatch, "menu_entries_missing")
+
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
+
+    assert queued is not None
+    assert error == "menu_entries_missing"
+    assert queued["state"] == "ocr_blocked"
+    assert queued["blockers"] == ["menu_entries_missing"]
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row.state == "ocr_blocked"
+        assert row.blockers_json == ["menu_entries_missing"]
+
+
+def test_workflow_ocr_job_serializes_progress_from_processing_stage(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     job_id = _id("OCRprogress")
     order_workflow_v2_service.confirm_context(
@@ -378,6 +413,7 @@ def test_workflow_ocr_job_serializes_progress_from_processing_stage() -> None:
                 updated_at=datetime.utcnow(),
             )
         )
+    _install_fake_ocr_prerequisite(monkeypatch)
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
 
     assert error is None
@@ -386,7 +422,7 @@ def test_workflow_ocr_job_serializes_progress_from_processing_stage() -> None:
     assert queued["ocr_job"]["progress_label"] == "位置合わせ/OCR"
 
 
-def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result() -> None:
+def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result(monkeypatch) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -395,6 +431,7 @@ def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result() -
         week_end="2026-04-30",
         template_id="template-fac00001",
     )
+    _install_fake_ocr_prerequisite(monkeypatch)
     order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
 
     completed, error = order_workflow_v2_service.mark_ocr_run_completed(

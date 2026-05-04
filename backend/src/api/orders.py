@@ -1626,6 +1626,27 @@ def _workflow_v2_or_404(result: tuple[dict | None, str | None]) -> dict:
     return payload or {}
 
 
+def _raise_workflow_v2_ocr_prerequisite_error(error: str, workflow: dict | None = None) -> None:
+    normalized = str(error or "").strip()
+    if normalized in {"context_not_confirmed", "facility_template_unresolved"}:
+        raise HTTPException(status_code=400, detail=normalized)
+    messages = {
+        "menu_entries_missing": "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
+        "monthly_menu_object_missing": "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
+        "monthly_menu_lookup_failed": "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
+        "monthly_menu_facility_scope_missing": "対象施設の月次メニュー差分を解決できません。メニュー設定を確認してください。",
+        "week_unresolved": "週次が未確定です。Step1で週次を確定してください。",
+    }
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": normalized or "ocr_prerequisite_unresolved",
+            "message": messages.get(normalized, "OCR前提条件が未解決です。Step1の施設・週次・メニュー設定を確認してください。"),
+            "workflow": workflow or {},
+        },
+    )
+
+
 def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
     raise HTTPException(
         status_code=410,
@@ -1765,6 +1786,9 @@ def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, 
     stale_action = str((body.stale_action if body else None) or "retry").strip().lower()
     force = bool(body.force) if body else False
     mode = str((body.mode if body else None) or "hakodate").strip().lower()
+    prerequisite_workflow, prerequisite_error = order_workflow_v2_service.ensure_ocr_prerequisites(order_id)
+    if prerequisite_error:
+        _raise_workflow_v2_ocr_prerequisite_error(prerequisite_error, prerequisite_workflow)
     if mode == "llm":
         result = _enqueue_order_reparse_job(
             order_id,

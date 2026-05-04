@@ -639,6 +639,12 @@ def _parse_month_id(month_id: str | None) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+def _month_id_from_date(value: date | None) -> str | None:
+    if not isinstance(value, date):
+        return None
+    return f"{value.year:04d}-{value.month:02d}"
+
+
 def _parse_day_number(value: object) -> int | None:
     if value is None:
         return None
@@ -1751,6 +1757,10 @@ def create_menu(
     except ValueError:
         parsed_items = []
         entries = []
+    parsed_month_id = _month_id_from_date(month_start)
+    requested_month_id = _normalize_month_id(month_id)
+    if parsed_month_id and requested_month_id and parsed_month_id != requested_month_id:
+        raise ValueError(f"menu_month_mismatch:{requested_month_id}!={parsed_month_id}")
     if parsed_items:
         names = [item["name"] for item in parsed_items]
     else:

@@ -35,6 +35,26 @@ _OCR_PROGRESS_STEPS: dict[str, tuple[int, str]] = {
     "draft_blocked": (6, "OCR完了/要確認"),
 }
 _OCR_PROGRESS_TOTAL = 6
+_OCR_PREREQUISITE_BLOCKERS = {
+    "facility_missing",
+    "facility_not_found",
+    "week_unresolved",
+    "menu_entries_missing",
+    "monthly_menu_object_missing",
+    "monthly_menu_facility_scope_missing",
+    "monthly_menu_lookup_failed",
+    "sheet_fields_not_found",
+    "sheet_fields_duplicate",
+    "sheet_template_field_invalid",
+    "sheet_quantity_columns_missing",
+    "sheet_quantity_column_unmapped",
+    "sheet_week_dates_incomplete",
+    "week_menu_date_mismatch",
+    "sheet_date_mismatch",
+    "sheet_canonical_mismatch",
+    "weekly_menu_sheet_missing",
+    "ocr_prerequisite_check_failed",
+}
 
 
 def _now() -> datetime:
@@ -263,6 +283,121 @@ def _get_order_service_module() -> Any:
     return order_service
 
 
+def _ocr_prerequisite_headline(error: str) -> str:
+    if error in {"menu_entries_missing", "monthly_menu_object_missing", "monthly_menu_lookup_failed"}:
+        return "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください"
+    if error == "monthly_menu_facility_scope_missing":
+        return "対象施設の月次メニュー差分が未登録です。メニュー設定を確認してください"
+    if error == "week_unresolved":
+        return "週次が未確定です。Step1で週次を確定してください"
+    return "OCR前提条件が未解決です。Step1の施設・週次・メニュー設定を確認してください"
+
+
+def _hakodate_weekly_menu_base_sheet_error(order_id: str) -> str | None:
+    try:
+        order_service = _get_order_service_module()
+        builder = getattr(order_service, "_build_hakodate_weekly_menu_base_sheet", None)
+        if not callable(builder):
+            return None
+        sheet, error = builder(order_id)
+    except Exception:
+        return "ocr_prerequisite_check_failed"
+    if error:
+        return str(error).strip() or "weekly_menu_sheet_missing"
+    if not isinstance(sheet, dict):
+        return "weekly_menu_sheet_missing"
+    return None
+
+
+def _is_prerequisite_failure_job(job: OcrJob | None) -> bool:
+    if job is None:
+        return False
+    error_message = _normalize_id(job.error_message)
+    metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    metric_error = _normalize_id(metrics.get("error"))
+    haystack = f"{error_message} {metric_error}"
+    if "hakodate_best_method_draft_sheet_missing" in haystack:
+        return True
+    return any(code in haystack for code in _OCR_PREREQUISITE_BLOCKERS)
+
+
+def _refresh_ocr_prerequisite_state(
+    session: Any,
+    order: Order,
+    row: OrderWorkflowState,
+) -> None:
+    meta = _workflow_meta(row)
+    if not _workflow_meta_has_confirmed_context(meta) or not _workflow_meta_has_resolved_template(meta):
+        return
+    if row.primary_action not in {"run_ocr", "wait_ocr"} and row.state not in {
+        "context_confirmed",
+        "ocr_blocked",
+        "ocr_failed",
+    }:
+        return
+    if row.state == "ocr_running" or row.primary_action == "wait_ocr":
+        return
+
+    blocker = _hakodate_weekly_menu_base_sheet_error(order.id)
+    current_blockers = [
+        _normalize_id(item)
+        for item in (row.blockers_json or [])
+        if _normalize_id(item)
+    ]
+    ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+    ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+    if blocker:
+        row.state = "ocr_blocked"
+        row.headline = _ocr_prerequisite_headline(blocker)
+        row.primary_action = "run_ocr"
+        row.blockers_json = [blocker]
+        row.warnings_json = []
+        row.last_transition_at = _now()
+        return
+
+    if row.state == "ocr_blocked" or any(item in _OCR_PREREQUISITE_BLOCKERS for item in current_blockers) or (
+        row.state == "ocr_failed" and _is_prerequisite_failure_job(ocr_job)
+    ):
+        row.state = "context_confirmed"
+        row.headline = "施設・週次・テンプレートが確定しました"
+        row.primary_action = "run_ocr"
+        row.blockers_json = [
+            item
+            for item in current_blockers
+            if item not in _OCR_PREREQUISITE_BLOCKERS and item != "hakodate_live_rerun_failed"
+        ]
+        row.warnings_json = []
+        row.last_transition_at = _now()
+
+
+def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        row = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(row)
+        if not _workflow_meta_has_confirmed_context(meta):
+            return None, "context_not_confirmed"
+        if not _workflow_meta_has_resolved_template(meta):
+            return None, "facility_template_unresolved"
+        _refresh_ocr_prerequisite_state(session, order, row)
+        blockers = [
+            _normalize_id(item)
+            for item in (row.blockers_json or [])
+            if _normalize_id(item)
+        ]
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        prerequisite_blocker = next(
+            (item for item in blockers if item in _OCR_PREREQUISITE_BLOCKERS),
+            None,
+        )
+        if prerequisite_blocker:
+            return _serialize_workflow(row, ocr_job=ocr_job), prerequisite_blocker
+        return _serialize_workflow(row, ocr_job=ocr_job), None
+
+
 def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     if job is None:
         return None
@@ -361,6 +496,8 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 meta["context_suggestion"] = suggestion
                 _write_workflow_meta(row, meta)
                 session.flush()
+        _refresh_ocr_prerequisite_state(session, order, row)
+        meta = _workflow_meta(row)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
         return _serialize_workflow(row, ocr_job=ocr_job), None
@@ -495,6 +632,18 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
             return None, "facility_template_unresolved"
+        _refresh_ocr_prerequisite_state(session, order, workflow)
+        blockers = [
+            _normalize_id(item)
+            for item in (workflow.blockers_json or [])
+            if _normalize_id(item)
+        ]
+        prerequisite_blocker = next(
+            (item for item in blockers if item in _OCR_PREREQUISITE_BLOCKERS),
+            None,
+        )
+        if prerequisite_blocker:
+            return _serialize_workflow(workflow), prerequisite_blocker
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None

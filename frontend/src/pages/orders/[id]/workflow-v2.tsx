@@ -28,6 +28,8 @@ type WorkflowV2 = {
   context_suggestion?: ContextSuggestion | null;
   bagging_result_id?: string | null;
   output_bundle_id?: string | null;
+  blockers?: string[] | null;
+  warnings?: string[] | null;
   ocr_job?: {
     ocr_job_id?: string | null;
     status?: string | null;
@@ -230,6 +232,12 @@ const formatApiError = (err: any, fallback: string) => {
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
     const error = (detail as { error?: unknown }).error;
+    if (error === "menu_entries_missing" || error === "monthly_menu_object_missing" || error === "monthly_menu_lookup_failed") {
+      return "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。";
+    }
+    if (error === "monthly_menu_facility_scope_missing") {
+      return "対象施設の月次メニュー差分を解決できません。メニュー設定を確認してください。";
+    }
     if (error === "fax_template_not_found") return "存在しない帳票レイアウトが指定されています。";
     const message = (detail as { message?: unknown }).message;
     if (typeof message === "string" && message.trim()) return message;
@@ -563,7 +571,9 @@ const stateLabel = (state?: string | null) => {
   const labels: Record<string, string> = {
     uploaded: "Step1: PDF/施設/週次確認",
     context_confirmed: "Step1完了: OCR実行待ち",
+    ocr_blocked: "Step1要対応: OCR実行不可",
     ocr_running: "Step1: OCR実行中",
+    ocr_failed: "Step1要対応: OCR失敗",
     ocr_selected: "Step2完了: 正解OCR選択済み",
     sheet_saved: "Step3完了: シート保存済み",
     bagging_ready: "Step4: 袋分け確認",
@@ -574,9 +584,22 @@ const stateLabel = (state?: string | null) => {
   return labels[normalized] || normalized || "未開始";
 };
 
+const describeWorkflowBlocker = (code: string) => {
+  const normalized = String(code || "").trim();
+  const labels: Record<string, string> = {
+    menu_entries_missing: "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
+    monthly_menu_object_missing: "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
+    monthly_menu_lookup_failed: "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
+    monthly_menu_facility_scope_missing: "対象施設の月次メニュー差分を解決できません。メニュー設定を確認してください。",
+    week_unresolved: "週次が未確定です。Step1で週次を確定してください。",
+    facility_template_unresolved: "施設テンプレートが未登録です。",
+  };
+  return labels[normalized] || normalized;
+};
+
 const stepIndexForState = (state?: string | null) => {
   const normalized = String(state || "").trim();
-  if (["uploaded", "context_confirmed", "ocr_running", "ocr_failed"].includes(normalized)) return 1;
+  if (["uploaded", "context_confirmed", "ocr_blocked", "ocr_running", "ocr_failed"].includes(normalized)) return 1;
   if (["ocr_completed"].includes(normalized)) return 2;
   if (["ocr_selected"].includes(normalized)) return 3;
   if (["sheet_saved"].includes(normalized)) return 4;
@@ -956,6 +979,18 @@ export default function OrderWorkflowV2Page() {
       && workflow?.week_start
       && workflow?.week_end
       && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
+  );
+  const workflowBlockers = Array.isArray(workflow?.blockers)
+    ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const ocrPrerequisiteBlockers = workflowBlockers.filter((item) =>
+    [
+      "menu_entries_missing",
+      "monthly_menu_object_missing",
+      "monthly_menu_lookup_failed",
+      "monthly_menu_facility_scope_missing",
+      "week_unresolved",
+    ].includes(item),
   );
   const selectedFacility = useMemo(
     () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
@@ -2040,6 +2075,11 @@ export default function OrderWorkflowV2Page() {
 
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
+      {workflowBlockers.length ? (
+        <div className="notice error">
+          {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}
+        </div>
+      ) : null}
 
       <section className="panel order-info-panel">
         <div className="panel-header">
@@ -2323,6 +2363,7 @@ export default function OrderWorkflowV2Page() {
                 disabled={Boolean(
                   busy
                   || !workflowContextConfirmed
+                  || ocrPrerequisiteBlockers.length > 0
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
                 )}
               >
