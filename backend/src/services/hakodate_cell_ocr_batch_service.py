@@ -16,7 +16,7 @@ import numpy as np
 from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import hakodate_assignment_service
+from src.services import config_service, hakodate_assignment_service
 from src.services.storage_service import load_bytes_from_uri
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
@@ -869,6 +869,27 @@ def _materialize_best_method_item_paths(*, item: dict[str, Any], output_dir: Pat
     return resolved
 
 
+def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) -> dict[str, Any] | None:
+    embedded = item.get("fax_template")
+    if isinstance(embedded, dict):
+        return embedded
+    template_id = (
+        str(
+            item.get("fax_template_id")
+            or item.get("template_id")
+            or item.get("resolved_template_id")
+            or ""
+        ).strip()
+        or None
+    )
+    try:
+        facility_config = config_service.get_facility_config_for_template(facility_code, template_id)
+    except Exception:
+        facility_config = None
+    fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+    return fax_template if isinstance(fax_template, dict) else None
+
+
 def _build_preprocess_for_ocr(
     *,
     item: dict[str, Any],
@@ -891,6 +912,7 @@ def _build_preprocess_for_ocr(
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
+    fax_template = _fax_template_for_manifest_item(item, facility_code)
     quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
@@ -931,6 +953,7 @@ def _build_preprocess_for_ocr(
         worksheet=worksheet,
         column_edges=[float(value) for value in aligned_xs],
         row_edges=[float(value) for value in aligned_ys],
+        fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)

@@ -280,6 +280,49 @@ def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, t
     ]
 
 
+def test_fax_template_for_manifest_item_uses_selected_template_id(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_facility_config_for_template(facility_id, template_id):
+        calls.append((facility_id, template_id))
+        return {"fax_template": {"template_id": template_id, "columns": [{"source_index": 4}]}}
+
+    monkeypatch.setattr(
+        hakodate_cell_ocr_batch_service.config_service,
+        "get_facility_config_for_template",
+        fake_get_facility_config_for_template,
+    )
+
+    template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(  # noqa: SLF001
+        {
+            "facility_code": "FAC00010",
+            "fax_template_id": "fax_layout_floor_2f3f_v1",
+        },
+        "FAC00010",
+    )
+
+    assert calls == [("FAC00010", "fax_layout_floor_2f3f_v1")]
+    assert template == {"template_id": "fax_layout_floor_2f3f_v1", "columns": [{"source_index": 4}]}
+
+
+def test_fax_template_for_manifest_item_prefers_embedded_template(monkeypatch) -> None:
+    def fail_get_facility_config_for_template(_facility_id, _template_id):  # pragma: no cover
+        raise AssertionError("embedded fax_template should not hit config lookup")
+
+    monkeypatch.setattr(
+        hakodate_cell_ocr_batch_service.config_service,
+        "get_facility_config_for_template",
+        fail_get_facility_config_for_template,
+    )
+
+    template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(  # noqa: SLF001
+        {"fax_template": {"template_id": "embedded"}},
+        "FAC00010",
+    )
+
+    assert template == {"template_id": "embedded"}
+
+
 def test_local_yomitoku_word_parser_normalizes_absolute_boxes() -> None:
     words = _analysis_to_yomitoku_words(
         {
