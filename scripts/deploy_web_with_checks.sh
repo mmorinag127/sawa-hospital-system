@@ -24,6 +24,7 @@ STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
 WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 IMAGE_REPO="${IMAGE_REPO:-asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend}"
 TAG_PREFIX="${TAG_PREFIX:-frontend}"
+PROVIDED_IMAGE="${IMAGE:-}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
 WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-web}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
@@ -76,14 +77,18 @@ if [ -z "$WEB_SERVICE" ]; then
   exit 1
 fi
 
-if [ -z "$FRONTEND_DIR" ]; then
+if [ -n "$PROVIDED_IMAGE" ]; then
+  echo "[0/7] promote provided web image"
+elif [ -z "$FRONTEND_DIR" ]; then
   echo "[0/7] prepare fresh web deploy source"
   FRONTEND_DIR="$("$PREPARE_WEB_DEPLOY_SOURCE" "$WEB_DEPLOY_LABEL")"
 else
   echo "[0/7] validate provided web deploy source"
 fi
 
-"$VALIDATE_WEB_DEPLOY_SOURCE" "$FRONTEND_DIR"
+if [ -z "$PROVIDED_IMAGE" ]; then
+  "$VALIDATE_WEB_DEPLOY_SOURCE" "$FRONTEND_DIR"
+fi
 
 if [ -z "$WORKER_URL" ] && [ -n "$WORKER_SERVICE" ]; then
   WORKER_URL="$(resolve_service_url "$WORKER_SERVICE" || true)"
@@ -104,7 +109,7 @@ if [ -z "$WEB_URL" ]; then
 fi
 
 TAG="${TAG_PREFIX}-$(date +%Y%m%d-%H%M%S)"
-IMAGE="${IMAGE_REPO}:${TAG}"
+IMAGE="${PROVIDED_IMAGE:-${IMAGE_REPO}:${TAG}}"
 BUILD_CONFIG="/tmp/cloudbuild.frontend.${TAG}.yaml"
 
 echo "[1/7] capture current web revision/image"
@@ -116,7 +121,8 @@ fi
 echo "current revision=${CURRENT_REVISION:-unknown}"
 echo "current image=${CURRENT_IMAGE:-unknown}"
 
-cat > "$BUILD_CONFIG" <<YAML
+if [ -z "$PROVIDED_IMAGE" ]; then
+  cat > "$BUILD_CONFIG" <<YAML
 steps:
   - name: 'gcr.io/cloud-builders/docker'
     args:
@@ -133,6 +139,7 @@ steps:
 images:
   - '${IMAGE}'
 YAML
+fi
 
 WEB_URL="$WEB_URL" \
 WORKER_URL="$WORKER_URL" \
@@ -146,8 +153,12 @@ CHECK_WEB_PROXY="0" \
 STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
   "$PREDEPLOY_SCRIPT"
 
-echo "[2/7] build web image"
-gcloud builds submit "$FRONTEND_DIR" --project="$PROJECT_ID" --config="$BUILD_CONFIG"
+if [ -z "$PROVIDED_IMAGE" ]; then
+  echo "[2/7] build web image"
+  gcloud builds submit "$FRONTEND_DIR" --project="$PROJECT_ID" --config="$BUILD_CONFIG"
+else
+  echo "[2/7] skip build; promoting provided image ${IMAGE}"
+fi
 
 echo "[3/7] deploy ${WEB_SERVICE}"
 gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" --quiet
