@@ -40,6 +40,16 @@
 11. Merge `release/prod-YYYYMMDD` into `master`.
 12. Merge `master` back into `develop`.
 
+## Deploy Instruction Contract
+- When the operator says `deploy`, do not deploy directly from a feature/codex branch and leave it unresolved.
+- First commit the requested changes, then merge the completed feature/codex branch into the target release source branch.
+- For stg, the target release source branch is `develop` unless the operator explicitly names a `release/*` branch.
+- For prod, the target release source branch is `release/prod-YYYYMMDD`.
+- Deploy from the target release source branch after the merge, using a fresh deploy copy.
+- After deploy, record the deployed Cloud Run revision/image and confirm the deployed source branch contains the merged commit.
+- A feature/codex branch is not considered resolved until its commits are ancestors of the target release source branch.
+- Do not delete a feature/codex branch until the deployed release source branch has passed postdeploy checks.
+
 ## Required Commands
 
 Check current release-source state:
