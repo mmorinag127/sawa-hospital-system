@@ -1480,7 +1480,7 @@
       "phone": "088-657-6567",
       "areas": [],
       "facility_id": "FAC00010",
-      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
       "fax_template_override": {
         "grid_line_scale_horizontal": 20
       },

@@ -65,6 +65,28 @@ def test_fac00002_template_columns_preserve_area_schema_without_duplicates():
     assert ((template.get("postprocess") or {}).get("qty_max_value")) == 50
 
 
+def test_fac00010_uses_floor_2f3f_fax_template():
+    _clear_facilities()
+    facility_service.list_facilities()
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00010")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    fields = (resolved.get("fax_template") or {}).get("main_ocr_row_fields") or []
+    assert fields == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "remarks",
+    ]
+
+
 def test_explicit_quantity_diet_type_wins_over_unrecognized_japanese_header():
     _clear_facilities()
     fac = facility_service.create_facility("Diet Override Facility", [])
@@ -603,6 +625,83 @@ def test_save_order_facility_template_columns_persists_deleted_column_authoritat
     assert refreshed is not None
     refreshed_columns = ((refreshed.get("fax_template") or {}).get("columns") or [])
     assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in refreshed_columns)
+
+
+def test_save_order_facility_template_columns_derives_mapping_from_visible_labels_only():
+    _clear_facilities()
+    facility_service.list_facilities()
+    order_service.clear_all()
+    previous_config = facility_service.get_facility_config("FAC00010") or {}
+
+    order = order_service.create_order_from_ingest(
+        IngestEmailPayload(
+            message_id="msg-facility-template-visible-labels-only",
+            pdf_uri="file://facility-template-visible-labels-only.pdf",
+            received_at=datetime(2026, 4, 12, 12, 0, 0),
+            facility_hint="FAC00010",
+            week_hint="2026-04",
+        ),
+        lines=[],
+    )
+    assert order is not None
+
+    try:
+        result, error = order_service.save_order_facility_template_columns(
+            order["id"],
+            [
+                {"index": 0, "role": "date", "header": "日付", "name": "date"},
+                {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+                {"index": 2, "role": "menu_name", "header": "メニュー", "name": "menu"},
+                {
+                    "index": 3,
+                    "role": "quantity",
+                    "header": "常食2F",
+                    "name": "qty.no_fish_3f",
+                    "diet_type": "no_fish",
+                    "area_id": "3F",
+                    "diet_type_locked": True,
+                    "area_id_locked": True,
+                    "name_locked": True,
+                },
+                {
+                    "index": 4,
+                    "role": "note",
+                    "header": "不明",
+                    "name": "qty.unknown_x",
+                    "name_locked": True,
+                },
+                {"index": 5, "role": "note", "header": "備考"},
+            ],
+        )
+
+        assert error is None
+        assert result is not None
+        resolved = config_service.get_facility_config("FAC00010")
+        assert resolved is not None
+        columns = (resolved.get("fax_template") or {}).get("columns") or []
+        quantity = next(column for column in columns if column.get("index") == 3)
+        assert quantity.get("header") == "常食2F"
+        assert quantity.get("name") == "qty.regular_2f"
+        assert quantity.get("diet_type") == "regular"
+        assert quantity.get("area_id") == "2F"
+        assert "name_locked" not in quantity
+        assert "diet_type_locked" not in quantity
+        assert "area_id_locked" not in quantity
+
+        note = next(column for column in columns if column.get("index") == 4)
+        assert note.get("role") == "note"
+        assert note.get("header") == "不明"
+        assert "name" not in note
+
+        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_2f",
+            "remarks",
+        ]
+    finally:
+        assert facility_service.update_config("FAC00010", previous_config)
 
 
 def test_generic_update_config_preserves_master_authoritative_columns_for_fac00014():

@@ -34512,13 +34512,55 @@ def choose_critical_decision(
     }, None
 
 
+def _user_facility_template_columns_for_save(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep operator-editable column fields only.
+
+    Facility column editing is a visual/template operation. Machine fields such
+    as qty.* names, diet_type and area_id must be derived from the display label
+    in the shared config normalizer, not manually supplied or locked by the UI.
+    """
+
+    ordered = sorted(
+        [column for column in columns if isinstance(column, dict)],
+        key=lambda column: int(column.get("index") or 0),
+    )
+    sanitized: list[dict[str, Any]] = []
+    for idx, raw_column in enumerate(ordered):
+        role = str(raw_column.get("role") or "").strip().lower() or "quantity"
+        header = (
+            str(
+                raw_column.get("header")
+                or raw_column.get("display_name")
+                or raw_column.get("label")
+                or ""
+            ).strip()
+        )
+        column: dict[str, Any] = {"index": idx, "role": role}
+        if header:
+            column["header"] = header
+        source_index = raw_column.get("source_index")
+        try:
+            parsed_source_index = int(source_index) if source_index is not None else None
+        except Exception:
+            parsed_source_index = None
+        if parsed_source_index is not None and parsed_source_index >= 0:
+            column["source_index"] = parsed_source_index
+        if role == "date":
+            fmt = str(raw_column.get("format") or "").strip()
+            if fmt:
+                column["format"] = fmt
+        sanitized.append(column)
+    return sanitized
+
+
 def save_order_facility_template_columns(
     order_id: str,
     columns: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(columns, list) or not columns:
         return None, "columns_invalid"
-    normalized_columns = config_service.normalize_fax_template_columns(columns)
+    user_columns = _user_facility_template_columns_for_save(columns)
+    normalized_columns = config_service.normalize_fax_template_columns(user_columns)
     if not normalized_columns:
         return None, "columns_invalid"
 

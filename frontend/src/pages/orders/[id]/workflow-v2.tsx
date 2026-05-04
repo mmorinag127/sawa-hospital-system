@@ -333,34 +333,6 @@ const dietTypeLabels: Record<string, string> = {
   unknown: "不明",
 };
 
-const preferredDietOrder = [
-  "regular",
-  "regular_bag",
-  "daycare",
-  "staff",
-  "tea",
-  "business",
-  "diabetes",
-  "pregnancy",
-  "soft",
-  "soft_mixer",
-  "mixer",
-  "sesame_allergy",
-  "no_fried",
-  "no_meat",
-  "forbidden_other",
-  "no_fish",
-  "change_1",
-  "change_2",
-  "placeholder",
-  "unknown",
-];
-
-const facilityTemplateDietTypeOptions = preferredDietOrder.map((value) => ({
-  value,
-  label: dietTypeLabels[value] || value,
-}));
-
 const formatDietType = (value?: string | null) => {
   const token = normalizeDietTypeToken(value || "");
   return dietTypeLabels[token] || value || "不明";
@@ -470,20 +442,9 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
   columns.map((column, idx) => {
     const role = String(column.role || "").trim().toLowerCase() || "quantity";
     const header = String(column.header || "").trim();
-    const name = String(column.name || "").trim();
     const payload: Record<string, unknown> = { index: idx, role };
     if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) payload.source_index = Number(column.source_index);
     if (header) payload.header = header;
-    if (name) payload.name = name;
-    if (role === "quantity") {
-      const dietType = normalizeDietTypeToken(column.diet_type || header || name || "") || "unknown";
-      const areaId = normalizeFacilityAreaToken(column.area_id || header || name || "");
-      payload.diet_type = dietType;
-      payload.area_id = areaId;
-      payload.diet_type_locked = true;
-      payload.area_id_locked = true;
-      payload.name_locked = true;
-    }
     return payload;
   });
 
@@ -494,28 +455,6 @@ const columnRoleOptions = [
   { value: "quantity", label: "数量" },
   { value: "note", label: "備考" },
 ];
-
-const buildFacilityTemplateAreaOptions = (facilityConfig: Record<string, any> | null, columns: FacilityTemplateColumn[]) => {
-  const seen = new Set<string>();
-  const options: { value: string; label: string }[] = [];
-  const push = (value: string, label?: string) => {
-    const normalized = normalizeFacilityAreaToken(value);
-    if (!normalized || seen.has(normalized)) return;
-    seen.add(normalized);
-    options.push({ value: normalized, label: label || normalized });
-  };
-  push("X", "共通");
-  const areas = Array.isArray(facilityConfig?.areas) ? facilityConfig.areas : [];
-  areas.forEach((area: any) => {
-    const areaId = String(area?.area_id || area?.id || "").trim();
-    const areaName = String(area?.name || "").trim();
-    if (areaId || areaName) push(areaId || areaName, areaName && areaName !== areaId ? `${normalizeFacilityAreaToken(areaId || areaName)} (${areaName})` : undefined);
-  });
-  columns.forEach((column) => {
-    if (isQuantityRole(column.role)) push(column.area_id || "X");
-  });
-  return options;
-};
 
 const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -1020,10 +959,6 @@ export default function OrderWorkflowV2Page() {
       && !facilityTemplateStatus.loading
       && facilityTemplateStatus.facilityId === contextForm.facility_id
       && !facilityTemplateStatus.templateId,
-  );
-  const facilityTemplateAreaOptions = useMemo(
-    () => buildFacilityTemplateAreaOptions(facilityResolvedConfig, facilityTemplateColumnDraft),
-    [facilityResolvedConfig, facilityTemplateColumnDraft],
   );
   const facilityTemplateDirty = useMemo(
     () => JSON.stringify(facilityTemplateColumns) !== JSON.stringify(facilityTemplateColumnDraft),
@@ -1654,12 +1589,6 @@ export default function OrderWorkflowV2Page() {
             next.diet_type = "";
             next.area_id = "";
           }
-          next.header = defaultHeaderForFacilityTemplateColumn(next);
-          next.name = defaultNameForFacilityTemplateColumn(next);
-        }
-        if (next.role === "quantity" && (key === "diet_type" || key === "area_id")) {
-          next.diet_type = normalizeDietTypeToken(next.diet_type || "") || "unknown";
-          next.area_id = normalizeFacilityAreaToken(next.area_id || "");
           next.header = defaultHeaderForFacilityTemplateColumn(next);
           next.name = defaultNameForFacilityTemplateColumn(next);
         }
@@ -2448,6 +2377,7 @@ export default function OrderWorkflowV2Page() {
                   <div className="facility-template-editor-body">
                     <div className="facility-template-callout">
                       <p>
+                        表示名・役割・並びだけを設定します。内部名・区分・エリアは保存時に表示名から自動生成します。
                         保存するとこの施設全体のテンプレート列定義を更新します。既存OCR結果・保存シート・袋分け・出力は破棄され、Step1からOCR再実行になります。
                       </p>
                     </div>
@@ -2490,15 +2420,11 @@ export default function OrderWorkflowV2Page() {
                             <th>#</th>
                             <th>役割</th>
                             <th>表示名</th>
-                            <th>内部名</th>
-                            <th>区分</th>
-                            <th>エリア</th>
                             <th>操作</th>
                           </tr>
                         </thead>
                         <tbody>
                           {facilityTemplateColumnDraft.map((column, idx) => {
-                            const quantityColumn = isQuantityRole(column.role);
                             return (
                               <tr key={`facility-template-column-${column.index}-${idx}`}>
                                 <td>{idx + 1}</td>
@@ -2520,38 +2446,6 @@ export default function OrderWorkflowV2Page() {
                                     onChange={(event) => updateFacilityTemplateColumn(idx, "header", event.target.value)}
                                     placeholder="表示名"
                                   />
-                                </td>
-                                <td>
-                                  <input
-                                    className="input"
-                                    value={column.name || ""}
-                                    onChange={(event) => updateFacilityTemplateColumn(idx, "name", event.target.value)}
-                                    placeholder="qty.regular_x"
-                                  />
-                                </td>
-                                <td>
-                                  <select
-                                    className="input"
-                                    value={quantityColumn ? normalizeDietTypeToken(column.diet_type || "") || "unknown" : ""}
-                                    disabled={!quantityColumn}
-                                    onChange={(event) => updateFacilityTemplateColumn(idx, "diet_type", event.target.value)}
-                                  >
-                                    {facilityTemplateDietTypeOptions.map((option) => (
-                                      <option key={option.value} value={option.value}>{option.label}</option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td>
-                                  <select
-                                    className="input"
-                                    value={quantityColumn ? normalizeFacilityAreaToken(column.area_id || "") : ""}
-                                    disabled={!quantityColumn}
-                                    onChange={(event) => updateFacilityTemplateColumn(idx, "area_id", event.target.value)}
-                                  >
-                                    {facilityTemplateAreaOptions.map((option) => (
-                                      <option key={option.value} value={option.value}>{option.label}</option>
-                                    ))}
-                                  </select>
                                 </td>
                                 <td>
                                   <div className="facility-template-row-actions">
