@@ -373,6 +373,7 @@ def _default_header_for_quantity(diet: str, area: str) -> str:
     diet_label = {
         "regular": "常食",
         "regular_bag": "常食(袋分け)",
+        "diabetes": "糖尿",
         "soft": "軟菜",
         "soft_mixer": "軟菜/ミキサー",
         "mixer": "ミキサー",
@@ -389,6 +390,36 @@ def _default_header_for_quantity(diet: str, area: str) -> str:
     if area == "x":
         return diet_label
     return f"{diet_label}{area.upper()}"
+
+
+def _quantity_header_is_internal_token(
+    header: str,
+    *,
+    diet: str,
+    area: str,
+    name: str,
+) -> bool:
+    raw = str(header or "").strip()
+    if not raw:
+        return True
+    # Japanese/custom display labels are operator-facing labels; only rewrite
+    # ASCII schema tokens that leaked from older template editors.
+    if not re.fullmatch(r"[A-Za-z0-9_.\-\s]+", raw):
+        return False
+    token = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    if not token:
+        return False
+    normalized_name = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+    candidates = {
+        diet,
+        f"{diet}_{area}",
+        f"qty_{diet}_{area}",
+        normalized_name,
+    }
+    if area == "x":
+        candidates.add(f"{diet}_x")
+        candidates.add(f"qty_{diet}_x")
+    return token in {candidate for candidate in candidates if candidate}
 
 
 def _parse_quantity_field_name(value: object) -> dict[str, str] | None:
@@ -719,7 +750,7 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                 col.pop("name_locked", None)
             col["diet_type"] = diet
             col["area_id"] = area.upper() if area != "x" else "X"
-            if not header:
+            if not header or _quantity_header_is_internal_token(header, diet=diet, area=area, name=name):
                 col["header"] = _default_header_for_quantity(diet, area)
             if name_locked and parsed_name:
                 col["name"] = parsed_name["field"]
