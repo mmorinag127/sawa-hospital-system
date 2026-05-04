@@ -720,6 +720,7 @@ def _process_ingest_inline(**kwargs):
     ocr_status = "success"
     ocr_error = None
     pipeline_output = None
+    facility_candidates: list[dict[str, object]] = []
     retry_limit = int(policy.get("ocr_retry_limit", 3) or 3)
     ocr_job_id = str(payload.ocr_job_id or f"OCR-{payload.message_id}").strip() or f"OCR-{payload.message_id}"
     create_job(ocr_job_id, input_reference=payload.pdf_uri)
@@ -852,6 +853,11 @@ def _process_ingest_inline(**kwargs):
                 if not payload.facility_hint and isinstance(pipeline_output, dict):
                     match_text = _build_pipeline_match_text(pipeline_output)
                     candidates = config_service.match_facility_candidates(match_text)
+                    facility_candidates = [
+                        dict(item)
+                        for item in candidates
+                        if isinstance(item, dict)
+                    ][:5]
                     auto_match = next((item for item in candidates if item.get("auto")), None)
                     if auto_match:
                         payload.facility_hint = auto_match.get("facility_id")
@@ -923,6 +929,29 @@ def _process_ingest_inline(**kwargs):
         document_status=ocr_status,
         error_message=ocr_error,
     )
+    if isinstance(order, dict):
+        try:
+            from src.services import order_workflow_v2_service  # noqa: PLC0415
+
+            order_workflow_v2_service.record_context_suggestion(
+                order_id=str(order.get("id") or "").strip(),
+                suggestion={
+                    "source": "ingest_first_pass_ocr",
+                    "facility_id": payload.facility_hint,
+                    "facility_name": payload.facility_name,
+                    "facility_candidates": facility_candidates,
+                    "week_code": payload.week_hint,
+                    "date_hints": payload.date_hints,
+                    "confidence": "high" if payload.facility_hint and payload.week_hint else "medium",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Workflow v2 context suggestion persistence failed",
+                order_id=str(order.get("id") or "").strip() or None,
+                message_id=payload.message_id,
+                error=str(exc),
+            )
     if isinstance(order, dict) and isinstance(pipeline_output, dict):
         try:
             ocr_evidence_service.persist_evidence_run(

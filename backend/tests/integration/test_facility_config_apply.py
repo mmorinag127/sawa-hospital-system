@@ -735,6 +735,46 @@ def test_reconcile_fax_override_keeps_current_when_quantity_families_differ():
     ]
 
 
+def test_fac00016_non_authoritative_stale_subset_reconciles_to_master_columns():
+    config_service.reload_configs()
+    previous_config = facility_service.get_facility_config("FAC00016") or {}
+    stale_override = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "header": "糖尿", "diet_type": "diabetes", "area_id": "X"},
+            {"index": 5, "role": "note", "header": "備考欄"},
+        ]
+    }
+
+    try:
+        assert facility_service.update_config("FAC00016", {"fax_template_override": stale_override})
+
+        resolved = config_service.get_facility_config("FAC00016")
+        assert resolved is not None
+        template = resolved.get("fax_template") or {}
+        columns = template.get("columns") or []
+        quantity_diets = [column.get("diet_type") for column in columns if column.get("role") == "quantity"]
+
+        assert quantity_diets == ["regular", "diabetes", "no_meat", "no_fish", "change_1", "change_2"]
+        assert template.get("main_ocr_row_fields") == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.diabetes_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+            "remarks",
+        ]
+    finally:
+        assert facility_service.update_config("FAC00016", previous_config)
+
+
 def test_authoritative_facility_override_is_not_reconciled_back_to_master():
     _clear_facilities()
     fac = facility_service.create_facility("Authoritative Override Facility", [])

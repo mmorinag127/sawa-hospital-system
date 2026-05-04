@@ -24,6 +24,8 @@ type WorkflowV2 = {
   week_start?: string | null;
   week_end?: string | null;
   template_id?: string | null;
+  expanded_cell_copy_mode?: ExpandedCellCopyMode | null;
+  context_suggestion?: ContextSuggestion | null;
   bagging_result_id?: string | null;
   output_bundle_id?: string | null;
   ocr_job?: {
@@ -36,7 +38,33 @@ type WorkflowV2 = {
     elapsed_seconds?: number | null;
     processing_stage?: string | null;
     result_state?: string | null;
+    progress_step?: number | null;
+    progress_total?: number | null;
+    progress_label?: string | null;
   } | null;
+};
+
+type FacilitySuggestionCandidate = {
+  facility_id?: string | null;
+  id?: string | null;
+  facility_name?: string | null;
+  name?: string | null;
+  score?: number | string | null;
+  reason?: string | null;
+};
+
+type ContextSuggestion = {
+  source?: string | null;
+  facility_id?: string | null;
+  facility_name?: string | null;
+  facility_candidates?: FacilitySuggestionCandidate[];
+  week_code?: string | null;
+  week_start?: string | null;
+  week_end?: string | null;
+  week_label?: string | null;
+  date_hints?: string[];
+  confidence?: string | null;
+  created_at?: string | null;
 };
 
 type OcrResult = {
@@ -155,6 +183,18 @@ type FacilityTemplateStatus = {
   error: string;
 };
 
+type ExpandedCellCopyMode = "auto" | "enabled" | "disabled";
+
+type FacilityTemplateColumn = {
+  index: number;
+  source_index?: number;
+  role: string;
+  header?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+};
+
 type WeekOption = {
   week_id: string;
   label: string;
@@ -202,6 +242,271 @@ const formatFaxTemplateOptionLabel = (option: FaxTemplateOption | null | undefin
   if (!option) return "";
   const main = option.description || option.label || option.template_family || option.template_id;
   return main === option.template_id ? option.template_id : `${main} (${option.template_id})`;
+};
+
+const normalizeExpandedCellCopyMode = (value?: unknown): ExpandedCellCopyMode => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "enabled" || normalized === "disabled" || normalized === "auto") return normalized;
+  return "auto";
+};
+
+const normalizeDietTypeToken = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const compact = raw
+    .toLowerCase()
+    .replace(/[\s　]+/g, "")
+    .replace(/[＿_]/g, "")
+    .replace(/[／/・+＋-]/g, "")
+    .replace(/[()（）\[\]【】]/g, "");
+  if (!compact) return "";
+  if ((compact.includes("袋") || compact.includes("bag")) && (compact.includes("regular") || compact.includes("常食") || compact.includes("通常") || compact === "常")) return "regular_bag";
+  if (compact.includes("regular") || compact.includes("常食") || compact.includes("通常")) return "regular";
+  if (compact.includes("daycare") || compact.includes("通所")) return "daycare";
+  if (compact.includes("staff") || compact.includes("職員")) return "staff";
+  if (compact.includes("揚げ物禁") || compact.includes("揚物禁") || compact.includes("nofried") || compact.includes("friedfree")) return "no_fried";
+  if (compact.includes("tea") || compact.includes("お茶")) return "tea";
+  if (compact.includes("business") || compact.includes("事業")) return "business";
+  if (compact.includes("diabetes") || compact.includes("糖尿")) return "diabetes";
+  if (compact.includes("pregnancy") || compact.includes("妊娠")) return "pregnancy";
+  if ((compact.includes("ごま") || compact.includes("sesame")) && (raw.includes("アレル") || compact.includes("allergy"))) return "sesame_allergy";
+  if ((compact.includes("肉") || compact.includes("meat")) && (compact.includes("卵") || compact.includes("玉子") || compact.includes("egg")) && (compact.includes("魚") || compact.includes("鯖") || compact.includes("さば") || compact.includes("fish"))) return "forbidden_other";
+  if (compact.includes("nomeat") || compact.includes("nobeef") || compact.includes("禁食肉禁") || compact.includes("肉禁")) return "no_meat";
+  if (compact.includes("nofish") || compact.includes("禁食魚禁") || compact.includes("魚禁")) return "no_fish";
+  if (compact.includes("change1") || compact.includes("変更1")) return "change_1";
+  if (compact.includes("change2") || compact.includes("変更2")) return "change_2";
+  if (compact === "-" || compact === "placeholder") return "placeholder";
+  if (compact === "unknown" || compact === "不明" || compact === "none") return "unknown";
+  const hasSoft = compact.includes("soft") || compact.includes("軟");
+  const hasMixer = compact.includes("mixer") || compact.includes("mix") || compact.includes("ミキサ");
+  if (hasSoft && hasMixer) return "soft_mixer";
+  if (hasSoft) return "soft";
+  if (hasMixer) return "mixer";
+  return compact;
+};
+
+const normalizeFacilityAreaToken = (value?: string | null) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "X";
+  const compact = raw
+    .toLowerCase()
+    .replace(/[\s　]+/g, "")
+    .replace(/[()（）\[\]【】]/g, "");
+  if (!compact) return "X";
+  if (compact === "花" || compact.includes("hana")) return "2F";
+  if (compact === "月" || compact.includes("tsuki")) return "3F";
+  if (/^\d+$/.test(compact)) return `${compact}F`;
+  const floorMatch = compact.match(/(\d)(?:f|階)/);
+  if (floorMatch) return `${floorMatch[1]}F`;
+  if (["x", "all", "common", "共通", "none", "null", "na", "n/a", "なし"].includes(compact)) return "X";
+  return compact.toUpperCase();
+};
+
+const dietTypeLabels: Record<string, string> = {
+  regular: "常食",
+  regular_bag: "常食(袋分け)",
+  daycare: "通所",
+  staff: "職員",
+  tea: "お茶",
+  business: "事業",
+  diabetes: "糖尿",
+  pregnancy: "妊娠",
+  soft: "軟菜",
+  soft_mixer: "軟菜/ミキサー",
+  mixer: "ミキサー",
+  sesame_allergy: "ゴマアレルギー",
+  no_fried: "禁食(揚げ物禁)",
+  no_meat: "禁食(肉禁)",
+  forbidden_other: "禁食(肉卵魚禁)",
+  no_fish: "禁食(魚禁)",
+  change_1: "変更1",
+  change_2: "変更2",
+  placeholder: "-",
+  unknown: "不明",
+};
+
+const preferredDietOrder = [
+  "regular",
+  "regular_bag",
+  "daycare",
+  "staff",
+  "tea",
+  "business",
+  "diabetes",
+  "pregnancy",
+  "soft",
+  "soft_mixer",
+  "mixer",
+  "sesame_allergy",
+  "no_fried",
+  "no_meat",
+  "forbidden_other",
+  "no_fish",
+  "change_1",
+  "change_2",
+  "placeholder",
+  "unknown",
+];
+
+const facilityTemplateDietTypeOptions = preferredDietOrder.map((value) => ({
+  value,
+  label: dietTypeLabels[value] || value,
+}));
+
+const formatDietType = (value?: string | null) => {
+  const token = normalizeDietTypeToken(value || "");
+  return dietTypeLabels[token] || value || "不明";
+};
+
+const defaultHeaderForFacilityTemplateColumn = (column: {
+  role?: string;
+  header?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+}) => {
+  const role = String(column.role || "").trim().toLowerCase();
+  const header = String(column.header || "").trim();
+  if (header) return header;
+  if (role === "date") return "日付";
+  if (role === "daypart") return "区分";
+  if (role === "menu_name") return "メニュー";
+  if (role === "note") return "備考";
+  if (role === "quantity") {
+    const diet = normalizeDietTypeToken(column.diet_type || column.name || "") || "unknown";
+    const area = normalizeFacilityAreaToken(column.area_id || column.name || "");
+    const base = formatDietType(diet);
+    return area === "X" ? base : `${base}${area}`;
+  }
+  return "";
+};
+
+const defaultNameForFacilityTemplateColumn = (column: {
+  role?: string;
+  name?: string;
+  diet_type?: string;
+  area_id?: string;
+}) => {
+  const role = String(column.role || "").trim().toLowerCase();
+  const explicitName = String(column.name || "").trim();
+  if (explicitName) return explicitName;
+  if (role === "date") return "date_mmdd";
+  if (role === "daypart") return "daypart";
+  if (role === "menu_name") return "menu";
+  if (role === "note") return "remarks";
+  if (role === "quantity") {
+    const diet = normalizeDietTypeToken(column.diet_type || "") || "unknown";
+    const area = normalizeFacilityAreaToken(column.area_id || "");
+    return `qty.${diet}_${area === "X" ? "x" : area.toLowerCase()}`;
+  }
+  return "";
+};
+
+const isQuantityRole = (role?: string | null) => String(role || "").trim().toLowerCase() === "quantity";
+
+const createEmptyFacilityTemplateColumn = (index: number): FacilityTemplateColumn => ({
+  index,
+  role: "quantity",
+  header: defaultHeaderForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
+  name: defaultNameForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
+  diet_type: "unknown",
+  area_id: "X",
+});
+
+const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateColumn[] => {
+  if (!Array.isArray(columns)) return [];
+  return columns
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item, idx) => {
+      const role = String(item.role || "").trim().toLowerCase() || "quantity";
+      const header = String(item.header || "").trim();
+      const name = String(item.name || "").trim();
+      const dietType = role === "quantity"
+        ? normalizeDietTypeToken(String(item.diet_type || header || name || "")) || "unknown"
+        : String(item.diet_type || "");
+      const areaId = role === "quantity"
+        ? normalizeFacilityAreaToken(String(item.area_id || header || name || ""))
+        : String(item.area_id || "");
+      return {
+        index: typeof item.index === "number" && Number.isFinite(item.index) ? Number(item.index) : idx,
+        source_index: typeof item.source_index === "number" && Number.isFinite(item.source_index) ? Number(item.source_index) : undefined,
+        role,
+        header: header || defaultHeaderForFacilityTemplateColumn({ role, name, diet_type: dietType, area_id: areaId }),
+        name: name || defaultNameForFacilityTemplateColumn({ role, diet_type: dietType, area_id: areaId }),
+        diet_type: dietType,
+        area_id: areaId,
+      };
+    })
+    .sort((left, right) => left.index - right.index)
+    .map((column, idx) => ({ ...column, index: idx }));
+};
+
+const reindexFacilityTemplateColumns = (columns: FacilityTemplateColumn[]) =>
+  columns.map((column, idx) => ({ ...column, index: idx }));
+
+const swapFacilityTemplateColumns = (columns: FacilityTemplateColumn[], leftIndex: number, rightIndex: number) => {
+  if (leftIndex === rightIndex || leftIndex < 0 || rightIndex < 0 || leftIndex >= columns.length || rightIndex >= columns.length) {
+    return reindexFacilityTemplateColumns(columns);
+  }
+  const next = columns.map((column) => ({ ...column }));
+  const temp = next[leftIndex];
+  next[leftIndex] = next[rightIndex];
+  next[rightIndex] = temp;
+  return reindexFacilityTemplateColumns(next);
+};
+
+const removeFacilityTemplateColumn = (columns: FacilityTemplateColumn[], rowIndex: number) =>
+  reindexFacilityTemplateColumns(columns.filter((_, idx) => idx !== rowIndex));
+
+const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) =>
+  columns.map((column, idx) => {
+    const role = String(column.role || "").trim().toLowerCase() || "quantity";
+    const header = String(column.header || "").trim();
+    const name = String(column.name || "").trim();
+    const payload: Record<string, unknown> = { index: idx, role };
+    if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) payload.source_index = Number(column.source_index);
+    if (header) payload.header = header;
+    if (name) payload.name = name;
+    if (role === "quantity") {
+      const dietType = normalizeDietTypeToken(column.diet_type || header || name || "") || "unknown";
+      const areaId = normalizeFacilityAreaToken(column.area_id || header || name || "");
+      payload.diet_type = dietType;
+      payload.area_id = areaId;
+      payload.diet_type_locked = true;
+      payload.area_id_locked = true;
+      payload.name_locked = true;
+    }
+    return payload;
+  });
+
+const columnRoleOptions = [
+  { value: "date", label: "日付" },
+  { value: "daypart", label: "区分" },
+  { value: "menu_name", label: "メニュー" },
+  { value: "quantity", label: "数量" },
+  { value: "note", label: "備考" },
+];
+
+const buildFacilityTemplateAreaOptions = (facilityConfig: Record<string, any> | null, columns: FacilityTemplateColumn[]) => {
+  const seen = new Set<string>();
+  const options: { value: string; label: string }[] = [];
+  const push = (value: string, label?: string) => {
+    const normalized = normalizeFacilityAreaToken(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    options.push({ value: normalized, label: label || normalized });
+  };
+  push("X", "共通");
+  const areas = Array.isArray(facilityConfig?.areas) ? facilityConfig.areas : [];
+  areas.forEach((area: any) => {
+    const areaId = String(area?.area_id || area?.id || "").trim();
+    const areaName = String(area?.name || "").trim();
+    if (areaId || areaName) push(areaId || areaName, areaName && areaName !== areaId ? `${normalizeFacilityAreaToken(areaId || areaName)} (${areaName})` : undefined);
+  });
+  columns.forEach((column) => {
+    if (isQuantityRole(column.role)) push(column.area_id || "X");
+  });
+  return options;
 };
 
 const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
@@ -312,6 +617,16 @@ const formatElapsedSeconds = (value?: number | null) => {
   return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
 };
 
+const formatOcrProgress = (workflow?: WorkflowV2 | null) => {
+  const job = workflow?.ocr_job;
+  if (!job) return "-";
+  const step = typeof job.progress_step === "number" ? job.progress_step : null;
+  const total = typeof job.progress_total === "number" ? job.progress_total : null;
+  const label = String(job.progress_label || job.processing_stage || "").trim();
+  if (step && total) return `${step}/${total}${label ? ` ${label}` : ""}`;
+  return label || String(job.status || "-");
+};
+
 const formatDateTime = (value?: string | null) => {
   if (!value) return "-";
   const parsed = new Date(value);
@@ -323,6 +638,24 @@ const formatDateTime = (value?: string | null) => {
     minute: "2-digit",
     second: "2-digit",
   });
+};
+
+const contextSuggestionWeekValue = (suggestion?: ContextSuggestion | null) => (
+  normalizeConcreteWeekValue(suggestion?.week_code)
+  || weekValueFromRange(suggestion?.week_start, suggestion?.week_end)
+);
+
+const contextSuggestionWeekLabel = (suggestion?: ContextSuggestion | null) => {
+  const value = contextSuggestionWeekValue(suggestion);
+  return formatWeekLabel(value) || suggestion?.week_label || value || "未推定";
+};
+
+const formatFacilityCandidate = (candidate: FacilitySuggestionCandidate) => {
+  const id = String(candidate.facility_id || candidate.id || "").trim();
+  const name = String(candidate.facility_name || candidate.name || "").trim();
+  const score = candidate.score === undefined || candidate.score === null ? "" : ` / score ${candidate.score}`;
+  const reason = candidate.reason ? ` / ${candidate.reason}` : "";
+  return `${name || id || "施設候補"}${id && name ? ` (${id})` : ""}${score}${reason}`;
 };
 
 const confidenceTierVisible = (tier: string | null | undefined, mode: ConfidenceDisplayMode) => {
@@ -565,7 +898,17 @@ export default function OrderWorkflowV2Page() {
     loading: false,
     error: "",
   });
+  const [facilityResolvedConfig, setFacilityResolvedConfig] = useState<Record<string, any> | null>(null);
+  const [facilityTemplateColumns, setFacilityTemplateColumns] = useState<FacilityTemplateColumn[]>([]);
+  const [facilityTemplateColumnDraft, setFacilityTemplateColumnDraft] = useState<FacilityTemplateColumn[]>([]);
+  const [facilityTemplateMessage, setFacilityTemplateMessage] = useState("");
+  const [facilityTemplateSaving, setFacilityTemplateSaving] = useState(false);
+  const [showFacilityTemplateEditor, setShowFacilityTemplateEditor] = useState(false);
+  const [facilityTemplateSwapLeft, setFacilityTemplateSwapLeft] = useState("");
+  const [facilityTemplateSwapRight, setFacilityTemplateSwapRight] = useState("");
   const [selectedFacilityTemplateId, setSelectedFacilityTemplateId] = useState("");
+  const [expandedCellCopyMode, setExpandedCellCopyMode] = useState<ExpandedCellCopyMode>("auto");
+  const [expandedCellCopySaving, setExpandedCellCopySaving] = useState(false);
   const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
   const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
@@ -606,7 +949,14 @@ export default function OrderWorkflowV2Page() {
     [contextForm.week_end, contextForm.week_start, weekDraft],
   );
 
+  const contextSuggestion = workflow?.context_suggestion || null;
   const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+  const workflowContextConfirmed = Boolean(
+    workflow?.facility_id
+      && workflow?.week_start
+      && workflow?.week_end
+      && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
+  );
   const selectedFacility = useMemo(
     () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
     [contextForm.facility_id, facilityOptions],
@@ -624,6 +974,21 @@ export default function OrderWorkflowV2Page() {
       && !facilityTemplateStatus.loading
       && facilityTemplateStatus.facilityId === contextForm.facility_id
       && !facilityTemplateStatus.templateId,
+  );
+  const facilityTemplateAreaOptions = useMemo(
+    () => buildFacilityTemplateAreaOptions(facilityResolvedConfig, facilityTemplateColumnDraft),
+    [facilityResolvedConfig, facilityTemplateColumnDraft],
+  );
+  const facilityTemplateDirty = useMemo(
+    () => JSON.stringify(facilityTemplateColumns) !== JSON.stringify(facilityTemplateColumnDraft),
+    [facilityTemplateColumnDraft, facilityTemplateColumns],
+  );
+  const facilityTemplateQuantitySummary = useMemo(
+    () => facilityTemplateColumns
+      .filter((column) => isQuantityRole(column.role))
+      .map((column) => column.header || defaultHeaderForFacilityTemplateColumn(column))
+      .filter(Boolean),
+    [facilityTemplateColumns],
   );
 
   const quantityColumnOptions = useMemo(() => {
@@ -825,6 +1190,23 @@ export default function OrderWorkflowV2Page() {
     }));
   };
 
+  const applyContextSuggestion = () => {
+    if (!contextSuggestion) return;
+    const weekValue = contextSuggestionWeekValue(contextSuggestion);
+    const range = weekRangeFromValue(weekValue);
+    setContextForm((current) => ({
+      ...current,
+      facility_id: String(contextSuggestion.facility_id || current.facility_id || ""),
+      week_start: String(contextSuggestion.week_start || range.week_start || current.week_start || ""),
+      week_end: String(contextSuggestion.week_end || range.week_end || current.week_end || ""),
+    }));
+    if (weekValue) {
+      setWeekDraft(weekValue);
+    }
+    setMessage("PDFから推定した施設・週次候補をフォームに反映しました。Step1はまだ未確定です。");
+    setError("");
+  };
+
   const refreshAll = async () => {
     if (!orderId) return;
     const [workflowRes, ocrRes, inspectionRes] = await Promise.all([
@@ -833,6 +1215,7 @@ export default function OrderWorkflowV2Page() {
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
     ]);
     setWorkflow(workflowRes.data);
+    setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
     setOcrResults(Array.isArray(ocrRes.data.results) ? ocrRes.data.results : []);
     setInspection(inspectionRes.data);
     const savedSheet = inspectionRes.data.saved_sheet?.sheet;
@@ -844,13 +1227,33 @@ export default function OrderWorkflowV2Page() {
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
     }
-    setContextForm({
+    const suggestion = workflowRes.data.context_suggestion || null;
+    const suggestedWeekValue = contextSuggestionWeekValue(suggestion);
+    const suggestedRange = weekRangeFromValue(suggestedWeekValue);
+    const suggestedContext = {
+      facility_id: String(suggestion?.facility_id || ""),
+      week_start: String(suggestion?.week_start || suggestedRange.week_start || ""),
+      week_end: String(suggestion?.week_end || suggestedRange.week_end || ""),
+    };
+    const confirmedContext = {
       facility_id: workflowRes.data.facility_id || "",
       week_start: workflowRes.data.week_start || "",
       week_end: workflowRes.data.week_end || "",
+    };
+    setContextForm((current) => {
+      if (confirmedContext.facility_id || confirmedContext.week_start || confirmedContext.week_end) {
+        return confirmedContext;
+      }
+      if (current.facility_id || current.week_start || current.week_end) {
+        return current;
+      }
+      if (suggestedContext.facility_id || suggestedContext.week_start || suggestedContext.week_end) {
+        return suggestedContext;
+      }
+      return emptyContext;
     });
     const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
-    setWeekDraft(workflowWeekValue);
+    setWeekDraft((current) => workflowWeekValue || current || suggestedWeekValue || "");
   };
 
   useEffect(() => {
@@ -859,6 +1262,16 @@ export default function OrderWorkflowV2Page() {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId || workflow?.state !== "ocr_running") return undefined;
+    const timer = window.setInterval(() => {
+      refreshAll().catch((err) => {
+        setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [router.isReady, orderId, workflow?.state]);
 
   const loadFacilityTemplateStatus = async (facilityId: string) => {
     const normalizedFacilityId = facilityId.trim();
@@ -870,6 +1283,12 @@ export default function OrderWorkflowV2Page() {
         loading: false,
         error: "",
       });
+      setFacilityResolvedConfig(null);
+      setFacilityTemplateColumns([]);
+      setFacilityTemplateColumnDraft([]);
+      setFacilityTemplateMessage("");
+      setFacilityTemplateSwapLeft("");
+      setFacilityTemplateSwapRight("");
       setSelectedFacilityTemplateId("");
       return;
     }
@@ -882,10 +1301,17 @@ export default function OrderWorkflowV2Page() {
     try {
       const res = await apiClient.get(`/facilities/${normalizedFacilityId}`);
       const resolved = res.data?.resolved_config || {};
+      const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns);
       const templateId = String(resolved?.fax_template_id || "").trim();
       const templateIds = Array.isArray(resolved?.fax_template_ids)
         ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
         : [];
+      setFacilityResolvedConfig(resolved);
+      setFacilityTemplateColumns(resolvedColumns);
+      setFacilityTemplateColumnDraft(resolvedColumns);
+      setFacilityTemplateSwapLeft("");
+      setFacilityTemplateSwapRight("");
+      setFacilityTemplateMessage("");
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
         templateId,
@@ -902,6 +1328,11 @@ export default function OrderWorkflowV2Page() {
         loading: false,
         error: formatApiError(err, "施設テンプレート設定を取得できませんでした"),
       });
+      setFacilityResolvedConfig(null);
+      setFacilityTemplateColumns([]);
+      setFacilityTemplateColumnDraft([]);
+      setFacilityTemplateSwapLeft("");
+      setFacilityTemplateSwapRight("");
     }
   };
 
@@ -977,6 +1408,16 @@ export default function OrderWorkflowV2Page() {
   useEffect(() => {
     void loadFacilityTemplateStatus(contextForm.facility_id);
   }, [contextForm.facility_id]);
+
+  useEffect(() => {
+    const indices = new Set(facilityTemplateColumnDraft.map((column, idx) => String(column.index ?? idx)));
+    if (facilityTemplateSwapLeft && !indices.has(facilityTemplateSwapLeft)) {
+      setFacilityTemplateSwapLeft("");
+    }
+    if (facilityTemplateSwapRight && !indices.has(facilityTemplateSwapRight)) {
+      setFacilityTemplateSwapRight("");
+    }
+  }, [facilityTemplateColumnDraft, facilityTemplateSwapLeft, facilityTemplateSwapRight]);
 
   useEffect(() => {
     if (!router.isReady || !orderId) return;
@@ -1149,6 +1590,124 @@ export default function OrderWorkflowV2Page() {
         refreshAfter: contextReady,
       },
     );
+
+  const updateFacilityTemplateColumn = (
+    rowIndex: number,
+    key: keyof FacilityTemplateColumn,
+    value: string,
+  ) => {
+    setFacilityTemplateColumnDraft((prev) =>
+      prev.map((column, idx) => {
+        if (idx !== rowIndex) return column;
+        const next = { ...column, [key]: value };
+        if (key === "role") {
+          if (value === "quantity") {
+            next.diet_type = normalizeDietTypeToken(next.diet_type || next.header || next.name || "") || "unknown";
+            next.area_id = normalizeFacilityAreaToken(next.area_id || next.header || next.name || "");
+          } else {
+            next.diet_type = "";
+            next.area_id = "";
+          }
+          next.header = defaultHeaderForFacilityTemplateColumn(next);
+          next.name = defaultNameForFacilityTemplateColumn(next);
+        }
+        if (next.role === "quantity" && (key === "diet_type" || key === "area_id")) {
+          next.diet_type = normalizeDietTypeToken(next.diet_type || "") || "unknown";
+          next.area_id = normalizeFacilityAreaToken(next.area_id || "");
+          next.header = defaultHeaderForFacilityTemplateColumn(next);
+          next.name = defaultNameForFacilityTemplateColumn(next);
+        }
+        return next;
+      }),
+    );
+  };
+
+  const applyFacilityTemplateColumnSwap = (leftIndex: number, rightIndex: number) => {
+    setShowFacilityTemplateEditor(true);
+    setFacilityTemplateColumnDraft((prev) => swapFacilityTemplateColumns(prev, leftIndex, rightIndex));
+    setFacilityTemplateSwapLeft("");
+    setFacilityTemplateSwapRight("");
+    setFacilityTemplateMessage("施設区分列の並びを入れ替えました。保存するとこの施設のテンプレートに反映されます。");
+  };
+
+  const applySelectedFacilityTemplateColumnSwap = () => {
+    const leftIndex = Number(facilityTemplateSwapLeft);
+    const rightIndex = Number(facilityTemplateSwapRight);
+    if (!Number.isInteger(leftIndex) || !Number.isInteger(rightIndex) || leftIndex === rightIndex) {
+      setFacilityTemplateMessage("入れ替える2つの列を選択してください。");
+      return;
+    }
+    applyFacilityTemplateColumnSwap(leftIndex, rightIndex);
+  };
+
+  const appendFacilityTemplateColumn = () => {
+    setShowFacilityTemplateEditor(true);
+    setFacilityTemplateColumnDraft((prev) => reindexFacilityTemplateColumns([...prev, createEmptyFacilityTemplateColumn(prev.length)]));
+    setFacilityTemplateMessage("施設区分列を追加しました。保存するとこの施設のテンプレートに反映されます。");
+  };
+
+  const deleteFacilityTemplateColumn = (rowIndex: number) => {
+    setShowFacilityTemplateEditor(true);
+    setFacilityTemplateColumnDraft((prev) => removeFacilityTemplateColumn(prev, rowIndex));
+    setFacilityTemplateMessage("施設区分列を削除しました。保存するとこの施設のテンプレートに反映されます。");
+  };
+
+  const saveFacilityTemplateColumns = async () => {
+    const facilityId = contextForm.facility_id.trim();
+    if (!facilityId || !orderId) {
+      setFacilityTemplateMessage("施設を選択してください。");
+      return;
+    }
+    if (!facilityTemplateColumnDraft.length) {
+      setFacilityTemplateMessage("保存できる施設区分列がありません。");
+      return;
+    }
+    setFacilityTemplateSaving(true);
+    setFacilityTemplateMessage("施設区分列を保存中...");
+    setError("");
+    try {
+      const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
+      const response = await apiClient.put(`/orders/${orderId}/workflow-v2/facility-template-columns`, { columns });
+      const resolved = response.data?.resolved_config || null;
+      const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns ?? columns);
+      setFacilityResolvedConfig(resolved);
+      setFacilityTemplateColumns(resolvedColumns);
+      setFacilityTemplateColumnDraft(resolvedColumns);
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
+      setFacilityTemplateMessage(
+        `施設区分列を保存しました。OCR結果を${Number(response.data?.ocr_results_cleared || 0)}件破棄したため、Step1からOCRを再実行してください。`,
+      );
+      setVisibleStep(1);
+      await refreshAll();
+      await loadFacilityTemplateStatus(facilityId);
+    } catch (err: any) {
+      setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
+    } finally {
+      setFacilityTemplateSaving(false);
+    }
+  };
+
+  const updateExpandedCellCopyMode = async (nextMode: ExpandedCellCopyMode) => {
+    if (nextMode === expandedCellCopyMode) return;
+    setExpandedCellCopySaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await apiClient.put(`/orders/${orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode });
+      setWorkflow(response.data);
+      setExpandedCellCopyMode(normalizeExpandedCellCopyMode(response.data?.expanded_cell_copy_mode));
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
+      await refreshAll();
+      setVisibleStep(3);
+      setMessage("拡大セルコピー設定を変更しました。選択OCRからシートを再生成してください。");
+    } catch (err: any) {
+      setError(formatApiError(err, "拡大セルコピー設定の保存に失敗しました"));
+    } finally {
+      setExpandedCellCopySaving(false);
+    }
+  };
 
   const applyCustomWeekRange = () => {
     const weekValue = deriveWeekValueFromCalendarRange(customWeekRangeStart, customWeekRangeEnd);
@@ -1458,6 +2017,9 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">Current State</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {workflow?.state === "ocr_running" ? (
+            <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
+          ) : null}
         </div>
         <div className="state-actions">
           <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
@@ -1517,6 +2079,10 @@ export default function OrderWorkflowV2Page() {
           <div className="summary-primary-card">
             <span className="field-label">OCRジョブ</span>
             <p className="summary-value">{workflow?.ocr_job?.ocr_job_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCR進捗</span>
+            <p className="summary-value">{formatOcrProgress(workflow)}</p>
           </div>
           <div className="summary-primary-card">
             <span className="field-label">OCR処理時間</span>
@@ -1587,6 +2153,35 @@ export default function OrderWorkflowV2Page() {
                 <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
               </div>
             </div>
+            {contextSuggestion ? (
+              <div className="context-suggestion-card">
+                <div>
+                  <span className="field-label">PDF自動推定候補</span>
+                  <h3>
+                    {contextSuggestion.facility_name || contextSuggestion.facility_id || "施設未推定"}
+                    {contextSuggestion.facility_id && contextSuggestion.facility_name ? ` (${contextSuggestion.facility_id})` : ""}
+                  </h3>
+                  <p className="subtle">
+                    週次: {contextSuggestionWeekLabel(contextSuggestion)}
+                    {contextSuggestion.confidence ? ` / confidence ${contextSuggestion.confidence}` : ""}
+                    {contextSuggestion.source ? ` / ${contextSuggestion.source}` : ""}
+                  </p>
+                  {Array.isArray(contextSuggestion.date_hints) && contextSuggestion.date_hints.length ? (
+                    <p className="subtle">日付候補: {contextSuggestion.date_hints.slice(0, 8).join(" / ")}</p>
+                  ) : null}
+                  {Array.isArray(contextSuggestion.facility_candidates) && contextSuggestion.facility_candidates.length ? (
+                    <ul className="context-suggestion-candidates">
+                      {contextSuggestion.facility_candidates.slice(0, 3).map((candidate, index) => (
+                        <li key={`facility-suggestion-${index}`}>{formatFacilityCandidate(candidate)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+                <button className="btn secondary" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
+                  推定をフォームに反映
+                </button>
+              </div>
+            ) : null}
             <div className="summary-actions">
               <label className="field">
                 <span className="field-label">施設 (Step1 必須)</span>
@@ -1727,10 +2322,7 @@ export default function OrderWorkflowV2Page() {
                 onClick={runOcr}
                 disabled={Boolean(
                   busy
-                  || !workflow?.facility_id
-                  || !workflow?.week_start
-                  || !workflow?.week_end
-                  || !workflow?.template_id
+                  || !workflowContextConfirmed
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
                 )}
               >
@@ -1782,6 +2374,162 @@ export default function OrderWorkflowV2Page() {
                     >
                       施設テンプレートに登録してStep1を保存
                     </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {contextForm.facility_id && !facilityTemplateMissing ? (
+              <div className="facility-template-editor">
+                <div className="facility-template-editor-header">
+                  <div>
+                    <strong>施設区分列</strong>
+                    <p className="subtle">
+                      施設テンプレートと連動する数量列定義です。現在: {facilityTemplateQuantitySummary.length ? facilityTemplateQuantitySummary.join(" / ") : "未設定"}
+                    </p>
+                  </div>
+                  <div className="row-actions">
+                    <button className="btn ghost" type="button" onClick={() => setShowFacilityTemplateEditor((current) => !current)}>
+                      {showFacilityTemplateEditor ? "列設定を閉じる" : "列設定を確認/修正"}
+                    </button>
+                    <button
+                      className="btn primary"
+                      type="button"
+                      onClick={saveFacilityTemplateColumns}
+                      disabled={Boolean(busy || facilityTemplateSaving || !facilityTemplateDirty || !facilityTemplateColumnDraft.length)}
+                    >
+                      {facilityTemplateSaving ? "保存中..." : "施設区分列を保存"}
+                    </button>
+                  </div>
+                </div>
+                {facilityTemplateMessage ? <p className="subtle">{facilityTemplateMessage}</p> : null}
+                {showFacilityTemplateEditor ? (
+                  <div className="facility-template-editor-body">
+                    <div className="facility-template-callout">
+                      <p>
+                        保存するとこの施設全体のテンプレート列定義を更新します。既存OCR結果・保存シート・袋分け・出力は破棄され、Step1からOCR再実行になります。
+                      </p>
+                    </div>
+                    <div className="facility-template-actions">
+                      <select
+                        className="input"
+                        value={facilityTemplateSwapLeft}
+                        onChange={(event) => setFacilityTemplateSwapLeft(event.target.value)}
+                      >
+                        <option value="">入替元</option>
+                        {facilityTemplateColumnDraft.map((column, idx) => (
+                          <option key={`template-swap-left-${idx}`} value={String(column.index)}>
+                            {column.index + 1}: {column.header || column.name || column.role}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        className="input"
+                        value={facilityTemplateSwapRight}
+                        onChange={(event) => setFacilityTemplateSwapRight(event.target.value)}
+                      >
+                        <option value="">入替先</option>
+                        {facilityTemplateColumnDraft.map((column, idx) => (
+                          <option key={`template-swap-right-${idx}`} value={String(column.index)}>
+                            {column.index + 1}: {column.header || column.name || column.role}
+                          </option>
+                        ))}
+                      </select>
+                      <button className="btn ghost" type="button" onClick={applySelectedFacilityTemplateColumnSwap}>
+                        列を入れ替える
+                      </button>
+                      <button className="btn ghost" type="button" onClick={appendFacilityTemplateColumn}>
+                        列を追加
+                      </button>
+                    </div>
+                    <div className="facility-template-table-wrap">
+                      <table className="facility-template-table">
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>役割</th>
+                            <th>表示名</th>
+                            <th>内部名</th>
+                            <th>区分</th>
+                            <th>エリア</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {facilityTemplateColumnDraft.map((column, idx) => {
+                            const quantityColumn = isQuantityRole(column.role);
+                            return (
+                              <tr key={`facility-template-column-${column.index}-${idx}`}>
+                                <td>{idx + 1}</td>
+                                <td>
+                                  <select
+                                    className="input"
+                                    value={column.role}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "role", event.target.value)}
+                                  >
+                                    {columnRoleOptions.map((option) => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.header || ""}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "header", event.target.value)}
+                                    placeholder="表示名"
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.name || ""}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "name", event.target.value)}
+                                    placeholder="qty.regular_x"
+                                  />
+                                </td>
+                                <td>
+                                  <select
+                                    className="input"
+                                    value={quantityColumn ? normalizeDietTypeToken(column.diet_type || "") || "unknown" : ""}
+                                    disabled={!quantityColumn}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "diet_type", event.target.value)}
+                                  >
+                                    {facilityTemplateDietTypeOptions.map((option) => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td>
+                                  <select
+                                    className="input"
+                                    value={quantityColumn ? normalizeFacilityAreaToken(column.area_id || "") : ""}
+                                    disabled={!quantityColumn}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "area_id", event.target.value)}
+                                  >
+                                    {facilityTemplateAreaOptions.map((option) => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td>
+                                  <div className="facility-template-row-actions">
+                                    <button className="btn ghost" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx - 1)} disabled={idx <= 0}>
+                                      前へ
+                                    </button>
+                                    <button className="btn ghost" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx + 1)} disabled={idx >= facilityTemplateColumnDraft.length - 1}>
+                                      次へ
+                                    </button>
+                                    <button className="btn danger" type="button" onClick={() => deleteFacilityTemplateColumn(idx)}>
+                                      削除
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -1885,7 +2633,22 @@ export default function OrderWorkflowV2Page() {
             >
               {step3LayoutMode === "side-by-side" ? "上下表示に切替" : "左右表示に切替"}
             </button>
+            <label className="toolbar-field expanded-cell-toggle">
+              <span>拡大セルコピー</span>
+              <select
+                value={expandedCellCopyMode}
+                onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
+                disabled={Boolean(busy || expandedCellCopySaving)}
+              >
+                <option value="auto">自動</option>
+                <option value="enabled">ON</option>
+                <option value="disabled">OFF</option>
+              </select>
+            </label>
           </div>
+          <p className="subtle">
+            拡大セルコピーは、merged cell施設で同じ食区分内へ数量を反映する設定です。変更後は選択OCRからシートを再生成してください。
+          </p>
           {sheetPayload ? (
             <div className={`step3-workspace ${step3LayoutMode}`}>
               <div className="step3-overlay-pane">
@@ -2419,6 +3182,17 @@ export default function OrderWorkflowV2Page() {
           display: flex;
           justify-content: space-between;
         }
+        .ocr-progress-inline {
+          background: #edf3ef;
+          border: 1px solid rgba(53, 80, 71, 0.16);
+          border-radius: 999px;
+          color: #355047;
+          display: inline-flex;
+          font-size: 13px;
+          font-weight: 800;
+          margin: 10px 0 0;
+          padding: 6px 10px;
+        }
         .state-actions,
         .row-actions {
           display: flex;
@@ -2661,6 +3435,31 @@ export default function OrderWorkflowV2Page() {
           gap: 8px;
           margin-top: 10px;
         }
+        .context-suggestion-card {
+          align-items: flex-start;
+          background: #fffaf0;
+          border: 1px solid #ead7af;
+          border-radius: 14px;
+          display: flex;
+          gap: 12px;
+          justify-content: space-between;
+          margin-top: 12px;
+          padding: 12px;
+        }
+        .context-suggestion-card h3 {
+          color: #1c2822;
+          font-size: 16px;
+          margin: 4px 0 0;
+        }
+        .context-suggestion-candidates {
+          color: #5d665f;
+          font-size: 12px;
+          margin: 8px 0 0;
+          padding-left: 18px;
+        }
+        .context-suggestion-candidates li + li {
+          margin-top: 4px;
+        }
         .field {
           display: flex;
           flex-direction: column;
@@ -2732,6 +3531,85 @@ export default function OrderWorkflowV2Page() {
         }
         .facility-template-register .subtle {
           flex-basis: 100%;
+        }
+        .facility-template-editor {
+          background: #fffdf7;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 14px;
+          margin-top: 12px;
+          padding: 14px;
+        }
+        .facility-template-editor-header {
+          align-items: flex-start;
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .facility-template-editor-header strong {
+          color: #1c2822;
+          display: block;
+          font-size: 14px;
+          margin-bottom: 4px;
+        }
+        .facility-template-editor-body {
+          display: grid;
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .facility-template-callout {
+          background: #fff8e6;
+          border: 1px solid #ebd6a7;
+          border-radius: 12px;
+          color: #775316;
+          font-size: 13px;
+          padding: 10px 12px;
+        }
+        .facility-template-callout p {
+          margin: 0;
+        }
+        .facility-template-actions,
+        .facility-template-row-actions {
+          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .facility-template-actions .input {
+          min-width: 180px;
+        }
+        .facility-template-table-wrap {
+          border: 1px solid #d7d1c0;
+          border-radius: 12px;
+          max-height: 420px;
+          overflow: auto;
+        }
+        .facility-template-table {
+          border-collapse: collapse;
+          min-width: 920px;
+          width: 100%;
+        }
+        .facility-template-table th,
+        .facility-template-table td {
+          border-bottom: 1px solid #e5dece;
+          font-size: 12px;
+          padding: 7px 8px;
+          vertical-align: top;
+        }
+        .facility-template-table th {
+          background: #f4eddd;
+          color: #405045;
+          font-weight: 800;
+          position: sticky;
+          text-align: left;
+          top: 0;
+          z-index: 1;
+        }
+        .facility-template-table .input {
+          min-width: 120px;
+          padding: 7px 8px;
+        }
+        .expanded-cell-toggle {
+          min-width: 170px;
         }
         .pdf-preview-panel {
           border: 1px solid #d7d1c0;
