@@ -86,6 +86,7 @@ class DailyOutputOverrideBulkUpsertBody(BaseModel):
 class WeekArchiveBody(BaseModel):
     week_value: str
     order_ids: list[str] | None = None
+    purge_runtime_state: bool = False
 
 
 class WorkflowV2ContextConfirmBody(BaseModel):
@@ -1230,6 +1231,7 @@ def archive_orders_for_week(payload: WeekArchiveBody):
         str(payload.week_value or "").strip(),
         order_ids=[str(item or "").strip() for item in (payload.order_ids or []) if str(item or "").strip()],
         archived_by="operator",
+        purge_runtime_state=bool(payload.purge_runtime_state),
     )
     if error == "invalid_week":
         raise HTTPException(status_code=400, detail={"error": error})

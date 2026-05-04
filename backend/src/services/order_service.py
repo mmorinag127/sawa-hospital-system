@@ -33,6 +33,7 @@ from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
 from src.models.order_current_state import OrderCurrentState  # noqa: F401
 from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
+from src.models.ocr_job import OcrJob
 from src.models.output import (
     Bag,
     LabelRow,
@@ -4715,11 +4716,126 @@ def unarchive_order(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     )
 
 
+def _purge_order_runtime_state_in_session(session, order_ids: list[str]) -> dict[str, int]:
+    normalized_order_ids = [str(item or "").strip() for item in order_ids if str(item or "").strip()]
+    if not normalized_order_ids:
+        return {}
+    ocr_job_ids = [f"OCR-{order_id}" for order_id in normalized_order_ids]
+    orders = session.execute(select(Order).where(Order.id.in_(normalized_order_ids))).scalars().all()
+    document_ids: set[str] = set()
+    for order in orders:
+        current_document_id = str(order.current_document_id or "").strip()
+        if current_document_id:
+            document_ids.add(current_document_id)
+        for document_id in order.superseded_document_ids or []:
+            normalized_document_id = str(document_id or "").strip()
+            if normalized_document_id:
+                document_ids.add(normalized_document_id)
+    documents = (
+        session.execute(select(OrderDocument).where(OrderDocument.id.in_(sorted(document_ids)))).scalars().all()
+        if document_ids
+        else []
+    )
+    upload_message_ids: set[str] = set()
+    upload_message_prefixes: set[str] = set()
+
+    def add_upload_message_id(raw_value: object) -> None:
+        token = str(raw_value or "").strip()
+        if not token.startswith("upload:sha256:"):
+            return
+        upload_message_ids.add(token)
+        if ":split:" in token:
+            upload_message_prefixes.add(token.split(":split:", 1)[0])
+        else:
+            upload_message_prefixes.add(token)
+
+    for order in orders:
+        add_upload_message_id(order.message_id)
+    for document in documents:
+        add_upload_message_id(document.source_email_id)
+
+    upload_pdf_filters = []
+    if upload_message_ids:
+        upload_pdf_filters.append(UploadedPdf.message_id.in_(sorted(upload_message_ids)))
+    for prefix in sorted(upload_message_prefixes):
+        upload_pdf_filters.append(UploadedPdf.message_id.like(f"{prefix}%"))
+
+    uploaded_pdf_ids: list[str] = []
+    if upload_pdf_filters:
+        uploaded_pdf_ids = [
+            str(item or "").strip()
+            for item in session.execute(select(UploadedPdf.id).where(or_(*upload_pdf_filters))).scalars().all()
+            if str(item or "").strip()
+        ]
+
+    ingest_job_filters = []
+    if upload_message_ids:
+        ingest_job_filters.append(IngestJob.id.in_(sorted(upload_message_ids)))
+    for prefix in sorted(upload_message_prefixes):
+        ingest_job_filters.append(IngestJob.id.like(f"{prefix}%"))
+
+    statements = [
+        ("label_rows", delete(LabelRow).where(LabelRow.order_id.in_(normalized_order_ids))),
+        ("bags", delete(Bag).where(Bag.order_id.in_(normalized_order_ids))),
+        ("delivery_notes", delete(DeliveryNote).where(DeliveryNote.order_id.in_(normalized_order_ids))),
+        (
+            "order_critical_decisions",
+            delete(OrderCriticalDecision).where(OrderCriticalDecision.order_id.in_(normalized_order_ids)),
+        ),
+        (
+            "order_current_states",
+            delete(OrderCurrentState).where(OrderCurrentState.order_id.in_(normalized_order_ids)),
+        ),
+        (
+            "order_workflow_states",
+            delete(OrderWorkflowState).where(OrderWorkflowState.order_id.in_(normalized_order_ids)),
+        ),
+        (
+            "order_confirmed_snapshots",
+            delete(OrderConfirmedSnapshot).where(OrderConfirmedSnapshot.order_id.in_(normalized_order_ids)),
+        ),
+        (
+            "order_sheet_patch_candidates",
+            delete(OrderSheetPatchCandidate).where(OrderSheetPatchCandidate.order_id.in_(normalized_order_ids)),
+        ),
+        ("order_sheet_drafts", delete(OrderSheetDraft).where(OrderSheetDraft.order_id.in_(normalized_order_ids))),
+        (
+            "order_ocr_evidence_runs",
+            delete(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id.in_(normalized_order_ids)),
+        ),
+        ("order_ocr_revisions", delete(OrderOcrRevision).where(OrderOcrRevision.order_id.in_(normalized_order_ids))),
+        ("order_ocr_cache", delete(OrderOcrCache).where(OrderOcrCache.order_id.in_(normalized_order_ids))),
+        (
+            "order_menu_snapshots",
+            delete(OrderMenuSnapshot).where(OrderMenuSnapshot.order_id.in_(normalized_order_ids)),
+        ),
+        ("order_lines", delete(OrderLine).where(OrderLine.order_id.in_(normalized_order_ids))),
+        ("ocr_jobs", delete(OcrJob).where(OcrJob.id.in_(ocr_job_ids))),
+    ]
+    if uploaded_pdf_ids:
+        statements.append(
+            (
+                "uploaded_pdf_attempts",
+                delete(UploadedPdfAttempt).where(UploadedPdfAttempt.uploaded_pdf_id.in_(uploaded_pdf_ids)),
+            )
+        )
+    if upload_pdf_filters:
+        statements.append(("uploaded_pdfs", delete(UploadedPdf).where(or_(*upload_pdf_filters))))
+    if ingest_job_filters:
+        statements.append(("ingest_jobs", delete(IngestJob).where(or_(*ingest_job_filters))))
+    counts: dict[str, int] = {}
+    for name, statement in statements:
+        result = session.execute(statement)
+        counts[name] = int(result.rowcount or 0)
+    return counts
+
+
 def archive_orders_for_week(
     week_value: str,
     *,
     order_ids: list[str] | None = None,
     archived_by: str | None = None,
+    purge_runtime_state: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_week = str(week_value or "").strip()
     if not normalized_week or normalized_week == "unresolved":
@@ -4745,6 +4861,11 @@ def archive_orders_for_week(
             archived=True,
             archived_by=archived_by,
         )
+        purge_counts = (
+            _purge_order_runtime_state_in_session(session, [str(order.id or "") for order in matched])
+            if purge_runtime_state
+            else {}
+        )
     _invalidate_orders_cache()
     return (
         {
@@ -4753,6 +4874,8 @@ def archive_orders_for_week(
             "archived_order_ids": archived_order_ids,
             "archived_at": archived_at.isoformat() if archived_at else now.isoformat(),
             "archived_by": str(archived_by or "").strip() or None,
+            "purged_runtime_state": bool(purge_runtime_state),
+            "purge_counts": purge_counts,
         },
         None,
     )

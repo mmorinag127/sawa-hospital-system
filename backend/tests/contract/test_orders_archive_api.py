@@ -8,6 +8,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
+from src.db import session_scope  # noqa: E402
+from src.models.ocr_job import OcrJob  # noqa: E402
+from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
@@ -163,6 +166,46 @@ def test_archive_week_can_target_visible_group_order_ids_even_when_stored_week_i
         },
     )
     assert restore_res.status_code == 200
+
+
+def test_archive_week_can_purge_runtime_state_when_explicitly_requested() -> None:
+    order_service.clear_all()
+    order = _create_order(
+        message_id="msg-archive-purge-001",
+        week_hint="2026-04@2026-04-05~2026-04-11",
+        status="要確認",
+    )
+    order_id = str(order["id"])
+
+    with session_scope() as session:
+        session.add(
+            OcrJob(
+                id=f"OCR-{order_id}",
+                status="done",
+                input_reference="file://dummy.pdf",
+                metrics={"stale": True},
+            )
+        )
+        session.merge(OrderOcrCache(order_id=order_id, payload={"stale": True}))
+
+    archive_res = client.post(
+        "/orders/archive-week",
+        json={
+            "week_value": "2026-04@2026-04-05~2026-04-11",
+            "order_ids": [order_id],
+            "purge_runtime_state": True,
+        },
+    )
+
+    assert archive_res.status_code == 200
+    payload = archive_res.json()
+    assert payload["archived_order_ids"] == [order_id]
+    assert payload["purged_runtime_state"] is True
+    assert payload["purge_counts"]["ocr_jobs"] == 1
+    assert payload["purge_counts"]["order_ocr_cache"] == 1
+    with session_scope() as session:
+        assert session.get(OcrJob, f"OCR-{order_id}") is None
+        assert session.get(OrderOcrCache, order_id) is None
 
 
 def test_archive_single_order_endpoint_hides_only_target_order_from_default_list() -> None:
