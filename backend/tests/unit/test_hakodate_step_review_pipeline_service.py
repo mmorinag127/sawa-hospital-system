@@ -174,3 +174,56 @@ def test_step_review_target_regions_keep_template_merge_center() -> None:
     assert by_id["E11:E12"]["covered_sheet_cells"] == ["E11", "E12"]
     assert evidence["physical_split_excel_merge_count"] == 0
     assert evidence["physical_split_excel_merge_ranges"] == []
+
+
+def test_step_review_target_regions_restrict_to_resolved_template_columns() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["C7"] = "献立"
+    worksheet["D7"] = "常食"
+    worksheet["E7"] = "糖尿"
+    worksheet["F7"] = "備考欄"
+    worksheet["G7"] = "肉禁"
+    worksheet["H7"] = "魚禁"
+    worksheet["C11"] = "先頭メニュー"
+    row_edges = [float(index * 10) for index in range(59)]
+    column_edges = [float(index * 10) for index in range(9)]
+    fax_template = {
+        "columns": [
+            {"index": 0, "role": "date", "field": "date_mmdd", "header": "日付"},
+            {"index": 1, "role": "daypart", "field": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "field": "menu", "header": "献立"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "name": "qty.regular_x",
+                "diet_type": "regular",
+                "area_id": "X",
+                "header": "常食",
+            },
+            {
+                "index": 4,
+                "role": "quantity",
+                "name": "qty.diabetes_x",
+                "diet_type": "diabetes",
+                "area_id": "X",
+                "header": "糖尿",
+            },
+            {"index": 5, "role": "note", "field": "remarks", "header": "備考欄"},
+        ],
+    }
+
+    regions, evidence = _post_menu_target_regions(
+        worksheet=worksheet,
+        column_edges=column_edges,
+        row_edges=row_edges,
+        fax_template=fax_template,
+    )
+
+    first_row_regions = [region for region in regions if int(region["worksheet_row"]) == 11]
+    assert [region["sheet_cell"] for region in first_row_regions] == ["D11", "E11", "F11"]
+    assert [region["field"] for region in first_row_regions] == ["qty.regular_x", "qty.diabetes_x", "note"]
+    assert "G11" not in {str(region["sheet_cell"]) for region in regions}
+    assert "H11" not in {str(region["sheet_cell"]) for region in regions}
+    assert evidence["template_column_restricted"] is True
+    assert evidence["target_worksheet_cols"] == [4, 5, 6]

@@ -746,7 +746,17 @@ def _post_menu_target_regions(
     )
     slot_by_col = {int(slot.get("worksheet_col_index") or 0): slot for slot in slots if isinstance(slot, dict)}
     menu_col = _menu_column_from_slots(slots, worksheet)
-    target_cols = list(range(menu_col + 1, col_count + 1))
+    canonical_target_cols = [
+        col
+        for col in range(menu_col + 1, col_count + 1)
+        if str((slot_by_col.get(col) or {}).get("canonical_source") or "").strip() == "facility_fax_template"
+        and (
+            str((slot_by_col.get(col) or {}).get("role") or "").strip() in {"quantity", "note"}
+            or str((slot_by_col.get(col) or {}).get("slot_name") or "").strip().startswith("qty.")
+            or str((slot_by_col.get(col) or {}).get("slot_name") or "").strip() in {"note", "remarks"}
+        )
+    ]
+    target_cols = canonical_target_cols or list(range(menu_col + 1, col_count + 1))
     physical_row_map = _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}
@@ -821,6 +831,7 @@ def _post_menu_target_regions(
         "target_rule": TARGET_RULE,
         "menu_worksheet_col": menu_col,
         "target_worksheet_cols": target_cols,
+        "template_column_restricted": bool(canonical_target_cols),
         "region_count": len(regions),
         "logical_target_count": sum(len(region.get("logical_targets") or []) for region in regions),
         "label_counts": label_counts,
