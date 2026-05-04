@@ -956,13 +956,28 @@ def test_fac00004_update_config_sanitizes_missing_aux_before_storage():
     ]
 
 
-def test_fac00010_uses_floor_columns_from_source_master():
+def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
     config_service.reload_configs()
-    resolved = config_service.get_facility_config("FAC00010")
-    assert resolved is not None
-    template = resolved.get("fax_template") or {}
-    assert resolved.get("fax_template_override") == {"grid_line_scale_horizontal": 20}
-    assert template.get("main_ocr_row_fields") == [
+    fac1 = config_service.get_facility_config("FAC00001")
+    assert fac1 is not None
+    assert fac1.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert (fac1.get("fax_template") or {}).get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.unknown_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
+
+    fac8 = config_service.get_facility_config("FAC00008")
+    assert fac8 is not None
+    assert fac8.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert (fac8.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
         "menu",
@@ -974,6 +989,43 @@ def test_fac00010_uses_floor_columns_from_source_master():
         "qty.mixer_3f",
         "remarks",
     ]
+
+    fac9 = config_service.get_facility_config("FAC00009")
+    assert fac9 is not None
+    assert fac9.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
+
+    resolved = config_service.get_facility_config("FAC00010")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
+    template = resolved.get("fax_template") or {}
+    assert resolved.get("fax_template_override") == {"grid_line_scale_horizontal": 20}
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.regular_bag_x",
+        "qty.soft_x",
+        "qty.mixer_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "remarks",
+    ]
+
+    fac11 = config_service.get_facility_config("FAC00011")
+    assert fac11 is not None
+    assert fac11.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+
+
+def test_all_master_facilities_have_explicit_layout_template_ids():
+    config_service.reload_configs()
+    missing = []
+    for facility in config_service.load_facility_master().get("facilities", []):
+        facility_id = facility.get("facility_id")
+        resolved = config_service.get_facility_config(facility_id)
+        if not resolved or not resolved.get("fax_template_id"):
+            missing.append(facility_id)
+    assert missing == []
 
 
 def test_fac00014_15_16_expose_custom_quantity_columns():
@@ -1053,7 +1105,22 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
 def test_layout_templates_qty_regex_match_digit_cells():
     config_service.reload_configs()
     registry = config_service.load_fax_template_registry()
-    for facility_id in ("FAC00002", "FAC00003", "FAC00006", "FAC00007", "FAC00012", "FAC00013", "FAC00014", "FAC00015", "FAC00016"):
+    for facility_id in (
+        "FAC00001",
+        "FAC00002",
+        "FAC00003",
+        "FAC00006",
+        "FAC00007",
+        "FAC00008",
+        "FAC00009",
+        "FAC00010",
+        "FAC00011",
+        "FAC00012",
+        "FAC00013",
+        "FAC00014",
+        "FAC00015",
+        "FAC00016",
+    ):
         resolved = config_service.get_facility_config(facility_id)
         assert resolved is not None
         template_ids = [resolved.get("fax_template_id")] + list(resolved.get("fax_template_ids") or [])

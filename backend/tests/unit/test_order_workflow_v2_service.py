@@ -229,7 +229,7 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     assert workflow["template_id"] == "fax_layout_regular_forbidden_v1"
 
 
-def test_context_confirm_accepts_facility_resolved_template_without_template_id(monkeypatch) -> None:
+def test_context_confirm_blocks_facility_columns_without_template_id(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
@@ -268,19 +268,13 @@ def test_context_confirm_accepts_facility_resolved_template_without_template_id(
         week_end="2026-04-30",
     )
 
-    assert error is None
-    assert workflow is not None
-    assert workflow["state"] == "context_confirmed"
-    assert workflow["template_id"] is None
+    assert workflow is None
+    assert error == "facility_template_unresolved"
     with session_scope() as session:
         row = session.get(OrderWorkflowState, order_id)
-        assert row.secondary_actions_json["workflow_v2"]["template_source"] == "facility_resolved_template"
-
-    _install_fake_ocr_prerequisite(monkeypatch)
-    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
-
-    assert error is None
-    assert queued["state"] == "ocr_running"
+        assert row is not None
+        assert row.state == "facility_template_unresolved"
+        assert row.secondary_actions_json["workflow_v2"]["template_id"] is None
 
 
 def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:

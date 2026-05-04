@@ -224,6 +224,98 @@
       "phone": "0886-663-966",
       "areas": [],
       "facility_id": "FAC00001",
+      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_override": {
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "header": "日付",
+            "name": "date_mmdd"
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "header": "区分",
+            "name": "daypart"
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "header": "メニュー",
+            "name": "menu"
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "header": "常食",
+            "name": "qty.regular_x",
+            "diet_type": "regular",
+            "area_id": "X",
+            "diet_type_locked": true,
+            "area_id_locked": true,
+            "name_locked": true
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "header": "不明",
+            "name": "qty.unknown_x",
+            "diet_type": "unknown",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "header": "肉禁",
+            "name": "qty.no_meat_x",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "diet_type_locked": true,
+            "area_id_locked": true,
+            "name_locked": true
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "header": "魚禁",
+            "name": "qty.no_fish_x",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "diet_type_locked": true,
+            "area_id_locked": true,
+            "name_locked": true
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "header": "変更1",
+            "name": "qty.change_1_x",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "diet_type_locked": true,
+            "area_id_locked": true,
+            "name_locked": true
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "header": "変更2",
+            "name": "qty.change_2_x",
+            "diet_type": "change_2",
+            "area_id": "X",
+            "diet_type_locked": true,
+            "area_id_locked": true,
+            "name_locked": true
+          },
+          {
+            "index": 9,
+            "role": "note",
+            "header": "備考",
+            "name": "remarks"
+          }
+        ]
+      },
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "大和なでしこ",
@@ -1225,6 +1317,7 @@
       "phone": "0886-113-630",
       "areas": [],
       "facility_id": "FAC00008",
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1302,6 +1395,7 @@
       "phone": "0886-837-888",
       "areas": [],
       "facility_id": "FAC00009",
+      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1386,6 +1480,7 @@
       "phone": "088-657-6567",
       "areas": [],
       "facility_id": "FAC00010",
+      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
       "fax_template_override": {
         "grid_line_scale_horizontal": 20
       },
@@ -1468,6 +1563,7 @@
       "phone": "0880-229-508",
       "areas": [],
       "facility_id": "FAC00011",
+      "fax_template_id": "fax_layout_regular_forbidden_v1",
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",

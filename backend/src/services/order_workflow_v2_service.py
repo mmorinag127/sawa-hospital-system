@@ -15,7 +15,6 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
 from src.services import config_service, sheet_week_service
-from src.services.template_field_schema_service import derive_row_fields_from_template
 
 
 Base.metadata.create_all(bind=engine)
@@ -207,15 +206,7 @@ def _facility_config_has_resolved_fax_template(
 ) -> bool:
     if not isinstance(facility_config, dict):
         return False
-    if _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id")):
-        return True
-    template = facility_config.get("fax_template")
-    if not isinstance(template, dict):
-        return False
-    fields = derive_row_fields_from_template(template)
-    if not fields:
-        return False
-    return any(str(field or "").strip().startswith("qty.") for field in fields)
+    return bool(_normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id")))
 
 
 def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
