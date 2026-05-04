@@ -932,6 +932,7 @@ export default function OrderWorkflowV2Page() {
   const [selectedFacilityTemplateId, setSelectedFacilityTemplateId] = useState("");
   const [expandedCellCopyMode, setExpandedCellCopyMode] = useState<ExpandedCellCopyMode>("auto");
   const [expandedCellCopySaving, setExpandedCellCopySaving] = useState(false);
+  const [showExceptionRange, setShowExceptionRange] = useState(false);
   const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
   const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
@@ -996,6 +997,16 @@ export default function OrderWorkflowV2Page() {
     () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
     [contextForm.facility_id, facilityOptions],
   );
+  const workflowFacilityOption = useMemo(
+    () => facilityOptions.find((option) => option.id === workflow?.facility_id) || null,
+    [facilityOptions, workflow?.facility_id],
+  );
+  const workflowFacilityLabel = workflow?.facility_id
+    ? (workflowFacilityOption ? formatFacilityLabel(workflowFacilityOption) : workflow.facility_id)
+    : "未設定";
+  const contextFacilityLabel = contextForm.facility_id
+    ? (selectedFacility ? formatFacilityLabel(selectedFacility) : contextForm.facility_id)
+    : "未設定";
   const selectedFacilityTemplateOption = useMemo(
     () => faxTemplateOptions.find((option) => option.template_id === selectedFacilityTemplateId) || null,
     [faxTemplateOptions, selectedFacilityTemplateId],
@@ -2089,50 +2100,32 @@ export default function OrderWorkflowV2Page() {
             <p className="subtle">前工程と照合するための基本情報です。</p>
           </div>
         </div>
-        <div className="summary-grid summary-grid--compact">
+        <div className="summary-grid summary-grid--compact summary-grid--order-info">
           <div className="summary-primary-card">
-            <span className="field-label">注文ID</span>
+            <span className="field-label">注文 / 状態</span>
             <p className="summary-value">{orderId || "-"}</p>
-          </div>
-          <div className="summary-primary-card">
-            <span className="field-label">処理状態</span>
-            <p className="summary-value">{stateLabel(workflow?.state)}</p>
+            <p className="summary-subline">{stateLabel(workflow?.state)}</p>
           </div>
           <div className="summary-primary-card">
             <span className="field-label">施設</span>
-            <p className="summary-value">{workflow?.facility_id || "未設定"}</p>
+            <p className="summary-value">{workflowFacilityLabel}</p>
           </div>
           <div className="summary-primary-card">
-            <span className="field-label">週次</span>
+            <span className="field-label">週次 / テンプレート</span>
             <p className="summary-value">
               {formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "未設定"}
             </p>
+            <p className="summary-subline">{workflow?.template_id || "施設設定から自動解決"}</p>
           </div>
           <div className="summary-primary-card">
-            <span className="field-label">テンプレート</span>
-            <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
+            <span className="field-label">OCR</span>
+            <p className="summary-value">{ocrResults.length}件 / {formatOcrProgress(workflow)}</p>
+            <p className="summary-subline">処理時間: {formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
           </div>
           <div className="summary-primary-card">
-            <span className="field-label">OCR結果</span>
-            <p className="summary-value">{ocrResults.length}件</p>
-          </div>
-          <div className="summary-primary-card">
-            <span className="field-label">OCRジョブ</span>
-            <p className="summary-value">{workflow?.ocr_job?.ocr_job_id || "-"}</p>
-          </div>
-          <div className="summary-primary-card">
-            <span className="field-label">OCR進捗</span>
-            <p className="summary-value">{formatOcrProgress(workflow)}</p>
-          </div>
-          <div className="summary-primary-card">
-            <span className="field-label">OCR処理時間</span>
-            <p className="summary-value">{formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
-          </div>
-          <div className="summary-primary-card">
-            <span className="field-label">OCR開始/更新</span>
-            <p className="summary-value">
-              {formatDateTime(workflow?.ocr_job?.started_at)} / {formatDateTime(workflow?.ocr_job?.finished_at || workflow?.ocr_job?.updated_at)}
-            </p>
+            <span className="field-label">OCR開始 / 更新</span>
+            <p className="summary-value">{formatDateTime(workflow?.ocr_job?.started_at)}</p>
+            <p className="summary-subline">{formatDateTime(workflow?.ocr_job?.finished_at || workflow?.ocr_job?.updated_at)}</p>
           </div>
           <div className="summary-primary-card">
             <span className="field-label">シート最終保存</span>
@@ -2173,189 +2166,147 @@ export default function OrderWorkflowV2Page() {
             )}
           </header>
           <div className="step1-facility-block">
-            <div className="summary-grid summary-grid--compact">
-              <div className="summary-primary-card">
-                <span className="field-label">注文ID</span>
-                <p className="summary-value">{orderId || "-"}</p>
-              </div>
-              <div className="summary-primary-card">
-                <span className="field-label">現在の施設</span>
-                <p className="summary-value">{workflow?.facility_id || "未設定"}</p>
-              </div>
-              <div className="summary-primary-card">
-                <span className="field-label">現在の週</span>
-                <p className="summary-value">
-                  {formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "未設定"}
-                </p>
-              </div>
-              <div className="summary-primary-card">
-                <span className="field-label">施設テンプレート</span>
-                <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
-              </div>
+            <div className="step1-current-strip">
+              <span>現在: {workflowFacilityLabel}</span>
+              <span>{formatWeekLabel(weekValueFromRange(workflow?.week_start, workflow?.week_end)) || "週未設定"}</span>
+              <span>{workflow?.template_id || "テンプレートは施設設定から自動解決"}</span>
             </div>
-            {contextSuggestion ? (
-              <div className="context-suggestion-card">
-                <div>
-                  <span className="field-label">PDF自動推定候補</span>
-                  <h3>
-                    {contextSuggestion.facility_name || contextSuggestion.facility_id || "施設未推定"}
-                    {contextSuggestion.facility_id && contextSuggestion.facility_name ? ` (${contextSuggestion.facility_id})` : ""}
-                  </h3>
-                  <p className="subtle">
-                    週次: {contextSuggestionWeekLabel(contextSuggestion)}
-                    {contextSuggestion.confidence ? ` / confidence ${contextSuggestion.confidence}` : ""}
-                    {contextSuggestion.source ? ` / ${contextSuggestion.source}` : ""}
-                  </p>
-                  {Array.isArray(contextSuggestion.date_hints) && contextSuggestion.date_hints.length ? (
-                    <p className="subtle">日付候補: {contextSuggestion.date_hints.slice(0, 8).join(" / ")}</p>
-                  ) : null}
-                  {Array.isArray(contextSuggestion.facility_candidates) && contextSuggestion.facility_candidates.length ? (
-                    <ul className="context-suggestion-candidates">
-                      {contextSuggestion.facility_candidates.slice(0, 3).map((candidate, index) => (
-                        <li key={`facility-suggestion-${index}`}>{formatFacilityCandidate(candidate)}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-                <button className="btn secondary" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
-                  推定をフォームに反映
-                </button>
-              </div>
-            ) : null}
-            <div className="summary-actions">
-              <label className="field">
-                <span className="field-label">施設 (Step1 必須)</span>
-                <select
-                  className="input"
-                  value={contextForm.facility_id}
-                  onChange={(event) => setContextForm((current) => ({ ...current, facility_id: event.target.value }))}
-                  disabled={facilityOptionsLoading || Boolean(busy)}
-                >
-                  <option value="">施設を選択</option>
-                  {contextForm.facility_id && !facilityOptions.some((option) => option.id === contextForm.facility_id) ? (
-                    <option value={contextForm.facility_id}>{contextForm.facility_id} (未登録)</option>
-                  ) : null}
-                  {facilityOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {formatFacilityLabel(option)}
-                    </option>
-                  ))}
-                </select>
-                {facilityOptionsError ? (
-                  <span className="subtle">{facilityOptionsError}</span>
-                ) : facilityOptionsLoading ? (
-                  <span className="subtle">施設一覧を取得中...</span>
-                ) : null}
-              </label>
-              <label className="field">
-                <span className="field-label">週 (Step1 必須)</span>
-                <select
-                  className="input"
-                  value={weekDraft}
-                  onChange={(event) => applyWeekValue(event.target.value)}
-                  disabled={weekOptionsLoading || Boolean(busy)}
-                >
-                  <option value="">週を選択</option>
-                  {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
-                    <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
-                  ) : null}
-                  {weekOptions.map((option) => (
-                    <option key={option.week_id} value={option.week_id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                {weekOptionsError ? (
-                  <span className="subtle">{weekOptionsError}</span>
-                ) : weekOptionsLoading ? (
-                  <span className="subtle">週候補を取得中...</span>
-                ) : (
-                  <span className="subtle">日曜から土曜の固定週を表示します。</span>
-                )}
-                <div className="step1-week-range">
-                  <span className="subtle">例外時だけ範囲指定します。</span>
-                  <div className="summary-actions">
-                    <input
-                      className="input"
-                      type="date"
-                      value={customWeekRangeStart}
-                      onChange={(event) => setCustomWeekRangeStart(event.target.value)}
-                      disabled={Boolean(busy)}
-                    />
-                    <input
-                      className="input"
-                      type="date"
-                      value={customWeekRangeEnd}
-                      onChange={(event) => setCustomWeekRangeEnd(event.target.value)}
-                      disabled={Boolean(busy)}
-                    />
-                    <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={Boolean(busy)}>
-                      例外範囲を設定
+            <div className="step1-control-grid">
+              <div className="step1-control-column">
+                {contextSuggestion ? (
+                  <div className="context-suggestion-card compact">
+                    <div>
+                      <span className="field-label">PDF自動推定候補</span>
+                      <h3>
+                        {contextSuggestion.facility_name || contextSuggestion.facility_id || "施設未推定"}
+                        {contextSuggestion.facility_id && contextSuggestion.facility_name ? ` (${contextSuggestion.facility_id})` : ""}
+                      </h3>
+                      <p className="subtle">
+                        週次: {contextSuggestionWeekLabel(contextSuggestion)}
+                        {contextSuggestion.confidence ? ` / confidence ${contextSuggestion.confidence}` : ""}
+                        {contextSuggestion.source ? ` / ${contextSuggestion.source}` : ""}
+                      </p>
+                      {Array.isArray(contextSuggestion.date_hints) && contextSuggestion.date_hints.length ? (
+                        <p className="subtle">日付候補: {contextSuggestion.date_hints.slice(0, 6).join(" / ")}</p>
+                      ) : null}
+                      {Array.isArray(contextSuggestion.facility_candidates) && contextSuggestion.facility_candidates.length ? (
+                        <ul className="context-suggestion-candidates">
+                          {contextSuggestion.facility_candidates.slice(0, 2).map((candidate, index) => (
+                            <li key={`facility-suggestion-${index}`}>{formatFacilityCandidate(candidate)}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                    <button className="btn secondary" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
+                      推定を反映
                     </button>
                   </div>
-                  {selectedWeekValue ? (
-                    <span className="subtle">設定予定: {formatWeekLabel(selectedWeekValue) || selectedWeekValue}</span>
-                  ) : null}
-                </div>
-              </label>
+                ) : (
+                  <div className="context-suggestion-card compact muted">
+                    <div>
+                      <span className="field-label">PDF自動推定候補</span>
+                      <p className="subtle">推定候補はありません。PDFを見て施設と週を選択してください。</p>
+                    </div>
+                  </div>
+                )}
+                <label className="field">
+                  <span className="field-label">施設 (Step1 必須)</span>
+                  <select
+                    className="input"
+                    value={contextForm.facility_id}
+                    onChange={(event) => setContextForm((current) => ({ ...current, facility_id: event.target.value }))}
+                    disabled={facilityOptionsLoading || Boolean(busy)}
+                  >
+                    <option value="">施設を選択</option>
+                    {contextForm.facility_id && !facilityOptions.some((option) => option.id === contextForm.facility_id) ? (
+                      <option value={contextForm.facility_id}>{contextForm.facility_id} (未登録)</option>
+                    ) : null}
+                    {facilityOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {formatFacilityLabel(option)}
+                      </option>
+                    ))}
+                  </select>
+                  {facilityOptionsError ? (
+                    <span className="subtle">{facilityOptionsError}</span>
+                  ) : facilityOptionsLoading ? (
+                    <span className="subtle">施設一覧を取得中...</span>
+                  ) : (
+                    <span className="subtle">選択中: {contextFacilityLabel}</span>
+                  )}
+                </label>
+              </div>
+              <div className="step1-control-column">
+                <label className="field">
+                  <span className="field-label">週 (Step1 必須)</span>
+                  <select
+                    className="input"
+                    value={weekDraft}
+                    onChange={(event) => applyWeekValue(event.target.value)}
+                    disabled={weekOptionsLoading || Boolean(busy)}
+                  >
+                    <option value="">週を選択</option>
+                    {isConcreteWeekValue(weekDraft) && !weekOptions.some((option) => option.week_id === weekDraft) ? (
+                      <option value={weekDraft}>{formatWeekLabel(weekDraft) || weekDraft} (現在値)</option>
+                    ) : null}
+                    {weekOptions.map((option) => (
+                      <option key={option.week_id} value={option.week_id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  {weekOptionsError ? (
+                    <span className="subtle">{weekOptionsError}</span>
+                  ) : weekOptionsLoading ? (
+                    <span className="subtle">週候補を取得中...</span>
+                  ) : (
+                    <span className="subtle">日曜から土曜の固定週を表示します。</span>
+                  )}
+                </label>
+                <details
+                  className="exception-range-details"
+                  open={showExceptionRange}
+                  onToggle={(event) => setShowExceptionRange(event.currentTarget.open)}
+                >
+                  <summary>例外範囲を指定する</summary>
+                  <div className="step1-week-range">
+                    <div className="summary-actions compact">
+                      <input
+                        className="input"
+                        type="date"
+                        value={customWeekRangeStart}
+                        onChange={(event) => setCustomWeekRangeStart(event.target.value)}
+                        disabled={Boolean(busy)}
+                      />
+                      <input
+                        className="input"
+                        type="date"
+                        value={customWeekRangeEnd}
+                        onChange={(event) => setCustomWeekRangeEnd(event.target.value)}
+                        disabled={Boolean(busy)}
+                      />
+                      <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={Boolean(busy)}>
+                        反映
+                      </button>
+                    </div>
+                    {selectedWeekValue ? (
+                      <span className="subtle">設定予定: {formatWeekLabel(selectedWeekValue) || selectedWeekValue}</span>
+                    ) : null}
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div className="step1-action-row">
               <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady || facilityTemplateMissing)}>
                 {facilityTemplateMissing ? "先にテンプレート登録" : contextReady ? "設定を保存" : "施設と週を選択"}
               </button>
-              <div className="ocr-run-options">
-                <label className="toolbar-field">
-                  <span>OCR実行方式</span>
-                  <select value={ocrRunMode} onChange={(event) => setOcrRunMode(event.target.value as OcrRunMode)} disabled={Boolean(busy)}>
-                    <option value="hakodate">箱館方式</option>
-                    <option value="llm">AIに任せる</option>
-                  </select>
-                </label>
-                {ocrRunMode === "llm" ? (
-                  <>
-                    <label className="toolbar-field">
-                      <span>自動調整プリセット</span>
-                      <select value={llmPromptPreset} onChange={(event) => setLlmPromptPreset(event.target.value as LlmPromptPreset)} disabled={Boolean(busy)}>
-                        {(Object.keys(llmPromptPresetLabels) as LlmPromptPreset[]).map((preset) => (
-                          <option key={preset} value={preset}>{llmPromptPresetLabels[preset]}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="toolbar-field">
-                      <span>AI provider</span>
-                      <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)} disabled={Boolean(busy)}>
-                        <option value="openai">OpenAI</option>
-                        <option value="gemini">Gemini</option>
-                      </select>
-                    </label>
-                    {llmProvider === "gemini" ? (
-                      <label className="toolbar-field">
-                        <span>Gemini model</span>
-                        <select value={llmModelMode} onChange={(event) => setLlmModelMode(event.target.value as "flash" | "pro" | "other")} disabled={Boolean(busy)}>
-                          <option value="flash">Flash</option>
-                          <option value="pro">Pro</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </label>
-                    ) : null}
-                    {llmProvider === "gemini" && llmModelMode === "other" ? (
-                      <input
-                        className="compact-input llm-model-input"
-                        value={llmCustomModel}
-                        onChange={(event) => setLlmCustomModel(event.target.value)}
-                        placeholder="gemini model"
-                      />
-                    ) : null}
-                    <details className="inline-details">
-                      <summary>LLM追加指示（任意）</summary>
-                      <textarea
-                        className="ocr-llm-prompt-textarea"
-                        value={ocrPrompt}
-                        onChange={(event) => setOcrPrompt(event.target.value)}
-                        placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
-                      />
-                    </details>
-                  </>
-                ) : null}
-              </div>
+              <label className="toolbar-field ocr-mode-field">
+                <span>OCR実行方式</span>
+                <select value={ocrRunMode} onChange={(event) => setOcrRunMode(event.target.value as OcrRunMode)} disabled={Boolean(busy)}>
+                  <option value="hakodate">箱館方式</option>
+                  <option value="llm">AIに任せる</option>
+                </select>
+              </label>
               <button
                 className="btn"
                 type="button"
@@ -2370,6 +2321,52 @@ export default function OrderWorkflowV2Page() {
                 OCRを実行
               </button>
             </div>
+            {ocrRunMode === "llm" ? (
+              <div className="ocr-run-options compact">
+                <label className="toolbar-field">
+                  <span>自動調整プリセット</span>
+                  <select value={llmPromptPreset} onChange={(event) => setLlmPromptPreset(event.target.value as LlmPromptPreset)} disabled={Boolean(busy)}>
+                    {(Object.keys(llmPromptPresetLabels) as LlmPromptPreset[]).map((preset) => (
+                      <option key={preset} value={preset}>{llmPromptPresetLabels[preset]}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="toolbar-field">
+                  <span>AI provider</span>
+                  <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)} disabled={Boolean(busy)}>
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </label>
+                {llmProvider === "gemini" ? (
+                  <label className="toolbar-field">
+                    <span>Gemini model</span>
+                    <select value={llmModelMode} onChange={(event) => setLlmModelMode(event.target.value as "flash" | "pro" | "other")} disabled={Boolean(busy)}>
+                      <option value="flash">Flash</option>
+                      <option value="pro">Pro</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                ) : null}
+                {llmProvider === "gemini" && llmModelMode === "other" ? (
+                  <input
+                    className="compact-input llm-model-input"
+                    value={llmCustomModel}
+                    onChange={(event) => setLlmCustomModel(event.target.value)}
+                    placeholder="gemini model"
+                  />
+                ) : null}
+                <details className="inline-details">
+                  <summary>LLM追加指示（任意）</summary>
+                  <textarea
+                    className="ocr-llm-prompt-textarea"
+                    value={ocrPrompt}
+                    onChange={(event) => setOcrPrompt(event.target.value)}
+                    placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
+                  />
+                </details>
+              </div>
+            ) : null}
             {contextForm.facility_id ? (
               <div className={`facility-template-resolution ${facilityTemplateMissing ? "blocked" : "resolved"}`}>
                 <div className="facility-template-resolution-copy">
@@ -3303,6 +3300,9 @@ export default function OrderWorkflowV2Page() {
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           align-items: stretch;
         }
+        .summary-grid--order-info {
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        }
         .summary-primary-card {
           background: #f8fbfa;
           border: 1px solid rgba(25, 32, 30, 0.08);
@@ -3310,6 +3310,12 @@ export default function OrderWorkflowV2Page() {
           padding: 10px 12px;
         }
         .summary-value {
+          font-weight: 700;
+          margin: 4px 0 0;
+        }
+        .summary-subline {
+          color: #687269;
+          font-size: 12px;
           font-weight: 700;
           margin: 4px 0 0;
         }
@@ -3459,6 +3465,9 @@ export default function OrderWorkflowV2Page() {
           gap: 12px;
           margin-top: 12px;
         }
+        .summary-actions.compact {
+          margin-top: 0;
+        }
         .summary-actions .field {
           flex: 1;
           min-width: 240px;
@@ -3469,6 +3478,35 @@ export default function OrderWorkflowV2Page() {
           border-radius: 12px;
           margin: 14px 0 16px;
           padding: 12px;
+        }
+        .step1-current-strip {
+          align-items: center;
+          background: #fffdf7;
+          border: 1px solid #e5dece;
+          border-radius: 12px;
+          color: #4b5d54;
+          display: flex;
+          flex-wrap: wrap;
+          font-size: 12px;
+          font-weight: 800;
+          gap: 8px;
+          margin-bottom: 12px;
+          padding: 8px 10px;
+        }
+        .step1-current-strip span {
+          background: #eef3ef;
+          border-radius: 999px;
+          padding: 4px 9px;
+        }
+        .step1-control-grid {
+          display: grid;
+          gap: 12px;
+          grid-template-columns: minmax(320px, 0.9fr) minmax(360px, 1.1fr);
+          align-items: start;
+        }
+        .step1-control-column {
+          display: grid;
+          gap: 12px;
         }
         .step1-week-range {
           display: flex;
@@ -3486,6 +3524,14 @@ export default function OrderWorkflowV2Page() {
           justify-content: space-between;
           margin-top: 12px;
           padding: 12px;
+        }
+        .context-suggestion-card.compact {
+          margin-top: 0;
+          min-height: 98px;
+        }
+        .context-suggestion-card.muted {
+          background: #f7f5ee;
+          border-color: #e2ddcf;
         }
         .context-suggestion-card h3 {
           color: #1c2822;
@@ -3505,6 +3551,36 @@ export default function OrderWorkflowV2Page() {
           display: flex;
           flex-direction: column;
           gap: 6px;
+        }
+        .exception-range-details {
+          background: #fffdf7;
+          border: 1px dashed #d7d1c0;
+          border-radius: 12px;
+          padding: 10px 12px;
+        }
+        .exception-range-details summary {
+          color: #5f7b74;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 900;
+          list-style: none;
+        }
+        .exception-range-details summary::-webkit-details-marker {
+          display: none;
+        }
+        .step1-action-row {
+          align-items: end;
+          background: #fffdf7;
+          border: 1px solid #e5dece;
+          border-radius: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          margin-top: 12px;
+          padding: 12px;
+        }
+        .ocr-mode-field {
+          min-width: 170px;
         }
         .field-label {
           color: #5f7b74;
@@ -3825,6 +3901,9 @@ export default function OrderWorkflowV2Page() {
           padding: 10px;
           width: 100%;
         }
+        .ocr-run-options.compact {
+          margin-top: 12px;
+        }
         .inline-details {
           flex-basis: 100%;
         }
@@ -4099,6 +4178,7 @@ export default function OrderWorkflowV2Page() {
           }
           .step-nav,
           .form-grid,
+          .step1-control-grid,
           .step3-workspace.side-by-side,
           .ocr-card-body {
             grid-template-columns: 1fr;
