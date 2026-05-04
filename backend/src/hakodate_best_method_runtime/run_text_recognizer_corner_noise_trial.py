@@ -120,13 +120,16 @@ def _foreground_centered(binary: np.ndarray, *, out_width: int, out_height: int)
     }
     if crop.size == 0:
         return Image.fromarray(canvas).convert("RGB"), stats
-    max_w = out_width - 18
-    max_h = out_height - 18
-    scale = min(max_w / max(1, crop.shape[1]), max_h / max(1, crop.shape[0]))
-    scale = max(0.2, min(scale, 5.5))
+    max_w = max(1, min(out_width, out_width - 18 if out_width > 18 else out_width))
+    max_h = max(1, min(out_height, out_height - 18 if out_height > 18 else out_height))
+    fit_scale = min(max_w / max(1, crop.shape[1]), max_h / max(1, crop.shape[0]))
+    # Very wide line/noise components must still fit in the contact-sheet slot.
+    scale = fit_scale if fit_scale < 0.2 else max(0.2, min(fit_scale, 5.5))
+    resized_width = max(1, min(max_w, int(round(crop.shape[1] * scale))))
+    resized_height = max(1, min(max_h, int(round(crop.shape[0] * scale))))
     resized = cv2.resize(
         crop,
-        (max(1, int(round(crop.shape[1] * scale))), max(1, int(round(crop.shape[0] * scale)))),
+        (resized_width, resized_height),
         interpolation=cv2.INTER_CUBIC,
     )
     px = (out_width - resized.shape[1]) // 2
