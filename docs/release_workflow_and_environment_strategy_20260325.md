@@ -63,6 +63,33 @@
 - `prod` で rebuild しない
 - dirty workspace から直接 deploy しない
 
+## Branch And Worktree Policy
+
+現在の標準は Git Flow ベースにする。
+
+- `master`: production の最終反映先。通常作業や stg deploy には使わない。
+- `develop`: staging の統合元。feature worktree の merge 先で、stg deploy は原則この branch から行う。
+- `feature`: `codex/<feature>` などの作業 branch。1機能または1修正につき1 worktree を作る。
+- `release/prod-YYYYMMDD`: prod 昇格用 branch。stg 検証済みの `develop` から切り、prod deploy はこの branch の専用 worktree から行う。
+- `stg` 固定 branch は現時点では持たない。stg は `develop` の役割で管理する。stg に固定ブランチが必要になった場合だけ `release/stg-YYYYMMDD` を追加する。
+
+worktree の merge タイミング:
+
+1. feature worktree 内で実装とローカル検証を完了する。
+2. feature branch を `develop` に merge する。
+3. `develop` の clean worktree から stg deploy する。
+4. stg で operator 観点の確認を完了する。
+5. `develop` から `release/prod-YYYYMMDD` を作る。
+6. prod release worktree で preflight を通し、prod deploy する。
+7. prod 検証後、release branch を `master` に merge する。
+
+禁止:
+
+- feature worktree や jj working copy から直接 stg/prod deploy しない。
+- `develop` に入っていない sibling commit や jj working-copy commit を含むつもりで deploy しない。
+- prod release branch に、stg 未検証の作業 branch を直接 merge しない。
+- 診断コード、生成物、本番コードを1つの release 判断単位に混ぜない。
+
 ## What We Standardize Now
 
 今回の repo 更新で標準化するもの:
