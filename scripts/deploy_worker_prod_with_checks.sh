@@ -20,6 +20,10 @@ CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-1}"
 WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO="${OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO:-0.99}"
 OCR_SHEET_GATE_ABS_MAX_QTY="${OCR_SHEET_GATE_ABS_MAX_QTY:-50}"
+WORKER_MEMORY="${WORKER_MEMORY:-8Gi}"
+WORKER_CPU="${WORKER_CPU:-2}"
+WORKER_TIMEOUT="${WORKER_TIMEOUT:-1800}"
+WORKER_CONCURRENCY="${WORKER_CONCURRENCY:-2}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
 ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh}"
 
@@ -129,6 +133,10 @@ gcloud run deploy "${SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${IMAGE}" \
+  --memory="${WORKER_MEMORY}" \
+  --cpu="${WORKER_CPU}" \
+  --timeout="${WORKER_TIMEOUT}" \
+  --concurrency="${WORKER_CONCURRENCY}" \
   --quiet
 DEPLOYED_REVISION="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestCreatedRevisionName)')"
 if [[ -z "${DEPLOYED_REVISION}" ]]; then
