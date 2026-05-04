@@ -14234,6 +14234,9 @@ def _field_label(field: str) -> str:
         return "メニュー"
     if token in {"remarks", "note"}:
         return "備考"
+    if token.startswith("post_menu."):
+        column_letter = str(field or "").split(".", 1)[1].strip() if "." in str(field or "") else ""
+        return f"空白列({column_letter})" if column_letter else "空白列"
     if token.startswith("aux."):
         return "補助列"
     diet, area = _quantity_meta_from_field(field)
@@ -14271,6 +14274,17 @@ def _is_aux_sheet_field(field: object) -> bool:
 def _is_sheet_note_field(field: object) -> bool:
     token = _normalize_sheet_text(field).lower()
     return token in {"remarks", "note"}
+
+
+def _is_hakodate_spacer_sheet_field(field: object) -> bool:
+    return _normalize_sheet_text(field).lower().startswith("post_menu.")
+
+
+def _normalize_hakodate_sheet_field(field: object) -> str:
+    token = str(field or "").strip()
+    if _normalize_sheet_text(token).lower() == "note":
+        return "remarks"
+    return token
 
 
 def _sheet_header_from_template(
@@ -19734,6 +19748,8 @@ def _validate_sheet_template_fields(fields: list[str]) -> str | None:
         if token in {"date_mmdd", "date", "daypart", "menu", "menu_name", "remarks", "note"}:
             continue
         if token.startswith("aux."):
+            continue
+        if _is_hakodate_spacer_sheet_field(token):
             continue
         diet, area = _quantity_meta_from_field(token)
         if not diet or not area:
@@ -27741,20 +27757,45 @@ def _hakodate_sheet_identity(date_value: object, daypart: object, menu_name: obj
     return date_key, _normalize_daypart_key(daypart), _normalize_menu_text(str(menu_name or ""))
 
 
+def _hakodate_target_cell_field_candidates(cell: dict[str, Any]) -> list[str]:
+    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
+    truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
+    logical_targets = cell.get("logical_targets") if isinstance(cell.get("logical_targets"), list) else []
+    candidates: list[str] = []
+    for candidate in (
+        cell.get("semantic_field"),
+        cell.get("field"),
+    ):
+        field = _normalize_hakodate_sheet_field(candidate)
+        if field:
+            candidates.append(field)
+    for target in logical_targets:
+        if not isinstance(target, dict):
+            continue
+        for candidate in (
+            target.get("semantic_field"),
+            target.get("field"),
+        ):
+            field = _normalize_hakodate_sheet_field(candidate)
+            if field:
+                candidates.append(field)
+    truth_field = _normalize_hakodate_sheet_field(truth.get("field"))
+    if truth_field:
+        candidates.append(truth_field)
+    deduped: list[str] = []
+    for field in candidates:
+        if field and field not in deduped:
+            deduped.append(field)
+    return deduped
+
+
 def _hakodate_projection_field_for_cell(
     cell: dict[str, Any],
     *,
     field_index: dict[str, int],
 ) -> str:
-    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
-    truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
-    for candidate in (
-        truth.get("field"),
-        cell.get("field"),
-        cell.get("semantic_field"),
-    ):
-        field = str(candidate or "").strip()
-        if field and field in field_index:
+    for field in _hakodate_target_cell_field_candidates(cell):
+        if field in field_index:
             return field
     return ""
 
@@ -27775,6 +27816,110 @@ def _hakodate_projection_row_for_cell(
             return truth_row_index
         return None
     return None
+
+
+def _hakodate_target_field_label(cell: dict[str, Any], field: str) -> str:
+    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
+    for source in (cell, metadata):
+        label = str(source.get("field_label") or "").strip()
+        if label:
+            return label
+    logical_targets = cell.get("logical_targets") if isinstance(cell.get("logical_targets"), list) else []
+    for target in logical_targets:
+        if not isinstance(target, dict):
+            continue
+        label = str(target.get("field_label") or "").strip()
+        if label:
+            return label
+    return _field_label(field)
+
+
+def _hakodate_physical_post_menu_fields(target_cells: list[Any]) -> list[tuple[str, str]]:
+    by_col: dict[int, tuple[str, str]] = {}
+    for cell in target_cells:
+        if not isinstance(cell, dict):
+            continue
+        try:
+            worksheet_col = int(cell.get("worksheet_col") or 0)
+        except Exception:
+            worksheet_col = 0
+        if worksheet_col <= 0 or worksheet_col in by_col:
+            continue
+        field = ""
+        for candidate in _hakodate_target_cell_field_candidates(cell):
+            if candidate:
+                field = candidate
+                break
+        if not field:
+            continue
+        by_col[worksheet_col] = (field, _hakodate_target_field_label(cell, field))
+    fields: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for _worksheet_col, (field, label) in sorted(by_col.items()):
+        if field in seen:
+            continue
+        seen.add(field)
+        fields.append((field, label))
+    return fields
+
+
+def _align_hakodate_sheet_payload_to_target_cells(
+    sheet: dict[str, Any],
+    target_cells: list[Any],
+) -> dict[str, Any]:
+    physical_fields = _hakodate_physical_post_menu_fields(target_cells)
+    if not physical_fields or not any(_is_hakodate_spacer_sheet_field(field) for field, _label in physical_fields):
+        return sheet
+    fields = [str(field or "").strip() for field in (sheet.get("fields") or [])]
+    if not fields:
+        return sheet
+    menu_index = fields.index("menu") if "menu" in fields else (fields.index("menu_name") if "menu_name" in fields else -1)
+    if menu_index < 0:
+        return sheet
+    header = [str(value or "") for value in (sheet.get("header") or [])]
+    old_header_by_field = {
+        field: header[idx] if idx < len(header) and str(header[idx] or "").strip() else _field_label(field)
+        for idx, field in enumerate(fields)
+    }
+    labels_by_field = {field: label for field, label in physical_fields if field}
+    prefix = fields[: menu_index + 1]
+    existing_after_menu = fields[menu_index + 1 :]
+    next_after_menu: list[str] = []
+    for field, _label in physical_fields:
+        if field and field not in prefix and field not in next_after_menu:
+            next_after_menu.append(field)
+    for field in existing_after_menu:
+        if field and field not in next_after_menu:
+            next_after_menu.append(field)
+    next_fields = prefix + next_after_menu
+    if next_fields == fields:
+        return sheet
+
+    old_index = {field: idx for idx, field in enumerate(fields)}
+    next_rows: list[list[str]] = []
+    for row in (sheet.get("rows") or []):
+        if not isinstance(row, list):
+            continue
+        next_row: list[str] = []
+        for field in next_fields:
+            source_index = old_index.get(field)
+            next_row.append(str(row[source_index] if source_index is not None and source_index < len(row) else ""))
+        next_rows.append(next_row)
+
+    aligned = dict(sheet)
+    aligned["fields"] = next_fields
+    aligned["header"] = [
+        labels_by_field.get(field)
+        or old_header_by_field.get(field)
+        or _field_label(field)
+        for field in next_fields
+    ]
+    aligned["rows"] = next_rows
+    warnings = list(aligned.get("warnings") or [])
+    if "hakodate_spacer_columns_preserved" not in warnings:
+        warnings.append("hakodate_spacer_columns_preserved")
+    aligned["warnings"] = warnings
+    return aligned
 
 
 def _apply_hakodate_sheet_output_to_sheet_payload(

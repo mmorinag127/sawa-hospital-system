@@ -749,17 +749,33 @@ def _compact_target_cell_map_for_sheet(
 ) -> list[dict[str, Any]]:
     field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields) if str(field or "").strip()}
     compact: list[dict[str, Any]] = []
+    def _sheet_field(value: object) -> str:
+        token = str(value or "").strip()
+        return "remarks" if token == "note" else token
+
     for target in target_cells:
         if not isinstance(target, dict):
             continue
         metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
         truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
-        field = str(
-            truth.get("field")
-            or target.get("field")
-            or target.get("semantic_field")
-            or ""
-        ).strip()
+        field = ""
+        logical_targets = target.get("logical_targets") if isinstance(target.get("logical_targets"), list) else []
+        candidates = [
+            target.get("semantic_field"),
+            target.get("field"),
+            *[
+                candidate
+                for logical_target in logical_targets
+                if isinstance(logical_target, dict)
+                for candidate in (logical_target.get("semantic_field"), logical_target.get("field"))
+            ],
+            truth.get("field"),
+        ]
+        for candidate in candidates:
+            candidate_field = _sheet_field(candidate)
+            if candidate_field and candidate_field in field_index:
+                field = candidate_field
+                break
         col_index = field_index.get(field)
         try:
             row_index = int(truth.get("row_index"))
@@ -781,6 +797,18 @@ def _compact_target_cell_map_for_sheet(
             }
         )
     return compact
+
+
+def _align_hakodate_sheet_payload_for_workflow(
+    order_service_module: Any,
+    sheet: dict[str, Any],
+    target_cells: list[Any],
+) -> dict[str, Any]:
+    aligner = getattr(order_service_module, "_align_hakodate_sheet_payload_to_target_cells", None)
+    if not callable(aligner):
+        return sheet
+    aligned = aligner(sheet, target_cells)
+    return aligned if isinstance(aligned, dict) else sheet
 
 
 def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1102,8 +1130,19 @@ def _saved_sheet_with_target_cell_map(
     if not isinstance(assignment, dict):
         return serialized
 
+    target_cells = list(assignment.get("target_cells") or [])
+    aligned_sheet = _align_hakodate_sheet_payload_for_workflow(
+        _get_order_service_module(),
+        sheet,
+        target_cells,
+    )
+    if aligned_sheet is not sheet:
+        sheet = aligned_sheet
+        fields = [str(field or "").strip() for field in (sheet.get("fields") or [])]
+        row_count = len(sheet.get("rows") or [])
+
     target_cell_map = _compact_target_cell_map_for_sheet(
-        target_cells=list(assignment.get("target_cells") or []),
+        target_cells=target_cells,
         fields=fields,
         row_count=row_count,
     )
@@ -1363,6 +1402,12 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         return None, sheet_error
     if not isinstance(base_sheet, dict):
         return None, "sheet_unavailable"
+    target_cells = list(assignment.get("target_cells") or [])
+    base_sheet = _align_hakodate_sheet_payload_for_workflow(
+        order_service_module,
+        base_sheet,
+        target_cells,
+    )
     projected = order_service_module._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
@@ -1378,7 +1423,7 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     projected["template_id"] = template_id or projected.get("template_id")
     projected["expanded_cell_copy_mode"] = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
     target_cell_map = _compact_target_cell_map_for_sheet(
-        target_cells=list(assignment.get("target_cells") or []),
+        target_cells=target_cells,
         fields=[str(field or "").strip() for field in (projected.get("fields") or [])],
         row_count=len(projected.get("rows") or []),
     )

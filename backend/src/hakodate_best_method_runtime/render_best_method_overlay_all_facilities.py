@@ -141,6 +141,23 @@ def _target_field_mapping(fields: list[str], target_cols: list[int]) -> dict[int
     return {col: str(field) for col, field in zip(target_cols, target_fields)}
 
 
+def _sheet_field_from_region(region: dict[str, Any]) -> str:
+    target = (region.get("logical_targets") or [{}])[0]
+    candidates = (
+        target.get("semantic_field"),
+        target.get("field"),
+        region.get("semantic_field"),
+        region.get("field"),
+    )
+    for candidate in candidates:
+        field = str(candidate or "").strip()
+        if field == "note":
+            return "remarks"
+        if field:
+            return field
+    return ""
+
+
 def _build_truth_for_facility(
     draft_sheet: dict[str, Any],
     regions: list[dict[str, Any]],
@@ -159,7 +176,7 @@ def _build_truth_for_facility(
         except Exception:
             continue
         row_index = worksheet_row - ROWS_START
-        field = field_by_col.get(worksheet_col)
+        field = _sheet_field_from_region(region) or field_by_col.get(worksheet_col)
         if field is None or row_index < 0:
             continue
         expected = ""
@@ -181,7 +198,7 @@ def _build_truth_for_facility(
             "daypart": target.get("daypart"),
             "menu_name": target.get("menu_name"),
             "field_label": region.get("field_label"),
-            "eval_numeric": field != "remarks",
+            "eval_numeric": field != "remarks" and not field.startswith("post_menu."),
         }
     return truth, field_by_col
 
