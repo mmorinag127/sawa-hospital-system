@@ -13,6 +13,7 @@ REGION="${REGION:-asia-northeast2}"
 WORKER_SERVICE="${WORKER_SERVICE:-worker-${TARGET_ENV}}"
 WEB_SERVICE="${WEB_SERVICE:-web-${TARGET_ENV}}"
 STRICT="${STRICT:-1}"
+SIBLING_ALLOWLIST_FILE="${SIBLING_ALLOWLIST_FILE:-$REPO_ROOT/docs/release_sibling_commit_exclusions.md}"
 
 critical_paths=(
   "backend/src/services/hakodate_fixed_quad_registration_service.py"
@@ -113,11 +114,26 @@ fi
 
 section "sibling commits touching critical paths"
 sibling_commits="$(git -C "$REPO_ROOT" log --all --not HEAD --format='%H %s' -- "${critical_paths[@]}" || true)"
+allowed_sibling_commits=""
+if [[ -f "$SIBLING_ALLOWLIST_FILE" ]]; then
+  allowed_sibling_commits="$(grep -Eo '[0-9a-f]{40}' "$SIBLING_ALLOWLIST_FILE" | sort -u || true)"
+  echo "sibling_allowlist=$SIBLING_ALLOWLIST_FILE"
+fi
 if [[ -z "$sibling_commits" ]]; then
   echo "sibling_commits=none"
 else
-  echo "$sibling_commits"
-  if [[ "$STRICT" == "1" ]]; then
+  unresolved_sibling_commits=""
+  while IFS= read -r sibling_line; do
+    [[ -z "$sibling_line" ]] && continue
+    sibling_hash="${sibling_line%% *}"
+    if [[ -n "$allowed_sibling_commits" ]] && grep -qx "$sibling_hash" <<< "$allowed_sibling_commits"; then
+      echo "allowed_sibling=$sibling_line"
+    else
+      echo "unresolved_sibling=$sibling_line"
+      unresolved_sibling_commits+="$sibling_line"$'\n'
+    fi
+  done <<< "$sibling_commits"
+  if [[ "$STRICT" == "1" && -n "$unresolved_sibling_commits" ]]; then
     fail "critical-path sibling commits exist outside HEAD; inspect/merge or document as unrelated"
   fi
 fi
