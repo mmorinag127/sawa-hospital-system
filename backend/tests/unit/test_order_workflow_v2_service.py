@@ -176,6 +176,18 @@ def test_context_suggestion_is_recorded_without_confirming_step1() -> None:
         assert order.week_code == "2026-04-26"
 
 
+def test_select_ocr_result_requires_confirmed_context() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+
+    workflow, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    assert workflow is None
+    assert error == "context_not_confirmed"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is None or row.evidence_run_id is None
+
+
 def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(
@@ -541,6 +553,58 @@ def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
     assert captured["payload"] == {"selected_marker": "expected"}
     assert source["selected_ocr_result_id"] == evidence_id_2
     assert source["sheet"]["rows"][0][2] == "70"
+
+
+def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        order.facility_code = "FAC00001"
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                evidence_run_id=evidence_id_1,
+                state="review_required",
+                headline="legacy selected OCR without workflow-v2 context",
+                primary_action="review",
+                secondary_actions_json=None,
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+
+    assert source is None
+    assert error == "context_not_confirmed"
+
+
+def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                evidence_run_id=evidence_id_1,
+                state="review_required",
+                headline="legacy selected OCR without workflow-v2 context",
+                primary_action="review",
+                secondary_actions_json=None,
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [["04/26", "朝", "大豆のトマト煮", "1"]]},
+        edited_by="test",
+    )
+
+    assert saved is None
+    assert error == "context_not_confirmed"
 
 
 def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypatch) -> None:

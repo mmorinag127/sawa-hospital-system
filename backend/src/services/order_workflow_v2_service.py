@@ -231,6 +231,14 @@ def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
     return _facility_config_has_resolved_fax_template(facility_config)
 
 
+def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
+    if not _workflow_meta_has_confirmed_context(meta):
+        return "context_not_confirmed"
+    if not _workflow_meta_has_resolved_template(meta):
+        return "facility_template_unresolved"
+    return None
+
+
 def workflow_has_confirmed_ocr_context(workflow: dict[str, Any] | None) -> bool:
     if not isinstance(workflow, dict):
         return False
@@ -918,6 +926,9 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
         workflow = _get_or_create_workflow(session, order.id)
+        context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
+        if context_error:
+            return None, context_error
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
@@ -1047,6 +1058,9 @@ def save_sheet(
         evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
         if evidence is None or evidence.order_id != order.id:
             return None, "selected_ocr_missing"
+        context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
+        if context_error:
+            return None, context_error
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
         session.flush()
@@ -1391,7 +1405,10 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
             return None, "selected_ocr_missing"
         payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else None
         meta = _workflow_meta(workflow)
-        facility_id = _normalize_id(meta.get("facility_id") or order.facility_code)
+        context_error = _workflow_v2_projection_context_error(meta)
+        if context_error:
+            return None, context_error
+        facility_id = _normalize_id(meta.get("facility_id"))
         template_id = _normalize_id(meta.get("template_id"))
         selected_ocr_result_id = evidence.id
     if not isinstance(payload, dict):
