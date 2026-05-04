@@ -1165,7 +1165,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
         "daypart",
         "menu",
         "qty.regular_x",
-        "qty.unknown_x",
+        "qty.placeholder_x",
         "qty.no_meat_x",
         "qty.no_fish_x",
         "qty.change_1_x",
@@ -1195,19 +1195,19 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
 
     resolved = config_service.get_facility_config("FAC00010")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
+    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
     template = resolved.get("fax_template") or {}
     assert resolved.get("fax_template_override") == {"grid_line_scale_horizontal": 20}
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
         "menu",
-        "qty.regular_x",
-        "qty.regular_bag_x",
-        "qty.soft_x",
-        "qty.mixer_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
         "remarks",
     ]
 

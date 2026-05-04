@@ -285,10 +285,15 @@ def _normalize_fax_template_for_area_mismatch(
 
 
 def _normalize_field_diet_token(value: object) -> str:
-    token = str(value or "").strip().lower()
+    raw = str(value or "").strip()
+    if raw in {"-", "ー", "－"}:
+        return "placeholder"
+    token = raw.lower()
     token = re.sub(r"[\s　]+", "", token)
     if not token:
         return "unknown"
+    if token in {"-", "placeholder", "blank", "spacer"}:
+        return "placeholder"
     if ("bag" in token or "袋" in token) and (
         "regular" in token or "常食" in token or "通常" in token
     ):
@@ -385,6 +390,7 @@ def _default_header_for_quantity(diet: str, area: str) -> str:
         "no_fried": "揚げ物禁",
         "change_1": "変更1",
         "change_2": "変更2",
+        "placeholder": "-",
         "unknown": "不明",
     }.get(diet, diet)
     if area == "x":
@@ -721,6 +727,12 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                     )
                 ):
                     diet = explicit_diet
+            legacy_unknown_spacer = (
+                diet == "unknown"
+                and _is_explicit_unknown_marker(label_token or explicit_diet_raw)
+            )
+            if legacy_unknown_spacer:
+                diet = "placeholder"
             raw_area = str(col.get("area_id") or "").strip()
             area_locked = bool(col.get("area_id_locked", False) or col.get("area_id_explicit", False))
             if area_locked and raw_area:
@@ -750,7 +762,11 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                 col.pop("name_locked", None)
             col["diet_type"] = diet
             col["area_id"] = area.upper() if area != "x" else "X"
-            if not header or _quantity_header_is_internal_token(header, diet=diet, area=area, name=name):
+            if (
+                not header
+                or legacy_unknown_spacer
+                or _quantity_header_is_internal_token(header, diet=diet, area=area, name=name)
+            ):
                 col["header"] = _default_header_for_quantity(diet, area)
             if name_locked and parsed_name:
                 col["name"] = parsed_name["field"]
