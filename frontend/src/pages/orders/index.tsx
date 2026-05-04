@@ -116,6 +116,8 @@ const compareOrdersByReceivedAt = (left: Order, right: Order) => {
   return String(right.id || "").localeCompare(String(left.id || ""), "ja");
 };
 
+const ORDER_LIST_FETCH_LIMIT = 500;
+
 const normalizeWeekGroup = (order: Order) => {
   const candidateWeek = order.candidate_resolution?.resolutions?.week;
   const candidateValue = String(candidateWeek?.resolved_value || "").trim();
@@ -245,8 +247,19 @@ export default function OrdersPage() {
   useEffect(() => {
     let cancelled = false;
     const params = statusFilter
-      ? { status: statusFilter, include_ocr: false, include_archived: showArchived, include_runtime: false }
-      : { include_ocr: false, include_archived: showArchived, include_runtime: false };
+      ? {
+          status: statusFilter,
+          include_ocr: false,
+          include_archived: showArchived,
+          include_runtime: false,
+          limit: ORDER_LIST_FETCH_LIMIT,
+        }
+      : {
+          include_ocr: false,
+          include_archived: showArchived,
+          include_runtime: false,
+          limit: ORDER_LIST_FETCH_LIMIT,
+        };
     setIsLoading(true);
     setLoadError("");
     setIsHydratingRuntime(false);
@@ -260,8 +273,13 @@ export default function OrdersPage() {
         setIsHydratingRuntime(true);
         try {
           const runtimeParams = statusFilter
-            ? { status: statusFilter, include_ocr: false, include_archived: showArchived }
-            : { include_ocr: false, include_archived: showArchived };
+            ? {
+                status: statusFilter,
+                include_ocr: false,
+                include_archived: showArchived,
+                limit: ORDER_LIST_FETCH_LIMIT,
+              }
+            : { include_ocr: false, include_archived: showArchived, limit: ORDER_LIST_FETCH_LIMIT };
           const runtimeRes = await apiClient.get("/orders", { params: runtimeParams });
           if (cancelled) return;
           const runtimeOrders = Array.isArray(runtimeRes.data?.orders) ? runtimeRes.data.orders : [];

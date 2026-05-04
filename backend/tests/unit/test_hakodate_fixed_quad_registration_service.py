@@ -1,5 +1,6 @@
-import numpy as np
 import cv2
+import numpy as np
+import pytest
 
 from src.services.hakodate_fixed_quad_registration_service import (
     extract_template_axes_from_image,
@@ -7,24 +8,50 @@ from src.services.hakodate_fixed_quad_registration_service import (
 )
 
 
-def test_extract_template_axes_keeps_template_lines_and_filters_header() -> None:
-    image = np.full((300, 400, 3), 255, dtype=np.uint8)
+def test_extract_template_axes_fills_partial_header_line_by_gap_without_table_external_fallback() -> None:
+    image = np.full((4000, 400, 3), 255, dtype=np.uint8)
     xs = [10, 100, 250, 390]
-    ys_all = [20, 80, 140, 200, 260]
+    external_y = 80
+    partial_header_y = 180
+    table_ys = [120, 240] + [300 + (index * 60) for index in range(56)]
     for x in xs:
-        cv2.line(image, (x, 0), (x, 299), (0, 0, 0), 2)
-    for y in ys_all:
+        cv2.line(image, (x, 0), (x, 3999), (0, 0, 0), 2)
+    cv2.line(image, (0, external_y), (399, external_y), (0, 0, 0), 2)
+    for y in table_ys:
         cv2.line(image, (0, y), (399, y), (0, 0, 0), 2)
+    cv2.line(image, (120, partial_header_y), (205, partial_header_y), (0, 0, 0), 2)
 
     table_xs, table_ys, all_xs, all_ys = extract_template_axes_from_image(
         image,
-        manifest_template_bbox=[10, 100, 390, 260],
+        manifest_template_bbox=[10, 120, 390, 3600],
     )
 
     assert table_xs == xs
     assert all_xs == xs
-    assert all_ys == ys_all
-    assert table_ys == [140, 200, 260]
+    assert external_y in all_ys
+    assert partial_header_y in all_ys
+    assert external_y not in table_ys
+    assert partial_header_y in table_ys
+    assert table_ys[:3] == [120, partial_header_y, 240]
+    assert len(table_ys) == 59
+
+
+def test_extract_template_axes_blocks_incomplete_table_instead_of_using_external_line() -> None:
+    image = np.full((900, 400, 3), 255, dtype=np.uint8)
+    xs = [10, 100, 250, 390]
+    external_y = 80
+    table_ys = [120 + (index * 10) for index in range(58)]
+    for x in xs:
+        cv2.line(image, (x, 0), (x, 899), (0, 0, 0), 2)
+    cv2.line(image, (0, external_y), (399, external_y), (0, 0, 0), 2)
+    for y in table_ys:
+        cv2.line(image, (0, y), (399, y), (0, 0, 0), 2)
+
+    with pytest.raises(ValueError, match="template table y axes incomplete"):
+        extract_template_axes_from_image(
+            image,
+            manifest_template_bbox=[10, 120, 390, 860],
+        )
 
 
 def test_rectify_fax_to_template_grid_uses_quad_and_template_outer_grid() -> None:

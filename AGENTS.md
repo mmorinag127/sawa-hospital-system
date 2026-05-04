@@ -78,4 +78,18 @@ tests/
   - the reported case
   - at least one close sibling case from the same failure class
   - the explicit stop/block behavior when the invariant cannot be satisfied
+
+## Git/JJ Release Source Discipline
+- Failure class: deploy source of truth mismatch. This means a fix exists in a jj working-copy commit, sibling git commit, detached worktree, deploy copy, or old integration tree, but the service is built from another HEAD that does not contain that fix.
+- Treat deploy source selection as a hard correctness gate, not as an operational detail.
+- Do not deploy Sawa stg or prod from detached HEAD. Create or use a named release branch first.
+- Do not treat `git status --short` being clean as deploy readiness. Clean only means the current worktree has no local diff; it does not prove that sibling commits, jj working-copy commits, or other worktrees are integrated.
+- Before deploy, list all worktrees with `git worktree list` and all jj repositories with `find /Users/mmorinag/Sawa/2025.12 -maxdepth 3 -name .jj -type d -print`.
+- For each relevant jj repository, run `jj status`. If a jj working-copy commit has production-code changes, it must be integrated into the deploy branch or explicitly abandoned before deploy.
+- Empty jj descriptions such as `JJ_EMPTY_STRING` or `(no description set)` are deploy blockers when they contain production-code changes.
+- Before deploy, inspect sibling history for critical paths with `git log --all --not HEAD -- <path>`. Any candidate fix commit outside HEAD must be checked with `git merge-base --is-ancestor <commit> HEAD`.
+- Critical Sawa paths include `backend/src/services/hakodate_fixed_quad_registration_service.py`, `backend/src/services/order_service.py`, `backend/src/services/order_workflow_v2_service.py`, `backend/src/services/uploaded_pdf_service.py`, `backend/src/services/apply_gate_service.py`, `backend/src/api/orders.py`, `frontend/src/pages/orders/[id].tsx`, `frontend/src/pages/orders/[id]/workflow-v2.tsx`, `frontend/src/pages/orders/[id]/inspection-v2.tsx`, `frontend/src/pages/orders/index.tsx`, `scripts/`, and `Taskfile.yml`.
+- Generated artifacts and production-code changes must not be treated as one release unit. Separate production-code changes from generated verification artifacts before release judgment.
+- Always create a fresh deploy copy after the final release commit. Do not reuse an old deploy copy or old generated deploy source.
+- Before claiming deploy completion, verify Cloud Run worker and web revisions/images and verify the exact user-visible live surface after deploy.
 <!-- MANUAL ADDITIONS END -->

@@ -2840,6 +2840,8 @@ export default function OrderDetailPage() {
   const router = useRouter();
   const { id } = router.query;
   const [order, setOrder] = useState<OrderDetail | null>(null);
+  const [orderDetailLoading, setOrderDetailLoading] = useState<boolean>(false);
+  const [orderDetailError, setOrderDetailError] = useState<string>("");
   const [facility, setFacility] = useState<string>("");
   const [weekDraft, setWeekDraft] = useState<string>("");
   const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
@@ -3051,29 +3053,52 @@ export default function OrderDetailPage() {
     const { preserveSelections = false } = options;
     const requestSeq = orderDetailRequestSeqRef.current + 1;
     orderDetailRequestSeqRef.current = requestSeq;
-    const res = await apiClient.get(`/orders/${orderId}`);
-    const nextOrder = (res.data || {}) as OrderDetail;
-    if (requestSeq < orderDetailAppliedSeqRef.current) {
+    setOrderDetailLoading(true);
+    setOrderDetailError("");
+    try {
+      const res = await apiClient.get(`/orders/${orderId}`, { timeout: 20000 });
+      const nextOrder = (res.data || {}) as OrderDetail;
+      if (requestSeq < orderDetailAppliedSeqRef.current) {
+        return authoritativeOrderRef.current;
+      }
+      orderDetailAppliedSeqRef.current = requestSeq;
+      authoritativeOrderRef.current = nextOrder;
+      const currentPersistedFacility = (order?.facility || "").trim();
+      const currentPersistedWeek = getCanonicalWeekSelectionSource(order);
+      const selectedFacility = facility.trim();
+      const selectedWeek = normalizeConcreteWeekValue(weekDraft);
+      const preserveFacilitySelection =
+        preserveSelections && Boolean(selectedFacility && selectedFacility !== currentPersistedFacility);
+      const preserveWeekSelection =
+        preserveSelections && Boolean(selectedWeek && selectedWeek !== currentPersistedWeek);
+      setOrder(nextOrder);
+      if (!preserveFacilitySelection) {
+        setFacility(nextOrder.facility || "");
+      }
+      if (!preserveWeekSelection) {
+        setWeekDraft(getCanonicalWeekSelectionSource(nextOrder));
+      }
+      return nextOrder;
+    } catch (err: any) {
+      if (requestSeq < orderDetailRequestSeqRef.current) {
+        return authoritativeOrderRef.current;
+      }
+      const status = err?.response?.status;
+      const nextMessage =
+        status === 404
+          ? "注文が見つかりません。"
+          : status === 401
+            ? "認証が必要です。ログインしてください。"
+            : err?.code === "ECONNABORTED"
+              ? "注文詳細の取得がタイムアウトしました。"
+              : "注文詳細の取得に失敗しました。";
+      setOrderDetailError(nextMessage);
       return authoritativeOrderRef.current;
+    } finally {
+      if (requestSeq === orderDetailRequestSeqRef.current) {
+        setOrderDetailLoading(false);
+      }
     }
-    orderDetailAppliedSeqRef.current = requestSeq;
-    authoritativeOrderRef.current = nextOrder;
-    const currentPersistedFacility = (order?.facility || "").trim();
-    const currentPersistedWeek = getCanonicalWeekSelectionSource(order);
-    const selectedFacility = facility.trim();
-    const selectedWeek = normalizeConcreteWeekValue(weekDraft);
-    const preserveFacilitySelection =
-      preserveSelections && Boolean(selectedFacility && selectedFacility !== currentPersistedFacility);
-    const preserveWeekSelection =
-      preserveSelections && Boolean(selectedWeek && selectedWeek !== currentPersistedWeek);
-    setOrder(nextOrder);
-    if (!preserveFacilitySelection) {
-      setFacility(nextOrder.facility || "");
-    }
-    if (!preserveWeekSelection) {
-      setWeekDraft(getCanonicalWeekSelectionSource(nextOrder));
-    }
-    return nextOrder;
   };
 
   const replaceAuthoritativeOrder = (nextOrder?: OrderDetail | null) => {
@@ -6993,6 +7018,15 @@ export default function OrderDetailPage() {
       );
       return false;
     }
+    if (!effectiveCanConfirm) {
+      const reasonText = reviewBlockerText || reviewWarningText;
+      setActionMessage(
+        reasonText
+          ? `まだ確定できません。先に下書きを明細へ反映してください: ${reasonText}`
+          : "まだ確定できません。先に下書きを明細へ反映してください。",
+      );
+      return false;
+    }
     setConfirmSaving(true);
     try {
       const refreshWorkspaceAfterSuccess = options?.refreshWorkspaceAfterSuccess !== false;
@@ -10013,7 +10047,22 @@ export default function OrderDetailPage() {
       </header>
 
       {!order ? (
-        <p className="subtle">Loading...</p>
+        <section className="panel">
+          {orderDetailLoading ? (
+            <p className="subtle">Loading...</p>
+          ) : orderDetailError ? (
+            <div className="stack">
+              <p className="error-text">{orderDetailError}</p>
+              {id ? (
+                <button className="btn ghost" type="button" onClick={() => void loadOrderDetail(String(id))}>
+                  再読み込み
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <p className="subtle">注文詳細を読み込みます。</p>
+          )}
+        </section>
       ) : (
         <>
           <section className="panel">

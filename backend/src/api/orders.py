@@ -85,6 +85,7 @@ class DailyOutputOverrideBulkUpsertBody(BaseModel):
 class WeekArchiveBody(BaseModel):
     week_value: str
     order_ids: list[str] | None = None
+    purge_runtime_state: bool = False
 
 
 def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
@@ -302,6 +303,7 @@ def _attach_order_review_summary(
     *,
     cached_payload: dict | None = None,
     ocr_job: dict | None = None,
+    lightweight: bool = False,
 ) -> None:
     order_id = str(order.get("id") or "").strip()
     if not order_id:
@@ -314,6 +316,60 @@ def _attach_order_review_summary(
         if not effective_ocr_metrics:
             effective_ocr_metrics = ocr_job.get("metrics")
     workflow = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else None
+    if lightweight:
+        job_state = describe_ocr_job_state(ocr_job if isinstance(ocr_job, dict) else None)
+        apply_gate = (workflow or {}).get("apply_gate") if isinstance(workflow, dict) else None
+        apply_gate = apply_gate if isinstance(apply_gate, dict) else {}
+        order.update(
+            {
+                "ocr_review_state": str((workflow or {}).get("state") or "").strip() or None,
+                "ocr_review_stage": str((workflow or {}).get("primary_action") or "").strip() or None,
+                "ocr_review_badges": [],
+                "ocr_has_saved_draft": None,
+                "ocr_draft_updated_at": None,
+                "ocr_draft_revision_id": str((workflow or {}).get("current_sheet_revision_id") or "").strip() or None,
+                "current_sheet_revision_id": str((workflow or {}).get("current_sheet_revision_id") or "").strip() or None,
+                "ocr_draft_row_count": None,
+                "ocr_draft_newer_than_lines": None,
+                "ocr_auto_apply_blocked": None,
+                "ocr_reject_reasons": [],
+                "ocr_last_reparse_error": None,
+                "ocr_reparse_status": str(job_state.get("status") or "idle"),
+                "ocr_reparse_health": str(job_state.get("status") or "idle"),
+                "ocr_reparse_stale_at": job_state.get("stale_at"),
+                "ocr_reparse_stale_threshold_seconds": job_state.get("stale_threshold_seconds"),
+                "ocr_reparse_last_job_id": (
+                    str(ocr_job.get("id") or "").strip()
+                    if isinstance(ocr_job, dict) and _is_order_reparse_job(ocr_job, order_id)
+                    else None
+                ),
+                "ocr_reparse_last_error_code": (
+                    str(ocr_job.get("error_message") or "").strip() or None if isinstance(ocr_job, dict) else None
+                ),
+                "ocr_can_apply_draft": False,
+                "ocr_apply_blockers": list(apply_gate.get("apply_blockers") or []),
+                "ocr_apply_blocker_details": list(apply_gate.get("apply_blocker_details") or []),
+                "ocr_can_confirm": False,
+                "ocr_confirm_blockers": list(apply_gate.get("confirm_blockers") or []),
+                "ocr_confirm_warnings": list(apply_gate.get("confirm_warnings") or []),
+                "ocr_confirm_blocker_details": list(apply_gate.get("confirm_blocker_details") or []),
+                "ocr_confirm_warning_details": list(apply_gate.get("confirm_warning_details") or []),
+                "ocr_processing_stage": (
+                    effective_ocr_metrics.get("processing_stage") if isinstance(effective_ocr_metrics, dict) else None
+                ),
+                "ocr_result_state": (
+                    effective_ocr_metrics.get("result_state") if isinstance(effective_ocr_metrics, dict) else None
+                ),
+                "ocr_confirmed_lines_retained": (
+                    effective_ocr_metrics.get("confirmed_lines_retained")
+                    if isinstance(effective_ocr_metrics, dict)
+                    else None
+                ),
+                "ocr_revision_count": None,
+                "ocr_revision_last_id": None,
+            }
+        )
+        return
     review = order_service.get_order_review_summary(
         order_id,
         lines_updated_at=order.get("lines_updated_at"),
@@ -325,7 +381,8 @@ def _attach_order_review_summary(
         sheet_gate=(workflow or {}).get("apply_gate") if isinstance(workflow, dict) else None,
     )
     if (
-        str(review.get("ocr_review_state") or "").strip() in {"", "none"}
+        not lightweight
+        and str(review.get("ocr_review_state") or "").strip() in {"", "none"}
         and not list(review.get("ocr_apply_blockers") or [])
         and not list(((workflow or {}).get("apply_gate") or {}).get("apply_blockers") or [])
     ):
@@ -359,23 +416,29 @@ def _attach_order_review_summary(
     order.update(review)
 
 
-def _attach_order_workflow_context(order: dict, *, refresh: bool = False) -> None:
+def _attach_order_workflow_context(
+    order: dict,
+    *,
+    refresh: bool = False,
+    reconcile: bool = True,
+    allow_refresh_fallback: bool = True,
+) -> None:
     order_id = str(order.get("id") or "").strip()
     if not order_id:
         return
-    workflow = order_service.get_order_workflow_state(order_id, refresh=refresh)
+    workflow = order_service.get_order_workflow_state(order_id, refresh=refresh, reconcile=reconcile)
     if not isinstance(workflow, dict):
-        if refresh:
+        if refresh or not allow_refresh_fallback:
             return
-        workflow = order_service.get_order_workflow_state(order_id, refresh=True)
+        workflow = order_service.get_order_workflow_state(order_id, refresh=True, reconcile=reconcile)
         if not isinstance(workflow, dict):
             return
     elif not refresh and (
         not isinstance(workflow.get("candidate_resolution"), dict)
         or not isinstance(workflow.get("apply_gate"), dict)
         or not isinstance(workflow.get("critical_decisions"), list)
-    ) and list(workflow.get("blockers_json") or []):
-        refreshed = order_service.get_order_workflow_state(order_id, refresh=True)
+    ) and list(workflow.get("blockers_json") or []) and allow_refresh_fallback:
+        refreshed = order_service.get_order_workflow_state(order_id, refresh=True, reconcile=reconcile)
         if isinstance(refreshed, dict):
             workflow = refreshed
     order["workflow_state"] = workflow
@@ -1073,6 +1136,7 @@ def archive_orders_for_week(payload: WeekArchiveBody):
         str(payload.week_value or "").strip(),
         order_ids=[str(item or "").strip() for item in (payload.order_ids or []) if str(item or "").strip()],
         archived_by="operator",
+        purge_runtime_state=bool(payload.purge_runtime_state),
     )
     if error == "invalid_week":
         raise HTTPException(status_code=400, detail={"error": error})
@@ -1120,10 +1184,9 @@ def unarchive_orders_for_week(payload: WeekArchiveBody):
 
 @router.get("/{order_id}", dependencies=[Depends(require_role("operator"))])
 def get_order(order_id: str):
-    order = order_service.get_order_by_id(order_id)
+    order = order_service.get_order_by_id(order_id, include_amount_meta=False)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    order_service.reconcile_ocr_rerun_state(order_id)
     job_id = order.get("ocr_job_id")
     job = get_ocr_job(f"OCR-{order_id}")
     if not job and job_id:
@@ -1133,69 +1196,19 @@ def get_order(order_id: str):
         if isinstance(message_id, str) and message_id:
             job = get_ocr_job(f"OCR-{message_id}")
     if job:
-        job_status = str(job.get("status") or "").strip().lower()
-        job_metrics = job.get("metrics")
-        job_metrics = job_metrics if isinstance(job_metrics, dict) else {}
-        preserve_terminal_reparse_state = _should_preserve_terminal_reparse_state(job, order_id)
-        job_evidence_run_id = str(job_metrics.get("evidence_run_id") or "").strip()
-        job_evidence_run = (
-            order_service.get_ocr_evidence_run(job_evidence_run_id)
-            if job_evidence_run_id
-            else None
-        )
-        latest_persisted_evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
-        needs_done_reconcile = (
-            not _is_order_reparse_job(job, order_id)
-            and job_status in {"done", "success", "completed"}
-            and not isinstance(job_evidence_run, dict)
-            and not isinstance(latest_persisted_evidence, dict)
-        )
-        if job.get("output_reference") and (job_status in {"running", "failed"} or needs_done_reconcile):
-            try:
-                payload = load_bytes_from_uri(job["output_reference"])
-                parsed = json.loads(payload.decode("utf-8"))
-                output_status = parsed.get("status")
-                output_template = parsed.get("template_id")
-                job_error = job.get("error_message")
-                should_update = bool(output_status and output_status != job.get("status"))
-                should_update = should_update or bool(job_error)
-                should_update = should_update or needs_done_reconcile
-                if job.get("status") == "running" and _is_order_reparse_job(job, order_id):
-                    # Reparse jobs keep running until post-processing/validation finishes.
-                    # OCR output JSON "done" must not terminate the job early.
-                    should_update = False
-                if preserve_terminal_reparse_state:
-                    should_update = False
-                if should_update:
-                    if _is_order_reparse_job(job, order_id):
-                        update_ocr_job(
-                            job["id"],
-                            status=output_status or job.get("status"),
-                            template_id=output_template or job.get("template_id"),
-                            error_message=parsed.get("error"),
-                            metrics=parsed.get("metrics"),
-                        )
-                    else:
-                        order_service.reconcile_completed_ocr_job(str(job.get("id") or ""))
-                    job = get_ocr_job(job["id"]) or job
-            except Exception:
-                pass
         _apply_job_status_to_order(order, job)
-    job = _apply_cached_status_override(order, order_id, job)
     job = _apply_stale_ocr_status(order, job)
     # Order detail is the first request that gates the page-level Loading state.
     # Keep it read-only/fast; explicit workflow endpoints and mutating actions
     # are responsible for refreshing persisted workflow/current-sheet state.
-    _attach_order_workflow_context(order, refresh=False)
+    _attach_order_workflow_context(order, refresh=False, reconcile=False, allow_refresh_fallback=False)
     if job:
         refreshed_job = get_ocr_job(str(job.get("id") or "")) or job
         if refreshed_job is not job:
             job = refreshed_job
         _apply_job_status_to_order(order, job)
-        job = _apply_cached_status_override(order, order_id, job)
         job = _apply_stale_ocr_status(order, job)
-    _align_order_ocr_readiness_with_workflow(order)
-    _attach_order_review_summary(order, ocr_job=job)
+    _attach_order_review_summary(order, ocr_job=job, lightweight=True)
     return order
 
 

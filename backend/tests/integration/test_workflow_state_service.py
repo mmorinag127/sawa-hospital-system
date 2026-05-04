@@ -3304,6 +3304,7 @@ def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_bloc
     assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
     assert "numeric_trust_low" not in (workflow["apply_gate"]["warnings"] or [])
     assert "draft_newer_than_lines" in (workflow["apply_gate"]["warnings"] or [])
+    assert "draft_newer_than_lines" in (workflow["apply_gate"]["confirm_blockers"] or [])
 
 
 def test_refresh_workflow_state_uses_persisted_draft_without_exact_revision(monkeypatch):

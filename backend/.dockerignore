@@ -7,3 +7,4 @@ __pycache__/
 dev.db
 *.db
 tests/
+src/hakodate_best_method_runtime/best_method_overlay_all_facilities/
