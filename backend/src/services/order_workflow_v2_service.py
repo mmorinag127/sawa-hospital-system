@@ -14,13 +14,26 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
-from src.services import config_service
+from src.services import config_service, sheet_week_service
 from src.services.template_field_schema_service import derive_row_fields_from_template
 
 
 Base.metadata.create_all(bind=engine)
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
+
+_OCR_PROGRESS_STEPS: dict[str, tuple[int, str]] = {
+    "queued": (1, "OCR準備中"),
+    "document_load": (2, "PDF読込"),
+    "ocr_pipeline": (3, "OCR処理"),
+    "hakodate_live_pipeline": (3, "位置合わせ/OCR"),
+    "inference": (3, "OCR推論"),
+    "persist_evidence": (4, "OCR結果保存"),
+    "project_hakodate_sheet": (5, "シート候補作成"),
+    "evidence_ready": (6, "OCR完了"),
+    "draft_blocked": (6, "OCR完了/要確認"),
+}
+_OCR_PROGRESS_TOTAL = 6
 
 
 def _now() -> datetime:
@@ -46,6 +59,13 @@ def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
     return f"{start_date.strftime('%Y-%m')}@{start_date.isoformat()}~{end_date.isoformat()}"
 
 
+def _week_range_from_week_code(week_code: object) -> tuple[str | None, str | None]:
+    _month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_code)
+    if isinstance(start_date, date) and isinstance(end_date, date):
+        return start_date.isoformat(), end_date.isoformat()
+    return None, None
+
+
 def _workflow_meta(row: OrderWorkflowState | None) -> dict[str, Any]:
     if row is None or not isinstance(row.secondary_actions_json, dict):
         return {}
@@ -57,6 +77,89 @@ def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
     existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
     existing[WORKFLOW_V2_META_KEY] = dict(meta)
     row.secondary_actions_json = existing
+
+
+def _normalize_context_suggestion(suggestion: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(suggestion, dict):
+        return None
+    facility_id = _normalize_id(suggestion.get("facility_id"))
+    facility_name = _normalize_id(suggestion.get("facility_name"))
+    week_code = (
+        sheet_week_service.normalize_sheet_week_value(suggestion.get("week_code"))
+        or sheet_week_service.normalize_sheet_week_value(suggestion.get("week_hint"))
+        or _normalize_id(suggestion.get("week_code"))
+        or _normalize_id(suggestion.get("week_hint"))
+    )
+    week_start = _normalize_id(suggestion.get("week_start"))
+    week_end = _normalize_id(suggestion.get("week_end"))
+    if week_code and (not week_start or not week_end):
+        parsed_start, parsed_end = _week_range_from_week_code(week_code)
+        week_start = week_start or _normalize_id(parsed_start)
+        week_end = week_end or _normalize_id(parsed_end)
+    candidates = [
+        item
+        for item in (suggestion.get("facility_candidates") or [])
+        if isinstance(item, dict)
+    ]
+    normalized: dict[str, Any] = {
+        "source": _normalize_id(suggestion.get("source")) or "ocr_context_suggestion",
+        "facility_id": facility_id or None,
+        "facility_name": facility_name or None,
+        "facility_candidates": candidates[:5],
+        "week_code": week_code or None,
+        "week_start": week_start or None,
+        "week_end": week_end or None,
+        "week_label": sheet_week_service.format_sheet_week_label(week_code) if week_code else None,
+        "date_hints": [
+            str(item).strip()
+            for item in (suggestion.get("date_hints") or [])
+            if str(item).strip()
+        ][:20],
+        "confidence": _normalize_id(suggestion.get("confidence")) or ("medium" if facility_id or week_code else None),
+        "created_at": _normalize_id(suggestion.get("created_at")) or _now().isoformat(),
+    }
+    if not normalized["facility_id"] and not normalized["week_code"] and not normalized["facility_candidates"]:
+        return None
+    return normalized
+
+
+def _order_context_suggestion(order: Order) -> dict[str, Any] | None:
+    facility_id = _normalize_id(order.facility_code)
+    week_code = sheet_week_service.normalize_sheet_week_value(order.week_code) or _normalize_id(order.week_code)
+    if not facility_id and not week_code:
+        return None
+    facility_name = None
+    if facility_id:
+        try:
+            facility = config_service.get_facility_config(facility_id)
+            if isinstance(facility, dict):
+                facility_name = _normalize_id(facility.get("facility_name"))
+        except Exception:
+            facility_name = None
+    return _normalize_context_suggestion(
+        {
+            "source": "order_ingest_context",
+            "facility_id": facility_id or None,
+            "facility_name": facility_name,
+            "week_code": week_code or None,
+            "confidence": "medium",
+        }
+    )
+
+
+def _ocr_progress_payload(job: OcrJob | None, metrics: dict[str, Any]) -> dict[str, Any]:
+    stage = _normalize_id(metrics.get("processing_stage")).lower()
+    result_state = _normalize_id(metrics.get("result_state")).lower()
+    status = _normalize_id(job.status if job is not None else None).lower()
+    if status in {"done", "failed"} or result_state in {"done", "hard_failed", "draft_ready_blocked"}:
+        step, label = _OCR_PROGRESS_STEPS.get(stage, (_OCR_PROGRESS_TOTAL, "OCR完了" if status == "done" else "OCR停止"))
+    else:
+        step, label = _OCR_PROGRESS_STEPS.get(stage, (1, "OCR処理中"))
+    return {
+        "progress_step": step,
+        "progress_total": _OCR_PROGRESS_TOTAL,
+        "progress_label": label,
+    }
 
 
 def _facility_config_has_resolved_fax_template(
@@ -155,6 +258,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     )
     if elapsed_seconds is None and isinstance(started_at, datetime) and isinstance(finished_at, datetime):
         elapsed_seconds = max((finished_at - started_at).total_seconds(), 0.0)
+    progress = _ocr_progress_payload(job, metrics)
     return {
         "ocr_job_id": job.id,
         "status": job.status,
@@ -165,6 +269,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
         "processing_stage": metrics.get("processing_stage"),
         "result_state": metrics.get("result_state"),
+        **progress,
     }
 
 
@@ -182,6 +287,8 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
         "week_start": meta.get("week_start"),
         "week_end": meta.get("week_end"),
         "template_id": meta.get("template_id"),
+        "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
+        or None,
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "ocr_job": _serialize_ocr_job(ocr_job),
@@ -229,6 +336,38 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             return None, error
         row = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(row)
+        if not isinstance(meta.get("context_suggestion"), dict):
+            suggestion = _order_context_suggestion(order)
+            if suggestion is not None:
+                meta["context_suggestion"] = suggestion
+                _write_workflow_meta(row, meta)
+                session.flush()
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        return _serialize_workflow(row, ocr_job=ocr_job), None
+
+
+def record_context_suggestion(
+    *,
+    order_id: str,
+    suggestion: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized = _normalize_context_suggestion(suggestion)
+    if normalized is None:
+        return None, "context_suggestion_empty"
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        row = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(row)
+        meta["context_suggestion"] = normalized
+        _write_workflow_meta(row, meta)
+        if row.state in {"uploaded", "", None}:
+            row.state = "uploaded"
+            row.headline = "PDFから施設・週次候補を推定しました。確認して確定してください"
+            row.primary_action = "confirm_context"
+            row.last_transition_at = _now()
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
         return _serialize_workflow(row, ocr_job=ocr_job), None
@@ -348,7 +487,8 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
-        return _serialize_workflow(workflow), None
+        ocr_job = session.get(OcrJob, normalized_job_id)
+        return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
 def mark_ocr_run_completed(
@@ -396,7 +536,8 @@ def mark_ocr_run_completed(
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
-        return _serialize_workflow(workflow), None
+        ocr_job = session.get(OcrJob, normalized_job_id)
+        return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
 def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[str, Any]:
@@ -952,6 +1093,8 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     projected = order_service_module._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=config_service.get_facility_config(facility_id),
+        week_sheet_name=None,
     )
     projected["source"] = "workflow_v2_selected_ocr_projection"
     projected["base_evidence_run_id"] = selected_ocr_result_id

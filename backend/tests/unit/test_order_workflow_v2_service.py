@@ -10,6 +10,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.ocr_job import OcrJob
 from src.services import order_workflow_v2_service
 
 
@@ -134,6 +135,35 @@ def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
         order = session.get(Order, order_id)
         assert order.facility_code == "FAC00001"
         assert order.week_code == "2026-04@2026-04-26~2026-04-30"
+
+
+def test_context_suggestion_is_recorded_without_confirming_step1() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+
+    workflow, error = order_workflow_v2_service.record_context_suggestion(
+        order_id=order_id,
+        suggestion={
+            "source": "ingest_first_pass_ocr",
+            "facility_id": "FAC00002",
+            "facility_name": "シルバーホームなごみ",
+            "week_code": "2026-04@2026-04-26~2026-04-30",
+            "date_hints": ["4/26", "4/30"],
+            "confidence": "high",
+        },
+    )
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["state"] == "uploaded"
+    assert workflow["facility_id"] is None
+    assert workflow["week_start"] is None
+    assert workflow["context_suggestion"]["facility_id"] == "FAC00002"
+    assert workflow["context_suggestion"]["week_start"] == "2026-04-26"
+    assert workflow["context_suggestion"]["week_end"] == "2026-04-30"
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        assert order.facility_code == "FAC_TEST"
+        assert order.week_code == "2026-04-26"
 
 
 def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch) -> None:
@@ -324,6 +354,38 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream() -> None:
         assert current_state.evidence_run_id is None
 
 
+def test_workflow_ocr_job_serializes_progress_from_processing_stage() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    job_id = _id("OCRprogress")
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    with session_scope() as session:
+        session.add(
+            OcrJob(
+                id=job_id,
+                status="running",
+                input_reference="gs://bucket/input.pdf",
+                metrics={
+                    "processing_stage": "hakodate_live_pipeline",
+                    "result_state": "processing",
+                },
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
+
+    assert error is None
+    assert queued["ocr_job"]["progress_step"] == 3
+    assert queued["ocr_job"]["progress_total"] == 6
+    assert queued["ocr_job"]["progress_label"] == "位置合わせ/OCR"
+
+
 def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -386,7 +448,7 @@ def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
             "row_ids": ["row-1"],
         }, None
 
-    def fake_apply(*, base_sheet, assignment):
+    def fake_apply(*, base_sheet, assignment, **_kwargs):
         _ = assignment
         projected = dict(base_sheet)
         projected["rows"] = [["04/26", "大豆のトマト煮", "70"]]

@@ -24346,6 +24346,8 @@ def _expanded_cell_same_daypart_copy_enabled(
 ) -> bool:
     if not isinstance(facility_config, dict):
         return False
+    if isinstance(facility_config.get("expanded_cell_same_daypart_copy_enabled"), bool):
+        return bool(facility_config.get("expanded_cell_same_daypart_copy_enabled"))
     try:
         if order_form_service.facility_template_has_vertical_merged_quantity_cells(
             facility_config,
@@ -27656,6 +27658,8 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     *,
     base_sheet: dict[str, Any],
     assignment: dict[str, Any],
+    facility_config: dict[str, Any] | None = None,
+    week_sheet_name: str | None = None,
 ) -> dict[str, Any]:
     projected = deepcopy(base_sheet)
     fields = [str(field or "").strip() for field in (projected.get("fields") or [])]
@@ -27829,6 +27833,50 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                 "classification": classification,
             }
         )
+    expanded_cell_filled = 0
+    effective_facility_config = facility_config
+    if effective_facility_config is None:
+        base_facility_id = str(base_sheet.get("facility_id") or "").strip()
+        if base_facility_id:
+            try:
+                effective_facility_config = config_service.get_facility_config(base_facility_id)
+            except Exception:
+                effective_facility_config = None
+    effective_week_sheet_name = week_sheet_name
+    if not effective_week_sheet_name:
+        week_id = str(base_sheet.get("week_id") or base_sheet.get("resolved_week_id") or "").strip()
+        effective_week_sheet_name = _week_sheet_name_from_week_value(week_id)
+    if _expanded_cell_same_daypart_copy_enabled(
+        effective_facility_config,
+        week_sheet_name=effective_week_sheet_name,
+    ):
+        quantity_index = _build_sheet_quantity_index(fields)
+        expanded_rows = [{"values": row} for row in rows]
+        before_rows = [list(row) for row in rows]
+        expanded_cell_filled = _apply_expanded_cell_same_daypart_copy(
+            rows=expanded_rows,
+            fields=fields,
+            quantity_index=quantity_index,
+        )
+        if expanded_cell_filled > 0:
+            rows = [
+                list(row.get("values") or [])
+                for row in expanded_rows
+            ]
+            for row_index, (before, after) in enumerate(zip(before_rows, rows, strict=False)):
+                for col_index, after_value in enumerate(after):
+                    if str(before[col_index] if col_index < len(before) else "").strip():
+                        continue
+                    if not str(after_value or "").strip():
+                        continue
+                    while len(cell_confidence_rows) <= row_index:
+                        cell_confidence_rows.append(["" for _ in range(column_count)])
+                        cell_provenance_rows.append(["" for _ in range(column_count)])
+                    while len(cell_confidence_rows[row_index]) <= col_index:
+                        cell_confidence_rows[row_index].append("")
+                        cell_provenance_rows[row_index].append("")
+                    cell_confidence_rows[row_index][col_index] = "high"
+                    cell_provenance_rows[row_index][col_index] = "expanded_cell_same_daypart_copy"
     projected["rows"] = rows
     projected["fields"] = fields
     projected["cell_confidence_rows"] = cell_confidence_rows
@@ -27854,6 +27902,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             "deferred_count": len(deferred),
             "ignored_count": len(ignored),
             "cleared_legacy_cell_count": len(cleared),
+            "expanded_cell_same_daypart_filled_count": expanded_cell_filled,
         },
     }
     blockers = list(assignment.get("blockers") or [])

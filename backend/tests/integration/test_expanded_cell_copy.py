@@ -122,14 +122,14 @@ def test_apply_expanded_cell_same_daypart_copy_skips_four_row_cluster():
     assert rows[3]["values"][3] == ""
 
 
-def test_legacy_manual_flag_does_not_enable_unmerged_template():
+def test_manual_facility_flag_enables_expanded_cell_copy_for_unmerged_template():
     previous_config = facility_service.get_facility_config("FAC00014") or {}
     next_config = dict(previous_config)
     next_config["expanded_cell_same_daypart_copy_enabled"] = True
     assert facility_service.update_config("FAC00014", next_config)
     try:
         facility_config = config_service.get_facility_config("FAC00014")
-        assert not order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+        assert order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
             facility_config,
             week_sheet_name="4月26日～4月30日",
         )

@@ -680,7 +680,66 @@ def test_hakodate_evidence_projection_applies_assigned_cells_to_sheet_rows() -> 
         "deferred_count": 0,
         "ignored_count": 0,
         "cleared_legacy_cell_count": 1,
+        "expanded_cell_same_daypart_filled_count": 0,
     }
+
+
+def test_hakodate_projection_applies_expanded_cell_same_daypart_copy_when_enabled() -> None:
+    assignment = {
+        "status": "auto_assignable",
+        "assignment_mode": "ocr_evidence",
+        "warnings": [],
+        "blockers": [],
+        "target_cells": [
+            {
+                "sheet_cell": "E11",
+                "worksheet_row": 11,
+                "worksheet_col": 5,
+                "semantic_field": "qty.regular_x",
+                "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
+            }
+        ],
+        "sheet_output": {
+            "cells": {
+                "E11": {
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                    "semantic_field": "qty.regular_x",
+                    "value_normalized": "44",
+                    "assignment_confidence": 0.9,
+                    "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
+                }
+            }
+        },
+    }
+    base_sheet = {
+        "fields": ["date", "daypart", "menu_name", "qty.regular_x"],
+        "rows": [
+            ["4/26", "朝", "献立A", ""],
+            ["4/26", "朝", "献立B", ""],
+            ["4/26", "昼", "献立C", ""],
+        ],
+        "row_ids": ["row-a", "row-b", "row-c"],
+        "warnings": [],
+        "blockers": [],
+    }
+
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+        base_sheet=base_sheet,
+        assignment=assignment,
+        facility_config={"expanded_cell_same_daypart_copy_enabled": True},
+    )
+
+    assert projected["rows"] == [
+        ["4/26", "朝", "献立A", "44"],
+        ["4/26", "朝", "献立B", "44"],
+        ["4/26", "昼", "献立C", ""],
+    ]
+    metrics = projected["hakodate_evidence_projection"]["metrics"]
+    assert metrics["applied_count"] == 1
+    assert metrics["expanded_cell_same_daypart_filled_count"] == 1
+    assert projected["cell_provenance_rows"][1][3] == "expanded_cell_same_daypart_copy"
 
 
 def test_hakodate_projection_clears_legacy_quantities_when_evidence_missing() -> None:

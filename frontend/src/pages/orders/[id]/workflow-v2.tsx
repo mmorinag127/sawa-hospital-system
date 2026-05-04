@@ -24,6 +24,7 @@ type WorkflowV2 = {
   week_start?: string | null;
   week_end?: string | null;
   template_id?: string | null;
+  context_suggestion?: ContextSuggestion | null;
   bagging_result_id?: string | null;
   output_bundle_id?: string | null;
   ocr_job?: {
@@ -36,7 +37,33 @@ type WorkflowV2 = {
     elapsed_seconds?: number | null;
     processing_stage?: string | null;
     result_state?: string | null;
+    progress_step?: number | null;
+    progress_total?: number | null;
+    progress_label?: string | null;
   } | null;
+};
+
+type FacilitySuggestionCandidate = {
+  facility_id?: string | null;
+  id?: string | null;
+  facility_name?: string | null;
+  name?: string | null;
+  score?: number | string | null;
+  reason?: string | null;
+};
+
+type ContextSuggestion = {
+  source?: string | null;
+  facility_id?: string | null;
+  facility_name?: string | null;
+  facility_candidates?: FacilitySuggestionCandidate[];
+  week_code?: string | null;
+  week_start?: string | null;
+  week_end?: string | null;
+  week_label?: string | null;
+  date_hints?: string[];
+  confidence?: string | null;
+  created_at?: string | null;
 };
 
 type OcrResult = {
@@ -312,6 +339,16 @@ const formatElapsedSeconds = (value?: number | null) => {
   return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
 };
 
+const formatOcrProgress = (workflow?: WorkflowV2 | null) => {
+  const job = workflow?.ocr_job;
+  if (!job) return "-";
+  const step = typeof job.progress_step === "number" ? job.progress_step : null;
+  const total = typeof job.progress_total === "number" ? job.progress_total : null;
+  const label = String(job.progress_label || job.processing_stage || "").trim();
+  if (step && total) return `${step}/${total}${label ? ` ${label}` : ""}`;
+  return label || String(job.status || "-");
+};
+
 const formatDateTime = (value?: string | null) => {
   if (!value) return "-";
   const parsed = new Date(value);
@@ -323,6 +360,24 @@ const formatDateTime = (value?: string | null) => {
     minute: "2-digit",
     second: "2-digit",
   });
+};
+
+const contextSuggestionWeekValue = (suggestion?: ContextSuggestion | null) => (
+  normalizeConcreteWeekValue(suggestion?.week_code)
+  || weekValueFromRange(suggestion?.week_start, suggestion?.week_end)
+);
+
+const contextSuggestionWeekLabel = (suggestion?: ContextSuggestion | null) => {
+  const value = contextSuggestionWeekValue(suggestion);
+  return formatWeekLabel(value) || suggestion?.week_label || value || "未推定";
+};
+
+const formatFacilityCandidate = (candidate: FacilitySuggestionCandidate) => {
+  const id = String(candidate.facility_id || candidate.id || "").trim();
+  const name = String(candidate.facility_name || candidate.name || "").trim();
+  const score = candidate.score === undefined || candidate.score === null ? "" : ` / score ${candidate.score}`;
+  const reason = candidate.reason ? ` / ${candidate.reason}` : "";
+  return `${name || id || "施設候補"}${id && name ? ` (${id})` : ""}${score}${reason}`;
 };
 
 const confidenceTierVisible = (tier: string | null | undefined, mode: ConfidenceDisplayMode) => {
@@ -606,7 +661,14 @@ export default function OrderWorkflowV2Page() {
     [contextForm.week_end, contextForm.week_start, weekDraft],
   );
 
+  const contextSuggestion = workflow?.context_suggestion || null;
   const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+  const workflowContextConfirmed = Boolean(
+    workflow?.facility_id
+      && workflow?.week_start
+      && workflow?.week_end
+      && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
+  );
   const selectedFacility = useMemo(
     () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
     [contextForm.facility_id, facilityOptions],
@@ -825,6 +887,23 @@ export default function OrderWorkflowV2Page() {
     }));
   };
 
+  const applyContextSuggestion = () => {
+    if (!contextSuggestion) return;
+    const weekValue = contextSuggestionWeekValue(contextSuggestion);
+    const range = weekRangeFromValue(weekValue);
+    setContextForm((current) => ({
+      ...current,
+      facility_id: String(contextSuggestion.facility_id || current.facility_id || ""),
+      week_start: String(contextSuggestion.week_start || range.week_start || current.week_start || ""),
+      week_end: String(contextSuggestion.week_end || range.week_end || current.week_end || ""),
+    }));
+    if (weekValue) {
+      setWeekDraft(weekValue);
+    }
+    setMessage("PDFから推定した施設・週次候補をフォームに反映しました。Step1はまだ未確定です。");
+    setError("");
+  };
+
   const refreshAll = async () => {
     if (!orderId) return;
     const [workflowRes, ocrRes, inspectionRes] = await Promise.all([
@@ -844,13 +923,33 @@ export default function OrderWorkflowV2Page() {
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
     }
-    setContextForm({
+    const suggestion = workflowRes.data.context_suggestion || null;
+    const suggestedWeekValue = contextSuggestionWeekValue(suggestion);
+    const suggestedRange = weekRangeFromValue(suggestedWeekValue);
+    const suggestedContext = {
+      facility_id: String(suggestion?.facility_id || ""),
+      week_start: String(suggestion?.week_start || suggestedRange.week_start || ""),
+      week_end: String(suggestion?.week_end || suggestedRange.week_end || ""),
+    };
+    const confirmedContext = {
       facility_id: workflowRes.data.facility_id || "",
       week_start: workflowRes.data.week_start || "",
       week_end: workflowRes.data.week_end || "",
+    };
+    setContextForm((current) => {
+      if (confirmedContext.facility_id || confirmedContext.week_start || confirmedContext.week_end) {
+        return confirmedContext;
+      }
+      if (current.facility_id || current.week_start || current.week_end) {
+        return current;
+      }
+      if (suggestedContext.facility_id || suggestedContext.week_start || suggestedContext.week_end) {
+        return suggestedContext;
+      }
+      return emptyContext;
     });
     const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
-    setWeekDraft(workflowWeekValue);
+    setWeekDraft((current) => workflowWeekValue || current || suggestedWeekValue || "");
   };
 
   useEffect(() => {
@@ -859,6 +958,16 @@ export default function OrderWorkflowV2Page() {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId || workflow?.state !== "ocr_running") return undefined;
+    const timer = window.setInterval(() => {
+      refreshAll().catch((err) => {
+        setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [router.isReady, orderId, workflow?.state]);
 
   const loadFacilityTemplateStatus = async (facilityId: string) => {
     const normalizedFacilityId = facilityId.trim();
@@ -1458,6 +1567,9 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">Current State</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {workflow?.state === "ocr_running" ? (
+            <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
+          ) : null}
         </div>
         <div className="state-actions">
           <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
@@ -1517,6 +1629,10 @@ export default function OrderWorkflowV2Page() {
           <div className="summary-primary-card">
             <span className="field-label">OCRジョブ</span>
             <p className="summary-value">{workflow?.ocr_job?.ocr_job_id || "-"}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">OCR進捗</span>
+            <p className="summary-value">{formatOcrProgress(workflow)}</p>
           </div>
           <div className="summary-primary-card">
             <span className="field-label">OCR処理時間</span>
@@ -1587,6 +1703,35 @@ export default function OrderWorkflowV2Page() {
                 <p className="summary-value">{workflow?.template_id || "施設設定から自動解決"}</p>
               </div>
             </div>
+            {contextSuggestion ? (
+              <div className="context-suggestion-card">
+                <div>
+                  <span className="field-label">PDF自動推定候補</span>
+                  <h3>
+                    {contextSuggestion.facility_name || contextSuggestion.facility_id || "施設未推定"}
+                    {contextSuggestion.facility_id && contextSuggestion.facility_name ? ` (${contextSuggestion.facility_id})` : ""}
+                  </h3>
+                  <p className="subtle">
+                    週次: {contextSuggestionWeekLabel(contextSuggestion)}
+                    {contextSuggestion.confidence ? ` / confidence ${contextSuggestion.confidence}` : ""}
+                    {contextSuggestion.source ? ` / ${contextSuggestion.source}` : ""}
+                  </p>
+                  {Array.isArray(contextSuggestion.date_hints) && contextSuggestion.date_hints.length ? (
+                    <p className="subtle">日付候補: {contextSuggestion.date_hints.slice(0, 8).join(" / ")}</p>
+                  ) : null}
+                  {Array.isArray(contextSuggestion.facility_candidates) && contextSuggestion.facility_candidates.length ? (
+                    <ul className="context-suggestion-candidates">
+                      {contextSuggestion.facility_candidates.slice(0, 3).map((candidate, index) => (
+                        <li key={`facility-suggestion-${index}`}>{formatFacilityCandidate(candidate)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+                <button className="btn secondary" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
+                  推定をフォームに反映
+                </button>
+              </div>
+            ) : null}
             <div className="summary-actions">
               <label className="field">
                 <span className="field-label">施設 (Step1 必須)</span>
@@ -1727,10 +1872,7 @@ export default function OrderWorkflowV2Page() {
                 onClick={runOcr}
                 disabled={Boolean(
                   busy
-                  || !workflow?.facility_id
-                  || !workflow?.week_start
-                  || !workflow?.week_end
-                  || !workflow?.template_id
+                  || !workflowContextConfirmed
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
                 )}
               >
@@ -2419,6 +2561,17 @@ export default function OrderWorkflowV2Page() {
           display: flex;
           justify-content: space-between;
         }
+        .ocr-progress-inline {
+          background: #edf3ef;
+          border: 1px solid rgba(53, 80, 71, 0.16);
+          border-radius: 999px;
+          color: #355047;
+          display: inline-flex;
+          font-size: 13px;
+          font-weight: 800;
+          margin: 10px 0 0;
+          padding: 6px 10px;
+        }
         .state-actions,
         .row-actions {
           display: flex;
@@ -2660,6 +2813,31 @@ export default function OrderWorkflowV2Page() {
           flex-direction: column;
           gap: 8px;
           margin-top: 10px;
+        }
+        .context-suggestion-card {
+          align-items: flex-start;
+          background: #fffaf0;
+          border: 1px solid #ead7af;
+          border-radius: 14px;
+          display: flex;
+          gap: 12px;
+          justify-content: space-between;
+          margin-top: 12px;
+          padding: 12px;
+        }
+        .context-suggestion-card h3 {
+          color: #1c2822;
+          font-size: 16px;
+          margin: 4px 0 0;
+        }
+        .context-suggestion-candidates {
+          color: #5d665f;
+          font-size: 12px;
+          margin: 8px 0 0;
+          padding-left: 18px;
+        }
+        .context-suggestion-candidates li + li {
+          margin-top: 4px;
         }
         .field {
           display: flex;
