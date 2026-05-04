@@ -519,6 +519,14 @@ tasks:
         RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
         ./scripts/git_flow_prepare_prod_release.sh
 
+  prod_release_worktree:
+    desc: Create a dedicated worktree for release/prod-YYYYMMDD.
+    cmds:
+      - >-
+        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
+        WORKTREE_ROOT="{{.WORKTREE_ROOT}}"
+        ./scripts/git_flow_add_release_worktree.sh
+
   prod_release_preflight:
     desc: Strict Git Flow prod release-source preflight before any prod deploy.
     cmds:
@@ -535,6 +543,7 @@ tasks:
     cmds:
       - 'bash -n ./scripts/create_feature_worktree.sh'
       - 'bash -n ./scripts/test_create_feature_worktree.sh'
+      - 'bash -n ./scripts/git_flow_add_release_worktree.sh'
       - 'bash -n ./scripts/git_flow_bootstrap_branches.sh'
       - 'bash -n ./scripts/git_flow_prepare_prod_release.sh'
       - 'bash -n ./scripts/git_flow_release_preflight.sh'

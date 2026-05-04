@@ -60,6 +60,12 @@ Create a prod release branch from `develop`:
 task prod_release_prepare RELEASE_DATE=20260504
 ```
 
+Create a dedicated worktree for the prod release branch:
+
+```bash
+task prod_release_worktree RELEASE_DATE=20260504
+```
+
 Run prod preflight from the release branch:
 
 ```bash

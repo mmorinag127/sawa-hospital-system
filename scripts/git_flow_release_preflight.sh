@@ -48,6 +48,13 @@ echo "current_branch=$current_branch"
 if [[ "$current_branch" == "HEAD" ]]; then
   fail "detached HEAD is not deployable"
 fi
+if [[ "$TARGET_ENV" == "prod" ]]; then
+  if [[ -n "$RELEASE_BRANCH" && "$current_branch" != "$RELEASE_BRANCH" ]]; then
+    fail "prod preflight must run from $RELEASE_BRANCH, not $current_branch"
+  elif [[ -z "$RELEASE_BRANCH" && "$current_branch" != release/prod-* ]]; then
+    fail "prod preflight must run from release/prod-*"
+  fi
+fi
 
 status_output="$(git -C "$REPO_ROOT" status --short)"
 if [[ -n "$status_output" ]]; then
