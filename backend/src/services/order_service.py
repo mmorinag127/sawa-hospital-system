@@ -27695,6 +27695,29 @@ def _build_hakodate_evidence_assignment_from_payload(
         blockers.append("hakodate_target_cell_map_missing")
     if not evidence_records:
         blockers.append("hakodate_ocr_evidence_missing")
+    allowed_fields: set[str] = set()
+    if facility_id:
+        try:
+            facility_config = config_service.get_facility_config_for_template(facility_id, template_id)
+        except Exception:
+            facility_config = None
+        fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+        if isinstance(fax_template, dict):
+            allowed_fields = {
+                str(field or "").strip()
+                for field in _row_fields_from_template(fax_template)
+                if str(field or "").strip()
+            }
+    if allowed_fields and target_cells:
+        target_fields = {
+            field
+            for cell in target_cells
+            for field in _hakodate_target_cell_field_candidates(cell)
+            if field
+        }
+        unmapped_fields = sorted(field for field in target_fields if field not in allowed_fields)
+        if unmapped_fields:
+            blockers.append("hakodate_target_field_unmapped")
 
     assignment_result = (
         hakodate_ocr_evidence_service.assign_evidence_to_target_cells(

@@ -735,10 +735,15 @@ def _post_menu_target_regions(
     worksheet: Any,
     column_edges: list[float],
     row_edges: list[float],
+    fax_template: dict[str, Any] | None = None,
     horizontal_line_mask: np.ndarray | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     col_count = min(int(worksheet.max_column or 0), len(column_edges) - 1)
-    slots = hakodate_assignment_service._column_slots_from_worksheet(worksheet, col_count=col_count)  # noqa: SLF001
+    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
+        worksheet,
+        col_count=col_count,
+        template=fax_template,
+    )
     slot_by_col = {int(slot.get("worksheet_col_index") or 0): slot for slot in slots if isinstance(slot, dict)}
     menu_col = _menu_column_from_slots(slots, worksheet)
     target_cols = list(range(menu_col + 1, col_count + 1))
@@ -868,6 +873,21 @@ def build_hakodate_step_review_for_manifest_item(
         manifest_template_bbox=item["template_bbox"],
     )
     week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
+    selected_template_id = str(
+        item.get("template_id")
+        or item.get("fax_template_id")
+        or item.get("resolved_template_id")
+        or ""
+    ).strip() or None
+    facility_config = order_form_service.config_service.get_facility_config_for_template(
+        facility_code,
+        selected_template_id,
+    )
+    fax_template = (
+        facility_config.get("fax_template")
+        if isinstance(facility_config, dict) and isinstance(facility_config.get("fax_template"), dict)
+        else None
+    )
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
@@ -917,6 +937,7 @@ def build_hakodate_step_review_for_manifest_item(
         worksheet=worksheet,
         column_edges=[float(value) for value in aligned_xs],
         row_edges=[float(value) for value in aligned_ys],
+        fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
     target_overlay = _draw_target_regions(

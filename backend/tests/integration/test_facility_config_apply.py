@@ -3,12 +3,14 @@ import pathlib
 import re
 from datetime import datetime
 
+from openpyxl import Workbook
 from sqlalchemy import delete
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import facility_service, config_service, order_service  # noqa: E402
+from src.services import hakodate_assignment_service  # noqa: E402
 from src.services import template_field_schema_service  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
@@ -85,6 +87,104 @@ def test_fac00010_uses_floor_2f3f_fax_template():
         "qty.mixer_3f",
         "remarks",
     ]
+    columns = (resolved.get("fax_template") or {}).get("columns") or []
+    assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
+
+
+def test_hakodate_slots_use_template_fields_over_header_guessing():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.cell(row=7, column=1, value="日付")
+    worksheet.cell(row=7, column=2, value="区分")
+    worksheet.cell(row=7, column=4, value="献立")
+    worksheet.cell(row=7, column=5, value="常食")
+    worksheet.cell(row=8, column=5, value="2F")
+    worksheet.cell(row=7, column=6, value="常食")
+    worksheet.cell(row=8, column=6, value="3F")
+    worksheet.cell(row=7, column=7, value="軟菜")
+    worksheet.cell(row=8, column=7, value="2F")
+    worksheet.cell(row=7, column=8, value="軟菜")
+    worksheet.cell(row=8, column=8, value="3F")
+    worksheet.cell(row=7, column=9, value="ミキサー")
+    worksheet.cell(row=8, column=9, value="2F")
+    worksheet.cell(row=7, column=10, value="ミキサー")
+    worksheet.cell(row=8, column=10, value="3F")
+    worksheet.cell(row=7, column=11, value="備考")
+    template = {
+        "columns": [
+            {"index": 0, "source_index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "source_index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "source_index": 3, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "source_index": 4, "role": "quantity", "header": "常食2F", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "source_index": 5, "role": "quantity", "header": "常食3F", "diet_type": "regular", "area_id": "3F"},
+            {"index": 5, "source_index": 6, "role": "quantity", "header": "軟菜2F", "diet_type": "soft", "area_id": "2F"},
+            {"index": 6, "source_index": 7, "role": "quantity", "header": "軟菜3F", "diet_type": "soft", "area_id": "3F"},
+            {"index": 7, "source_index": 8, "role": "quantity", "header": "ミキサー2F", "diet_type": "mixer", "area_id": "2F"},
+            {"index": 8, "source_index": 9, "role": "quantity", "header": "ミキサー3F", "diet_type": "mixer", "area_id": "3F"},
+            {"index": 9, "source_index": 10, "role": "note", "header": "備考"},
+        ],
+    }
+
+    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
+        worksheet,
+        col_count=11,
+        template=template,
+    )
+    by_col = {slot["worksheet_col_index"]: slot for slot in slots}
+
+    assert by_col[5]["slot_name"] == "qty.regular_2f"
+    assert by_col[6]["slot_name"] == "qty.regular_3f"
+    assert by_col[7]["slot_name"] == "qty.soft_2f"
+    assert by_col[8]["slot_name"] == "qty.soft_3f"
+    assert by_col[9]["slot_name"] == "qty.mixer_2f"
+    assert by_col[10]["slot_name"] == "qty.mixer_3f"
+    assert by_col[11]["slot_name"] == "note"
+
+
+def test_hakodate_assignment_blocks_target_fields_not_in_facility_template():
+    _clear_facilities()
+    facility_service.list_facilities()
+    config_service.reload_configs()
+    payload = {
+        "hakodate_preprocessing": {
+            "target_cell_map": [
+                {
+                    "target_cell_id": "E11",
+                    "sheet_cell": "E11",
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                    "semantic_field": "qty.regular_x",
+                    "bbox": [10, 10, 30, 30],
+                    "center": [20, 20],
+                    "metadata": {
+                        "truth": {
+                            "row_index": 0,
+                            "field": "qty.regular_x",
+                        }
+                    },
+                }
+            ]
+        },
+        "hakodate_ocr_evidence_records": [
+            {
+                "evidence_id": "ev1",
+                "raw_text": "1",
+                "normalized_value": "1",
+                "source_bbox": [12, 12, 18, 18],
+                "center": [15, 15],
+                "confidence": 0.99,
+            }
+        ],
+    }
+
+    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+        order_id="ORD-test-field-unmapped",
+        facility_id="FAC00010",
+        template_id="fax_layout_floor_2f3f_v1",
+        payload=payload,
+    )
+
+    assert "hakodate_target_field_unmapped" in assignment["blockers"]
 
 
 def test_explicit_quantity_diet_type_wins_over_unrecognized_japanese_header():
