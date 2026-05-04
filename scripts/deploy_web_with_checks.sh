@@ -25,6 +25,7 @@ WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 IMAGE_REPO="${IMAGE_REPO:-asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend}"
 TAG_PREFIX="${TAG_PREFIX:-frontend}"
 PROVIDED_IMAGE="${IMAGE:-}"
+ALLOW_WEB_IMAGE_PROMOTION="${ALLOW_WEB_IMAGE_PROMOTION:-0}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
 WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-web}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
@@ -74,6 +75,12 @@ compare_workflow_v2_json() {
 
 if [ -z "$WEB_SERVICE" ]; then
   echo "WEB_SERVICE is required"
+  exit 1
+fi
+
+if [ -n "$PROVIDED_IMAGE" ] && [ "$ALLOW_WEB_IMAGE_PROMOTION" != "1" ]; then
+  echo "blocked: web image promotion is disabled by default because Next rewrites bake API_PROXY_TARGET at build time."
+  echo "blocked: build web-prod with the prod WORKER_URL, or first remove the build-time rewrite dependency."
   exit 1
 fi
 
