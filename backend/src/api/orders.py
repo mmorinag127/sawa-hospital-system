@@ -111,6 +111,14 @@ class WorkflowV2SheetSaveBody(BaseModel):
     edited_by: str | None = None
 
 
+class WorkflowV2ExpandedCellCopyModeBody(BaseModel):
+    mode: str
+
+
+class WorkflowV2FacilityTemplateColumnsBody(BaseModel):
+    columns: list[dict]
+
+
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
@@ -1803,6 +1811,21 @@ def get_order_workflow_v2_sheet(order_id: str):
 @router.get("/{order_id}/workflow-v2/sheet-source", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_v2_sheet_source(order_id: str):
     return _workflow_v2_or_404(order_workflow_v2_service.build_sheet_from_selected_ocr(order_id))
+
+
+@router.put("/{order_id}/workflow-v2/expanded-cell-copy-mode", dependencies=[Depends(require_role("operator"))])
+def set_order_workflow_v2_expanded_cell_copy_mode(order_id: str, body: WorkflowV2ExpandedCellCopyModeBody):
+    return _workflow_v2_or_404(order_workflow_v2_service.set_expanded_cell_copy_mode(order_id, body.mode))
+
+
+@router.put("/{order_id}/workflow-v2/facility-template-columns", dependencies=[Depends(require_role("operator"))])
+def save_order_workflow_v2_facility_template_columns(order_id: str, body: WorkflowV2FacilityTemplateColumnsBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.save_facility_template_columns(
+            order_id,
+            body.columns,
+        )
+    )
 
 
 @router.put("/{order_id}/workflow-v2/sheet", dependencies=[Depends(require_role("operator"))])

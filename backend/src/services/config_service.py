@@ -504,6 +504,17 @@ def _should_prefer_master_fax_override(
     master_columns = normalize_fax_template_columns(master_override.get("columns"))
     if not current_columns or not master_columns:
         return False
+    current_qty = [_quantity_signature(col) for col in current_columns if str(col.get("role") or "").strip().lower() == "quantity"]
+    master_qty = [_quantity_signature(col) for col in master_columns if str(col.get("role") or "").strip().lower() == "quantity"]
+    if current_qty and master_qty:
+        current_qty_set = set(current_qty)
+        master_qty_set = set(master_qty)
+        if current_qty_set < master_qty_set:
+            # A non-authoritative persisted override that only contains a subset
+            # of the master quantity schema is stale. Operator-authored
+            # reductions are stored with columns_authoritative=True and are
+            # handled above.
+            return True
     current_aux = [col for col in current_columns if str(col.get("role") or "").strip().lower() == "aux"]
     master_aux = [col for col in master_columns if str(col.get("role") or "").strip().lower() == "aux"]
     if not master_aux or len(current_aux) >= len(master_aux):
@@ -520,8 +531,6 @@ def _should_prefer_master_fax_override(
     if current_menu_index is None or master_menu_index is None or current_menu_index >= master_menu_index:
         return False
 
-    current_qty = [_quantity_signature(col) for col in current_columns if str(col.get("role") or "").strip().lower() == "quantity"]
-    master_qty = [_quantity_signature(col) for col in master_columns if str(col.get("role") or "").strip().lower() == "quantity"]
     if not current_qty or not master_qty:
         return False
     if set(current_qty) != set(master_qty):

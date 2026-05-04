@@ -21,6 +21,7 @@ from src.services.template_field_schema_service import derive_row_fields_from_te
 Base.metadata.create_all(bind=engine)
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
+EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
 
 _OCR_PROGRESS_STEPS: dict[str, tuple[int, str]] = {
     "queued": (1, "OCR準備中"),
@@ -42,6 +43,23 @@ def _now() -> datetime:
 
 def _normalize_id(value: object) -> str:
     return str(value or "").strip()
+
+
+def _normalize_expanded_cell_copy_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in EXPANDED_CELL_COPY_MODES else "auto"
+
+
+def _facility_config_with_expanded_cell_mode(
+    facility_config: dict[str, Any] | None,
+    mode: object,
+) -> dict[str, Any] | None:
+    normalized_mode = _normalize_expanded_cell_copy_mode(mode)
+    if normalized_mode == "auto":
+        return facility_config
+    next_config = dict(facility_config or {})
+    next_config["expanded_cell_same_daypart_copy_enabled"] = normalized_mode == "enabled"
+    return next_config
 
 
 def _new_id(prefix: str) -> str:
@@ -287,6 +305,7 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
         "week_start": meta.get("week_start"),
         "week_end": meta.get("week_end"),
         "template_id": meta.get("template_id"),
+        "expanded_cell_copy_mode": _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode")),
         "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
         or None,
         "bagging_result_id": meta.get("bagging_result_id"),
@@ -407,6 +426,8 @@ def confirm_context(
         order.facility_code = normalized_facility_id
         order.week_code = normalized_week_code
         row = _get_or_create_workflow(session, order.id)
+        current_meta = _workflow_meta(row)
+        expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
         if not template_ready:
             row.state = "facility_template_unresolved"
             row.headline = "施設テンプレートが未登録です"
@@ -426,6 +447,7 @@ def confirm_context(
                     "week_code": normalized_week_code,
                     "template_id": None,
                     "template_source": None,
+                    "expanded_cell_copy_mode": expanded_cell_copy_mode,
                     "bagging_result_id": None,
                     "output_bundle_id": None,
                 },
@@ -450,6 +472,7 @@ def confirm_context(
                 "week_code": normalized_week_code,
                 "template_id": normalized_template_id or None,
                 "template_source": "registered_template_id" if normalized_template_id else "facility_resolved_template",
+                "expanded_cell_copy_mode": expanded_cell_copy_mode,
                 "bagging_result_id": None,
                 "output_bundle_id": None,
             },
@@ -643,6 +666,57 @@ def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
+def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
+    _delete_downstream_after_ocr_change(session, order_id)
+    deleted = (
+        session.query(OrderOcrEvidenceRun)
+        .filter(OrderOcrEvidenceRun.order_id == order_id)
+        .delete(synchronize_session=False)
+    )
+    return int(deleted or 0)
+
+
+def set_expanded_cell_copy_mode(order_id: str, mode: str) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_mode = _normalize_expanded_cell_copy_mode(mode)
+    if normalized_mode != str(mode or "").strip().lower():
+        return None, "expanded_cell_copy_mode_invalid"
+
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        previous_mode = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
+        meta["expanded_cell_copy_mode"] = normalized_mode
+        meta["bagging_result_id"] = None
+        meta["bagging_result"] = None
+        meta["output_bundle_id"] = None
+        meta["output_bundle"] = None
+        if previous_mode != normalized_mode:
+            workflow.draft_id = None
+            workflow.confirmed_snapshot_id = None
+            session.flush()
+            _delete_downstream_after_sheet_change(session, order.id)
+            if workflow.evidence_run_id:
+                workflow.state = "ocr_selected"
+                workflow.headline = "拡大セル設定を変更しました。選択OCRからシートを再生成してください"
+                workflow.primary_action = "edit_sheet"
+            elif _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta):
+                workflow.state = "context_confirmed"
+                workflow.headline = "拡大セル設定を変更しました。OCRを実行してください"
+                workflow.primary_action = "run_ocr"
+            else:
+                workflow.state = "uploaded"
+                workflow.headline = "PDFと施設・週次を確認してください"
+                workflow.primary_action = "confirm_context"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        _write_workflow_meta(workflow, meta)
+        return _serialize_workflow(workflow), None
+
+
 def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
     normalized_ocr_result_id = _normalize_id(ocr_result_id)
     if not normalized_ocr_result_id:
@@ -714,6 +788,56 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         session.delete(ocr_result)
         workflow.last_transition_at = _now()
         return _serialize_workflow(workflow), None
+
+
+def save_facility_template_columns(
+    order_id: str,
+    columns: list[dict[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    order_service_module = _get_order_service_module()
+    result, error = order_service_module.save_order_facility_template_columns(order_id, columns)
+    if error:
+        return result, error
+
+    with session_scope() as session:
+        order, order_error = _get_order_or_error(session, order_id)
+        if order_error:
+            return None, order_error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        deleted_ocr_results = _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        meta["latest_ocr_result_id"] = None
+        meta["latest_ocr_error"] = None
+        meta["bagging_result_id"] = None
+        meta["bagging_result"] = None
+        meta["output_bundle_id"] = None
+        meta["output_bundle"] = None
+        meta["expanded_cell_copy_mode"] = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
+        if _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta):
+            workflow.state = "context_confirmed"
+            workflow.headline = "施設区分を保存しました。OCRを再実行してください"
+            workflow.primary_action = "run_ocr"
+            workflow.blockers_json = []
+        else:
+            workflow.state = "facility_template_unresolved"
+            workflow.headline = "施設テンプレートが未解決です"
+            workflow.primary_action = "register_facility_template"
+            workflow.blockers_json = ["facility_template_unresolved"]
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        _write_workflow_meta(workflow, meta)
+        resolved_config = result.get("resolved_config") if isinstance(result, dict) else None
+        validation = result.get("validation") if isinstance(result, dict) else None
+        return {
+            "updated": True,
+            "workflow": _serialize_workflow(workflow),
+            "resolved_config": resolved_config,
+            "validation": validation,
+            "ocr_results_cleared": deleted_ocr_results,
+        }, None
 
 
 def save_sheet(
@@ -1093,13 +1217,17 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     projected = order_service_module._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
-        facility_config=config_service.get_facility_config(facility_id),
+        facility_config=_facility_config_with_expanded_cell_mode(
+            config_service.get_facility_config(facility_id),
+            meta.get("expanded_cell_copy_mode"),
+        ),
         week_sheet_name=None,
     )
     projected["source"] = "workflow_v2_selected_ocr_projection"
     projected["base_evidence_run_id"] = selected_ocr_result_id
     projected["selected_ocr_result_id"] = selected_ocr_result_id
     projected["template_id"] = template_id or projected.get("template_id")
+    projected["expanded_cell_copy_mode"] = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
     target_cell_map = _compact_target_cell_map_for_sheet(
         target_cells=list(assignment.get("target_cells") or []),
         fields=[str(field or "").strip() for field in (projected.get("fields") or [])],
