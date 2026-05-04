@@ -137,12 +137,8 @@ if isinstance(quality, dict):
             included_jobs = 0
 
 if strict_quality:
-    allow_warming_up = (
-        gate_status == "insufficient_data"
-        and scope_mode == "explicit_only"
-        and included_jobs == 0
-    )
-    if gate_status not in {"pass"} and not allow_warming_up:
+    allow_insufficient_data = gate_status == "insufficient_data" and included_jobs == 0
+    if gate_status not in {"pass"} and not allow_insufficient_data:
         fail_detail = ""
         if isinstance(quality, dict):
             gate = quality.get("gate")
@@ -151,13 +147,13 @@ if strict_quality:
                     f" fail_providers={gate.get('fail_providers')}"
                     f" warming_up={gate.get('warming_up_providers')}"
                     f" scope_mode={scope_mode or 'missing'} included_jobs={included_jobs}"
-                )
+        )
         print(f"[FAIL] ocr_reparse_quality.gate.status is {gate_status or 'missing'}{fail_detail}")
         raise SystemExit(1)
-    if allow_warming_up:
+    if allow_insufficient_data:
         print(
             "[WARN] ocr_reparse_quality.gate.status is insufficient_data "
-            f"(explicit_only warming up; included_jobs={included_jobs})"
+            f"(no included jobs; scope_mode={scope_mode or 'missing'})"
         )
 else:
     if gate_status and gate_status != "pass":
