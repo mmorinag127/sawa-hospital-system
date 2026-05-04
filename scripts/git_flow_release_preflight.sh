@@ -94,10 +94,14 @@ else
     if command -v jj >/dev/null 2>&1; then
       jj_status="$(jj --repository "$repo_dir" status 2>&1 || true)"
       echo "$jj_status"
-      if [[ "$jj_status" != *"The working copy is clean"* && "$jj_status" != *"Nothing changed."* ]]; then
+      jj_clean="0"
+      if [[ "$jj_status" == *"The working copy is clean"* || "$jj_status" == *"Nothing changed."* || "$jj_status" == *"The working copy has no changes."* ]]; then
+        jj_clean="1"
+      fi
+      if [[ "$jj_clean" != "1" ]]; then
         fail "jj working copy has changes: $repo_dir"
       fi
-      if [[ "$jj_status" == *"no description set"* || "$jj_status" == *"JJ_EMPTY_STRING"* ]]; then
+      if [[ "$jj_clean" != "1" && ( "$jj_status" == *"no description set"* || "$jj_status" == *"JJ_EMPTY_STRING"* ) ]]; then
         fail "jj working copy has empty description: $repo_dir"
       fi
     else
