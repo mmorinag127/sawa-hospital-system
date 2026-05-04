@@ -45,6 +45,8 @@ source_dir, deploy_dir, manifest_path, label = sys.argv[1:5]
 sentinels = [
     "src/pages/orders/index.tsx",
     "src/pages/orders/[id].tsx",
+    "src/pages/orders/[id]/workflow-v2.tsx",
+    "src/pages/orders/[id]/inspection-v2.tsx",
     "src/pages/index.tsx",
 ]
 
