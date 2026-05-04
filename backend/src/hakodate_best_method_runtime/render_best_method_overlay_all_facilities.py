@@ -176,7 +176,8 @@ def _build_truth_for_facility(
         except Exception:
             continue
         row_index = worksheet_row - ROWS_START
-        field = _sheet_field_from_region(region) or field_by_col.get(worksheet_col)
+        region_field = _sheet_field_from_region(region)
+        field = region_field if region_field in field_indexes else field_by_col.get(worksheet_col) or region_field
         if field is None or row_index < 0:
             continue
         expected = ""

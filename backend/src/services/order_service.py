@@ -7856,6 +7856,12 @@ def _build_live_hakodate_manifest_item(
             raise ValueError("order_not_found")
         document_uri = str(order.document_uri or "").strip()
         week_code = str(order.week_code or "").strip()
+        workflow = session.get(OrderWorkflowState, order_id)
+        workflow_meta = {}
+        if workflow is not None and isinstance(workflow.secondary_actions_json, dict):
+            raw_meta = workflow.secondary_actions_json.get("workflow_v2")
+            workflow_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        selected_template_id = str(workflow_meta.get("template_id") or "").strip() or None
     if not document_uri:
         raise ValueError("document_missing")
     week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
@@ -7922,6 +7928,8 @@ def _build_live_hakodate_manifest_item(
         "facility_id": facility_id,
         "fax_pdf": fax_pdf_for_registration,
         "template_pdf": str(structure_pdf),
+        "fax_template_id": selected_template_id,
+        "template_id": selected_template_id,
         "step2_png": str(step2_png),
         "template_bbox": template_bbox,
         "quad_px": registration.quad_px,
