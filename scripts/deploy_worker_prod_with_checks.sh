@@ -100,11 +100,17 @@ if [[ "${RUN_LOCAL_REGRESSION}" == "1" ]]; then
       tests/integration/test_ocr_sheet_history.py::test_set_facility_does_not_mutate_clean_saved_sheet_header_when_fields_match \
       tests/integration/test_ocr_sheet_history.py::test_force_overwrite_current_sheet_with_weekly_menu_can_blank_quantities \
       tests/integration/test_ocr_sheet_history.py::test_force_overwrite_current_sheet_with_facility_schema_blanks_quantities_and_survives_refresh \
-      tests/contract/test_orders_draft_review_api.py::test_order_detail_and_draft_sheet_expose_same_blocker_reason_for_missing_menu \
-      tests/contract/test_orders_draft_review_api.py::test_ocr_sheet_api_prefers_current_sheet_context_without_persisted_draft \
-      tests/contract/test_orders_draft_review_api.py::test_ocr_sheet_api_prefers_generic_current_sheet_context_before_recoverable_fallback \
-      tests/contract/test_orders_draft_review_api.py::test_order_endpoints_expose_draft_ready_state_from_saved_sheet_and_reject_reason \
-      tests/contract/test_orders_ocr_sheet_history_api.py::test_orders_force_weekly_menu_api_accepts_blank_quantities \
+      tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_queued_requires_context_and_clears_downstream \
+      tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_completed_preserves_context_and_does_not_select_result \
+      tests/unit/test_order_workflow_v2_service.py::test_sheet_source_uses_only_selected_ocr_payload \
+      tests/unit/test_order_workflow_v2_service.py::test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection \
+      tests/unit/test_order_workflow_v2_service.py::test_facility_template_columns_save_clears_stale_ocr_and_downstream \
+      tests/unit/test_order_workflow_v2_service.py::test_selecting_ocr_result_clears_downstream_sheet \
+      tests/unit/test_order_workflow_v2_service.py::test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1_context \
+      tests/unit/test_order_workflow_v2_service.py::test_workflow_v2_does_not_use_order_lines_as_sheet_source \
+      tests/unit/test_order_workflow_v2_service.py::test_inspection_is_read_only_projection_of_current_lineage \
+      tests/unit/test_order_workflow_v2_service.py::test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source \
+      tests/unit/test_order_workflow_v2_service.py::test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot \
       -q
   )
 fi
