@@ -491,11 +491,53 @@ tasks:
         BASE_REF="${BASE_REF:-$(git rev-parse --abbrev-ref HEAD)}"
         ./scripts/create_feature_worktree.sh "${FEATURE}"
 
+  git_flow_bootstrap:
+    desc: Create standard Git Flow branches if missing. Uses master/develop and optionally release/prod-YYYYMMDD.
+    cmds:
+      - >-
+        PROD_BRANCH="${PROD_BRANCH:-master}"
+        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
+        CREATE_RELEASE_BRANCH="${CREATE_RELEASE_BRANCH:-0}"
+        ./scripts/git_flow_bootstrap_branches.sh
+
+  git_flow_status:
+    desc: Show release-source status for Git Flow operations without requiring a pass.
+    cmds:
+      - >-
+        STRICT="${STRICT:-0}"
+        TARGET_ENV="${TARGET_ENV:-prod}"
+        RELEASE_BRANCH="${RELEASE_BRANCH:-}"
+        ./scripts/git_flow_release_preflight.sh
+
+  prod_release_prepare:
+    desc: Create release/prod-YYYYMMDD from develop after stg validation.
+    cmds:
+      - >-
+        PROD_BRANCH="${PROD_BRANCH:-master}"
+        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+        RELEASE_DATE="${RELEASE_DATE:-$(date +%Y%m%d)}"
+        ./scripts/git_flow_prepare_prod_release.sh
+
+  prod_release_preflight:
+    desc: Strict Git Flow prod release-source preflight before any prod deploy.
+    cmds:
+      - >-
+        STRICT="1"
+        TARGET_ENV="prod"
+        PROD_BRANCH="${PROD_BRANCH:-master}"
+        DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+        RELEASE_BRANCH="${RELEASE_BRANCH:-release/prod-$(date +%Y%m%d)}"
+        ./scripts/git_flow_release_preflight.sh
+
   ops_script_check:
     desc: Syntax-check release/worktree helper scripts.
     cmds:
       - 'bash -n ./scripts/create_feature_worktree.sh'
       - 'bash -n ./scripts/test_create_feature_worktree.sh'
+      - 'bash -n ./scripts/git_flow_bootstrap_branches.sh'
+      - 'bash -n ./scripts/git_flow_prepare_prod_release.sh'
+      - 'bash -n ./scripts/git_flow_release_preflight.sh'
       - 'bash -n ./scripts/predeploy_env_checks.sh'
       - 'bash -n ./scripts/predeploy_prod_checks.sh'
       - 'bash -n ./scripts/deploy_web_with_checks.sh'
