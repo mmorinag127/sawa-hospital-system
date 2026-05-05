@@ -449,6 +449,42 @@ def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[
     return _normalize_id(row.template_version_id) or _normalize_id(meta.get("template_version_id")) or None
 
 
+def _ensure_workflow_template_version_from_context(
+    session: Any,
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    meta: dict[str, Any],
+    created_by: str,
+) -> tuple[str | None, str | None]:
+    template_version_id = _effective_workflow_template_version_id(workflow, meta)
+    if template_version_id:
+        return template_version_id, None
+    if not _workflow_meta_has_confirmed_context(meta):
+        return None, "context_not_confirmed"
+    if not _workflow_meta_has_resolved_template(meta):
+        return None, "facility_template_unresolved"
+    facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
+    if not facility_id:
+        return None, "facility_missing"
+    facility_config = config_service.get_facility_config(facility_id)
+    template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+        session,
+        facility_id=facility_id,
+        facility_config=facility_config if isinstance(facility_config, dict) else None,
+        created_by=created_by,
+    )
+    if template_version is None:
+        return None, "facility_template_unresolved"
+    workflow.template_version_id = template_version.id
+    order.template_version_id = template_version.id
+    meta["template_version_id"] = template_version.id
+    meta["template_version_digest"] = template_version.template_digest
+    if not _normalize_id(meta.get("template_id")) and _normalize_id(template_version.template_id):
+        meta["template_id"] = template_version.template_id
+    return template_version.id, None
+
+
 def _resolve_evidence_template_version(
     evidence: OrderOcrEvidenceRun,
     workflow: OrderWorkflowState,
@@ -1194,9 +1230,21 @@ def save_sheet(
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
             return None, context_error
+        workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+            session,
+            order=order,
+            workflow=workflow,
+            meta=workflow_meta,
+            created_by="workflow-v2-sheet-save",
+        )
+        if template_error:
+            return None, template_error
+        if workflow_template_version_id and not _normalize_id(evidence.template_version_id):
+            evidence.template_version_id = workflow_template_version_id
         evidence_template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, workflow_meta)
         if template_error:
             return None, template_error
+        resolved_template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
         session.flush()
@@ -1204,7 +1252,7 @@ def save_sheet(
         draft = OrderSheetDraft(
             id=_new_id("ODS"),
             order_id=order.id,
-            template_version_id=evidence_template_version_id or workflow_template_version_id or None,
+            template_version_id=resolved_template_version_id,
             base_evidence_run_id=evidence.id,
             base_template_resolution_id=workflow_meta.get("template_id"),
             base_menu_snapshot_id=None,

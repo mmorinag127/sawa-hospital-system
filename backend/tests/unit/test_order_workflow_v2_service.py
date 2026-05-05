@@ -343,6 +343,59 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
         assert snapshot.template_version_id == template_version_id
 
 
+def test_save_sheet_recovers_template_version_for_legacy_selected_evidence(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        _registered_template_config,
+    )
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+    assert error is None
+    template_version_id = workflow["template_version_id"]
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        row = session.get(OrderWorkflowState, order_id)
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        assert order is not None
+        assert row is not None
+        assert evidence is not None
+        meta = order_workflow_v2_service._workflow_meta(row)
+        meta["template_version_id"] = None
+        row.secondary_actions_json = {"workflow_v2": meta}
+        row.template_version_id = None
+        row.evidence_run_id = evidence_id_1
+        row.state = "ocr_selected"
+        row.primary_action = "edit_sheet"
+        order.template_version_id = None
+        evidence.template_version_id = None
+
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu": "A", "qty": "1"}]},
+        edited_by="test",
+    )
+
+    assert error is None
+    assert saved["workflow"]["state"] == "sheet_saved"
+    assert saved["workflow"]["template_version_id"] == template_version_id
+    saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        row = session.get(OrderWorkflowState, order_id)
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        draft = session.get(OrderSheetDraft, saved_sheet_id)
+        assert order.template_version_id == template_version_id
+        assert row.template_version_id == template_version_id
+        assert evidence.template_version_id == template_version_id
+        assert draft.template_version_id == template_version_id
+
+
 def test_select_ocr_result_blocks_template_version_mismatch(monkeypatch) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     monkeypatch.setattr(
