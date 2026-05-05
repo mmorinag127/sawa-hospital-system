@@ -441,6 +441,7 @@
         ]
       },
       "fax_template_override": {
+        "columns_authoritative": true,
         "llm_audit_non_blocking_codes": [
           "row_count_shortfall"
         ],
@@ -471,33 +472,40 @@
           {
             "index": 4,
             "role": "quantity",
+            "header": "不明(-)",
+            "diet_type": "placeholder",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "role": "quantity",
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X"
           },
           {
-            "index": 5,
+            "index": 6,
             "role": "quantity",
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X"
           },
           {
-            "index": 6,
+            "index": 7,
             "role": "quantity",
             "header": "変更1",
             "diet_type": "change_1",
             "area_id": "X"
           },
           {
-            "index": 7,
+            "index": 8,
             "role": "quantity",
             "header": "変更2",
             "diet_type": "change_2",
             "area_id": "X"
           },
           {
-            "index": 8,
+            "index": 9,
             "role": "note",
             "header": "備考欄"
           }

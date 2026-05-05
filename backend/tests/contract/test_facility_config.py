@@ -109,3 +109,35 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
         "変更2",
         "備考欄",
     ]
+
+
+def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
+    _clear_facilities()
+    client = TestClient(app)
+    assert client.get("/facilities").status_code == 200
+    fetched = client.get("/facilities/FAC00002")
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    resolved = payload.get("resolved_config") or {}
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+
+    assert [column.get("header") for column in columns[:10]] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "常食",
+        "不明(-)",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+        "備考欄",
+    ]
+    placeholder = columns[4]
+    assert placeholder.get("role") == "quantity"
+    assert placeholder.get("diet_type") == "placeholder"
+    assert placeholder.get("name") == "qty.placeholder_x"
+    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
+    version_placeholder = version_columns[4]
+    assert version_placeholder.get("column_id") == "col_004_quantity"
+    assert (version_placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
