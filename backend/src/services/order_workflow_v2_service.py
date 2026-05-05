@@ -51,6 +51,7 @@ _OCR_PREREQUISITE_BLOCKERS = {
     "week_menu_date_mismatch",
     "sheet_date_mismatch",
     "sheet_canonical_mismatch",
+    "template_unresolved",
     "weekly_menu_sheet_missing",
     "ocr_prerequisite_check_failed",
 }
