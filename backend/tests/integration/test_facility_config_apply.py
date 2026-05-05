@@ -98,6 +98,7 @@ def test_fac00009_uses_floor_2f3f_fax_template_from_master():
     resolved = config_service.get_facility_config("FAC00009")
     assert resolved is not None
     assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert resolved.get("fax_template_ids") == ["fax_layout_floor_2f3f_v1"]
     assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -112,12 +113,32 @@ def test_fac00009_uses_floor_2f3f_fax_template_from_master():
     ]
 
 
+def test_master_facility_template_replaces_stale_template_candidates_without_operator_source():
+    _clear_facilities()
+    facility_service.list_facilities()
+    previous_config = facility_service.get_facility_config("FAC00009") or {}
+    stale_config = {
+        "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+        "fax_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+    }
+
+    try:
+        assert facility_service.update_config("FAC00009", stale_config)
+        resolved = config_service.get_facility_config("FAC00009")
+        assert resolved is not None
+        assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+        assert resolved.get("fax_template_ids") == ["fax_layout_floor_2f3f_v1"]
+    finally:
+        assert facility_service.update_config("FAC00009", previous_config)
+
+
 def test_master_facility_template_wins_over_stale_db_config_without_operator_source():
     _clear_facilities()
     facility_service.list_facilities()
     previous_config = facility_service.get_facility_config("FAC00016") or {}
     stale_config = {
         "fax_template_id": "fax_layout_regular_diabetes_v1",
+        "fax_template_ids": ["fax_layout_regular_diabetes_v1"],
         "fax_template_override": {
             "columns_authoritative": True,
             "columns": [
@@ -135,6 +156,11 @@ def test_master_facility_template_wins_over_stale_db_config_without_operator_sou
         assert facility_service.update_config("FAC00016", stale_config)
         resolved = config_service.get_facility_config("FAC00016")
         assert resolved is not None
+        assert resolved.get("fax_template_id") == "fax_layout_regular_diabetes_v1"
+        assert resolved.get("fax_template_ids") == [
+            "fax_layout_regular_diabetes_v1",
+            "fax_layout_regular_forbidden_v1",
+        ]
         assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
             "date_mmdd",
             "daypart",

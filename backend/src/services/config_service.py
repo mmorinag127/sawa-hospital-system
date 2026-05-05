@@ -484,6 +484,22 @@ def _facility_template_operator_override_enabled(value: Any) -> bool:
     return _facility_template_source(value) in {"operator_override", "facility_override", "db_override"}
 
 
+def _master_facility_template_ids(facility_master: Any) -> tuple[str | None, list[str]]:
+    if not isinstance(facility_master, dict):
+        return None, []
+    primary = str(facility_master.get("fax_template_id") or "").strip() or None
+    template_ids: list[str] = []
+    raw_template_ids = facility_master.get("fax_template_ids")
+    if isinstance(raw_template_ids, list):
+        for item in raw_template_ids:
+            token = str(item or "").strip()
+            if token and token not in template_ids:
+                template_ids.append(token)
+    if primary and primary not in template_ids:
+        template_ids.insert(0, primary)
+    return primary, template_ids
+
+
 def _normalize_authoritative_fax_override(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -662,10 +678,13 @@ def sanitize_facility_config_for_storage(
 ) -> dict[str, Any]:
     sanitized = deepcopy(config)
     master_override = None
+    master_template_id = None
+    master_template_ids: list[str] = []
     master = load_facility_master()
     for fac_master in master.get("facilities", []):
         if fac_master.get("facility_id") == facility_id:
             master_override = fac_master.get("fax_template_override")
+            master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
             break
 
     current_override = (current_config or {}).get("fax_template_override")
@@ -676,6 +695,9 @@ def sanitize_facility_config_for_storage(
         source = _facility_template_source(current_config)
         if source:
             sanitized["facility_template_source"] = source
+    if not operator_template_source and master_template_id:
+        sanitized["fax_template_id"] = master_template_id
+        sanitized["fax_template_ids"] = master_template_ids or [master_template_id]
     fax_override = _preserve_authoritative_fax_override(
         current_override,
         sanitized.get("fax_template_override"),
@@ -1116,7 +1138,11 @@ def get_facility_by_id(facility_id: str) -> Optional[dict]:
                 if fac_master.get("facility_id") == facility_id:
                     prefer_master_template = not _facility_template_operator_override_enabled(facility)
                     if prefer_master_template:
-                        for key in ("fax_template_id", "fax_template_ids", "fax_template_override"):
+                        master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
+                        if master_template_id:
+                            facility["fax_template_id"] = master_template_id
+                            facility["fax_template_ids"] = master_template_ids or [master_template_id]
+                        for key in ("fax_template_override",):
                             value = fac_master.get(key)
                             if value not in (None, [], {}):
                                 facility[key] = deepcopy(value)
