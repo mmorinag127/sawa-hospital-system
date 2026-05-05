@@ -12,7 +12,13 @@ from sqlalchemy import delete, text
 from src.db import Base, engine
 from src.models.facility import Facility, FacilityConfig
 from src.models.facility_template_version import FacilityTemplateVersion
+from src.models.ocr_job import OcrJob
 from src.models.order import Order
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
+from src.models.order_current_state import OrderCurrentState
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service
 from src.services.config_validator import validate_facility_config
 from src.services.template_field_schema_service import derive_row_fields_from_columns
@@ -60,6 +66,8 @@ def _ensure_sqlite_schema() -> None:
 
 
 _ensure_sqlite_schema()
+
+WORKFLOW_V2_META_KEY = "workflow_v2"
 
 
 def _now() -> datetime:
@@ -202,6 +210,207 @@ def serialize_template_version(row: FacilityTemplateVersion | None) -> dict[str,
         "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
         "activated_at": row.activated_at.isoformat() if isinstance(row.activated_at, datetime) else None,
     }
+
+
+def _workflow_meta_payload(row: OrderWorkflowState) -> dict[str, Any]:
+    existing = row.secondary_actions_json if isinstance(row.secondary_actions_json, dict) else {}
+    meta = existing.get(WORKFLOW_V2_META_KEY)
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _write_workflow_meta_payload(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
+    existing = dict(row.secondary_actions_json or {}) if isinstance(row.secondary_actions_json, dict) else {}
+    existing[WORKFLOW_V2_META_KEY] = dict(meta)
+    row.secondary_actions_json = existing
+
+
+def _stamp_workflow_template_lineage(
+    row: OrderWorkflowState,
+    *,
+    facility_id: str,
+    version: FacilityTemplateVersion,
+) -> bool:
+    changed = False
+    if not str(row.template_version_id or "").strip():
+        row.template_version_id = version.id
+        changed = True
+    meta = _workflow_meta_payload(row)
+    if not str(meta.get("facility_id") or "").strip() and facility_id:
+        meta["facility_id"] = facility_id
+        changed = True
+    if not str(meta.get("template_version_id") or "").strip():
+        meta["template_version_id"] = version.id
+        changed = True
+    if not str(meta.get("template_version_digest") or "").strip():
+        meta["template_version_digest"] = version.template_digest
+        changed = True
+    if not str(meta.get("template_id") or "").strip() and str(version.template_id or "").strip():
+        meta["template_id"] = version.template_id
+        changed = True
+    if changed:
+        _write_workflow_meta_payload(row, meta)
+    return changed
+
+
+def _set_template_version_if_missing(row: Any, version_id: str) -> bool:
+    if row is None:
+        return False
+    if str(getattr(row, "template_version_id", "") or "").strip():
+        return False
+    row.template_version_id = version_id
+    return True
+
+
+def _ensure_active_version_for_backfill(
+    session: Any,
+    *,
+    facility_id: str,
+    cache: dict[str, FacilityTemplateVersion],
+    summary: dict[str, Any],
+    created_by: str,
+) -> FacilityTemplateVersion | None:
+    normalized_facility_id = str(facility_id or "").strip()
+    if not normalized_facility_id:
+        return None
+    if normalized_facility_id in cache:
+        return cache[normalized_facility_id]
+    active_before = get_active_template_version(session, normalized_facility_id)
+    try:
+        facility_config = config_service.get_facility_config(normalized_facility_id)
+    except Exception:
+        facility_config = None
+    version = ensure_active_template_version_from_resolved_config(
+        session,
+        facility_id=normalized_facility_id,
+        facility_config=facility_config if isinstance(facility_config, dict) else None,
+        created_by=created_by,
+    )
+    if version is None:
+        skipped = summary.setdefault("skipped", {})
+        skipped["facility_template_unresolved"] = int(skipped.get("facility_template_unresolved") or 0) + 1
+        return None
+    if active_before is None:
+        summary["active_versions_created"] = int(summary.get("active_versions_created") or 0) + 1
+    else:
+        summary["active_versions_reused"] = int(summary.get("active_versions_reused") or 0) + 1
+    cache[normalized_facility_id] = version
+    return version
+
+
+def backfill_facility_template_version_lineage(
+    session: Any,
+    *,
+    dry_run: bool = False,
+    actor: str = "facility-template-version-backfill",
+) -> dict[str, Any]:
+    """Stamp canonical facility-template lineage onto existing order artifacts.
+
+    This only fills missing ``template_version_id`` values. Existing non-null
+    lineage is never overwritten because a mismatch must be resolved explicitly.
+    """
+
+    summary: dict[str, Any] = {
+        "dry_run": bool(dry_run),
+        "active_versions_created": 0,
+        "active_versions_reused": 0,
+        "updated": {
+            "orders": 0,
+            "ocr_jobs": 0,
+            "order_ocr_evidence_runs": 0,
+            "order_sheet_drafts": 0,
+            "order_confirmed_snapshots": 0,
+            "order_workflow_states": 0,
+            "order_current_states": 0,
+        },
+        "skipped": {},
+    }
+    version_by_facility: dict[str, FacilityTemplateVersion] = {}
+
+    for facility in session.query(Facility).order_by(Facility.id).all():
+        _ensure_active_version_for_backfill(
+            session,
+            facility_id=facility.id,
+            cache=version_by_facility,
+            summary=summary,
+            created_by=actor,
+        )
+
+    for order in session.query(Order).order_by(Order.id).all():
+        facility_id = str(order.facility_code or "").strip()
+        if not facility_id:
+            skipped = summary.setdefault("skipped", {})
+            skipped["order_facility_missing"] = int(skipped.get("order_facility_missing") or 0) + 1
+            continue
+        version = _ensure_active_version_for_backfill(
+            session,
+            facility_id=facility_id,
+            cache=version_by_facility,
+            summary=summary,
+            created_by=actor,
+        )
+        if version is None:
+            skipped = summary.setdefault("skipped", {})
+            skipped["order_template_unresolved"] = int(skipped.get("order_template_unresolved") or 0) + 1
+            continue
+        updated = summary["updated"]
+        if _set_template_version_if_missing(order, version.id):
+            updated["orders"] += 1
+
+        workflow = session.get(OrderWorkflowState, order.id)
+        if workflow is not None and _stamp_workflow_template_lineage(
+            workflow,
+            facility_id=facility_id,
+            version=version,
+        ):
+            updated["order_workflow_states"] += 1
+
+        job_ids = [f"OCR-{order.id}"]
+        message_id = str(order.message_id or "").strip()
+        if message_id:
+            job_ids.append(f"OCR-{message_id}")
+        if workflow is not None:
+            meta_job_id = str(_workflow_meta_payload(workflow).get("ocr_job_id") or "").strip()
+            if meta_job_id and meta_job_id not in job_ids:
+                job_ids.append(meta_job_id)
+        for job_id in job_ids:
+            job = session.get(OcrJob, job_id)
+            if _set_template_version_if_missing(job, version.id):
+                updated["ocr_jobs"] += 1
+
+        for row in (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order.id, OrderOcrEvidenceRun.template_version_id.is_(None))
+            .all()
+        ):
+            row.template_version_id = version.id
+            updated["order_ocr_evidence_runs"] += 1
+        for row in (
+            session.query(OrderSheetDraft)
+            .filter(OrderSheetDraft.order_id == order.id, OrderSheetDraft.template_version_id.is_(None))
+            .all()
+        ):
+            row.template_version_id = version.id
+            updated["order_sheet_drafts"] += 1
+        for row in (
+            session.query(OrderConfirmedSnapshot)
+            .filter(OrderConfirmedSnapshot.order_id == order.id, OrderConfirmedSnapshot.template_version_id.is_(None))
+            .all()
+        ):
+            row.template_version_id = version.id
+            updated["order_confirmed_snapshots"] += 1
+        current_state = session.get(OrderCurrentState, order.id)
+        if current_state is not None and _set_template_version_if_missing(current_state, version.id):
+            state_payload = current_state.state_json if isinstance(current_state.state_json, dict) else {}
+            next_payload = dict(state_payload)
+            next_payload["template_version_id"] = version.id
+            current_state.state_json = next_payload
+            updated["order_current_states"] += 1
+
+    if dry_run:
+        session.rollback()
+    else:
+        session.flush()
+    return summary
 
 
 def _resolved_config_from_parts(

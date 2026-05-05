@@ -2722,28 +2722,8 @@ def set_week(order_id: str, body: dict):
 
 @router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("operator"))])
 def save_facility_template_columns(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("facility-template-columns")
-    columns = body.get("columns") if isinstance(body, dict) else None
-    result, error = order_service.save_order_facility_template_columns(order_id, columns)
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error == "facility_not_found":
-        raise HTTPException(status_code=404, detail="facility not found")
-    if error == "facility_missing":
-        raise HTTPException(status_code=400, detail="facility missing")
-    if error == "columns_invalid":
-        raise HTTPException(status_code=400, detail="columns invalid")
-    if error == "validation_error":
-        raise HTTPException(
-            status_code=400,
-            detail=(result or {}).get("validation", {}).get("errors") or ["facility template invalid"],
-        )
-    if error:
-        raise HTTPException(status_code=500, detail="facility template update failed")
-    if isinstance(result, dict) and isinstance(result.get("draft"), dict):
-        result = dict(result)
-        result["draft_payload"] = _flatten_draft_sheet_payload(order_id, result["draft"])
-    return result
 
 
 @router.put("/{order_id}/lines", dependencies=[Depends(require_role("operator"))])

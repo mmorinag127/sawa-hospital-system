@@ -185,6 +185,14 @@ tasks:
     cmds:
       - './.venv/bin/python -m pytest tests'
 
+  db_backfill_facility_template_versions:
+    desc: Backfill facility template version lineage for existing orders/artifacts. Pass DRY_RUN=1 to inspect only.
+    cmds:
+      - >-
+        backfill_args="";
+        if [ "${DRY_RUN:-0}" = "1" ]; then backfill_args="--dry-run"; fi;
+        backend/.venv/bin/python scripts/backfill_facility_template_version_lineage.py ${backfill_args}
+
   backend_test_regression_sheet:
     desc: Run OCR sheet regression tests (template validation + known order fixture).
     dir: backend

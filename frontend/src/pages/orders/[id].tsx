@@ -1131,38 +1131,6 @@ const swapFacilityTemplateColumns = (
 const removeFacilityTemplateColumn = (columns: FacilityTemplateColumn[], rowIndex: number) =>
   reindexFacilityTemplateColumns(columns.filter((_, idx) => idx !== rowIndex));
 
-const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) =>
-  columns.map((column, idx) => {
-    const role = String(column.role || "").trim().toLowerCase() || "quantity";
-    const header = String(column.header || "").trim();
-    const name = String(column.name || "").trim();
-    const payload: Record<string, unknown> = {
-      index: idx,
-      role,
-    };
-    if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) {
-      payload.source_index = Number(column.source_index);
-    }
-    if (header) payload.header = header;
-    if (name) payload.name = name;
-    if (role === "quantity") {
-      const explicitDietType = String(column.diet_type || "").trim();
-      const explicitAreaId = String(column.area_id || "").trim();
-      const dietType = explicitDietType
-        ? normalizeDietTypeToken(explicitDietType) || explicitDietType
-        : normalizeDietTypeToken(header || name) || "unknown";
-      const areaId = explicitAreaId
-        ? normalizeFacilityAreaToken(explicitAreaId)
-        : normalizeFacilityAreaToken(header || name);
-      payload.diet_type = dietType;
-      payload.area_id = areaId;
-      payload.diet_type_locked = true;
-      payload.area_id_locked = true;
-      payload.name_locked = true;
-    }
-    return payload;
-  });
-
 const columnRoleOptions = [
   { value: "date", label: "日付" },
   { value: "daypart", label: "区分" },
@@ -7591,44 +7559,11 @@ export default function OrderDetailPage() {
       return;
     }
     setFacilityTemplateSaving(true);
-    setFacilityTemplateMessage("施設テンプレートを保存中...");
+    setFacilityTemplateMessage("施設区分列の編集は workflow-v2 に移行しました。workflow-v2 へ移動します。");
     try {
-      const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
-      const res = await apiClient.put(`/orders/${order.id}/facility-template-columns`, { columns });
-      const resolvedConfig = res.data?.resolved_config || null;
-      const resolvedColumns = normalizeFacilityTemplateColumns(
-        resolvedConfig?.fax_template?.columns ?? columns,
-      );
-      const nextConfig = {
-        ...(facilityConfig || {}),
-        fax_template_override: {
-          ...((facilityConfig || {}).fax_template_override || {}),
-          columns,
-        },
-      };
-      delete nextConfig.fax_template_override.main_ocr_row_fields;
-      setFacilityConfig(nextConfig);
-      setFacilityTemplateColumns(resolvedColumns);
-      setFacilityTemplateColumnDraft(resolvedColumns);
-      const refreshedDraftPayload = res.data?.draft_payload || res.data?.draft || null;
-      if (refreshedDraftPayload) {
-        const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
-        applyNormalizedSheetEditorPayload(normalizedDraftPayload);
-        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
-      }
-      setFacilityTemplateMessage(
-        res.data?.draft_refreshed
-          ? "施設テンプレートに保存し、現在のシートにも反映しました。"
-          : "施設テンプレートに保存しました。シートを再読込して確認してください。",
-      );
-      if (order?.id && normalizeConcreteWeekValue(order.persisted_week_value || order.week_value || order.week || "")) {
-        await refreshOrderWorkspace({ reloadSheet: true, preserveSelections: true });
-      }
+      await router.push(`/orders/${order.id}/workflow-v2`);
     } catch (err: any) {
-      const status = err?.response?.status;
-      setFacilityTemplateMessage(
-        status === 403 ? "権限がありません。" : "施設テンプレートの保存に失敗しました。"
-      );
+      setFacilityTemplateMessage(err?.message || "workflow-v2 への移動に失敗しました。");
     } finally {
       setFacilityTemplateSaving(false);
     }

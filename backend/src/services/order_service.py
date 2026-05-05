@@ -11182,12 +11182,19 @@ def _persisted_current_state_is_reusable(
     latest_draft_id = str((latest_draft or {}).get("id") or "").strip()
     if not latest_draft_id or latest_draft_id != draft_id:
         return False
+    latest_draft_template_version_id = str((latest_draft or {}).get("template_version_id") or "").strip() or None
+    persisted_template_version_id = str(payload.get("template_version_id") or "").strip() or None
+    if latest_draft_template_version_id and latest_draft_template_version_id != persisted_template_version_id:
+        return False
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return False
         current_lines_updated_at = order.lines_updated_at
         current_facility_id = str(order.facility_code or "").strip() or None
+        current_order_template_version_id = str(order.template_version_id or "").strip() or None
+    if current_order_template_version_id and current_order_template_version_id != persisted_template_version_id:
+        return False
     persisted_order_payload = payload.get("order_payload")
     persisted_lines_updated_at = _parse_iso_datetime_value(
         (persisted_order_payload or {}).get("lines_updated_at")
@@ -11366,6 +11373,12 @@ def _build_current_sheet_context_uncached(
     blockers = _dedupe_str_tokens(current_record.get("blockers_json") or [])
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(current_record)
     facility_id = str((order_payload or {}).get("facility") or "").strip() or None
+    template_version_id = (
+        str(materialized_record.get("template_version_id") or "").strip()
+        or str(current_record.get("template_version_id") or "").strip()
+        or str((order_payload or {}).get("template_version_id") or "").strip()
+        or None
+    )
     resolved_week_id = _resolve_current_sheet_context_week_id(
         order_id=normalized_order_id,
         order_payload=order_payload,
@@ -11417,6 +11430,7 @@ def _build_current_sheet_context_uncached(
         "source_draft_record": current_record,
         "draft_payload": draft_payload,
         "draft_id": str(materialized_record.get("id") or "").strip() or None,
+        "template_version_id": template_version_id,
         "source": source,
         "fields": fields,
         "header": header,
@@ -34651,6 +34665,7 @@ def serialize_order(order: Order):
         "id": order.id,
         "ocr_job_id": f"OCR-{order.id}",
         "facility": order.facility_code,
+        "template_version_id": order.template_version_id,
         "week": week_month_id,
         "week_value": week_value,
         "week_label": week_label,
@@ -34677,6 +34692,7 @@ def serialize_order_summary(order: Order):
         "id": order.id,
         "ocr_job_id": f"OCR-{order.id}",
         "facility": order.facility_code,
+        "template_version_id": order.template_version_id,
         "week": week_month_id,
         "week_value": week_value,
         "week_label": week_label,
