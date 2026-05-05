@@ -91,6 +91,106 @@ def test_fac00010_uses_floor_2f3f_fax_template():
     assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
+def test_fac00009_uses_floor_2f3f_fax_template_from_master():
+    _clear_facilities()
+    facility_service.list_facilities()
+    config_service.reload_configs()
+    resolved = config_service.get_facility_config("FAC00009")
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "remarks",
+    ]
+
+
+def test_master_facility_template_wins_over_stale_db_config_without_operator_source():
+    _clear_facilities()
+    facility_service.list_facilities()
+    previous_config = facility_service.get_facility_config("FAC00016") or {}
+    stale_config = {
+        "fax_template_id": "fax_layout_regular_diabetes_v1",
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "糖尿", "diet_type": "diabetes", "area_id": "X"},
+                {"index": 5, "role": "note", "header": "備考欄"},
+            ],
+        },
+    }
+
+    try:
+        assert facility_service.update_config("FAC00016", stale_config)
+        resolved = config_service.get_facility_config("FAC00016")
+        assert resolved is not None
+        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.diabetes_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+            "remarks",
+        ]
+    finally:
+        assert facility_service.update_config("FAC00016", previous_config)
+
+
+def test_operator_facility_template_source_allows_explicit_override():
+    _clear_facilities()
+    facility_service.list_facilities()
+    previous_config = facility_service.get_facility_config("FAC00016") or {}
+    operator_config = {
+        "facility_template_source": "operator_override",
+        "fax_template_id": "fax_layout_regular_diabetes_v1",
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "糖尿", "diet_type": "diabetes", "area_id": "X"},
+                {"index": 5, "role": "note", "header": "備考欄"},
+            ],
+        },
+    }
+
+    try:
+        assert facility_service.update_config(
+            "FAC00016",
+            operator_config,
+            allow_authoritative_column_changes=True,
+        )
+        resolved = config_service.get_facility_config("FAC00016")
+        assert resolved is not None
+        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.diabetes_x",
+            "remarks",
+        ]
+    finally:
+        assert facility_service.update_config("FAC00016", previous_config)
+
+
 def test_hakodate_slots_use_template_fields_over_header_guessing():
     workbook = Workbook()
     worksheet = workbook.active
@@ -1237,7 +1337,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
 
     fac9 = config_service.get_facility_config("FAC00009")
     assert fac9 is not None
-    assert fac9.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
+    assert fac9.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
 
     resolved = config_service.get_facility_config("FAC00010")
     assert resolved is not None

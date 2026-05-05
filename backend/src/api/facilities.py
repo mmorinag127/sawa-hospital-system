@@ -94,6 +94,7 @@ def update_facility_fax_template(facility_id: str, body: FacilityFaxTemplateUpda
     next_config = dict(current_config)
     next_config["fax_template_id"] = primary_template_id
     next_config["fax_template_ids"] = template_ids
+    next_config["facility_template_source"] = "operator_override"
 
     validation = validate_facility_config(next_config)
     if validation["errors"]:

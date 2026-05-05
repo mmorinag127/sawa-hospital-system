@@ -765,6 +765,10 @@
     {
       "facility_name": "池袋病院内事業所 傑合同会社",
       "aliases": [
+        "傑合同会社（池袋病院）",
+        "傑合同会社(池袋病院)",
+        "傑合同会社",
+        "池袋病院",
         "池袋病院内事業所　傑合同会社イケブクロビョウインナイジギョウショケツゴウドウガイシャ"
       ],
       "address": "東京都豊島区東池袋３丁目５-４",
@@ -1390,12 +1394,15 @@
     },
     {
       "facility_name": "グループホームそよかぜ",
-      "aliases": [],
+      "aliases": [
+        "グループホームそよかぜ",
+        "そよかぜ"
+      ],
       "address": "徳島県鳴門市瀬戸町明神鳴谷１２１番地",
       "phone": "0886-837-888",
       "areas": [],
       "facility_id": "FAC00009",
-      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+      "fax_template_id": "fax_layout_floor_2f3f_v1",
       "invoice_template": {
         "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",

@@ -34614,6 +34614,7 @@ def save_order_facility_template_columns(
     override["columns"] = normalized_columns
     override["columns_authoritative"] = True
     next_config["fax_template_override"] = override
+    next_config["facility_template_source"] = "operator_override"
 
     validation = validate_facility_config(next_config)
     if validation["errors"]:
