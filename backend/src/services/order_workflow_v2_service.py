@@ -990,12 +990,29 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         }, None
 
 
-def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+def _clear_downstream_references_before_delete(
+    session: Any,
+    order_id: str,
+    *,
+    clear_evidence: bool,
+) -> None:
+    workflow = session.get(OrderWorkflowState, order_id)
+    if workflow is not None:
+        if clear_evidence:
+            workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
     current_state = session.get(OrderCurrentState, order_id)
     if current_state is not None:
         current_state.draft_id = None
-        current_state.evidence_run_id = None
-        current_state.template_version_id = None
+        if clear_evidence:
+            current_state.evidence_run_id = None
+            current_state.template_version_id = None
+    session.flush()
+
+
+def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+    _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
@@ -1287,7 +1304,9 @@ def save_sheet(
 
 
 def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
+    _clear_downstream_references_before_delete(session, order_id, clear_evidence=False)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 

@@ -919,6 +919,50 @@ def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypa
         assert session.get(FacilityTemplateVersion, result["workflow"]["template_version_id"]) is not None
 
 
+def test_facility_template_columns_save_on_confirmed_order_clears_snapshot_reference(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00016",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00016",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    order_workflow_v2_service.run_bagging(order_id)
+    order_workflow_v2_service.confirm_bagging(order_id)
+    order_workflow_v2_service.prepare_output_review(order_id)
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert error is None
+    snapshot_id = confirmed["confirmed_snapshot_id"]
+
+    columns = [
+        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+        {"index": 1, "role": "daypart", "header": "区分"},
+        {"index": 2, "role": "menu_name", "header": "メニュー"},
+        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+        {"index": 4, "role": "quantity", "header": "不明(-)", "diet_type": "placeholder", "area_id": "X"},
+        {"index": 5, "role": "note", "header": "備考欄"},
+    ]
+
+    result, error = order_workflow_v2_service.save_facility_template_columns(order_id, columns)
+
+    assert error is None
+    assert result["workflow"]["state"] == "context_confirmed"
+    assert result["workflow"]["confirmed_snapshot_id"] is None
+    assert result["workflow"]["selected_ocr_result_id"] is None
+    with session_scope() as session:
+        assert session.get(OrderWorkflowState, order_id).confirmed_snapshot_id is None
+        assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
+
+
 def test_selecting_ocr_result_blocks_template_version_mismatch() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     workflow, error = order_workflow_v2_service.confirm_context(
