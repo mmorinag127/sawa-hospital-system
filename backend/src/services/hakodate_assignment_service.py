@@ -1162,63 +1162,160 @@ def _template_slot_label(column: dict[str, Any], field: str) -> str:
     return field or role or "unknown"
 
 
+def _canonical_slot_from_template_column(
+    column: dict[str, Any],
+    *,
+    fallback_index: int,
+) -> dict[str, Any] | None:
+    field = canonical_field_name_from_template_column(column, fallback_index=fallback_index)
+    role = str(column.get("role") or "").strip().lower()
+    if not field:
+        return None
+    if role == "note":
+        slot_role = "note"
+        slot_name = "note"
+    elif field == "date_mmdd":
+        slot_role = "date"
+        slot_name = "date"
+    elif field == "daypart":
+        slot_role = "daypart"
+        slot_name = "daypart"
+    elif field == "menu":
+        slot_role = "menu_name"
+        slot_name = "menu_name"
+    elif field.startswith("qty."):
+        slot_role = "quantity"
+        slot_name = field
+    else:
+        slot_role = role or "unknown"
+        slot_name = field
+    source_index = column.get("source_index")
+    try:
+        explicit_source_index = int(source_index) if source_index is not None else None
+    except Exception:
+        explicit_source_index = None
+    return {
+        "role": slot_role,
+        "slot_name": slot_name,
+        "label": _template_slot_label(column, field),
+        "canonical_field": field,
+        "canonical_source": "facility_fax_template",
+        "logical_index": fallback_index,
+        "explicit_source_index": explicit_source_index,
+    }
+
+
+def _canonical_slot_specs_from_template(
+    template: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(template, dict):
+        return []
+    raw_columns = template.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        raw_columns = template.get("grid_columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        return []
+
+    ordered = sorted(
+        [column for column in raw_columns if isinstance(column, dict)],
+        key=lambda column: int(column.get("index") or 0),
+    )
+    specs: list[dict[str, Any]] = []
+    for fallback_index, column in enumerate(ordered):
+        spec = _canonical_slot_from_template_column(column, fallback_index=fallback_index)
+        if not spec:
+            continue
+        specs.append(spec)
+    return specs
+
+
 def _canonical_column_slots_from_template(
     template: dict[str, Any] | None,
     *,
     col_count: int,
 ) -> dict[int, dict[str, Any]]:
-    if not isinstance(template, dict):
-        return {}
-    raw_columns = template.get("columns")
-    if not isinstance(raw_columns, list) or not raw_columns:
-        raw_columns = template.get("grid_columns")
-    if not isinstance(raw_columns, list) or not raw_columns:
-        return {}
-
     slots: dict[int, dict[str, Any]] = {}
-    ordered = sorted(
-        [column for column in raw_columns if isinstance(column, dict)],
-        key=lambda column: int(column.get("index") or 0),
-    )
-    for fallback_index, column in enumerate(ordered):
-        field = canonical_field_name_from_template_column(column, fallback_index=fallback_index)
-        role = str(column.get("role") or "").strip().lower()
-        if not field:
-            continue
-        if role == "note":
-            slot_role = "note"
-            slot_name = "note"
-        elif field == "date_mmdd":
-            slot_role = "date"
-            slot_name = "date"
-        elif field == "daypart":
-            slot_role = "daypart"
-            slot_name = "daypart"
-        elif field == "menu":
-            slot_role = "menu_name"
-            slot_name = "menu_name"
-        elif field.startswith("qty."):
-            slot_role = "quantity"
-            slot_name = field
-        else:
-            slot_role = role or "unknown"
-            slot_name = field
-        source_index = column.get("source_index")
+    for spec in _canonical_slot_specs_from_template(template):
+        source_index = spec.get("explicit_source_index")
         if source_index is None:
-            source_index = column.get("index")
+            continue
         try:
             worksheet_col = int(source_index) + 1
         except Exception:
-            worksheet_col = fallback_index + 1
+            continue
         if worksheet_col <= 0 or worksheet_col > col_count:
             continue
         slots[worksheet_col] = {
-            "role": slot_role,
-            "slot_name": slot_name,
-            "label": _template_slot_label(column, field),
-            "canonical_field": field,
+            "role": spec["role"],
+            "slot_name": spec["slot_name"],
+            "label": spec["label"],
+            "canonical_field": spec["canonical_field"],
             "canonical_source": "facility_fax_template",
         }
+    return slots
+
+
+def _canonical_slot_match_score(slot: dict[str, Any], spec: dict[str, Any]) -> int:
+    slot_role = str(slot.get("role") or "").strip()
+    slot_name = str(slot.get("slot_name") or "").strip()
+    slot_label = _normalize_slot_text(slot.get("label") or "")
+    spec_role = str(spec.get("role") or "").strip()
+    spec_name = str(spec.get("slot_name") or "").strip()
+    spec_label = _normalize_slot_text(spec.get("label") or "")
+    if not spec_name:
+        return 0
+    if slot_name == spec_name:
+        return 100
+    if spec_name == "qty.placeholder_x" and slot_role == "spacer":
+        return 95
+    if spec_role == "note" and slot_role == "note":
+        return 90
+    if spec_role in {"date", "daypart", "menu_name"} and slot_role == spec_role:
+        return 90
+    if spec_role == slot_role and spec_label and slot_label == spec_label:
+        return 80
+    return 0
+
+
+def _apply_implicit_canonical_slots(
+    slots: list[dict[str, Any]],
+    specs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not specs:
+        return slots
+    assigned_cols = {
+        int(slot.get("worksheet_col_index") or 0)
+        for slot in slots
+        if str(slot.get("canonical_source") or "").strip() == "facility_fax_template"
+    }
+    for spec in specs:
+        if spec.get("explicit_source_index") is not None:
+            continue
+        matches: list[tuple[int, int, dict[str, Any]]] = []
+        for slot in slots:
+            worksheet_col = int(slot.get("worksheet_col_index") or 0)
+            if worksheet_col <= 0 or worksheet_col in assigned_cols:
+                continue
+            score = _canonical_slot_match_score(slot, spec)
+            if score > 0:
+                matches.append((score, worksheet_col, slot))
+        if not matches:
+            continue
+        if str(spec.get("role") or "").strip() == "note":
+            selected = sorted(matches, key=lambda item: item[1])
+        else:
+            selected = [max(matches, key=lambda item: (item[0], -item[1]))]
+        for _score, worksheet_col, slot in selected:
+            slot.update(
+                {
+                    "role": spec["role"],
+                    "slot_name": spec["slot_name"],
+                    "label": spec["label"],
+                    "canonical_field": spec["canonical_field"],
+                    "canonical_source": "facility_fax_template",
+                }
+            )
+            assigned_cols.add(worksheet_col)
     return slots
 
 
@@ -1230,6 +1327,7 @@ def _column_slots_from_worksheet(
 ) -> list[dict[str, Any]]:
     merged_values = _merged_value_map(worksheet)
     canonical_slots = _canonical_column_slots_from_template(template, col_count=col_count)
+    canonical_specs = _canonical_slot_specs_from_template(template)
     slots: list[dict[str, Any]] = []
     for raw_col_index in range(col_count):
         worksheet_col = raw_col_index + 1
@@ -1300,7 +1398,7 @@ def _column_slots_from_worksheet(
         if canonical:
             slot.update(canonical)
         slots.append(slot)
-    return slots
+    return _apply_implicit_canonical_slots(slots, canonical_specs)
 
 
 def _workbook_physical_row_map(worksheet: Any, *, row_count: int, header_rows: int = 2) -> dict[int, dict[str, Any]]:

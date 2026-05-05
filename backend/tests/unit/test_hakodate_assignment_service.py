@@ -570,6 +570,51 @@ def test_column_slots_detect_diabetes_quantity_from_template_header() -> None:
     assert slots[5]["slot_name"] == "qty.diabetes_x"
 
 
+def test_column_slots_do_not_treat_logical_template_index_as_physical_column() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.cell(row=7, column=1, value="日付")
+    worksheet.cell(row=7, column=2, value="区分")
+    worksheet.cell(row=7, column=3, value="区分")
+    worksheet.cell(row=7, column=4, value="献立")
+    worksheet.cell(row=7, column=5, value="常食")
+    worksheet.cell(row=7, column=7, value="肉禁")
+    worksheet.cell(row=7, column=8, value="魚禁")
+    worksheet.cell(row=7, column=9, value="変更1")
+    worksheet.cell(row=7, column=10, value="変更2")
+    worksheet.cell(row=7, column=11, value="備考欄")
+    worksheet.cell(row=7, column=12, value="備考欄")
+    template = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "header": "メニュー", "name": "menu"},
+            {"index": 3, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+            {"index": 4, "role": "quantity", "header": "-", "name": "qty.placeholder_x"},
+            {"index": 5, "role": "quantity", "header": "肉禁", "name": "qty.no_meat_x"},
+            {"index": 6, "role": "quantity", "header": "魚禁", "name": "qty.no_fish_x"},
+            {"index": 7, "role": "quantity", "header": "変更1", "name": "qty.change_1_x"},
+            {"index": 8, "role": "quantity", "header": "変更2", "name": "qty.change_2_x"},
+            {"index": 9, "role": "note", "header": "備考", "name": "remarks"},
+        ],
+    }
+
+    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
+        worksheet,
+        col_count=12,
+        template=template,
+    )
+    by_col = {slot["worksheet_col_index"]: slot for slot in slots}
+
+    assert by_col[4]["slot_name"] == "menu_name"
+    assert by_col[5]["slot_name"] == "qty.regular_x"
+    assert by_col[6]["slot_name"] == "qty.placeholder_x"
+    assert by_col[7]["slot_name"] == "qty.no_meat_x"
+    assert by_col[8]["slot_name"] == "qty.no_fish_x"
+    assert by_col[11]["slot_name"] == "note"
+    assert by_col[12]["slot_name"] == "note"
+
+
 def test_structure_slot_assignment_blocks_when_detected_table_box_is_invalid(monkeypatch) -> None:
     skeleton_rows = [{"row_id": "row-a", "date": "2026-04-26", "daypart": "朝", "menu_name": "献立A"}]
     structure_grid = {
