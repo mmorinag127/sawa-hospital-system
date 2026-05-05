@@ -10,6 +10,7 @@ class OrderSheetDraft(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     base_evidence_run_id = Column(String, ForeignKey("order_ocr_evidence_runs.id"), nullable=True)
     base_template_resolution_id = Column(String, nullable=True)
     base_menu_snapshot_id = Column(String, nullable=True)

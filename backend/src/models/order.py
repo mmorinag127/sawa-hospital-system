@@ -20,6 +20,7 @@ class Order(Base):
     lines_updated_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, nullable=True)
     archived_by = Column(String, nullable=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
 
     lines = relationship("OrderLine", back_populates="order", cascade="all, delete-orphan")
 

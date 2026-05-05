@@ -14,7 +14,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
-from src.services import config_service, sheet_week_service
+from src.services import config_service, facility_template_version_service, sheet_week_service
 
 
 Base.metadata.create_all(bind=engine)
@@ -415,6 +415,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     return {
         "ocr_job_id": job.id,
         "status": job.status,
+        "template_version_id": job.template_version_id,
         "created_at": _serialize_datetime(job.created_at),
         "updated_at": _serialize_datetime(job.updated_at),
         "started_at": _serialize_datetime(started_at),
@@ -444,9 +445,32 @@ def _effective_workflow_template_id(meta: dict[str, Any]) -> str | None:
     return _normalize_id(facility_config.get("fax_template_id")) or None
 
 
+def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[str, Any]) -> str | None:
+    return _normalize_id(row.template_version_id) or _normalize_id(meta.get("template_version_id")) or None
+
+
+def _resolve_evidence_template_version(
+    evidence: OrderOcrEvidenceRun,
+    workflow: OrderWorkflowState,
+    meta: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
+    evidence_template_version_id = _normalize_id(evidence.template_version_id)
+    if workflow_template_version_id and not evidence_template_version_id:
+        return None, "template_version_mismatch"
+    if workflow_template_version_id and evidence_template_version_id != workflow_template_version_id:
+        return None, "template_version_mismatch"
+    if evidence_template_version_id and not workflow_template_version_id:
+        workflow.template_version_id = evidence_template_version_id
+        meta["template_version_id"] = evidence_template_version_id
+        workflow_template_version_id = evidence_template_version_id
+    return evidence_template_version_id or workflow_template_version_id or None, None
+
+
 def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = None) -> dict[str, Any]:
     meta = _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
+    template_version_id = _effective_workflow_template_version_id(row, meta)
     return {
         "order_id": row.order_id,
         "state": row.state,
@@ -459,6 +483,7 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
         "week_start": meta.get("week_start"),
         "week_end": meta.get("week_end"),
         "template_id": effective_template_id,
+        "template_version_id": template_version_id,
         "template_source": meta.get("template_source") or ("facility_resolved_template" if effective_template_id else None),
         "expanded_cell_copy_mode": _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode")),
         "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
@@ -589,6 +614,7 @@ def confirm_context(
             row.state = "facility_template_unresolved"
             row.headline = "施設テンプレートが未登録です"
             row.primary_action = "register_facility_template"
+            row.template_version_id = None
             row.evidence_run_id = None
             row.draft_id = None
             row.confirmed_snapshot_id = None
@@ -603,6 +629,41 @@ def confirm_context(
                     "week_end": normalized_week_end,
                     "week_code": normalized_week_code,
                     "template_id": None,
+                    "template_version_id": None,
+                    "template_source": None,
+                    "expanded_cell_copy_mode": expanded_cell_copy_mode,
+                    "bagging_result_id": None,
+                    "output_bundle_id": None,
+                },
+            )
+            return None, "facility_template_unresolved"
+
+        template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=normalized_facility_id,
+            facility_config=facility_config,
+            created_by="workflow-v2-context-confirm",
+        )
+        if template_version is None:
+            row.state = "facility_template_unresolved"
+            row.headline = "施設テンプレートが未登録です"
+            row.primary_action = "register_facility_template"
+            row.template_version_id = None
+            row.evidence_run_id = None
+            row.draft_id = None
+            row.confirmed_snapshot_id = None
+            row.blockers_json = ["facility_template_unresolved"]
+            row.warnings_json = []
+            row.last_transition_at = _now()
+            _write_workflow_meta(
+                row,
+                {
+                    "facility_id": normalized_facility_id,
+                    "week_start": normalized_week_start,
+                    "week_end": normalized_week_end,
+                    "week_code": normalized_week_code,
+                    "template_id": normalized_template_id or None,
+                    "template_version_id": None,
                     "template_source": None,
                     "expanded_cell_copy_mode": expanded_cell_copy_mode,
                     "bagging_result_id": None,
@@ -614,9 +675,11 @@ def confirm_context(
         row.state = "context_confirmed"
         row.headline = "施設・週次・テンプレートが確定しました"
         row.primary_action = "run_ocr"
+        row.template_version_id = template_version.id
         row.evidence_run_id = None
         row.draft_id = None
         row.confirmed_snapshot_id = None
+        order.template_version_id = template_version.id
         row.blockers_json = []
         row.warnings_json = []
         row.last_transition_at = _now()
@@ -628,6 +691,8 @@ def confirm_context(
                 "week_end": normalized_week_end,
                 "week_code": normalized_week_code,
                 "template_id": normalized_template_id or None,
+                "template_version_id": template_version.id,
+                "template_version_digest": template_version.template_digest,
                 "template_source": "registered_template_id" if normalized_template_id else "facility_resolved_template",
                 "expanded_cell_copy_mode": expanded_cell_copy_mode,
                 "bagging_result_id": None,
@@ -652,6 +717,27 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
             return None, "facility_template_unresolved"
+        facility_id = _normalize_id(meta.get("facility_id"))
+        template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=facility_id,
+            facility_config=config_service.get_facility_config(facility_id) if facility_id else None,
+            created_by="workflow-v2-ocr-run",
+        )
+        if template_version is None:
+            workflow.state = "facility_template_unresolved"
+            workflow.headline = "施設テンプレートが未登録です"
+            workflow.primary_action = "register_facility_template"
+            workflow.template_version_id = None
+            workflow.evidence_run_id = None
+            workflow.draft_id = None
+            workflow.confirmed_snapshot_id = None
+            workflow.blockers_json = ["facility_template_unresolved"]
+            workflow.warnings_json = []
+            workflow.last_transition_at = _now()
+            meta["template_version_id"] = None
+            _write_workflow_meta(workflow, meta)
+            return _serialize_workflow(workflow), "facility_template_unresolved"
         _refresh_ocr_prerequisite_state(session, order, workflow)
         blockers = [
             _normalize_id(item)
@@ -667,6 +753,8 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
+        workflow.template_version_id = template_version.id
+        order.template_version_id = template_version.id
         session.flush()
         _delete_downstream_after_ocr_change(session, order.id)
         workflow.state = "ocr_running"
@@ -676,10 +764,14 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         meta["ocr_job_id"] = normalized_job_id
+        meta["template_version_id"] = template_version.id
+        meta["template_version_digest"] = template_version.template_digest
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
         ocr_job = session.get(OcrJob, normalized_job_id)
+        if ocr_job is not None:
+            ocr_job.template_version_id = template_version.id
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -721,6 +813,7 @@ def mark_ocr_run_completed(
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
+        workflow.template_version_id = _normalize_id(meta.get("template_version_id")) or workflow.template_version_id
         workflow.last_transition_at = _now()
         meta["ocr_job_id"] = normalized_job_id
         meta["latest_ocr_result_id"] = normalized_evidence_run_id or None
@@ -729,6 +822,13 @@ def mark_ocr_run_completed(
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
         ocr_job = session.get(OcrJob, normalized_job_id)
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
+        if ocr_job is not None and workflow_template_version_id:
+            ocr_job.template_version_id = workflow_template_version_id
+        if normalized_evidence_run_id and workflow_template_version_id:
+            evidence = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
+            if evidence is not None and evidence.order_id == order.id and not _normalize_id(evidence.template_version_id):
+                evidence.template_version_id = workflow_template_version_id
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -745,6 +845,7 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
     return {
         "ocr_result_id": row.id,
         "order_id": row.order_id,
+        "template_version_id": row.template_version_id,
         "schema_version": row.schema_version,
         "producer_version": row.producer_version,
         "source": row.source,
@@ -858,13 +959,20 @@ def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
     if current_state is not None:
         current_state.draft_id = None
         current_state.evidence_run_id = None
+        current_state.template_version_id = None
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
 def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
+    workflow = session.get(OrderWorkflowState, order_id)
+    if workflow is not None:
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
     _delete_downstream_after_ocr_change(session, order_id)
+    session.flush()
     deleted = (
         session.query(OrderOcrEvidenceRun)
         .filter(OrderOcrEvidenceRun.order_id == order_id)
@@ -930,11 +1038,22 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
         if context_error:
             return None, context_error
+        meta = _workflow_meta(workflow)
+        evidence_template_version_id, template_error = _resolve_evidence_template_version(ocr_result, workflow, meta)
+        if template_error:
+            workflow.state = "template_version_mismatch"
+            workflow.headline = "施設テンプレートが変更されています。OCRを再実行してください"
+            workflow.primary_action = "run_ocr"
+            workflow.blockers_json = ["template_version_mismatch"]
+            workflow.warnings_json = []
+            workflow.last_transition_at = _now()
+            return _serialize_workflow(workflow), "template_version_mismatch"
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
             session.flush()
             _delete_downstream_after_ocr_change(session, order.id)
+        workflow.template_version_id = evidence_template_version_id or None
         workflow.evidence_run_id = normalized_ocr_result_id
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -945,6 +1064,7 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         meta = _workflow_meta(workflow)
+        meta["template_version_id"] = _normalize_id(workflow.template_version_id) or None
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
@@ -994,23 +1114,33 @@ def save_facility_template_columns(
     order_id: str,
     columns: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    order_service_module = _get_order_service_module()
-    result, error = order_service_module.save_order_facility_template_columns(order_id, columns)
-    if error:
-        return result, error
-
     with session_scope() as session:
         order, order_error = _get_order_or_error(session, order_id)
         if order_error:
             return None, order_error
+        result, error = facility_template_version_service.save_columns_for_order(
+            session,
+            order=order,
+            columns=columns,
+            actor="workflow-v2-facility-template-columns",
+        )
+        if error:
+            return result, error
         workflow = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(workflow)
+        template_version = result.get("template_version") if isinstance(result, dict) else None
+        template_version_id = _normalize_id((template_version or {}).get("id"))
+        template_version_digest = _normalize_id((template_version or {}).get("template_digest"))
         deleted_ocr_results = _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+        workflow.template_version_id = template_version_id or None
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
+        order.template_version_id = template_version_id or None
         meta["latest_ocr_result_id"] = None
         meta["latest_ocr_error"] = None
+        meta["template_version_id"] = template_version_id or None
+        meta["template_version_digest"] = template_version_digest or None
         meta["bagging_result_id"] = None
         meta["bagging_result"] = None
         meta["output_bundle_id"] = None
@@ -1036,6 +1166,7 @@ def save_facility_template_columns(
             "workflow": _serialize_workflow(workflow),
             "resolved_config": resolved_config,
             "validation": validation,
+            "template_version": template_version,
             "ocr_results_cleared": deleted_ocr_results,
         }, None
 
@@ -1059,9 +1190,13 @@ def save_sheet(
         evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
         if evidence is None or evidence.order_id != order.id:
             return None, "selected_ocr_missing"
-        context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
+        workflow_meta = _workflow_meta(workflow)
+        context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
             return None, context_error
+        evidence_template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, workflow_meta)
+        if template_error:
+            return None, template_error
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
         session.flush()
@@ -1069,8 +1204,9 @@ def save_sheet(
         draft = OrderSheetDraft(
             id=_new_id("ODS"),
             order_id=order.id,
+            template_version_id=evidence_template_version_id or workflow_template_version_id or None,
             base_evidence_run_id=evidence.id,
-            base_template_resolution_id=_workflow_meta(workflow).get("template_id"),
+            base_template_resolution_id=workflow_meta.get("template_id"),
             base_menu_snapshot_id=None,
             draft_sheet_json=dict(sheet),
             draft_state="saved",
@@ -1083,6 +1219,7 @@ def save_sheet(
         )
         session.add(draft)
         workflow.draft_id = draft.id
+        workflow.template_version_id = draft.template_version_id
         workflow.confirmed_snapshot_id = None
         workflow.state = "sheet_saved"
         workflow.headline = "シートが保存されました"
@@ -1091,6 +1228,7 @@ def save_sheet(
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         meta = _workflow_meta(workflow)
+        meta["template_version_id"] = draft.template_version_id
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
@@ -1109,6 +1247,7 @@ def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
     return {
         "saved_sheet_id": row.id,
         "order_id": row.order_id,
+        "template_version_id": row.template_version_id,
         "source_ocr_result_id": row.base_evidence_run_id,
         "sheet": row.draft_sheet_json if isinstance(row.draft_sheet_json, dict) else {},
         "state": row.draft_state,
@@ -1348,6 +1487,7 @@ def _build_bagging_result_payload(
         "order_id": order.id,
         "source_saved_sheet_id": saved_sheet.id,
         "source_ocr_result_id": saved_sheet.base_evidence_run_id,
+        "template_version_id": saved_sheet.template_version_id,
         "status": "ready",
         "materialization_candidate": materialization_candidate,
         "summary": {
@@ -1367,6 +1507,7 @@ def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]
         "output_bundle_id": _new_id("OOB"),
         "order_id": order.id,
         "source_bagging_result_id": bagging_result.get("bagging_result_id"),
+        "template_version_id": bagging_result.get("template_version_id"),
         "status": "review_ready",
         "artifacts": [],
         "created_at": _now().isoformat(),
@@ -1390,6 +1531,10 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        draft_template_version_id = _normalize_id(draft.template_version_id)
+        if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
         return _serialize_saved_sheet(draft), None
 
 
@@ -1409,6 +1554,9 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
             return None, context_error
+        template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, meta)
+        if template_error:
+            return None, template_error
         facility_id = _normalize_id(meta.get("facility_id"))
         template_id = _normalize_id(meta.get("template_id"))
         selected_ocr_result_id = evidence.id
@@ -1448,6 +1596,7 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     )
     projected["source"] = "workflow_v2_selected_ocr_projection"
     projected["base_evidence_run_id"] = selected_ocr_result_id
+    projected["template_version_id"] = template_version_id or None
     projected["selected_ocr_result_id"] = selected_ocr_result_id
     projected["template_id"] = template_id or projected.get("template_id")
     projected["expanded_cell_copy_mode"] = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
@@ -1480,6 +1629,10 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        draft_template_version_id = _normalize_id(draft.template_version_id)
+        if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
         materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
         if not isinstance(materialization_candidate, dict):
             return None, "saved_sheet_materialization_failed"
@@ -1518,6 +1671,10 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
+        if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
@@ -1545,6 +1702,10 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
+        if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
@@ -1579,6 +1740,16 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
+        draft_template_version_id = _normalize_id(draft.template_version_id)
+        if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
+        bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id")) if isinstance(bagging_result, dict) else None
+        output_template_version_id = _normalize_id(output_bundle.get("template_version_id")) if isinstance(output_bundle, dict) else None
+        if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
+        if workflow_template_version_id and output_template_version_id != workflow_template_version_id:
+            return None, "template_version_mismatch"
         materialization_candidate = (
             bagging_result.get("materialization_candidate")
             if isinstance(bagging_result.get("materialization_candidate"), dict)
@@ -1606,6 +1777,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         snapshot_json = {
             "source": "workflow_v2",
             "order_id": order.id,
+            "template_version_id": draft_template_version_id or workflow_template_version_id or None,
             "selected_ocr_result_id": workflow.evidence_run_id,
             "saved_sheet_id": draft.id,
             "saved_sheet": draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
@@ -1619,6 +1791,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         snapshot = OrderConfirmedSnapshot(
             id=_new_id("OCS"),
             order_id=order.id,
+            template_version_id=draft_template_version_id or workflow_template_version_id or None,
             draft_id=draft.id,
             snapshot_digest=digest,
             snapshot_json=snapshot_json,

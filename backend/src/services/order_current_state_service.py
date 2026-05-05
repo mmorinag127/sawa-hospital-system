@@ -60,6 +60,7 @@ def _hydrate_current_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _serialize(row: OrderCurrentState) -> dict[str, Any]:
     return {
         "order_id": row.order_id,
+        "template_version_id": row.template_version_id,
         "draft_id": row.draft_id,
         "evidence_run_id": row.evidence_run_id,
         "snapshot_version": str(row.snapshot_version or "").strip() or _CURRENT_STATE_SNAPSHOT_VERSION,
@@ -95,6 +96,7 @@ def persist_current_state(
     state_json: dict[str, Any],
     draft_id: str | None = None,
     evidence_run_id: str | None = None,
+    template_version_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id or not isinstance(state_json, dict):
@@ -104,6 +106,7 @@ def persist_current_state(
     with session_scope() as session:
         values = {
             "order_id": normalized_order_id,
+            "template_version_id": str(template_version_id or "").strip() or None,
             "draft_id": str(draft_id or "").strip() or None,
             "evidence_run_id": str(evidence_run_id or "").strip() or None,
             "snapshot_version": _CURRENT_STATE_SNAPSHOT_VERSION,
@@ -117,6 +120,7 @@ def persist_current_state(
                 index_elements=[OrderCurrentState.order_id],
                 set_={
                     "draft_id": values["draft_id"],
+                    "template_version_id": values["template_version_id"],
                     "evidence_run_id": values["evidence_run_id"],
                     "snapshot_version": values["snapshot_version"],
                     "state_json": values["state_json"],
@@ -132,6 +136,7 @@ def persist_current_state(
                 session.add(row)
             else:
                 row.draft_id = values["draft_id"]
+                row.template_version_id = values["template_version_id"]
                 row.evidence_run_id = values["evidence_run_id"]
                 row.snapshot_version = values["snapshot_version"]
                 row.state_json = values["state_json"]

@@ -59,6 +59,18 @@ def test_facility_scoped_fax_template_registration_contract():
     assert update_payload["config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
     assert update_payload["config"]["fax_template_ids"] == ["fax_layout_regular_forbidden_v1"]
     assert update_payload["resolved_config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
+    assert update_payload["template_version"]["id"]
+    assert update_payload["resolved_config"]["facility_template_version_id"] == update_payload["template_version"]["id"]
+
+    direct_template_update = client.put(
+        f"/facilities/{facility_id}/config",
+        json={"fax_template_id": "fax_layout_regular_forbidden_v1", "fax_template_override": {"columns": []}},
+    )
+    assert direct_template_update.status_code == 400
+    assert (
+        direct_template_update.json()["detail"]["error"]
+        == "facility_template_definition_update_requires_versioned_template_endpoint"
+    )
 
     fetched = client.get(f"/facilities/{facility_id}")
     assert fetched.status_code == 200

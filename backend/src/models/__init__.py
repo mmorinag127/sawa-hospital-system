@@ -1,6 +1,7 @@
 from src.db import Base  # noqa: F401
 from src.models.order import Order, OrderLine, OrderMenuSnapshot  # noqa: F401
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: F401
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: F401
 from src.models.menu import (  # noqa: F401
     WeeklyMenu,
     MenuItem,

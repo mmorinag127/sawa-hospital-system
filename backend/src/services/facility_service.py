@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 import threading
 from uuid import uuid4
 from loguru import logger
@@ -34,6 +35,20 @@ _SYNC_LOCK = threading.Lock()
 _SYNC_DONE = False
 _SYNC_LAST_ERROR_AT: datetime | None = None
 _SYNC_RETRY_WINDOW = timedelta(seconds=60)
+_TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
+
+
+def _stable_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _contains_template_definition_change(current_config: dict, next_config: dict) -> bool:
+    for key in _TEMPLATE_DEFINITION_KEYS:
+        if key not in next_config:
+            continue
+        if _stable_json(next_config.get(key)) != _stable_json(current_config.get(key)):
+            return True
+    return False
 
 
 def _ensure_facility_sync(session) -> None:
@@ -183,6 +198,12 @@ def update_config(
         if not fac:
             return False
         current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
+        if _contains_template_definition_change(current_config, config):
+            logger.warning(
+                "Blocked direct facility template definition update outside versioned template path",
+                fac=facility_id,
+            )
+            return False
         sanitized_config = config_service.sanitize_facility_config_for_storage(
             facility_id,
             config,

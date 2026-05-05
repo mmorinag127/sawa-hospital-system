@@ -35,6 +35,7 @@ def _serialize_draft(draft: OrderSheetDraft) -> dict[str, Any]:
     return {
         "id": draft.id,
         "order_id": draft.order_id,
+        "template_version_id": draft.template_version_id,
         "base_evidence_run_id": draft.base_evidence_run_id,
         "base_template_resolution_id": draft.base_template_resolution_id,
         "base_menu_snapshot_id": draft.base_menu_snapshot_id,
@@ -163,6 +164,7 @@ def persist_sheet_draft(
     order_id: str,
     draft_sheet_json: dict[str, Any],
     base_evidence_run_id: str | None = None,
+    template_version_id: str | None = None,
     base_template_resolution_id: str | None = None,
     base_menu_snapshot_id: str | None = None,
     draft_state: str = "draft_ready",
@@ -179,6 +181,7 @@ def persist_sheet_draft(
         draft = OrderSheetDraft(
             id=f"ODR{uuid4().hex[:12]}",
             order_id=normalized_order_id,
+            template_version_id=str(template_version_id or "").strip() or None,
             base_evidence_run_id=str(base_evidence_run_id or "").strip() or None,
             base_template_resolution_id=str(base_template_resolution_id or "").strip() or None,
             base_menu_snapshot_id=str(base_menu_snapshot_id or "").strip() or None,

@@ -8472,6 +8472,7 @@ def persist_sheet_draft(
         order_id=order_id,
         draft_sheet_json=draft_sheet_json,
         base_evidence_run_id=(latest_evidence or {}).get("id") if isinstance(latest_evidence, dict) else None,
+        template_version_id=(latest_evidence or {}).get("template_version_id") if isinstance(latest_evidence, dict) else None,
         base_template_resolution_id=template_resolution_id,
         draft_state=draft_state,
         blockers=blockers,
@@ -11483,6 +11484,7 @@ def refresh_current_sheet_context(
                 state_json=context,
                 draft_id=str(context.get("draft_id") or "").strip() or None,
                 evidence_run_id=str(context.get("base_evidence_run_id") or "").strip() or None,
+                template_version_id=str(context.get("template_version_id") or "").strip() or None,
             )
         else:
             order_current_state_service.delete_current_state(normalized_order_id)
@@ -28422,76 +28424,8 @@ def build_order_hakodate_template_candidate(
 def approve_order_hakodate_template_candidate(
     order_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    candidate, error = build_order_hakodate_template_candidate(order_id)
-    if error:
-        return None, error
-    if not isinstance(candidate, dict):
-        return None, "candidate_unavailable"
-    candidate_template = candidate.get("candidate_template")
-    if not isinstance(candidate_template, dict):
-        return None, "candidate_unavailable"
-    facility_id = str(candidate.get("facility_id") or "").strip()
-    if not facility_id:
-        return None, "facility_missing"
-    signature = str(candidate_template.get("hakodate_template_signature") or "").strip()
-    components = candidate_template.get("hakodate_template_signature_components")
-    if not signature or not isinstance(components, dict):
-        return None, "candidate_signature_missing"
-
-    current_config = facility_service.get_facility_config(facility_id) or {}
-    next_config = dict(current_config)
-    override = dict(next_config.get("fax_template_override") or {})
-    candidate_columns = config_service.normalize_fax_template_columns(candidate_template.get("columns"))
-    candidate_row_fields = config_service.derive_row_fields_from_columns(candidate_columns) if candidate_columns else []
-    if not candidate_row_fields:
-        candidate_row_fields = [
-            str(item or "").strip()
-            for item in (candidate_template.get("main_ocr_row_fields") or [])
-            if str(item or "").strip()
-        ]
-    if candidate_columns:
-        override["columns"] = candidate_columns
-        override["columns_authoritative"] = True
-    if candidate_row_fields:
-        override["main_ocr_row_fields"] = candidate_row_fields
-    if override:
-        next_config["fax_template_override"] = override
-    next_config["hakodate_template_signature"] = signature
-    next_config["hakodate_template_signature_components"] = deepcopy(components)
-    if candidate_template.get("hakodate_data_row_count") is not None:
-        next_config["hakodate_data_row_count"] = candidate_template.get("hakodate_data_row_count")
-
-    validation = validate_facility_config(next_config)
-    if validation["errors"]:
-        return {"validation": validation, "candidate": candidate}, "validation_error"
-
-    updated = facility_service.update_config(
-        facility_id,
-        next_config,
-        allow_authoritative_column_changes=True,
-    )
-    if not updated:
-        return None, "facility_not_found"
-    refreshed = config_service.get_facility_config(facility_id)
-    try:
-        workflow_state_service.refresh_workflow_state(order_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Workflow state refresh failed after Hakodate template approval",
-            order_id=order_id,
-            facility_id=facility_id,
-            error=str(exc),
-        )
-    return {
-        "updated": True,
-        "order_id": order_id,
-        "facility_id": facility_id,
-        "template_id": candidate.get("template_id"),
-        "approved_signature": signature,
-        "approved_components": deepcopy(components),
-        "candidate": candidate,
-        "resolved_config": refreshed,
-    }, None
+    _ = order_id
+    return None, "legacy_hakodate_template_candidate_approval_removed"
 
 
 def clone_order_for_hakodate_audit(
@@ -34592,62 +34526,8 @@ def save_order_facility_template_columns(
     order_id: str,
     columns: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if not isinstance(columns, list) or not columns:
-        return None, "columns_invalid"
-    user_columns = _user_facility_template_columns_for_save(columns)
-    normalized_columns = config_service.normalize_fax_template_columns(user_columns)
-    if not normalized_columns:
-        return None, "columns_invalid"
-
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if not order:
-            return None, "order_not_found"
-        facility_id = str(order.facility_code or "").strip()
-
-    if not facility_id:
-        return None, "facility_missing"
-
-    config = facility_service.get_facility_config(facility_id) or {}
-    next_config = dict(config)
-    override = dict(next_config.get("fax_template_override") or {})
-    override["columns"] = normalized_columns
-    override["columns_authoritative"] = True
-    next_config["fax_template_override"] = override
-    next_config["facility_template_source"] = "operator_override"
-
-    validation = validate_facility_config(next_config)
-    if validation["errors"]:
-        return {"validation": validation}, "validation_error"
-
-    updated = facility_service.update_config(
-        facility_id,
-        next_config,
-        allow_authoritative_column_changes=True,
-    )
-    if not updated:
-        return None, "facility_not_found"
-    resolved = config_service.get_facility_config(facility_id)
-    refreshed_draft: dict[str, Any] | None = None
-    try:
-        refreshed_draft = _rebuild_current_sheet_for_facility_schema(
-            order_id,
-            edited_by="facility-template-columns-save",
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Facility template draft refresh failed",
-            order_id=order_id,
-            facility_id=facility_id,
-            error=str(exc),
-        )
-    return {
-        "updated": True,
-        "validation": validation,
-        "resolved_config": resolved,
-        "draft_refreshed": refreshed_draft is not None,
-        "draft": refreshed_draft,
-    }, None
+    _ = order_id, columns
+    return None, "legacy_facility_template_columns_removed"
 
 
 def set_status(order_id: str, status: str) -> bool:

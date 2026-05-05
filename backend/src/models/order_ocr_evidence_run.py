@@ -10,6 +10,7 @@ class OrderOcrEvidenceRun(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     schema_version = Column(String, nullable=False)
     producer_version = Column(String, nullable=True)
     source = Column(String, nullable=True)

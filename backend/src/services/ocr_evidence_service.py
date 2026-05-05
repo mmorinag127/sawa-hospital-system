@@ -10,9 +10,11 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from src.db import Base, engine, session_scope
+from src.models.order import Order
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services import (
     evidence_manifest_service,
+    facility_template_version_service,
     hakodate_ocr_evidence_service,
     order_current_state_service,
     template_resolution_service,
@@ -32,6 +34,8 @@ def _ensure_order_ocr_evidence_run_schema() -> None:
         columns = {str(row[1]) for row in rows if len(row) > 1}
         if "source" not in columns:
             conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN source VARCHAR"))
+        if "template_version_id" not in columns:
+            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN template_version_id VARCHAR"))
 
 
 _ensure_order_ocr_evidence_run_schema()
@@ -479,6 +483,7 @@ def build_evidence_run_record(
     producer_version: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    template_version_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -498,6 +503,7 @@ def build_evidence_run_record(
     resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
     return {
         "order_id": normalized_order_id,
+        "template_version_id": str(template_version_id or "").strip() or None,
         "schema_version": schema_version,
         "producer_version": producer_version or "legacy-cache-mirror/v1",
         "source": str(source or "unknown").strip() or "unknown",
@@ -518,6 +524,7 @@ def persist_evidence_run(
     producer_version: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    template_version_id: str | None = None,
 ) -> dict[str, Any] | None:
     record = build_evidence_run_record(
         order_id,
@@ -526,10 +533,23 @@ def persist_evidence_run(
         producer_version=producer_version,
         status=status,
         source=source,
+        template_version_id=template_version_id,
     )
     if not isinstance(record, dict):
         return None
     with session_scope() as session:
+        normalized_template_version_id = str(record.get("template_version_id") or "").strip()
+        if not normalized_template_version_id:
+            order = session.get(Order, record["order_id"])
+            facility_id = str(order.facility_code or "").strip() if order is not None else ""
+            active_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+                session,
+                facility_id=facility_id,
+                created_by="ocr-evidence-persist",
+            )
+            normalized_template_version_id = str(active_version.id if active_version is not None else "").strip()
+        if not normalized_template_version_id:
+            return None
         latest = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == record["order_id"])
@@ -542,6 +562,7 @@ def persist_evidence_run(
             and str(latest.schema_version or "") == str(record["schema_version"])
             and str(latest.producer_version or "") == str(record["producer_version"])
             and str(latest.source or "") == str(record.get("source") or "")
+            and str(latest.template_version_id or "") == normalized_template_version_id
         )
         if latest_matches_record_identity:
             existing = _serialize_evidence_run(latest, include_payload=True)
@@ -550,6 +571,7 @@ def persist_evidence_run(
         run = OrderOcrEvidenceRun(
             id=f"OEV{uuid4().hex[:12]}",
             order_id=record["order_id"],
+            template_version_id=normalized_template_version_id,
             schema_version=record["schema_version"],
             producer_version=record["producer_version"],
             source=record.get("source"),
@@ -642,6 +664,7 @@ def _serialize_evidence_run(
     serialized = {
         "id": row.id,
         "order_id": row.order_id,
+        "template_version_id": row.template_version_id,
         "schema_version": row.schema_version,
         "producer_version": row.producer_version,
         "source": row.source,

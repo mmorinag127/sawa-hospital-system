@@ -10,6 +10,7 @@ class OrderConfirmedSnapshot(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     draft_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True)
     snapshot_digest = Column(String, nullable=False)
     snapshot_json = Column(JSON, nullable=False)

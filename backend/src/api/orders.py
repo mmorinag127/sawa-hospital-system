@@ -2204,6 +2204,7 @@ def get_hakodate_template_candidate(order_id: str):
 
 @router.post("/{order_id}/hakodate-template-candidate/approve", dependencies=[Depends(require_role("operator"))])
 def approve_hakodate_template_candidate(order_id: str):
+    _raise_legacy_order_workflow_gone("hakodate-template-candidate/approve")
     data, error = order_service.approve_order_hakodate_template_candidate(order_id)
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail="order not found")

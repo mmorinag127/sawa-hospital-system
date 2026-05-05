@@ -1,7 +1,10 @@
+import json
+
 from fastapi import APIRouter, HTTPException, Depends, File, Form, UploadFile, status
 from pydantic import BaseModel
 
-from src.services import facility_service, config_service, order_form_service
+from src.db import session_scope
+from src.services import facility_service, config_service, facility_template_version_service, order_form_service
 from src.services.config_validator import validate_facility_config
 from src.api.auth import require_role
 
@@ -40,6 +43,27 @@ def _normalize_template_ids(primary_template_id: str, template_ids: list[str] | 
     return normalized
 
 
+_TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
+
+
+def _stable_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _template_definition_change_error(facility_id: str, next_config: dict) -> dict | None:
+    current_config = facility_service.get_facility_config(facility_id) or {}
+    for key in _TEMPLATE_DEFINITION_KEYS:
+        if key not in next_config:
+            continue
+        if _stable_json(next_config.get(key)) != _stable_json(current_config.get(key)):
+            return {
+                "error": "facility_template_definition_update_requires_versioned_template_endpoint",
+                "field": key,
+                "message": "Use /facilities/{facility_id}/fax-template or workflow-v2 facility template column editing.",
+            }
+    return None
+
+
 @router.get("", dependencies=[Depends(require_role("operator"))])
 def list_facilities():
     return {"facilities": facility_service.list_facilities()}
@@ -63,6 +87,21 @@ def get_facility(facility_id: str):
         raise HTTPException(status_code=404, detail="not found")
     config = facility_service.get_facility_config(facility_id) or {}
     resolved = config_service.get_facility_config(facility_id)
+    with session_scope() as session:
+        active_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=facility_id,
+            facility_config=resolved,
+            created_by="facility-api-get",
+        )
+        if active_version is not None and isinstance(resolved, dict):
+            resolved = dict(resolved)
+            fax_template = dict(resolved.get("fax_template") or {})
+            fax_template["facility_template_version_id"] = active_version.id
+            fax_template["facility_template_version_digest"] = active_version.template_digest
+            resolved["fax_template"] = fax_template
+            resolved["facility_template_version_id"] = active_version.id
+            resolved["facility_template_version"] = facility_template_version_service.serialize_template_version(active_version)
     return {
         "facility": facility,
         "config": config,
@@ -90,25 +129,23 @@ def update_facility_fax_template(facility_id: str, body: FacilityFaxTemplateUpda
             },
         )
 
-    current_config = facility_service.get_facility_config(facility_id) or {}
-    next_config = dict(current_config)
-    next_config["fax_template_id"] = primary_template_id
-    next_config["fax_template_ids"] = template_ids
-    next_config["facility_template_source"] = "operator_override"
-
-    validation = validate_facility_config(next_config)
-    if validation["errors"]:
-        raise HTTPException(status_code=400, detail={"errors": validation["errors"]})
-    updated = facility_service.update_config(facility_id, next_config)
-    if not updated:
+    with session_scope() as session:
+        result, error = facility_template_version_service.save_template_registration_for_facility(
+            session,
+            facility_id=facility_id,
+            fax_template_id=primary_template_id,
+            fax_template_ids=template_ids,
+            actor="facility-fax-template-registration",
+        )
+    if error == "fax_template_not_found":
+        raise HTTPException(status_code=400, detail=result or {"error": error})
+    if error == "facility_not_found":
         raise HTTPException(status_code=404, detail="not found")
-    resolved = config_service.get_facility_config(facility_id)
-    return {
-        "updated": True,
-        "config": next_config,
-        "validation": validation,
-        "resolved_config": resolved,
-    }
+    if error == "validation_error":
+        raise HTTPException(status_code=400, detail=result or {"error": error})
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return result
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_role("admin"))])
@@ -132,6 +169,9 @@ def update_config(facility_id: str, body: dict):
     config = body.get("config") if isinstance(body, dict) and "config" in body else body
     if not isinstance(config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
+    template_change_error = _template_definition_change_error(facility_id, config)
+    if template_change_error:
+        raise HTTPException(status_code=400, detail=template_change_error)
     validation = validate_facility_config(config)
     if validation["errors"]:
         raise HTTPException(status_code=400, detail={"errors": validation["errors"]})

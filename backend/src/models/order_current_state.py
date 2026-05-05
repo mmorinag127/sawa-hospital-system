@@ -9,6 +9,7 @@ class OrderCurrentState(Base):
     __tablename__ = "order_current_states"
 
     order_id = Column(String, ForeignKey("orders.id"), primary_key=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True)
     draft_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True)
     evidence_run_id = Column(String, ForeignKey("order_ocr_evidence_runs.id"), nullable=True)
     snapshot_version = Column(String, nullable=False, default="v1")

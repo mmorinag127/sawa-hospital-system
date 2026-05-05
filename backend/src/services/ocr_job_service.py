@@ -20,6 +20,7 @@ def _job_to_dict(job: OcrJob) -> dict[str, Any]:
         "status": job.status,
         "input_reference": job.input_reference,
         "template_id": job.template_id,
+        "template_version_id": job.template_version_id,
         "output_reference": job.output_reference,
         "metrics": job.metrics,
         "error_message": job.error_message,
