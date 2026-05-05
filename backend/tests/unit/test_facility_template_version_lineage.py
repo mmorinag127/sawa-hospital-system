@@ -258,3 +258,53 @@ def test_current_state_cache_requires_matching_template_version(monkeypatch) -> 
         upgrade_generic_from_sheet=True,
     )
     assert context["template_version_id"] == template_version_id
+
+
+def test_resolved_config_digest_change_replaces_active_template_version(monkeypatch) -> None:
+    facility_id = _id("FAC")
+    stale_version_id = _id("FTV")
+    resolved_config = _registered_config(facility_id)
+    normalized_columns = facility_template_version_service.normalize_template_columns(
+        resolved_config["fax_template"]["columns"]
+    )
+    fresh_digest = facility_template_version_service.template_digest(
+        template_id=resolved_config["fax_template_id"],
+        columns=normalized_columns,
+    )
+    assert fresh_digest != "stale-digest"
+    monkeypatch.setattr(
+        facility_template_version_service.config_service,
+        "get_facility_config",
+        lambda requested_id: resolved_config if requested_id == facility_id else None,
+    )
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Digest Facility"))
+        session.add(
+            FacilityTemplateVersion(
+                id=stale_version_id,
+                facility_id=facility_id,
+                version="1",
+                status="active",
+                template_id=resolved_config["fax_template_id"],
+                source="stale-test",
+                columns_json=[],
+                cells_json=[],
+                template_digest="stale-digest",
+                validation_json={},
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+
+    with session_scope() as session:
+        version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=facility_id,
+            created_by="digest-test",
+        )
+        assert version is not None
+        assert version.id != stale_version_id
+        assert version.template_digest == fresh_digest
+        stale = session.get(FacilityTemplateVersion, stale_version_id)
+        assert stale is not None
+        assert stale.status == "archived"

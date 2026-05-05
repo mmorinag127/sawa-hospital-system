@@ -179,6 +179,147 @@ def _merge_template(base: Optional[dict], override: Optional[dict]) -> dict:
     return result
 
 
+def _normalize_cell_text(value: object) -> str:
+    return str(value or "").strip().replace(" ", "").replace("　", "")
+
+
+def _effective_merged_value(worksheet: Any, *, row: int, col: int, merged_values: dict[tuple[int, int], object]) -> object:
+    value = worksheet.cell(row=row, column=col).value
+    if value is not None:
+        return value
+    return merged_values.get((row, col))
+
+
+@lru_cache
+def _source_workbook_column_slots_for_template(template_id: str) -> tuple[dict[str, Any], ...]:
+    normalized_template_id = str(template_id or "").strip()
+    if not normalized_template_id:
+        return ()
+    manifest_path = DATA_DIR / "order_form_source_workbooks" / "manifest.json"
+    if not manifest_path.exists():
+        return ()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        family = (manifest.get("families") or {}).get(normalized_template_id) or {}
+        month_sources = family.get("month_sources") or {}
+        month_key = sorted(str(key) for key in month_sources if str(key).strip())[-1]
+        workbook_name = str(month_sources.get(month_key) or "").strip()
+    except Exception:
+        return ()
+    workbook_path = DATA_DIR / "order_form_source_workbooks" / workbook_name
+    if not workbook_path.exists():
+        return ()
+    try:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(workbook_path, data_only=True)
+    except Exception:
+        return ()
+    if not workbook.sheetnames:
+        return ()
+    worksheet = workbook[workbook.sheetnames[-1]]
+    merged_values: dict[tuple[int, int], object] = {}
+    for merged_range in getattr(worksheet, "merged_cells", []).ranges:
+        min_col, min_row, max_col, max_row = merged_range.bounds
+        value = worksheet.cell(row=min_row, column=min_col).value
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                merged_values[(row, col)] = value
+    slots: list[dict[str, Any]] = []
+    for col in range(1, int(worksheet.max_column or 0) + 1):
+        header_values = [
+            _normalize_cell_text(_effective_merged_value(worksheet, row=row, col=col, merged_values=merged_values))
+            for row in (7, 8, 9)
+        ]
+        header_blob = "".join(value for value in header_values if value)
+        role = "unknown"
+        if "日付" in header_blob:
+            role = "date"
+        elif "区分" in header_blob:
+            role = "daypart"
+        elif "献立" in header_blob:
+            role = "menu_name"
+        elif "備考" in header_blob:
+            role = "note"
+        elif header_blob:
+            role = "quantity"
+        slots.append(
+            {
+                "worksheet_col": col,
+                "source_index": col - 1,
+                "role": role,
+                "header_blob": header_blob,
+            }
+        )
+    return tuple(slots)
+
+
+def _enrich_missing_source_indexes_from_source_workbook(
+    template: dict[str, Any],
+    *,
+    template_id: str | None,
+) -> dict[str, Any]:
+    columns = template.get("columns")
+    if not isinstance(columns, list) or not columns:
+        return template
+    if all(isinstance(column, dict) and column.get("source_index") is not None for column in columns):
+        return template
+    slots = list(_source_workbook_column_slots_for_template(str(template_id or template.get("template_id") or "")))
+    if not slots:
+        return template
+    source_menu_col = next((int(slot["worksheet_col"]) for slot in slots if slot.get("role") == "menu_name"), None)
+    if source_menu_col is None:
+        return template
+
+    enriched_columns = [deepcopy(column) if isinstance(column, dict) else column for column in columns]
+    used_source_indexes: set[int] = set()
+    structural_roles = ("date", "daypart", "menu_name")
+    for role in structural_roles:
+        source_slot = next(
+            (
+                slot
+                for slot in slots
+                if slot.get("role") == role and int(slot.get("source_index") or -1) not in used_source_indexes
+            ),
+            None,
+        )
+        if source_slot is None:
+            continue
+        for column in enriched_columns:
+            if not isinstance(column, dict):
+                continue
+            if str(column.get("role") or "").strip().lower() != role:
+                continue
+            if column.get("source_index") is None:
+                source_index = int(source_slot["source_index"])
+                column["source_index"] = source_index
+                used_source_indexes.add(source_index)
+            break
+
+    post_menu_slots = [
+        slot
+        for slot in slots
+        if int(slot.get("worksheet_col") or 0) > source_menu_col
+        and str(slot.get("role") or "") in {"quantity", "note", "unknown"}
+    ]
+    post_menu_columns = [
+        column
+        for column in enriched_columns
+        if isinstance(column, dict)
+        and str(column.get("role") or "").strip().lower() in {"quantity", "note", "remarks"}
+    ]
+    for column, slot in zip(post_menu_columns, post_menu_slots):
+        if column.get("source_index") is not None:
+            continue
+        source_index = int(slot["source_index"])
+        column["source_index"] = source_index
+        used_source_indexes.add(source_index)
+
+    enriched = deepcopy(template)
+    enriched["columns"] = enriched_columns
+    return enriched
+
+
 def _facility_has_explicit_areas(facility: dict[str, Any]) -> bool:
     areas = facility.get("areas")
     if not isinstance(areas, list) or not areas:
@@ -1200,6 +1341,10 @@ def _build_facility_config(
     fax_template = _normalize_fax_template_for_area_mismatch(
         template=fax_template,
         facility=facility,
+    )
+    fax_template = _enrich_missing_source_indexes_from_source_workbook(
+        fax_template,
+        template_id=template_id,
     )
     fax_template = _harmonize_main_ocr_row_fields(fax_template)
     explicit_row_fields = (

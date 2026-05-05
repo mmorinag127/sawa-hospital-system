@@ -467,9 +467,6 @@ def ensure_active_template_version_from_resolved_config(
         session.flush()
         if session.get(Facility, normalized_facility_id) is None:
             return None
-    active = get_active_template_version(session, normalized_facility_id)
-    if active is not None:
-        return active
     config = facility_config if isinstance(facility_config, dict) else config_service.get_facility_config(normalized_facility_id)
     if not isinstance(config, dict):
         return None
@@ -480,7 +477,13 @@ def ensure_active_template_version_from_resolved_config(
         return None
     template_id = str(config.get("fax_template_id") or template.get("template_id") or "").strip() or None
     digest = template_digest(template_id=template_id, columns=columns)
+    active = get_active_template_version(session, normalized_facility_id)
+    if active is not None and active.template_digest == digest:
+        return active
     now = _now()
+    if active is not None:
+        active.status = "archived"
+        active.archived_at = now
     version = FacilityTemplateVersion(
         id=_new_template_version_id(),
         facility_id=normalized_facility_id,
