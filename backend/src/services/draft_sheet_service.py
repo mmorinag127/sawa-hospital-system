@@ -4,16 +4,11 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from src.db import Base, engine, session_scope
-from src.models.order_ocr_cache import OrderOcrCache
+from src.db import session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.services import ocr_sheet_revision_service
 from src.services import order_current_state_service
-
-
-Base.metadata.create_all(bind=engine)
-
 
 def _field_value_to_str(value: object) -> str:
     if value is None:

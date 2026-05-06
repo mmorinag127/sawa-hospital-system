@@ -11,7 +11,7 @@ from loguru import logger
 from uuid import uuid4
 import pandas as pd
 
-from sqlalchemy import delete, select, inspect, text, or_
+from sqlalchemy import delete, select, inspect, or_
 
 from src.db import session_scope, engine
 from src.models.menu import (
@@ -143,143 +143,24 @@ def _normalize_menu_match_key(value: str) -> str:
     return normalized
 
 
-def _ensure_menu_master_condiments() -> bool:
-    inspector = inspect(engine)
-    if "menu_masters" not in inspector.get_table_names():
-        return False
-    columns = {col.get("name") for col in inspector.get_columns("menu_masters")}
-    if "condiments" in columns:
-        return True
-    migrated = False
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("ALTER TABLE menu_masters ADD COLUMN condiments JSON"))
-            migrated = True
-        except Exception as exc:
-            logger.warning("Failed to ensure menu_masters.condiments", error=str(exc))
-    if migrated:
-        inspector = inspect(engine)
-        columns = {col.get("name") for col in inspector.get_columns("menu_masters")}
-    return "condiments" in columns
-
-
-def _ensure_monthly_menu_items_menu_master_id() -> bool:
-    inspector = inspect(engine)
-    if "monthly_menu_items" not in inspector.get_table_names():
-        return False
-    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
-    if "menu_master_id" in columns:
-        return True
-    migrated = False
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("ALTER TABLE monthly_menu_items ADD COLUMN menu_master_id VARCHAR"))
-            migrated = True
-        except Exception as exc:
-            logger.warning("Failed to ensure monthly_menu_items.menu_master_id", error=str(exc))
-    if migrated:
-        inspector = inspect(engine)
-        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
-    return "menu_master_id" in columns
-
-
-def _ensure_monthly_menu_items_master_resolution_mode() -> bool:
-    inspector = inspect(engine)
-    if "monthly_menu_items" not in inspector.get_table_names():
-        return False
-    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
-    if "master_resolution_mode" in columns:
-        return True
-    migrated = False
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("ALTER TABLE monthly_menu_items ADD COLUMN master_resolution_mode VARCHAR"))
-            migrated = True
-        except Exception as exc:
-            logger.warning("Failed to ensure monthly_menu_items.master_resolution_mode", error=str(exc))
-    if migrated:
-        inspector = inspect(engine)
-        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
-    return "master_resolution_mode" in columns
-
-
-def _ensure_monthly_menu_entries_scope_column() -> bool:
-    inspector = inspect(engine)
-    if "monthly_menu_entries" not in inspector.get_table_names():
-        return False
-    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_entries")}
-    if "facility_override" in columns:
-        return True
-    migrated = False
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("ALTER TABLE monthly_menu_entries ADD COLUMN facility_override VARCHAR"))
-            migrated = True
-        except Exception as exc:
-            logger.warning("Failed to ensure monthly_menu_entries.facility_override", error=str(exc))
-    if migrated:
-        inspector = inspect(engine)
-        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_entries")}
-    return "facility_override" in columns
-
-
-def _ensure_menu_unique_indexes() -> bool:
+def _menu_schema_missing_items() -> list[str]:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
-    required_tables_present = {"menu_facility_overrides", "monthly_menu_items", "monthly_menu_entries"}.issubset(tables)
-    with engine.begin() as conn:
-        if "menu_facility_overrides" in tables:
-            try:
-                conn.execute(
-                    text(
-                        """
-                        CREATE UNIQUE INDEX IF NOT EXISTS uq_menu_facility_overrides_master_facility
-                        ON menu_facility_overrides(menu_master_id, facility_id)
-                        """
-                    )
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to ensure unique index for menu_facility_overrides",
-                    error=str(exc),
-                )
-        if "monthly_menu_items" in tables:
-            try:
-                conn.execute(
-                    text(
-                        """
-                        CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_menu_items_scope_name
-                        ON monthly_menu_items(monthly_menu_id, name, COALESCE(facility_override, ''))
-                        """
-                    )
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to ensure unique index for monthly_menu_items",
-                    error=str(exc),
-                )
-        if "monthly_menu_entries" in tables:
-            try:
-                conn.execute(
-                    text(
-                        """
-                        CREATE INDEX IF NOT EXISTS ix_monthly_menu_entries_scope_slot
-                        ON monthly_menu_entries(
-                          monthly_menu_id,
-                          menu_date,
-                          daypart,
-                          COALESCE(slot_index, -1),
-                          COALESCE(facility_override, '')
-                        )
-                        """
-                    )
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to ensure index for monthly_menu_entries",
-                    error=str(exc),
-                )
-    return required_tables_present
+    required: dict[str, set[str]] = {
+        "menu_masters": {"condiments"},
+        "menu_facility_overrides": {"menu_master_id", "facility_id"},
+        "monthly_menu_items": {"menu_master_id", "master_resolution_mode"},
+        "monthly_menu_entries": {"facility_override"},
+    }
+    missing: list[str] = []
+    for table_name, required_columns in required.items():
+        if table_name not in tables:
+            missing.append(table_name)
+            continue
+        columns = {str(col.get("name") or "") for col in inspector.get_columns(table_name)}
+        for column_name in sorted(required_columns - columns):
+            missing.append(f"{table_name}.{column_name}")
+    return missing
 
 
 def ensure_menu_schema() -> None:
@@ -289,15 +170,13 @@ def ensure_menu_schema() -> None:
     with _MENU_SCHEMA_LOCK:
         if _MENU_SCHEMA_INITIALIZED:
             return
-        condiments_ok = _ensure_menu_master_condiments()
-        monthly_item_ok = _ensure_monthly_menu_items_menu_master_id()
-        monthly_item_mode_ok = _ensure_monthly_menu_items_master_resolution_mode()
-        monthly_entry_ok = _ensure_monthly_menu_entries_scope_column()
-        indexes_ok = _ensure_menu_unique_indexes()
-        # Only memoize success when the expected tables/columns are actually present.
-        _MENU_SCHEMA_INITIALIZED = bool(
-            condiments_ok and monthly_item_ok and monthly_item_mode_ok and monthly_entry_ok and indexes_ok
-        )
+        missing = _menu_schema_missing_items()
+        if missing:
+            raise RuntimeError(
+                "menu schema is not migrated; run database migrations before boot: "
+                + ", ".join(missing)
+            )
+        _MENU_SCHEMA_INITIALIZED = True
 
 _TEMP_COLD_HINTS = (
     "サラダ",

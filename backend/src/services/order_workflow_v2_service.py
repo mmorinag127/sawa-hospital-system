@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
@@ -16,9 +16,6 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, sheet_week_service
-
-
-Base.metadata.create_all(bind=engine)
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}

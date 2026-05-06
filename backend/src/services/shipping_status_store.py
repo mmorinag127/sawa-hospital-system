@@ -10,9 +10,9 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, inspect, select, text
+from sqlalchemy import delete, func, select
 
-from src.db import Base, DB_URI, engine, session_scope
+from src.db import DB_URI, session_scope
 from src.models.shipping_tracking import (
     ShippingTrackingCurrent,
     ShippingTrackingEvent,
@@ -20,42 +20,10 @@ from src.models.shipping_tracking import (
 )
 from src.services.sagawa_tracking_service import normalize_tracking_key
 
-
-Base.metadata.create_all(bind=engine)
-
 _DEFAULT_TZ = "Asia/Tokyo"
 _EXPORT_DIR = Path(os.getenv("SHIPPING_EXPORT_DIR", "/tmp/shipping-exports"))
 _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 _EVENT_TEXT_RE = re.compile(r"(\d{2})/(\d{2})\s*(\d{2}):(\d{2})")
-
-
-def _ensure_shipping_tracking_schema() -> None:
-    Base.metadata.create_all(bind=engine)
-    inspector = inspect(engine)
-    table_names = set(inspector.get_table_names())
-
-    with engine.begin() as conn:
-        if "shipping_tracking_logs" in table_names:
-            log_columns = {column["name"] for column in inspector.get_columns("shipping_tracking_logs")}
-            if "ship_date" not in log_columns:
-                conn.execute(text("ALTER TABLE shipping_tracking_logs ADD COLUMN ship_date DATE"))
-        ShippingTrackingCurrent.__table__.create(bind=conn, checkfirst=True)
-        ShippingTrackingEvent.__table__.create(bind=conn, checkfirst=True)
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_shipping_tracking_logs_ship_date "
-                "ON shipping_tracking_logs (ship_date)"
-            )
-        )
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_shipping_tracking_events_tracking_key_order "
-                "ON shipping_tracking_events (tracking_key, event_order)"
-            )
-        )
-
-
-_ensure_shipping_tracking_schema()
 
 
 def _status_to_dict(item: object) -> dict[str, Any]:

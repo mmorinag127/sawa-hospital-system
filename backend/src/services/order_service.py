@@ -19,9 +19,9 @@ from loguru import logger
 from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 import pandas as pd
-from sqlalchemy import select, delete, inspect, text, func, or_
+from sqlalchemy import select, delete, func, or_
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.document import OrderDocument
 from src.models.order_ocr_cache import OrderOcrCache
@@ -49,14 +49,12 @@ from src.services.notification_service import record_event
 from src.services import (
     config_service,
     menu_service,
-    facility_service,
     fax_extractor,
     order_form_service,
     daily_output_override_service,
     week_candidate_service,
 )
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
-from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
 from src.services import (
@@ -108,45 +106,8 @@ from src.services.ocr_pipeline_service import (
     run_ocr_pipeline,
 )
 
-Base.metadata.create_all(bind=engine)
-
-
 HAKODATE_EVIDENCE_PROJECTION_VERSION = "hakodate_projection_truth_v2"
 HAKODATE_CANONICAL_PIPELINE_VERSION = "hakodate_best_method_canonical_v2"
-
-
-def _ensure_orders_lines_updated_at() -> None:
-    inspector = inspect(engine)
-    if "orders" not in inspector.get_table_names():
-        return
-    columns = {col.get("name") for col in inspector.get_columns("orders")}
-    if "lines_updated_at" in columns:
-        return
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE orders ADD COLUMN lines_updated_at TIMESTAMP"))
-
-
-_ensure_orders_lines_updated_at()
-
-
-def _ensure_orders_archive_columns() -> None:
-    inspector = inspect(engine)
-    if "orders" not in inspector.get_table_names():
-        return
-    columns = {col.get("name") for col in inspector.get_columns("orders")}
-    statements: list[str] = []
-    if "archived_at" not in columns:
-        statements.append("ALTER TABLE orders ADD COLUMN archived_at TIMESTAMP")
-    if "archived_by" not in columns:
-        statements.append("ALTER TABLE orders ADD COLUMN archived_by VARCHAR")
-    if not statements:
-        return
-    with engine.begin() as conn:
-        for statement in statements:
-            conn.execute(text(statement))
-
-
-_ensure_orders_archive_columns()
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:

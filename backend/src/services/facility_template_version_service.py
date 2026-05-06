@@ -7,9 +7,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
-from src.db import Base, engine
 from src.models.facility import Facility, FacilityConfig
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.ocr_job import OcrJob
@@ -22,50 +21,6 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service
 from src.services.config_validator import validate_facility_config
 from src.services.template_field_schema_service import derive_row_fields_from_columns
-
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_sqlite_schema() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-    with engine.begin() as conn:
-        existing_tables = {
-            str(row[0])
-            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
-        }
-        if "facility_template_versions" not in existing_tables:
-            return
-        table_columns: dict[str, set[str]] = {}
-        for table_name in (
-            "orders",
-            "ocr_jobs",
-            "order_ocr_evidence_runs",
-            "order_sheet_drafts",
-            "order_confirmed_snapshots",
-            "order_workflow_states",
-            "order_current_states",
-        ):
-            if table_name not in existing_tables:
-                continue
-            rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
-            table_columns[table_name] = {str(row[1]) for row in rows if len(row) > 1}
-        if "orders" in table_columns and "template_version_id" not in table_columns["orders"]:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN template_version_id VARCHAR"))
-        for table_name in (
-            "ocr_jobs",
-            "order_ocr_evidence_runs",
-            "order_sheet_drafts",
-            "order_confirmed_snapshots",
-            "order_workflow_states",
-            "order_current_states",
-        ):
-            if table_name in table_columns and "template_version_id" not in table_columns[table_name]:
-                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN template_version_id VARCHAR"))
-
-
-_ensure_sqlite_schema()
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 

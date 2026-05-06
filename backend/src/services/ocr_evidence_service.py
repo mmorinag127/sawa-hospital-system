@@ -7,40 +7,16 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import text
-
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services import (
     evidence_manifest_service,
-    facility_template_version_service,
     hakodate_ocr_evidence_service,
     order_current_state_service,
     template_resolution_service,
 )
-
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_order_ocr_evidence_run_schema() -> None:
-    if not str(engine.url).startswith("sqlite"):
-        return
-    with engine.begin() as conn:
-        rows = conn.execute(text("PRAGMA table_info(order_ocr_evidence_runs)")).fetchall()
-        if not rows:
-            return
-        columns = {str(row[1]) for row in rows if len(row) > 1}
-        if "source" not in columns:
-            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN source VARCHAR"))
-        if "template_version_id" not in columns:
-            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN template_version_id VARCHAR"))
-
-
-_ensure_order_ocr_evidence_run_schema()
-
 
 _EVIDENCE_META_KEYS = (
     "job_id",

@@ -5,12 +5,8 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order_ocr_revision import OrderOcrRevision
-
-
-Base.metadata.create_all(bind=engine)
-
 
 def _revision_to_dict(row: OrderOcrRevision) -> dict[str, Any]:
     payload = {

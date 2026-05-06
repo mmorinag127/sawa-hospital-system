@@ -7,7 +7,7 @@ import re
 
 from sqlalchemy import select, update
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
@@ -23,15 +23,10 @@ from src.services import (
     config_service,
     critical_decision_service,
     draft_sheet_service,
-    menu_service,
     ocr_evidence_service,
     position_column_mapping_service,
     week_candidate_service,
 )
-
-
-Base.metadata.create_all(bind=engine)
-
 
 _WORKFLOW_REFRESH_STACK: ContextVar[tuple[str, ...]] = ContextVar(
     "workflow_refresh_stack",
@@ -747,10 +742,6 @@ def _derive_state(
     order_status = str((order_payload or {}).get("status") or "").strip()
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_sheet)
     resolutions = (candidate_resolution or {}).get("resolutions") if isinstance(candidate_resolution, dict) else {}
-    gate_summary = candidate_resolution_service.summarize_resolution_gate(
-        resolutions if isinstance(resolutions, dict) else {},
-        suppress_decision_types={"template", "column_mapping", "quantity"} if clean_saved_draft else set(),
-    )
     blocker_tokens = {str(item).strip() for item in blockers if str(item).strip()}
     identity_choice_required = bool(
         blocker_tokens

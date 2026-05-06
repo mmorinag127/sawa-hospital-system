@@ -12,15 +12,12 @@ from uuid import uuid4
 
 from sqlalchemy import delete, func, select
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
 from src.models.order import Order, OrderLine
 from src.models.order_ocr_cache import OrderOcrCache
 from src.services.storage_service import load_bytes_from_uri
-
-
-Base.metadata.create_all(bind=engine)
 
 _EXPORT_DIR = Path(os.getenv("OCR_TRAINING_EXPORT_DIR", "/tmp/ocr-training-exports"))
 _EXPORT_DIR.mkdir(parents=True, exist_ok=True)

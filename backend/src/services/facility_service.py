@@ -3,33 +3,13 @@ import json
 import threading
 from uuid import uuid4
 from loguru import logger
-from sqlalchemy import delete, select, update, inspect, text
+from sqlalchemy import delete, select, update
 
-from src.db import session_scope, Base, engine
+from src.db import session_scope
 from src.models.facility import Facility, FacilityArea, FacilityConfig
 from src.models.order import Order
 from src.services import config_service
 from src.services.notification_service import record_event
-
-
-def _ensure_facility_area_pk() -> None:
-    if engine.dialect.name == "sqlite":
-        return
-    inspector = inspect(engine)
-    if "facility_areas" not in inspector.get_table_names():
-        return
-    pk = inspector.get_pk_constraint("facility_areas") or {}
-    cols = pk.get("constrained_columns") or []
-    if set(cols) == {"facility_id", "id"}:
-        return
-    constraint_name = pk.get("name") or "facility_areas_pkey"
-    with engine.begin() as conn:
-        conn.execute(text(f'ALTER TABLE facility_areas DROP CONSTRAINT IF EXISTS "{constraint_name}"'))
-        conn.execute(text("ALTER TABLE facility_areas ADD PRIMARY KEY (facility_id, id)"))
-
-
-Base.metadata.create_all(bind=engine)
-_ensure_facility_area_pk()
 
 _SYNC_LOCK = threading.Lock()
 _SYNC_DONE = False

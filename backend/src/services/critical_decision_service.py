@@ -4,11 +4,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order_critical_decision import OrderCriticalDecision
-
-
-Base.metadata.create_all(bind=engine)
 
 INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE = "_candidate_evidence_ack"
 

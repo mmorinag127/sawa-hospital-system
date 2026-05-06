@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import MetaData, delete, func, select
 
-from src.db import Base, DB_URI, engine, session_scope
+from src.db import DB_URI, engine, session_scope
 from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
@@ -28,9 +28,6 @@ from src.models.shipping_tracking import ShippingTrackingLog
 from src.models.user import AuditLog, Notification
 from src.models.document import OrderDocument
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
-
-
-Base.metadata.create_all(bind=engine)
 
 _EXPORT_DIR = Path(os.getenv("SYSTEM_EXPORT_DIR", "/tmp/system-exports"))
 _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
