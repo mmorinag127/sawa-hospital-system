@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
 
 from src.db import Base
 
@@ -33,8 +33,8 @@ class UploadedPdf(Base):
     last_error_code = Column(String, nullable=True)
     last_error_message = Column(String, nullable=True)
     alerted_at = Column(DateTime, nullable=True)
-    current_order_id = Column(String, nullable=True, index=True)
-    current_document_id = Column(String, nullable=True, index=True)
+    current_order_id = Column(String, ForeignKey("orders.id"), nullable=True, index=True)
+    current_document_id = Column(String, ForeignKey("order_documents.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

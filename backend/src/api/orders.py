@@ -15,6 +15,7 @@ from src.services.ocr_job_service import (
     describe_job_state as describe_ocr_job_state,
     get_job_request_mode,
     get_job as get_ocr_job,
+    get_latest_order_job,
     is_order_reparse_job as is_order_reparse_ocr_job,
     get_jobs as get_ocr_jobs,
     get_job_stale_at as get_ocr_job_stale_at,
@@ -577,7 +578,7 @@ def _heal_active_order_reparse_job_from_workflow(order_id: str, job: dict | None
         )
         return job
     if not isinstance(workflow, dict):
-        return get_ocr_job(f"OCR-{order_id}") or job
+        return get_latest_order_job(order_id) or job
     reparse_state = workflow.get("reparse_state")
     reparse_state = reparse_state if isinstance(reparse_state, dict) else {}
     reparse_status = str(
@@ -586,8 +587,10 @@ def _heal_active_order_reparse_job_from_workflow(order_id: str, job: dict | None
         or ""
     ).strip().lower()
     if reparse_status not in {"hard_failed", "done"}:
-        return get_ocr_job(f"OCR-{order_id}") or job
-    normalized_job_id = str((job or {}).get("id") or f"OCR-{order_id}").strip() or f"OCR-{order_id}"
+        return get_latest_order_job(order_id) or job
+    normalized_job_id = str((job or {}).get("id") or "").strip()
+    if not normalized_job_id:
+        return get_latest_order_job(order_id) or job
     metrics = (job or {}).get("metrics")
     metrics = dict(metrics) if isinstance(metrics, dict) else {}
     processing_stage = str(
@@ -703,7 +706,19 @@ def _enqueue_order_reparse_job(
         )
 
     input_reference = str(order.get("document") or "")
-    _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
+    workflow_for_lineage, _workflow_error = order_workflow_v2_service.get_workflow(order_id)
+    workflow_template_version_id = (
+        str((workflow_for_lineage or {}).get("template_version_id") or "").strip()
+        if isinstance(workflow_for_lineage, dict)
+        else None
+    )
+    _, created = create_ocr_job(
+        ocr_job_id,
+        input_reference=input_reference,
+        status="running",
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
+    )
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
         if _is_active_order_reparse_job(existing_job, order_id):
@@ -727,6 +742,8 @@ def _enqueue_order_reparse_job(
         error_message=None,
         template_id=None,
         output_reference=None,
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
         metrics={
             "job_id": ocr_job_id,
             "processing_stage": "queued",
@@ -928,7 +945,19 @@ def _enqueue_order_evidence_rerun(
         )
 
     input_reference = str(order.get("document") or "")
-    _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
+    workflow_for_lineage, _workflow_error = order_workflow_v2_service.get_workflow(order_id)
+    workflow_template_version_id = (
+        str((workflow_for_lineage or {}).get("template_version_id") or "").strip()
+        if isinstance(workflow_for_lineage, dict)
+        else None
+    )
+    _, created = create_ocr_job(
+        ocr_job_id,
+        input_reference=input_reference,
+        status="running",
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
+    )
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
         if _is_active_order_reparse_job(existing_job, order_id):
@@ -948,6 +977,8 @@ def _enqueue_order_evidence_rerun(
         template_id=None,
         output_reference=None,
         input_reference=input_reference,
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
         metrics={
             "job_id": ocr_job_id,
             "processing_stage": "queued",
@@ -1007,26 +1038,13 @@ def list_orders(
     else:
         job_ids = [order.get("ocr_job_id") for order in orders if order.get("ocr_job_id")]
         jobs = get_ocr_jobs(job_ids)
-        fallback_ids: list[str] = []
-        for order in orders:
-            job_id = order.get("ocr_job_id")
-            if job_id and job_id in jobs:
-                continue
-            message_id = order.get("message_id")
-            if isinstance(message_id, str) and message_id:
-                fallback_ids.append(f"OCR-{message_id}")
-        fallback_jobs = get_ocr_jobs(fallback_ids) if fallback_ids else {}
         for order in orders:
             job_id = order.get("ocr_job_id")
             job = jobs.get(job_id) if job_id else None
             if not job:
                 order_id = str(order.get("id") or "").strip()
                 if order_id:
-                    job = get_ocr_job(f"OCR-{order_id}")
-            if not job:
-                message_id = order.get("message_id")
-                if isinstance(message_id, str) and message_id:
-                    job = fallback_jobs.get(f"OCR-{message_id}")
+                    job = get_latest_order_job(order_id)
             if job:
                 error_message = job.get("error_message")
                 if job.get("status") == "failed" and _is_read_timeout_error(error_message):
@@ -1234,13 +1252,9 @@ def get_order(order_id: str):
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
     job_id = order.get("ocr_job_id")
-    job = get_ocr_job(f"OCR-{order_id}")
+    job = get_latest_order_job(order_id)
     if not job and job_id:
         job = get_ocr_job(job_id)
-    if not job:
-        message_id = order.get("message_id")
-        if isinstance(message_id, str) and message_id:
-            job = get_ocr_job(f"OCR-{message_id}")
     if job:
         # GET /orders/{id} is a read projection. Finished OCR jobs are
         # reconciled by workers or explicit commands, not by page reads.
@@ -1532,7 +1546,14 @@ def _enqueue_workflow_v2_evidence_rerun(
 
     input_reference = str(order.get("document") or "")
     run_requested_at = datetime.utcnow().isoformat()
-    _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
+    workflow_template_version_id = str(workflow.get("template_version_id") or "").strip() or None
+    _, created = create_ocr_job(
+        ocr_job_id,
+        input_reference=input_reference,
+        status="running",
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
+    )
     if not created:
         existing_job = get_ocr_job(ocr_job_id)
         if _is_active_order_reparse_job(existing_job, order_id):
@@ -1552,6 +1573,8 @@ def _enqueue_workflow_v2_evidence_rerun(
         template_id=None,
         output_reference=None,
         input_reference=input_reference,
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
         metrics={
             "job_id": ocr_job_id,
             "workflow_version": "v2",

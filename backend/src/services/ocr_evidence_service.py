@@ -477,13 +477,16 @@ def build_evidence_run_record(
     capabilities["legacy_editable"] = bool(str(schema_version or "").startswith("v1_legacy"))
     degraded_reasons = _build_degraded_reasons(extracted, capabilities)
     artifact_digest = _digest(extracted)
+    normalized_source = str(source or "unknown").strip() or "unknown"
     resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
+    if normalized_source == "legacy-cache-backfill":
+        resolved_status = "repair_blocked"
     return {
         "order_id": normalized_order_id,
         "template_version_id": str(template_version_id or "").strip() or None,
         "schema_version": schema_version,
         "producer_version": producer_version or "legacy-cache-mirror/v1",
-        "source": str(source or "unknown").strip() or "unknown",
+        "source": normalized_source,
         "status": resolved_status,
         "payload_json": extracted,
         "artifact_manifest_json": manifest,
@@ -528,6 +531,21 @@ def persist_evidence_run(
             facility_id = str(order.facility_code or "").strip()
             if facility_id and str(template_version.facility_id or "").strip() != facility_id:
                 return None
+        existing_identity = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(
+                OrderOcrEvidenceRun.order_id == record["order_id"],
+                OrderOcrEvidenceRun.template_version_id == normalized_template_version_id,
+                OrderOcrEvidenceRun.artifact_digest == record["artifact_digest"],
+                OrderOcrEvidenceRun.status != "repair_blocked",
+            )
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .first()
+        )
+        if existing_identity is not None:
+            existing = _serialize_evidence_run(existing_identity, include_payload=True)
+            existing["created"] = False
+            return existing
         latest = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == record["order_id"])
@@ -593,7 +611,10 @@ def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
     with session_scope() as session:
         latest = (
             session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
+            .filter(
+                OrderOcrEvidenceRun.order_id == normalized_order_id,
+                OrderOcrEvidenceRun.status != "repair_blocked",
+            )
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .first()
         )

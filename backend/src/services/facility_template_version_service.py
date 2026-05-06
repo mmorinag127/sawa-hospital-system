@@ -385,16 +385,11 @@ def backfill_facility_template_version_lineage(
         ):
             updated["order_workflow_states"] += 1
 
-        job_ids = [f"OCR-{order.id}"]
-        message_id = str(order.message_id or "").strip()
-        if message_id:
-            job_ids.append(f"OCR-{message_id}")
-        if workflow is not None:
-            meta_job_id = str(_workflow_meta_payload(workflow).get("ocr_job_id") or "").strip()
-            if meta_job_id and meta_job_id not in job_ids:
-                job_ids.append(meta_job_id)
-        for job_id in job_ids:
-            job = session.get(OcrJob, job_id)
+        for job in (
+            session.query(OcrJob)
+            .filter(OcrJob.order_id == order.id, OcrJob.template_version_id.is_(None))
+            .all()
+        ):
             if _set_template_version_if_missing(job, version.id):
                 updated["ocr_jobs"] += 1
 

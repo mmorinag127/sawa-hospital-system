@@ -17,6 +17,9 @@ class IngestEmailPayload:
     original_filename: Optional[str] = None
     content_sha256: Optional[str] = None
     ocr_job_id: Optional[str] = None
+    order_id: Optional[str] = None
+    uploaded_pdf_id: Optional[str] = None
+    order_document_id: Optional[str] = None
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -37,6 +40,9 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         original_filename=data.get("original_filename"),
         content_sha256=data.get("content_sha256"),
         ocr_job_id=data.get("ocr_job_id"),
+        order_id=data.get("order_id"),
+        uploaded_pdf_id=data.get("uploaded_pdf_id"),
+        order_document_id=data.get("order_document_id"),
     )
 
 
@@ -55,4 +61,7 @@ def to_job_kwargs(payload: IngestEmailPayload) -> dict:
         "original_filename": payload.original_filename,
         "content_sha256": payload.content_sha256,
         "ocr_job_id": payload.ocr_job_id,
+        "order_id": payload.order_id,
+        "uploaded_pdf_id": payload.uploaded_pdf_id,
+        "order_document_id": payload.order_document_id,
     }

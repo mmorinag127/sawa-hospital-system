@@ -105,13 +105,13 @@ def _load_ocr_payload(order: Order) -> tuple[dict | None, str | None]:
                 provider = payload.get("engine") or payload.get("provider")
                 return payload, str(provider) if provider else None
 
-    ocr_job_ids = [f"OCR-{order.id}"]
-    if order.message_id:
-        ocr_job_ids.append(f"OCR-{order.message_id}")
-
     with session_scope() as session:
         jobs = (
-            session.execute(select(OcrJob).where(OcrJob.id.in_(ocr_job_ids)))
+            session.execute(
+                select(OcrJob)
+                .where(OcrJob.order_id == order.id)
+                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+            )
             .scalars()
             .all()
         )
@@ -156,7 +156,17 @@ def register_order_sample(
     has_corrections = any(_has_line_correction(line) for line in lines)
     ocr_output, ocr_provider = _load_ocr_payload(order)
     now = datetime.utcnow()
-    ocr_job_id = f"OCR-{order_id}"
+    with session_scope() as session:
+        latest_job_id = (
+            session.execute(
+                select(OcrJob.id)
+                .where(OcrJob.order_id == order_id)
+                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+    ocr_job_id = str(latest_job_id or "").strip() or None
 
     with session_scope() as session:
         sample = (

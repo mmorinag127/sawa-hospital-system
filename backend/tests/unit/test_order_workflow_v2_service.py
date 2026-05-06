@@ -210,6 +210,23 @@ def _install_active_template_version(
     return version_id
 
 
+def _add_ocr_job(order_id: str, job_id: str = "OCR-job", *, job_order_id: str | None = None) -> str:
+    with session_scope() as session:
+        row = session.get(OcrJob, job_id)
+        if row is None:
+            row = OcrJob(
+                id=job_id,
+                created_at=datetime.utcnow(),
+            )
+            session.add(row)
+        row.order_id = job_order_id if job_order_id is not None else order_id
+        row.template_version_id = None
+        row.status = "running"
+        row.input_reference = "file:///input.pdf"
+        row.updated_at = datetime.utcnow()
+    return job_id
+
+
 @pytest.fixture(autouse=True)
 def _standard_active_template_for_workflow_tests() -> None:
     _install_active_template_version("FAC00001", "template-fac00001")
@@ -495,7 +512,7 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
         _registered_template_config,
     )
     with session_scope() as session:
-        session.add(OcrJob(id=job_id, status="running", input_reference="file:///input.pdf"))
+        session.add(OcrJob(id=job_id, order_id=order_id, status="running", input_reference="file:///input.pdf"))
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -641,6 +658,54 @@ def test_select_ocr_result_blocks_template_version_mismatch(monkeypatch) -> None
     assert selected["state"] == "template_version_mismatch"
     assert selected["blockers"] == ["template_version_mismatch"]
     assert selected["template_version_id"] == workflow["template_version_id"]
+
+
+def test_select_ocr_result_blocks_legacy_cache_backfill(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        _registered_template_config,
+    )
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+    assert error is None
+    with session_scope() as session:
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        evidence.template_version_id = workflow["template_version_id"]
+        evidence.source = "legacy-cache-backfill"
+        evidence.status = "repair_blocked"
+
+    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    assert selected is not None
+    assert error == "legacy_ocr_evidence_not_selectable"
+    assert selected["state"] == "legacy_ocr_evidence_not_selectable"
+    assert selected["selected_ocr_result_id"] is None
+
+
+def test_ocr_job_order_mismatch_blocks_queue(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    other_order_id = _id("ORDother")
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _install_fake_ocr_prerequisite(monkeypatch)
+    _add_ocr_job(order_id, "OCR-job-mismatch", job_order_id=other_order_id)
+
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job-mismatch")
+
+    assert queued is not None
+    assert error == "ocr_job_order_mismatch"
+    assert queued["state"] == "ocr_job_order_mismatch"
 
 
 def test_workflow_serializes_effective_template_for_legacy_meta(monkeypatch) -> None:
@@ -800,6 +865,7 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream(monkeypatch)
             )
         )
 
+    _add_ocr_job(order_id)
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
 
     assert error is None
@@ -851,6 +917,7 @@ def test_workflow_ocr_job_serializes_progress_from_processing_stage(monkeypatch)
         session.add(
             OcrJob(
                 id=job_id,
+                order_id=order_id,
                 status="running",
                 input_reference="gs://bucket/input.pdf",
                 metrics={
@@ -882,6 +949,7 @@ def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result(mon
         template_id="template-fac00001",
     )
     _install_fake_ocr_prerequisite(monkeypatch)
+    _add_ocr_job(order_id)
     order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
 

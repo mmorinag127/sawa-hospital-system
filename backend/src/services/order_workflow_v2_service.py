@@ -423,6 +423,10 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     progress = _ocr_progress_payload(job, metrics)
     return {
         "ocr_job_id": job.id,
+        "order_id": job.order_id,
+        "uploaded_pdf_id": job.uploaded_pdf_id,
+        "order_document_id": job.order_document_id,
+        "input_artifact_digest": job.input_artifact_digest,
         "status": job.status,
         "template_version_id": job.template_version_id,
         "created_at": _serialize_datetime(job.created_at),
@@ -516,6 +520,33 @@ def _resolve_evidence_template_version(
     return evidence_template_version_id or workflow_template_version_id or None, None
 
 
+def _ensure_ocr_job_lineage(
+    job: OcrJob | None,
+    *,
+    order_id: str,
+    template_version_id: str,
+) -> str | None:
+    if job is None:
+        return "ocr_job_not_found"
+    normalized_order_id = _normalize_id(order_id)
+    normalized_template_version_id = _normalize_id(template_version_id)
+    if not normalized_template_version_id:
+        return "template_version_required"
+    job_order_id = _normalize_id(job.order_id)
+    if job_order_id and job_order_id != normalized_order_id:
+        return "ocr_job_order_mismatch"
+    job_template_version_id = _normalize_id(job.template_version_id)
+    if job_template_version_id and job_template_version_id != normalized_template_version_id:
+        return "template_version_mismatch"
+    job.order_id = normalized_order_id
+    job.template_version_id = normalized_template_version_id
+    return None
+
+
+def _evidence_is_legacy_cache_backfill(row: OrderOcrEvidenceRun) -> bool:
+    return _normalize_id(row.source) == "legacy-cache-backfill"
+
+
 def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | None) -> None:
     normalized_error = _normalize_id(error)
     if not normalized_error:
@@ -531,6 +562,18 @@ def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | N
     elif normalized_error == "template_version_mismatch":
         workflow.state = "template_version_mismatch"
         workflow.headline = "施設テンプレートが変更されています。OCRを再実行してください"
+        workflow.primary_action = "run_ocr"
+    elif normalized_error == "ocr_job_not_found":
+        workflow.state = "ocr_job_not_found"
+        workflow.headline = "OCRジョブが見つかりません。Step1から再実行してください"
+        workflow.primary_action = "run_ocr"
+    elif normalized_error == "ocr_job_order_mismatch":
+        workflow.state = "ocr_job_order_mismatch"
+        workflow.headline = "OCRジョブの注文紐づけが一致しません。Step1から再実行してください"
+        workflow.primary_action = "run_ocr"
+    elif normalized_error == "legacy_ocr_evidence_not_selectable":
+        workflow.state = "legacy_ocr_evidence_not_selectable"
+        workflow.headline = "旧キャッシュ由来のOCR結果は正解にできません。OCRを再実行してください"
         workflow.primary_action = "run_ocr"
     elif normalized_error == "facility_template_ambiguous":
         workflow.state = "facility_template_ambiguous"
@@ -872,6 +915,15 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         )
         if prerequisite_blocker:
             return _serialize_workflow(workflow), prerequisite_blocker
+        ocr_job = session.get(OcrJob, normalized_job_id)
+        lineage_error = _ensure_ocr_job_lineage(
+            ocr_job,
+            order_id=order.id,
+            template_version_id=template_version.id,
+        )
+        if lineage_error:
+            _apply_template_lineage_blocker(workflow, lineage_error)
+            return _serialize_workflow(workflow, ocr_job=ocr_job), lineage_error
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -891,9 +943,6 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
-        ocr_job = session.get(OcrJob, normalized_job_id)
-        if ocr_job is not None:
-            ocr_job.template_version_id = template_version.id
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -930,11 +979,23 @@ def mark_ocr_run_completed(
         if template_error:
             _apply_template_lineage_blocker(workflow, template_error)
             return _serialize_workflow(workflow), template_error
+        ocr_job = session.get(OcrJob, normalized_job_id)
+        lineage_error = _ensure_ocr_job_lineage(
+            ocr_job,
+            order_id=order.id,
+            template_version_id=workflow_template_version_id or "",
+        )
+        if lineage_error:
+            _apply_template_lineage_blocker(workflow, lineage_error)
+            return _serialize_workflow(workflow, ocr_job=ocr_job), lineage_error
         if normalized_evidence_run_id and not normalized_error:
             evidence = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
             if evidence is None or evidence.order_id != order.id:
                 _apply_template_lineage_blocker(workflow, "template_version_mismatch")
                 return _serialize_workflow(workflow), "template_version_mismatch"
+            if _evidence_is_legacy_cache_backfill(evidence) or _normalize_id(evidence.status) == "repair_blocked":
+                _apply_template_lineage_blocker(workflow, "legacy_ocr_evidence_not_selectable")
+                return _serialize_workflow(workflow), "legacy_ocr_evidence_not_selectable"
             _evidence_template_version_id, template_error = _resolve_evidence_template_version(
                 evidence,
                 workflow,
@@ -967,10 +1028,6 @@ def mark_ocr_run_completed(
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
-        ocr_job = session.get(OcrJob, normalized_job_id)
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
-        if ocr_job is not None and workflow_template_version_id:
-            ocr_job.template_version_id = workflow_template_version_id
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -1196,6 +1253,10 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
+        if _evidence_is_legacy_cache_backfill(ocr_result) or _normalize_id(ocr_result.status) == "repair_blocked":
+            workflow = _get_or_create_workflow(session, order.id)
+            _apply_template_lineage_blocker(workflow, "legacy_ocr_evidence_not_selectable")
+            return _serialize_workflow(workflow), "legacy_ocr_evidence_not_selectable"
         workflow = _get_or_create_workflow(session, order.id)
         context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
         if context_error:

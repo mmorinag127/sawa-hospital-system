@@ -13,7 +13,7 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services.ocr_job_service import (
     describe_job_state,
-    get_job as get_ocr_job,
+    get_latest_order_job,
     get_job_request_mode,
     is_order_reparse_job,
 )
@@ -313,7 +313,7 @@ def _build_sheet_gate(
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
-    reparse_job = get_ocr_job(f"OCR-{order_id}")
+    reparse_job = get_latest_order_job(order_id)
     if not is_order_reparse_job(reparse_job if isinstance(reparse_job, dict) else None, order_id):
         reparse_job = None
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
@@ -985,7 +985,7 @@ def _build_workflow_state_projection(
         if isinstance(current_sheet_context, dict)
         else None
     )
-    order_bound_job = get_ocr_job(f"OCR-{normalized_order_id}")
+    order_bound_job = get_latest_order_job(normalized_order_id)
     reparse_job = (
         order_bound_job
         if is_order_reparse_job(order_bound_job if isinstance(order_bound_job, dict) else None, normalized_order_id)

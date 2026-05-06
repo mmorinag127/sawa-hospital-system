@@ -36,6 +36,7 @@ from src.services.ocr_job_service import (
     get_auto_recovery_interval_seconds,
     get_auto_recovery_max_attempts,
     get_job,
+    get_latest_order_job,
     get_job_recovery_attempts,
     is_job_recovery_due,
     list_recoverable_jobs,
@@ -382,7 +383,7 @@ def _enqueue_auto_llm_reparse(
     document_uri = str(order.get("document") or "").strip()
     if not order_id or not facility_id or not document_uri:
         return
-    existing_job = get_job(f"OCR-{order_id}")
+    existing_job = get_latest_order_job(order_id)
     if isinstance(existing_job, dict):
         job_state = describe_job_state(existing_job)
         if str(job_state.get("status") or "").strip().lower() in {"running", "pending", "stalled"}:
@@ -614,6 +615,10 @@ def process_uploaded_pdf_job(uploaded_pdf_id: str) -> None:
         current_order_id = str(linked_row.get("current_order_id") or "").strip()
     if current_order_id:
         payload["ocr_job_id"] = f"OCR-{current_order_id}"
+        payload["order_id"] = current_order_id
+    current_document_id = str(linked_row.get("current_document_id") or "").strip()
+    if current_document_id:
+        payload["order_document_id"] = current_document_id
     existing_job = ingest_job_service.get_ingest_job_snapshot(job_id)
     existing_status = str((existing_job or {}).get("status") or "").strip().lower()
     should_force_restart = False
@@ -723,11 +728,22 @@ def _process_ingest_inline(**kwargs):
     facility_candidates: list[dict[str, object]] = []
     retry_limit = int(policy.get("ocr_retry_limit", 3) or 3)
     ocr_job_id = str(payload.ocr_job_id or f"OCR-{payload.message_id}").strip() or f"OCR-{payload.message_id}"
-    create_job(ocr_job_id, input_reference=payload.pdf_uri)
+    create_job(
+        ocr_job_id,
+        input_reference=payload.pdf_uri,
+        order_id=payload.order_id,
+        uploaded_pdf_id=payload.uploaded_pdf_id,
+        order_document_id=payload.order_document_id,
+        input_artifact_digest=payload.content_sha256,
+    )
     update_job(
         ocr_job_id,
         status="running",
         input_reference=payload.pdf_uri,
+        order_id=payload.order_id,
+        uploaded_pdf_id=payload.uploaded_pdf_id,
+        order_document_id=payload.order_document_id,
+        input_artifact_digest=payload.content_sha256,
         error_message=None,
         metrics=_first_pass_job_metrics(
             ocr_job_id,
