@@ -179,6 +179,63 @@ Current findings:
 - Current stg output includes `placeholder` rows for lunch and dinner in both `/daily-bags` and `/totals`. Those rows were not included in the comparison table above because the email compares 常食/軟菜/ミキサー/禁食, but their presence in daily output is a separate item to check.
 - Current stg keeps いこいの森 糖尿 as `diabetes` rows in the API output. The email's parenthesized 常食 values already included that diabetes count manually, so any final reconciliation must define whether 糖尿 should be merged into 常食 at daily-output time or only in a specific downstream view.
 
+## 2026-05-07 stg Rebuild Check
+
+After the workflow-v2 lineage hardening and OCR rerun serialization fixes were deployed, the 14 stg orders for the 2026-04-26..2026-04-30 week were rechecked.
+
+Workflow state:
+
+- 14/14 orders are `confirmed`.
+- 14/14 `GET /orders/{order_id}/workflow-v2/sheet-source` returned 200.
+- 14/14 saved sheets have 40 menu rows.
+- 14/14 saved sheets start with `大豆のトマト煮`.
+- The previous `template_version_required` / `template_version_mismatch` blockers were not reproduced in this scan.
+
+Current `GET /orders/daily-bags?date=2026-04-28` returned `order_count=12` and 9 menu groups. The count is lower than 14 because orders with only blank/zero 2026-04-28 quantities do not contribute positive bag rows.
+
+### 2026-05-07 Diet-Level Comparison
+
+Parenthesized email numbers are intentionally ignored in this section.
+
+| daypart | menu | diet | email_actual | stg_daily | diff | current cause from stg artifacts |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| 朝 | 野菜の卵とじ | 常食 | 300 | 188 | -112 | `ORDe608fed7` and `ORDa1e2e963` have blank 4/28 quantities; `ORD372603e7` has 0 for 4/28. |
+| 朝 | 野菜の卵とじ | 軟菜 | 24 | 18 | -6 | Current saved sheets sum to 18. `ORD372603e7` has OCR-derived 0 for this cell. |
+| 朝 | 野菜の卵とじ | ミキサー | 20 | 12 | -8 | Current saved sheets sum to 12; missing amount is upstream of daily aggregation. |
+| 朝 | ブロッコリーの和え物 | 常食 | 300 | 192 | -108 | Same blank/zero 4/28 contributor pattern as the previous row. |
+| 朝 | ブロッコリーの和え物 | 軟菜 | 24 | 18 | -6 | Current saved sheets sum to 18. |
+| 朝 | ブロッコリーの和え物 | ミキサー | 20 | 18 | -2 | Current saved sheets sum to 18. |
+| 昼 | 豆腐ハンバーグ | 常食 | 382 | 350 | -32 | Daily output matches confirmed lines; gap is in saved quantities. |
+| 昼 | 豆腐ハンバーグ | 軟菜 | 28 | 52 | +24 | `ORD04cc4e57` contributes OCR-derived 軟菜 34 for this row. |
+| 昼 | 豆腐ハンバーグ | ミキサー | 20 | 16 | -4 | Current saved sheets sum to 16. |
+| 昼 | ピーマンしりしり | 常食 | 373 | 308 | -65 | Current saved sheets sum to 308 after regular bucket rules. |
+| 昼 | ピーマンしりしり | 禁食 | 9 | 9 | 0 | `no_meat` / `no_fish` / `no_fried` bucket into `forbidden`; this row matches. |
+| 昼 | ピーマンしりしり | 軟菜 | 28 | 20 | -8 | Current saved sheets sum to 20. |
+| 昼 | ピーマンしりしり | ミキサー | 20 | 16 | -4 | Current saved sheets sum to 16. |
+| 昼 | オーロラサラダ | 常食 | 379 | 405 | +26 | Daily output matches confirmed lines; excess is in saved quantities. |
+| 昼 | オーロラサラダ | 禁食 | 3 | 0 | -3 | No current confirmed forbidden-line contribution exists for this row. |
+| 昼 | オーロラサラダ | 軟菜 | 28 | 20 | -8 | Current saved sheets sum to 20. |
+| 昼 | オーロラサラダ | ミキサー | 20 | 16 | -4 | Current saved sheets sum to 16. |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 常食 | 371 | 395 | +24 | Daily output matches confirmed lines; excess is in saved quantities and regular bucket rules. |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 禁食 | 6 | 6 | 0 | This row matches. |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 軟菜 | 28 | 52 | +24 | `ORD04cc4e57` contributes OCR-derived 軟菜 34 for this row. |
+| 夕 | 豚肉とじゃが芋の醤油炒め | ミキサー | 20 | 20 | 0 | This row matches. |
+| 夕 | 冬瓜の水晶煮 | 常食 | 377 | 442 | +65 | Daily output matches confirmed lines; excess is in saved quantities and regular bucket rules. |
+| 夕 | 冬瓜の水晶煮 | 軟菜 | 28 | 22 | -6 | Current saved sheets sum to 22. |
+| 夕 | 冬瓜の水晶煮 | ミキサー | 20 | 20 | 0 | This row matches. |
+| 夕 | 春雨サラダ | 常食 | 377 | 385 | +8 | The previous 大和なでしこ `92` issue is no longer present in the current saved sheet. |
+| 夕 | 春雨サラダ | 禁食 | 1 | 5 | +4 | Current contribution is from confirmed forbidden bucket lines, especially FAC00004. |
+| 夕 | 春雨サラダ | 軟菜 | 28 | 18 | -10 | Current saved sheets sum to 18. |
+| 夕 | 春雨サラダ | ミキサー | 20 | 16 | -4 | Current saved sheets sum to 16. |
+
+### Current Cause Classification
+
+- The menu/daypart shift class is not reproduced in the 2026-05-07 stg scan: daily groups are the expected 4/28 menu groups, and the saved sheets all keep the expected first menu.
+- The daily output is following confirmed order lines and bagging rows. The large remaining differences are not created by a daily-output arithmetic duplication path in this scan.
+- The remaining differences are upstream saved-sheet values produced from OCR evidence or later sheet edits.
+- Examples: `ORDe608fed7` and `ORDa1e2e963` have no 4/28 quantity cells in the saved sheet, so they contribute 0 to 4/28 daily output. `ORD372603e7` has OCR-derived 0 values for 4/28. `ORD04cc4e57` has OCR-derived `34` in several 軟菜 cells.
+- Therefore, after the current lineage/blocker fixes, the remaining 4/28 mismatch should be treated as OCR quantity reading / operator sheet-correction debt unless a later scan finds a saved-sheet-to-confirmed-lines mismatch on the same 4/28 rows.
+
 ## Regular + Soft + Mixer Total Check
 
 The email specifically says the total of `常食 + 軟菜 + ミキサー` does not match. 禁食 is excluded from this total because the email defines the problematic total as 常食+軟菜+ミキサー.
