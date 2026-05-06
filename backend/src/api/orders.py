@@ -444,7 +444,7 @@ def _attach_order_workflow_context(
     order: dict,
     *,
     refresh: bool = False,
-    allow_refresh_fallback: bool = True,
+    allow_refresh_fallback: bool = False,
 ) -> None:
     order_id = str(order.get("id") or "").strip()
     if not order_id:

@@ -113,6 +113,23 @@ def test_list_orders_include_ocr_prefers_cached_success_over_non_reparse_running
     assert row.get("ocr_status") == "success"
 
 
+def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch):
+    order_service.clear_all()
+    _create_seed_order("msg-status-api-read-workflow-no-refresh")
+
+    def _fake_workflow_state(_order_id: str, *, refresh: bool = False):
+        if refresh:
+            raise AssertionError("GET /orders must not refresh workflow state")
+        return None
+
+    monkeypatch.setattr(orders_api.order_service, "get_order_workflow_state", _fake_workflow_state)
+
+    client = TestClient(app)
+    res = client.get("/orders?include_ocr=true")
+
+    assert res.status_code == 200
+
+
 def test_get_order_preserves_terminal_reparse_failure_status(tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-001b")

@@ -11172,6 +11172,7 @@ def _build_current_sheet_context_uncached(
     refresh_draft_from_semantic: bool = True,
     upgrade_generic_from_sheet: bool = True,
     backfill_from_revision: bool = False,
+    allow_state_mutation: bool = False,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -11186,7 +11187,7 @@ def _build_current_sheet_context_uncached(
             normalized_order_id,
             current_record,
         )
-        if rebase_required:
+        if rebase_required and allow_state_mutation:
             refreshed_record = _rebase_draft_record_to_facility_schema(
                 normalized_order_id,
                 current_record,
@@ -11354,6 +11355,7 @@ def refresh_current_sheet_context(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
+        allow_state_mutation=True,
     )
     if _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -11395,11 +11397,12 @@ def get_current_sheet_context(
             refresh_draft_from_semantic=refresh_draft_from_semantic,
         ):
             return persisted_payload
-    return refresh_current_sheet_context(
+    return _build_current_sheet_context_uncached(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
+        allow_state_mutation=False,
     )
 
 
@@ -20176,6 +20179,8 @@ def _canonicalize_sheet_daypart_rows(
         elif current_date_key:
             date_key = current_date_key
         raw_daypart_token = str(raw_daypart or "").strip()
+        if raw_daypart_token in {'"', "＂", "〃"}:
+            raw_daypart_token = ""
         supported_daypart = _canonical_daypart_key(raw_daypart_token)
         if (
             not raw_daypart_token

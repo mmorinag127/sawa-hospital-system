@@ -198,7 +198,7 @@ def test_get_current_sheet_context_prefers_persisted_current_state_snapshot(monk
     assert current == persisted
 
 
-def test_get_current_sheet_context_rebuilds_when_current_state_snapshot_missing(monkeypatch) -> None:
+def test_get_current_sheet_context_builds_transient_when_current_state_snapshot_missing(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order(message_id="msg-current-state-snapshot-003")
     order_current_state_service.delete_current_state(order["id"])
@@ -216,8 +216,7 @@ def test_get_current_sheet_context_rebuilds_when_current_state_snapshot_missing(
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
-    assert isinstance(snapshot, dict)
-    assert snapshot["resolved_week_id"] == current["resolved_week_id"]
+    assert snapshot is None
 
 
 def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_timestamp_stale(monkeypatch) -> None:
@@ -272,10 +271,13 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_t
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _wrapped_builder)
 
     current = order_service.get_current_sheet_context(order["id"])
+    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
     assert current["order_payload"]["lines_updated_at"] != stale_snapshot["order_payload"]["lines_updated_at"]
+    assert isinstance(snapshot_after, dict)
+    assert snapshot_after["order_payload"]["lines_updated_at"] == stale_snapshot["order_payload"]["lines_updated_at"]
 
 
 def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidence_changes(monkeypatch) -> None:
@@ -312,9 +314,85 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidenc
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _wrapped_builder)
 
     current = order_service.get_current_sheet_context(order["id"])
+    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
+    assert isinstance(snapshot_after, dict)
+    assert snapshot_after["base_evidence_run_id"] == "OEV-old"
+
+
+def test_get_current_sheet_context_does_not_delete_unusable_current_state_on_read(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-current-state-read-no-delete-001")
+    order_current_state_service.persist_current_state(
+        order_id=order["id"],
+        state_json={
+            "order_id": order["id"],
+            "draft_id": None,
+            "source": "stale-transient",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [["03/22", "朝", "Menu A", "5"]],
+            "row_ids": ["row-1"],
+        },
+        draft_id=None,
+        evidence_run_id=None,
+    )
+
+    monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", lambda *_args, **_kwargs: None)
+
+    current = order_service.get_current_sheet_context(order["id"])
+    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
+
+    assert current is None
+    assert isinstance(snapshot_after, dict)
+    assert snapshot_after["source"] == "stale-transient"
+
+
+def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeypatch) -> None:
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-read-no-decision-sync-001")
+    order_payload = order_service.get_order_by_id(order["id"])
+
+    monkeypatch.setattr(
+        workflow_state_service.candidate_resolution_service,
+        "resolve_order_candidates",
+        lambda **_kwargs: {
+            "critical_choices": [
+                {
+                    "decision_type": "facility",
+                    "candidates": [
+                        {"value": "FAC00001", "label": "Facility A"},
+                    ],
+                }
+            ]
+        },
+    )
+
+    projected = workflow_state_service.project_workflow_state(
+        order["id"],
+        current_sheet_context={
+            "order_id": order["id"],
+            "order_payload": order_payload,
+            "draft_record": None,
+            "draft_payload": {},
+            "draft_id": None,
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+            "header": ["日付", "区分", "メニュー", "常食2F"],
+            "rows": [],
+            "row_ids": [],
+            "warnings": [],
+            "blockers": [],
+            "source": "test_projection",
+        },
+        include_candidate_preview=False,
+    )
+    persisted_decisions = critical_decision_service.list_decisions(order["id"])
+
+    assert isinstance(projected, dict)
+    assert projected["critical_decisions"][0]["id"] == "pending:facility"
+    assert persisted_decisions == []
 
 
 def test_get_current_sheet_context_does_not_reuse_transient_current_state_snapshot(monkeypatch) -> None:

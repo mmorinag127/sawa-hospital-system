@@ -1063,7 +1063,12 @@ def _build_workflow_state_projection(
         received_at=order_payload.get("received_at"),
         evidence_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
     )
-    synced_decisions_all = critical_decision_service.sync_pending_decisions(
+    decision_projector = (
+        critical_decision_service.sync_pending_decisions
+        if persist
+        else critical_decision_service.project_pending_decisions
+    )
+    synced_decisions_all = decision_projector(
         normalized_order_id,
         list(candidate_resolution.get("critical_choices") or []),
         base_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
