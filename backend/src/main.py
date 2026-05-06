@@ -24,9 +24,20 @@ from src.api import (
     users,
 )
 from src.services import menu_service
+from src.services.read_only_request_guard_service import read_only_request_guard
 from src.workers.ingest_worker import start_uploaded_pdf_recovery_loop
 
 app = FastAPI(title="Hospital Order System API")
+
+
+@app.middleware("http")
+async def _block_canonical_writes_during_get(request, call_next):
+    if str(request.method or "").upper() != "GET":
+        return await call_next(request)
+    with read_only_request_guard(method=request.method, path=str(request.url.path)):
+        return await call_next(request)
+
+
 cors_origins = [
     origin.strip()
     for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
