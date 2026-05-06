@@ -23,6 +23,7 @@ from src.services.ocr_job_service import (
     is_job_stale as is_ocr_job_stale,
     update_job as update_ocr_job,
 )
+from src.services.ocr_execution_lock_service import OcrExecutionSlotTimeout, acquire_ocr_execution_slot
 from src.api.auth import require_role
 from src.services.storage_service import load_bytes_from_uri
 
@@ -797,14 +798,42 @@ def _run_reparse_background(
 
 
 def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
+    def _patch_job_metrics(patch: dict) -> None:
+        existing_job = get_ocr_job(ocr_job_id) or {}
+        metrics = dict(existing_job.get("metrics") or {})
+        metrics.update(patch)
+        metrics["stage_updated_at"] = datetime.utcnow().isoformat()
+        update_ocr_job(ocr_job_id, metrics=metrics)
+
     started_at = datetime.utcnow()
     try:
-        evidence, error = order_service.rerun_ocr_evidence_only(
-            order_id,
-            job_id=ocr_job_id,
-            project_sheet=False,
-            refresh_workflow=False,
+        _patch_job_metrics(
+            {
+                "processing_stage": "waiting_for_ocr_slot",
+                "result_state": "processing",
+                "request_mode": "ocr_rerun",
+                "ocr_started_at": started_at.isoformat(),
+                "ocr_slot_wait_started_at": started_at.isoformat(),
+            }
         )
+        with acquire_ocr_execution_slot(order_id=order_id, job_id=ocr_job_id) as slot:
+            slot_acquired_at = datetime.utcnow()
+            _patch_job_metrics(
+                {
+                    "processing_stage": "ocr_slot_acquired",
+                    "result_state": "processing",
+                    "request_mode": "ocr_rerun",
+                    "ocr_slot_acquired_at": slot_acquired_at.isoformat(),
+                    "ocr_slot_wait_seconds": round((slot_acquired_at - started_at).total_seconds(), 3),
+                    "ocr_execution_slot": slot,
+                }
+            )
+            evidence, error = order_service.rerun_ocr_evidence_only(
+                order_id,
+                job_id=ocr_job_id,
+                project_sheet=False,
+                refresh_workflow=False,
+            )
         if error:
             logger.warning("OCR evidence-only rerun failed", order_id=order_id, error=error)
             finished_at = datetime.utcnow()
@@ -840,6 +869,34 @@ def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
             job_id=ocr_job_id,
             evidence_run_id=str((evidence or {}).get("id") or "").strip() or None,
         )
+    except OcrExecutionSlotTimeout as exc:
+        finished_at = datetime.utcnow()
+        existing_job = get_ocr_job(ocr_job_id) or {}
+        metrics = dict(existing_job.get("metrics") or {})
+        metrics.update(
+            {
+                "error": str(exc),
+                "request_mode": "ocr_rerun",
+                "processing_stage": "ocr_execution_slot_timeout",
+                "result_state": "hard_failed",
+                "ocr_started_at": started_at.isoformat(),
+                "ocr_finished_at": finished_at.isoformat(),
+                "ocr_elapsed_seconds": round((finished_at - started_at).total_seconds(), 3),
+                "stage_updated_at": finished_at.isoformat(),
+            }
+        )
+        update_ocr_job(
+            ocr_job_id,
+            status="failed",
+            error_message="ocr_execution_slot_timeout",
+            metrics=metrics,
+        )
+        order_workflow_v2_service.mark_ocr_run_completed(
+            order_id,
+            job_id=ocr_job_id,
+            error="ocr_execution_slot_timeout",
+        )
+        logger.exception("OCR evidence-only rerun could not acquire execution slot", order_id=order_id)
     except BaseException as exc:  # noqa: BLE001
         finished_at = datetime.utcnow()
         current_order = order_service.get_order_by_id(order_id)

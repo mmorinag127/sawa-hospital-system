@@ -2309,6 +2309,105 @@ def test_run_ocr_rerun_background_marks_job_failed_on_system_exit(monkeypatch):
     assert metrics.get("error") == "1"
 
 
+def test_run_ocr_rerun_background_acquires_execution_slot_before_pipeline(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003e")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "request_mode": "ocr_rerun",
+            "processing_stage": "queued",
+            "result_state": "processing",
+        },
+    )
+    events: list[str] = []
+
+    class _FakeSlot:
+        def __enter__(self):
+            events.append("slot_acquired")
+            return {"backend": "test", "slot": 0}
+
+        def __exit__(self, *_args):
+            events.append("slot_released")
+            return False
+
+    def _fake_slot(**_kwargs):
+        return _FakeSlot()
+
+    def _fake_rerun(*_args, **_kwargs):
+        events.append("pipeline_started")
+        return {"id": "EVID-test"}, None
+
+    def _fake_mark(*_args, **_kwargs):
+        events.append("workflow_completed")
+        return {"state": "ocr_completed"}
+
+    monkeypatch.setattr(orders_api, "acquire_ocr_execution_slot", _fake_slot)
+    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _fake_rerun)
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_completed", _fake_mark)
+
+    orders_api._run_ocr_rerun_background(order["id"], job_id)
+
+    assert events == ["slot_acquired", "pipeline_started", "slot_released", "workflow_completed"]
+    job = get_job(job_id)
+    assert job is not None
+    metrics = job.get("metrics") or {}
+    assert metrics.get("processing_stage") == "ocr_slot_acquired"
+    assert metrics.get("ocr_execution_slot") == {"backend": "test", "slot": 0}
+    assert isinstance(metrics.get("ocr_slot_wait_seconds"), (int, float))
+
+
+def test_run_ocr_rerun_background_marks_slot_timeout_failed(monkeypatch):
+    order_service.clear_all()
+    order = _create_seed_order("msg-status-api-003f")
+    job_id = f"OCR-{order['id']}"
+    create_job(job_id, input_reference=order["document"], status="running")
+    update_job(
+        job_id,
+        status="running",
+        metrics={
+            "request_mode": "ocr_rerun",
+            "processing_stage": "queued",
+            "result_state": "processing",
+        },
+    )
+    completed: dict[str, object] = {}
+
+    def _raise_timeout(**_kwargs):
+        raise orders_api.OcrExecutionSlotTimeout("ocr_execution_slot_timeout")
+
+    def _fake_mark(order_id, job_id, error=None, **_kwargs):
+        completed["order_id"] = order_id
+        completed["job_id"] = job_id
+        completed["error"] = error
+        return {"state": "ocr_failed"}
+
+    def _fail_rerun(*_args, **_kwargs):
+        raise AssertionError("OCR pipeline must not start without execution slot")
+
+    monkeypatch.setattr(orders_api, "acquire_ocr_execution_slot", _raise_timeout)
+    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _fail_rerun)
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_completed", _fake_mark)
+
+    orders_api._run_ocr_rerun_background(order["id"], job_id)
+
+    job = get_job(job_id)
+    assert job is not None
+    assert job.get("status") == "failed"
+    assert job.get("error_message") == "ocr_execution_slot_timeout"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("processing_stage") == "ocr_execution_slot_timeout"
+    assert metrics.get("result_state") == "hard_failed"
+    assert completed == {
+        "order_id": order["id"],
+        "job_id": job_id,
+        "error": "ocr_execution_slot_timeout",
+    }
+
+
 def test_get_ocr_output_includes_reparse_debug_from_cache(tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-004")
