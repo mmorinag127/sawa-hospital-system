@@ -338,3 +338,92 @@ Deferred success criteria:
 - Menu, date, and daypart in delivery notes match the confirmed semantic order lines.
 - Quantity values in delivery notes reconcile with confirmed order lines under an explicit diet/area aggregation rule.
 - Area-specific columns are either preserved or intentionally aggregated according to a documented facility/output rule.
+
+## 2026-05-07 stg Full Workflow/Daily Re-scan
+
+Generated evidence:
+
+- Raw/API artifacts: `/tmp/sawa_stg_check_20260507_full`
+- Summary: `/tmp/sawa_stg_check_20260507_full/workflow_daily_reconciliation.md`
+- 4/28 overlay contact sheet: `/tmp/sawa_stg_check_20260507_full/overlay_0428_contact.png`
+- OCR source vs saved sheet cell comparison: `/tmp/sawa_stg_check_20260507_full/saved_vs_ocr_source_0428.md`
+
+Scope:
+
+- 14 active stg orders for `2026-04 (04/26-04/30)`.
+- Endpoints checked for every order:
+  - `/orders/{order_id}/workflow-v2`
+  - `/orders/{order_id}/workflow-v2/sheet-source`
+  - `/orders/{order_id}/workflow-v2/sheet`
+  - `/orders/{order_id}/workflow-v2/inspection`
+  - `/orders/{order_id}`
+  - `/orders/{order_id}/workflow-v2/ocr-results`
+- Daily output checked with `/orders/daily-bags?date=2026-04-28`.
+
+Result:
+
+- `endpoint_error_count=0`
+- `workflow_error_count=0`
+- `daily_vs_bagging_rows_mismatch_count=0`
+- `daily_vs_order_lines_mismatch_count=9`, but these are informational only because current output generation intentionally splits or transforms confirmed order lines, for example `豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ` into `豆腐ﾊﾝﾊﾞｰｸﾞ` and `おろしｿｰｽ` bagging rows.
+
+Order workflow scan:
+
+| order | facility | state | blockers | saved sheet rows | first menu | 4/28 accepted/strict sheet cells | 4/28 zero sheet cells |
+| --- | --- | --- | ---: | ---: | --- | ---: | ---: |
+| ORDe608fed7 | FAC00007 | confirmed | 0 | 40 | 大豆のトマト煮 | 0 | 0 |
+| ORDccff9ed3 | FAC00002 | confirmed | 0 | 40 | 大豆のトマト煮 | 3 | 0 |
+| ORDbd3425d7 | FAC00004 | confirmed | 0 | 40 | 大豆のトマト煮 | 22 | 0 |
+| ORDb6f4d715 | FAC00014 | confirmed | 0 | 40 | 大豆のトマト煮 | 12 | 0 |
+| ORDb6702c19 | FAC00006 | confirmed | 0 | 40 | 大豆のトマト煮 | 21 | 0 |
+| ORDab6c77ff | FAC00008 | confirmed | 0 | 40 | 大豆のトマト煮 | 11 | 0 |
+| ORDa1e2e963 | FAC00016 | confirmed | 0 | 40 | 大豆のトマト煮 | 0 | 0 |
+| ORD8e7e41ad | FAC00003 | confirmed | 0 | 40 | 大豆のトマト煮 | 25 | 0 |
+| ORD386cf1de | FAC00015 | confirmed | 0 | 40 | 大豆のトマト煮 | 8 | 0 |
+| ORD372603e7 | FAC00005 | confirmed | 0 | 40 | 大豆のトマト煮 | 0 | 13 |
+| ORD2a654d51 | FAC00001 | confirmed | 0 | 40 | 大豆のトマト煮 | 7 | 0 |
+| ORD12df0b1e | FAC00012 | confirmed | 0 | 40 | 大豆のトマト煮 | 4 | 0 |
+| ORD10ba5ca2 | FAC00010 | confirmed | 0 | 40 | 大豆のトマト煮 | 35 | 0 |
+| ORD04cc4e57 | FAC00009 | confirmed | 0 | 40 | 大豆のトマト煮 | 27 | 0 |
+
+Current conclusion:
+
+- The previous workflow blockers such as `template_version_mismatch` and `template_version_required` were not reproduced in the full scan.
+- The menu/daypart shift failure class was not reproduced in this scan. Every saved sheet has 40 rows and starts with `大豆のトマト煮`; daily output matches persisted bagging rows exactly.
+- The current 2026-04-28 daily totals are not diverging after bagging. The remaining email-vs-stg quantity differences are already present in saved sheets / OCR evidence / operator correction state.
+- Examples:
+  - `ORDa1e2e963` has 4/28 OCR candidates, but they are `deterministic_candidate` or `weak_candidate`; none are accepted into the saved sheet, so the saved sheet contributes 0 for 4/28.
+  - `ORD372603e7` has strict OCR-derived `0` values in several 4/28 cells, so zero is carried forward.
+  - `ORD04cc4e57` has strict OCR-derived values such as `32` and `34` in soft-related cells, explaining several soft overages.
+  - `ORD2a654d51` selected OCR source still contains the earlier `92` candidate, but the saved sheet has been corrected to `32`; the daily output follows the saved sheet, not the stale OCR source.
+
+This means the currently proven system issue is not daily-output aggregation. The remaining reconciliation work is upstream OCR/sheet-review accuracy: compare each saved sheet value against the original PDF/overlay and correct or improve OCR acceptance where the saved sheet is wrong.
+
+### OCR source vs saved sheet comparison
+
+The selected OCR source and saved sheet were compared cell-by-cell for 4/28 quantity cells. Summary:
+
+| order | facility | OCR nonempty | saved nonempty | source/saved changed | accepted | deterministic | weak |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ORDe608fed7 | FAC00007 | 0 | 0 | 0 | 0 | 0 | 0 |
+| ORDccff9ed3 | FAC00002 | 3 | 3 | 0 | 3 | 0 | 0 |
+| ORDbd3425d7 | FAC00004 | 22 | 22 | 0 | 22 | 2 | 0 |
+| ORDb6f4d715 | FAC00014 | 12 | 12 | 0 | 12 | 0 | 12 |
+| ORDb6702c19 | FAC00006 | 21 | 21 | 0 | 21 | 1 | 8 |
+| ORDab6c77ff | FAC00008 | 11 | 11 | 0 | 11 | 1 | 6 |
+| ORDa1e2e963 | FAC00016 | 0 | 0 | 0 | 0 | 3 | 9 |
+| ORD8e7e41ad | FAC00003 | 25 | 25 | 0 | 25 | 2 | 7 |
+| ORD386cf1de | FAC00015 | 8 | 8 | 0 | 8 | 0 | 0 |
+| ORD372603e7 | FAC00005 | 13 | 13 | 0 | 13 | 3 | 0 |
+| ORD2a654d51 | FAC00001 | 7 | 7 | 1 | 7 | 0 | 0 |
+| ORD12df0b1e | FAC00012 | 4 | 4 | 0 | 4 | 0 | 0 |
+| ORD10ba5ca2 | FAC00010 | 35 | 35 | 0 | 35 | 4 | 1 |
+| ORD04cc4e57 | FAC00009 | 27 | 27 | 0 | 27 | 7 | 3 |
+
+Only one 4/28 quantity cell differs between selected OCR source and saved sheet:
+
+| order | facility | menu | field | OCR source | saved sheet | interpretation |
+| --- | --- | --- | --- | ---: | ---: | --- |
+| ORD2a654d51 | FAC00001 | 春雨サラダ | `qty.regular_x` | 92 | 32 | The OCR source still has the bad value, but the saved sheet was corrected. Daily output follows `32`. |
+
+Therefore current daily output is driven by saved sheet and persisted bagging rows, not by stale selected OCR source. The remaining mismatch against the email actuals is not a downstream aggregation bug. It is caused by the saved sheet values themselves: accepted OCR values, accepted OCR zero values, or low-confidence OCR candidates that were not accepted into the saved sheet.
