@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
-from src.models.order import Order
+from src.models.order import Order, OrderLine
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
@@ -1780,10 +1780,44 @@ def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]
         "output_bundle_id": _new_id("OOB"),
         "order_id": order.id,
         "source_bagging_result_id": bagging_result.get("bagging_result_id"),
+        "source_saved_sheet_id": bagging_result.get("source_saved_sheet_id"),
+        "source_ocr_result_id": bagging_result.get("source_ocr_result_id"),
         "template_version_id": bagging_result.get("template_version_id"),
         "status": "review_ready",
         "artifacts": [],
         "created_at": _now().isoformat(),
+    }
+
+
+def _order_line_digest(line: OrderLine) -> str:
+    payload = {
+        "date": line.date.isoformat() if line.date else None,
+        "daypart": line.daypart,
+        "menu_name": line.menu_name,
+        "diet_type": line.diet_type,
+        "area_id": line.area_id,
+        "bag_type": line.bag_type,
+        "quantity_original": line.quantity_original,
+        "quantity_corrected": line.quantity_corrected,
+        "change_note": line.change_note,
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _serialize_materialized_order_line(line: OrderLine) -> dict[str, Any]:
+    return {
+        "id": line.id,
+        "line_id": line.line_id,
+        "date": line.date.isoformat() if line.date else None,
+        "daypart": line.daypart,
+        "menu_name": line.menu_name,
+        "diet_type": line.diet_type,
+        "area_id": line.area_id,
+        "bag_type": line.bag_type,
+        "quantity_original": line.quantity_original,
+        "quantity_corrected": line.quantity_corrected,
+        "change_note": line.change_note,
+        "line_digest": line.line_digest,
     }
 
 
@@ -2044,10 +2078,20 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             return None, "template_version_mismatch"
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id")) if isinstance(bagging_result, dict) else None
         output_template_version_id = _normalize_id(output_bundle.get("template_version_id")) if isinstance(output_bundle, dict) else None
+        output_source_bagging_result_id = _normalize_id(output_bundle.get("source_bagging_result_id")) if isinstance(output_bundle, dict) else None
+        bagging_result_id = _normalize_id(bagging_result.get("bagging_result_id")) if isinstance(bagging_result, dict) else None
+        output_source_saved_sheet_id = _normalize_id(output_bundle.get("source_saved_sheet_id")) if isinstance(output_bundle, dict) else None
+        bagging_source_saved_sheet_id = _normalize_id(bagging_result.get("source_saved_sheet_id")) if isinstance(bagging_result, dict) else None
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
             return None, "template_version_mismatch"
         if workflow_template_version_id and output_template_version_id != workflow_template_version_id:
             return None, "template_version_mismatch"
+        if not bagging_result_id or output_source_bagging_result_id != bagging_result_id:
+            return None, "output_bundle_source_mismatch"
+        if output_source_saved_sheet_id and output_source_saved_sheet_id != draft.id:
+            return None, "output_bundle_source_mismatch"
+        if bagging_source_saved_sheet_id and bagging_source_saved_sheet_id != draft.id:
+            return None, "bagging_result_source_mismatch"
         materialization_candidate = (
             bagging_result.get("materialization_candidate")
             if isinstance(bagging_result.get("materialization_candidate"), dict)
@@ -2068,6 +2112,15 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         except Exception as exc:  # noqa: BLE001
             session.rollback()
             return None, f"saved_sheet_materialization_failed:{exc}"
+        session.flush()
+        materialized_lines = (
+            session.query(OrderLine)
+            .filter(OrderLine.order_id == order.id)
+            .order_by(OrderLine.date, OrderLine.daypart, OrderLine.menu_name, OrderLine.id)
+            .all()
+        )
+        for line in materialized_lines:
+            line.line_digest = _order_line_digest(line)
         order.status = "確定"
         invalidate_orders_cache = getattr(order_service_module, "_invalidate_orders_cache", None)
         if callable(invalidate_orders_cache):
@@ -2082,6 +2135,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             "bagging_result": bagging_result,
             "output_bundle": output_bundle,
             "materialization_candidate": materialization_candidate,
+            "order_lines": [_serialize_materialized_order_line(line) for line in materialized_lines],
         }
         digest = hashlib.sha256(
             json.dumps(snapshot_json, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -2098,6 +2152,12 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             created_at=_now(),
         )
         session.add(snapshot)
+        session.flush()
+        for line in materialized_lines:
+            line.confirmed_snapshot_id = snapshot.id
+        output_bundle = {**output_bundle, "confirmed_snapshot_id": snapshot.id}
+        meta["output_bundle"] = output_bundle
+        _write_workflow_meta(workflow, meta)
         workflow.confirmed_snapshot_id = snapshot.id
         workflow.state = "confirmed"
         workflow.headline = "注文が確定されました"

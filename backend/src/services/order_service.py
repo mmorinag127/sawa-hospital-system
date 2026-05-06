@@ -7214,6 +7214,10 @@ def get_bag_summary(order_id: str):
         payload = [
             {
                 "id": bag.id,
+                "confirmed_snapshot_id": bag.confirmed_snapshot_id,
+                "output_bundle_id": bag.output_bundle_id,
+                "source_saved_sheet_id": bag.source_saved_sheet_id,
+                "template_version_id": bag.template_version_id,
                 "date": bag.date.isoformat() if bag.date else None,
                 "daypart": bag.daypart,
                 "menu_name": bag.menu_name,
@@ -34454,6 +34458,8 @@ def _serialize_line_with_amount(line: OrderLine, menu_meta: dict[str, dict[str, 
     return {
         "id": line.id,
         "line_id": line.line_id,
+        "confirmed_snapshot_id": line.confirmed_snapshot_id,
+        "line_digest": line.line_digest,
         "date": line.date.isoformat() if line.date else None,
         "daypart": line.daypart,
         "menu_name": line.menu_name,

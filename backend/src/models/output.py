@@ -9,6 +9,10 @@ class Bag(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    confirmed_snapshot_id = Column(String, ForeignKey("order_confirmed_snapshots.id"), nullable=True, index=True)
+    output_bundle_id = Column(String, nullable=True, index=True)
+    source_saved_sheet_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     date = Column(Date, nullable=True)
     daypart = Column(String, nullable=True)
     menu_name = Column(String, nullable=True)
@@ -24,6 +28,10 @@ class LabelRow(Base):
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False)
     bag_id = Column(String, ForeignKey("bags.id"), nullable=True)
+    confirmed_snapshot_id = Column(String, ForeignKey("order_confirmed_snapshots.id"), nullable=True, index=True)
+    output_bundle_id = Column(String, nullable=True, index=True)
+    source_saved_sheet_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     payload_json = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -33,6 +41,10 @@ class DeliveryNote(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    confirmed_snapshot_id = Column(String, ForeignKey("order_confirmed_snapshots.id"), nullable=True, index=True)
+    output_bundle_id = Column(String, nullable=True, index=True)
+    source_saved_sheet_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     facility_code = Column(String, nullable=False)
     date = Column(Date, nullable=True)
     file_uri = Column(String, nullable=True)
@@ -44,6 +56,9 @@ class ManufacturingAggregateRow(Base):
     __tablename__ = "manufacturing_aggregate_rows"
 
     id = Column(String, primary_key=True)
+    confirmed_snapshot_id = Column(String, ForeignKey("order_confirmed_snapshots.id"), nullable=True, index=True)
+    output_bundle_id = Column(String, nullable=True, index=True)
+    template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     week_code = Column(String, nullable=False)
     facility_code = Column(String, nullable=False)
     menu_name = Column(String, nullable=True)

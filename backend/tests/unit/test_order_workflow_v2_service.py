@@ -1580,5 +1580,9 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert snapshot is not None
         assert snapshot.snapshot_json["source"] == "workflow_v2"
         assert snapshot.snapshot_json["bagging_result"]["bagging_result_id"] == bagging_result_id
-        assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 1
+        lines = session.query(OrderLine).filter(OrderLine.order_id == order_id).all()
+        assert len(lines) == 1
+        assert lines[0].confirmed_snapshot_id == snapshot.id
+        assert isinstance(lines[0].line_digest, str) and len(lines[0].line_digest) == 64
+        assert snapshot.snapshot_json["order_lines"][0]["line_digest"] == lines[0].line_digest
         assert session.get(Order, order_id).status == "確定"

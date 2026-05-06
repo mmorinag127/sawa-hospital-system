@@ -30,6 +30,8 @@ class OrderLine(Base):
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    confirmed_snapshot_id = Column(String, ForeignKey("order_confirmed_snapshots.id"), nullable=True, index=True)
+    line_digest = Column(String, nullable=True, index=True)
     line_id = Column(String, nullable=True)
     date = Column(Date, nullable=True)
     daypart = Column(String, nullable=True)
