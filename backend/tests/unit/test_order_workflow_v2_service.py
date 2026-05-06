@@ -318,6 +318,64 @@ def test_workflow_v2_get_endpoints_do_not_create_workflow_rows() -> None:
         assert session.get(OrderWorkflowState, order_id) is None
 
 
+def test_list_ocr_results_only_returns_current_template_candidates() -> None:
+    order_id, current_evidence_id, mismatched_evidence_id = _create_order_with_evidence()
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    assert error is None
+    current_template_version_id = workflow["template_version_id"]
+    archived_template_version_id = _id("FTVarchived")
+    null_template_evidence_id = _id("OEV")
+    with session_scope() as session:
+        session.add(
+            FacilityTemplateVersion(
+                id=archived_template_version_id,
+                facility_id="FAC00001",
+                version="archived",
+                status="archived",
+                template_id="template-fac00001",
+                source="test-archived-template",
+                columns_json=_template_columns(),
+                cells_json=[],
+                template_digest="archived-digest",
+                validation_json={"errors": [], "warnings": []},
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.get(OrderOcrEvidenceRun, current_evidence_id).template_version_id = current_template_version_id
+        session.get(OrderOcrEvidenceRun, mismatched_evidence_id).template_version_id = archived_template_version_id
+        session.add(
+            OrderOcrEvidenceRun(
+                id=null_template_evidence_id,
+                order_id=order_id,
+                schema_version="workflow-v2-test",
+                producer_version="test",
+                source="test",
+                status="ready",
+                payload_json={"pipeline_version": "test-pipeline"},
+                artifact_manifest_json={"overlay": f"{null_template_evidence_id}.pdf"},
+                artifact_digest=f"digest-{null_template_evidence_id}",
+                capabilities_json={},
+                degraded_reasons_json=[],
+                created_at=datetime.utcnow(),
+            )
+        )
+
+    results, error = order_workflow_v2_service.list_ocr_results(order_id)
+
+    assert error is None
+    assert results["candidate_template_version_id"] == current_template_version_id
+    assert results["hidden_template_mismatch_result_count"] == 2
+    assert [item["ocr_result_id"] for item in results["results"]] == [current_evidence_id]
+    assert results["results"][0]["template_version_id"] == current_template_version_id
+
+
 def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(

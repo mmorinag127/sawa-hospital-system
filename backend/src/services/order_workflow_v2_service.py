@@ -1137,21 +1137,39 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if error:
             return None, error
         workflow = _get_workflow(session, order.id)
+        workflow_meta = _workflow_meta(workflow) if workflow is not None else {}
+        workflow_template_version_id = (
+            _effective_workflow_template_version_id(workflow, workflow_meta)
+            if workflow is not None
+            else None
+        )
         rows = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .all()
         )
+        visible_rows = rows
+        hidden_template_mismatch_result_count = 0
+        if workflow is not None:
+            visible_rows = []
+            for row in rows:
+                row_template_version_id = _normalize_id(row.template_version_id)
+                if workflow_template_version_id and row_template_version_id == workflow_template_version_id:
+                    visible_rows.append(row)
+                else:
+                    hidden_template_mismatch_result_count += 1
         selected_ocr_result_id = workflow.evidence_run_id if workflow is not None else None
         return {
             "order_id": order.id,
             "selected_ocr_result_id": selected_ocr_result_id,
             "workflow_state": workflow.state if workflow is not None else "not_initialized",
             "blockers": [] if workflow is not None else ["workflow_not_initialized"],
+            "candidate_template_version_id": workflow_template_version_id,
+            "hidden_template_mismatch_result_count": hidden_template_mismatch_result_count,
             "results": [
                 _serialize_ocr_result(row, selected=row.id == selected_ocr_result_id)
-                for row in rows
+                for row in visible_rows
             ],
         }, None
 
