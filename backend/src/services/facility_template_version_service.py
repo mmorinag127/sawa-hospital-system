@@ -7,9 +7,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
-from src.db import Base, engine
 from src.models.facility import Facility, FacilityConfig
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.ocr_job import OcrJob
@@ -23,51 +22,8 @@ from src.services import config_service
 from src.services.config_validator import validate_facility_config
 from src.services.template_field_schema_service import derive_row_fields_from_columns
 
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_sqlite_schema() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-    with engine.begin() as conn:
-        existing_tables = {
-            str(row[0])
-            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
-        }
-        if "facility_template_versions" not in existing_tables:
-            return
-        table_columns: dict[str, set[str]] = {}
-        for table_name in (
-            "orders",
-            "ocr_jobs",
-            "order_ocr_evidence_runs",
-            "order_sheet_drafts",
-            "order_confirmed_snapshots",
-            "order_workflow_states",
-            "order_current_states",
-        ):
-            if table_name not in existing_tables:
-                continue
-            rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
-            table_columns[table_name] = {str(row[1]) for row in rows if len(row) > 1}
-        if "orders" in table_columns and "template_version_id" not in table_columns["orders"]:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN template_version_id VARCHAR"))
-        for table_name in (
-            "ocr_jobs",
-            "order_ocr_evidence_runs",
-            "order_sheet_drafts",
-            "order_confirmed_snapshots",
-            "order_workflow_states",
-            "order_current_states",
-        ):
-            if table_name in table_columns and "template_version_id" not in table_columns[table_name]:
-                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN template_version_id VARCHAR"))
-
-
-_ensure_sqlite_schema()
-
 WORKFLOW_V2_META_KEY = "workflow_v2"
+VALID_TEMPLATE_VERSION_STATUSES = {"draft", "active", "archived", "invalid", "repair_blocked"}
 
 
 def _now() -> datetime:
@@ -212,19 +168,45 @@ def _next_version_label(session: Any, facility_id: str) -> str:
     return str(count + 1)
 
 
-def get_active_template_version(session: Any, facility_id: str) -> FacilityTemplateVersion | None:
+def get_active_template_versions(session: Any, facility_id: str) -> list[FacilityTemplateVersion]:
     normalized_facility_id = str(facility_id or "").strip()
     if not normalized_facility_id:
-        return None
-    return (
+        return []
+    return list(
         session.query(FacilityTemplateVersion)
         .filter(
             FacilityTemplateVersion.facility_id == normalized_facility_id,
             FacilityTemplateVersion.status == "active",
         )
         .order_by(FacilityTemplateVersion.activated_at.desc(), FacilityTemplateVersion.created_at.desc())
-        .first()
+        .all()
     )
+
+
+def get_active_template_version(session: Any, facility_id: str) -> FacilityTemplateVersion | None:
+    active_versions = get_active_template_versions(session, facility_id)
+    if len(active_versions) != 1:
+        return None
+    return active_versions[0]
+
+
+def resolve_single_active_template_version(
+    session: Any,
+    facility_id: str,
+) -> tuple[FacilityTemplateVersion | None, str | None]:
+    active_versions = get_active_template_versions(session, facility_id)
+    if not active_versions:
+        return None, "facility_template_unresolved"
+    if len(active_versions) > 1:
+        return None, "facility_template_ambiguous"
+    version = active_versions[0]
+    status = str(version.status or "").strip()
+    if status not in VALID_TEMPLATE_VERSION_STATUSES or status != "active":
+        return None, "facility_template_unresolved"
+    validation = validate_template_columns(list(version.columns_json or []))
+    if validation.get("errors"):
+        return None, "facility_template_unresolved"
+    return version, None
 
 
 def serialize_template_version(row: FacilityTemplateVersion | None) -> dict[str, Any] | None:
@@ -309,7 +291,11 @@ def _ensure_active_version_for_backfill(
         return None
     if normalized_facility_id in cache:
         return cache[normalized_facility_id]
-    active_before = get_active_template_version(session, normalized_facility_id)
+    active_before, active_error = resolve_single_active_template_version(session, normalized_facility_id)
+    if active_error == "facility_template_ambiguous":
+        skipped = summary.setdefault("skipped", {})
+        skipped["facility_template_ambiguous"] = int(skipped.get("facility_template_ambiguous") or 0) + 1
+        return None
     try:
         facility_config = config_service.get_facility_config(normalized_facility_id)
     except Exception:
@@ -399,16 +385,11 @@ def backfill_facility_template_version_lineage(
         ):
             updated["order_workflow_states"] += 1
 
-        job_ids = [f"OCR-{order.id}"]
-        message_id = str(order.message_id or "").strip()
-        if message_id:
-            job_ids.append(f"OCR-{message_id}")
-        if workflow is not None:
-            meta_job_id = str(_workflow_meta_payload(workflow).get("ocr_job_id") or "").strip()
-            if meta_job_id and meta_job_id not in job_ids:
-                job_ids.append(meta_job_id)
-        for job_id in job_ids:
-            job = session.get(OcrJob, job_id)
+        for job in (
+            session.query(OcrJob)
+            .filter(OcrJob.order_id == order.id, OcrJob.template_version_id.is_(None))
+            .all()
+        ):
             if _set_template_version_if_missing(job, version.id):
                 updated["ocr_jobs"] += 1
 
@@ -496,12 +477,7 @@ def ensure_active_template_version_from_resolved_config(
     if not normalized_facility_id:
         return None
     if session.get(Facility, normalized_facility_id) is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        if session.get(Facility, normalized_facility_id) is None:
-            return None
+        return None
     config = facility_config if isinstance(facility_config, dict) else config_service.get_facility_config(normalized_facility_id)
     if not isinstance(config, dict):
         return None
@@ -512,7 +488,10 @@ def ensure_active_template_version_from_resolved_config(
         return None
     template_id = str(config.get("fax_template_id") or template.get("template_id") or "").strip() or None
     digest = template_digest(template_id=template_id, columns=columns)
-    active = get_active_template_version(session, normalized_facility_id)
+    active_versions = get_active_template_versions(session, normalized_facility_id)
+    if len(active_versions) > 1:
+        return None
+    active = active_versions[0] if active_versions else None
     if active is not None and active.template_digest == digest:
         return active
     now = _now()
@@ -552,12 +531,6 @@ def save_columns_for_order(
     if not facility_id:
         return None, "facility_missing"
     facility = session.get(Facility, facility_id)
-    if facility is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        facility = session.get(Facility, facility_id)
     if facility is None:
         return None, "facility_not_found"
 
@@ -672,12 +645,6 @@ def save_template_registration_for_facility(
         return {"error": "fax_template_not_found", "template_ids": missing_template_ids}, "fax_template_not_found"
 
     facility = session.get(Facility, normalized_facility_id)
-    if facility is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        facility = session.get(Facility, normalized_facility_id)
     if facility is None:
         return None, "facility_not_found"
 

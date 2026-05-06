@@ -8,6 +8,10 @@ class OcrJob(Base):
     __tablename__ = "ocr_jobs"
 
     id = Column(String, primary_key=True)
+    order_id = Column(String, ForeignKey("orders.id"), nullable=True, index=True)
+    uploaded_pdf_id = Column(String, ForeignKey("uploaded_pdfs.id"), nullable=True, index=True)
+    order_document_id = Column(String, ForeignKey("order_documents.id"), nullable=True, index=True)
+    input_artifact_digest = Column(String, nullable=True, index=True)
     status = Column(String, default="running")
     input_reference = Column(String, nullable=False)
     template_id = Column(String, nullable=True)

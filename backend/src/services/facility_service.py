@@ -1,40 +1,14 @@
-from datetime import datetime, timedelta
 import json
-import threading
 from uuid import uuid4
 from loguru import logger
-from sqlalchemy import delete, select, update, inspect, text
+from sqlalchemy import delete, select, update
 
-from src.db import session_scope, Base, engine
+from src.db import session_scope
 from src.models.facility import Facility, FacilityArea, FacilityConfig
 from src.models.order import Order
 from src.services import config_service
 from src.services.notification_service import record_event
 
-
-def _ensure_facility_area_pk() -> None:
-    if engine.dialect.name == "sqlite":
-        return
-    inspector = inspect(engine)
-    if "facility_areas" not in inspector.get_table_names():
-        return
-    pk = inspector.get_pk_constraint("facility_areas") or {}
-    cols = pk.get("constrained_columns") or []
-    if set(cols) == {"facility_id", "id"}:
-        return
-    constraint_name = pk.get("name") or "facility_areas_pkey"
-    with engine.begin() as conn:
-        conn.execute(text(f'ALTER TABLE facility_areas DROP CONSTRAINT IF EXISTS "{constraint_name}"'))
-        conn.execute(text("ALTER TABLE facility_areas ADD PRIMARY KEY (facility_id, id)"))
-
-
-Base.metadata.create_all(bind=engine)
-_ensure_facility_area_pk()
-
-_SYNC_LOCK = threading.Lock()
-_SYNC_DONE = False
-_SYNC_LAST_ERROR_AT: datetime | None = None
-_SYNC_RETRY_WINDOW = timedelta(seconds=60)
 _TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
 
 
@@ -49,26 +23,6 @@ def _contains_template_definition_change(current_config: dict, next_config: dict
         if _stable_json(next_config.get(key)) != _stable_json(current_config.get(key)):
             return True
     return False
-
-
-def _ensure_facility_sync(session) -> None:
-    global _SYNC_DONE, _SYNC_LAST_ERROR_AT
-    if _SYNC_DONE:
-        return
-    if _SYNC_LAST_ERROR_AT and datetime.utcnow() - _SYNC_LAST_ERROR_AT < _SYNC_RETRY_WINDOW:
-        return
-    with _SYNC_LOCK:
-        if _SYNC_DONE:
-            return
-        if _SYNC_LAST_ERROR_AT and datetime.utcnow() - _SYNC_LAST_ERROR_AT < _SYNC_RETRY_WINDOW:
-            return
-        try:
-            _sync_facilities_from_master(session)
-            _SYNC_DONE = True
-            _SYNC_LAST_ERROR_AT = None
-        except Exception as exc:  # noqa: BLE001
-            _SYNC_LAST_ERROR_AT = datetime.utcnow()
-            logger.warning("Facility sync failed", error=str(exc))
 
 
 def _normalize_area_payload(areas: list | None) -> list[dict]:
@@ -188,13 +142,7 @@ def update_config(
 ) -> bool:
     updated = False
     with session_scope() as session:
-        _ensure_facility_sync(session)
-        session.flush()
         fac = session.get(Facility, facility_id)
-        if not fac:
-            _sync_facilities_from_master(session)
-            session.flush()
-            fac = session.get(Facility, facility_id)
         if not fac:
             return False
         current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
@@ -228,14 +176,12 @@ def update_config(
 
 def list_facilities() -> list[dict]:
     with session_scope() as session:
-        _ensure_facility_sync(session)
         facilities = session.execute(select(Facility)).scalars().all()
         return [serialize_facility(fac) for fac in facilities]
 
 
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
-        _ensure_facility_sync(session)
         fac = session.get(Facility, facility_id)
         if not fac:
             return None

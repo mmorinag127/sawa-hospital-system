@@ -6,12 +6,8 @@ from typing import Any
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order_current_state import OrderCurrentState
-
-
-Base.metadata.create_all(bind=engine)
-
 
 _CURRENT_STATE_SNAPSHOT_VERSION = "v2"
 

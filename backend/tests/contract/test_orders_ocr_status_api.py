@@ -113,6 +113,23 @@ def test_list_orders_include_ocr_prefers_cached_success_over_non_reparse_running
     assert row.get("ocr_status") == "success"
 
 
+def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch):
+    order_service.clear_all()
+    _create_seed_order("msg-status-api-read-workflow-no-refresh")
+
+    def _fake_workflow_state(_order_id: str, *, refresh: bool = False):
+        if refresh:
+            raise AssertionError("GET /orders must not refresh workflow state")
+        return None
+
+    monkeypatch.setattr(orders_api.order_service, "get_order_workflow_state", _fake_workflow_state)
+
+    client = TestClient(app)
+    res = client.get("/orders?include_ocr=true")
+
+    assert res.status_code == 200
+
+
 def test_get_order_preserves_terminal_reparse_failure_status(tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-001b")
@@ -683,7 +700,7 @@ def test_get_ocr_output_returns_pending_when_active_ocr_rerun_output_is_pending(
     assert res.json() == {"pending": True}
 
 
-def test_get_order_reconciles_completed_first_pass_output(monkeypatch, tmp_path):
+def test_get_order_does_not_reconcile_completed_first_pass_output(monkeypatch, tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-first-pass-reconcile")
     output_path = tmp_path / "ocr_output_done_first_pass.json"
@@ -714,11 +731,12 @@ def test_get_order_reconciles_completed_first_pass_output(monkeypatch, tmp_path)
     res = client.get(f"/orders/{order['id']}")
     assert res.status_code == 200
     payload = res.json()
-    assert seen == [job_id]
-    assert payload.get("ocr_status") == "done"
+    assert seen == []
+    assert payload.get("ocr_status") == "running"
+    assert get_job(job_id)["status"] == "running"
 
 
-def test_get_order_reconciles_done_first_pass_output_without_evidence(monkeypatch, tmp_path):
+def test_get_order_does_not_reconcile_done_first_pass_output_without_evidence(monkeypatch, tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-first-pass-done-missing-evidence")
     output_path = tmp_path / "ocr_output_done_first_pass_missing_evidence.json"
@@ -747,7 +765,8 @@ def test_get_order_reconciles_done_first_pass_output_without_evidence(monkeypatc
     client = TestClient(app)
     res = client.get(f"/orders/{order['id']}")
     assert res.status_code == 200
-    assert seen == [job_id]
+    assert seen == []
+    assert get_job(job_id)["status"] == "done"
 
 
 def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evidence_exists(monkeypatch, tmp_path):
@@ -788,7 +807,7 @@ def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evid
     assert seen == []
 
 
-def test_get_order_reconciles_done_order_bound_first_pass_output_without_evidence(monkeypatch, tmp_path):
+def test_get_order_does_not_reconcile_done_order_bound_first_pass_output_without_evidence(monkeypatch, tmp_path):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-order-bound-first-pass")
     output_path = tmp_path / "ocr_output_done_order_bound_first_pass.json"
@@ -818,7 +837,8 @@ def test_get_order_reconciles_done_order_bound_first_pass_output_without_evidenc
     client = TestClient(app)
     res = client.get(f"/orders/{order['id']}")
     assert res.status_code == 200
-    assert seen == [job_id]
+    assert seen == []
+    assert get_job(job_id)["status"] == "done"
 
 
 def test_list_orders_include_ocr_keeps_running_status():

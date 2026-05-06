@@ -16,6 +16,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 
 from src.db import session_scope
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
@@ -80,6 +81,30 @@ def _serialize_for_json(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def _latest_output_lineage_for_order(session, order_id: str) -> dict[str, str | None]:
+    snapshot = (
+        session.query(OrderConfirmedSnapshot)
+        .filter(OrderConfirmedSnapshot.order_id == order_id)
+        .order_by(OrderConfirmedSnapshot.confirmed_at.desc(), OrderConfirmedSnapshot.id.desc())
+        .first()
+    )
+    if snapshot is None:
+        return {
+            "confirmed_snapshot_id": None,
+            "output_bundle_id": None,
+            "source_saved_sheet_id": None,
+            "template_version_id": None,
+        }
+    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
+    output_bundle = snapshot_json.get("output_bundle") if isinstance(snapshot_json.get("output_bundle"), dict) else {}
+    return {
+        "confirmed_snapshot_id": snapshot.id,
+        "output_bundle_id": str(output_bundle.get("output_bundle_id") or "").strip() or None,
+        "source_saved_sheet_id": str(snapshot_json.get("saved_sheet_id") or output_bundle.get("source_saved_sheet_id") or "").strip() or None,
+        "template_version_id": str(snapshot.template_version_id or output_bundle.get("template_version_id") or "").strip() or None,
+    }
 
 
 def _format_number(value: float | int | None) -> str:
@@ -2996,6 +3021,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     _write_aggregate_csv(agg_path, total_rows, total_fields)
 
     with session_scope() as session:
+        lineage = _latest_output_lineage_for_order(session, order_id)
         session.query(Bag).filter(Bag.order_id == order_id).delete()
         session.query(LabelRow).filter(LabelRow.order_id == order_id).delete()
         session.query(DeliveryNote).filter(DeliveryNote.order_id == order_id).delete()
@@ -3006,6 +3032,10 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
                 Bag(
                     id=bag_id,
                     order_id=order_id,
+                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
+                    output_bundle_id=lineage["output_bundle_id"],
+                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
+                    template_version_id=lineage["template_version_id"],
                     date=bag.get("date"),
                     daypart=bag.get("daypart"),
                     menu_name=bag.get("menu_name"),
@@ -3023,6 +3053,10 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
                     id=f"LAB{uuid4().hex[:8]}",
                     order_id=order_id,
                     bag_id=None,
+                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
+                    output_bundle_id=lineage["output_bundle_id"],
+                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
+                    template_version_id=lineage["template_version_id"],
                     payload_json=label,
                 )
             )
@@ -3030,6 +3064,10 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
             DeliveryNote(
                 id=f"INV{uuid4().hex[:8]}",
                 order_id=order_id,
+                confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
+                output_bundle_id=lineage["output_bundle_id"],
+                source_saved_sheet_id=lineage["source_saved_sheet_id"],
+                template_version_id=lineage["template_version_id"],
                 facility_code=order.get("facility") or "",
                 date=None,
                 file_uri=str(delivery_path),
@@ -3040,6 +3078,9 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
             session.add(
                 ManufacturingAggregateRow(
                     id=f"MAG{uuid4().hex[:8]}",
+                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
+                    output_bundle_id=lineage["output_bundle_id"],
+                    template_version_id=lineage["template_version_id"],
                     week_code=order.get("week") or "",
                     facility_code=order.get("facility") or "",
                     menu_name=row.get("menu_name"),
@@ -3073,6 +3114,7 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
     payload = []
 
     with session_scope() as session:
+        lineage = _latest_output_lineage_for_order(session, order_id)
         session.query(Bag).filter(Bag.order_id == order_id).delete()
         for bag in bags:
             bag_id = f"BAG{uuid4().hex[:8]}"
@@ -3080,6 +3122,10 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
                 Bag(
                     id=bag_id,
                     order_id=order_id,
+                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
+                    output_bundle_id=lineage["output_bundle_id"],
+                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
+                    template_version_id=lineage["template_version_id"],
                     date=bag.get("date"),
                     daypart=bag.get("daypart"),
                     menu_name=bag.get("menu_name"),

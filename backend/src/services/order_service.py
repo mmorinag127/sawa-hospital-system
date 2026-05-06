@@ -19,9 +19,9 @@ from loguru import logger
 from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 import pandas as pd
-from sqlalchemy import select, delete, inspect, text, func, or_
+from sqlalchemy import select, delete, func, or_
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.document import OrderDocument
 from src.models.order_ocr_cache import OrderOcrCache
@@ -49,14 +49,12 @@ from src.services.notification_service import record_event
 from src.services import (
     config_service,
     menu_service,
-    facility_service,
     fax_extractor,
     order_form_service,
     daily_output_override_service,
     week_candidate_service,
 )
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
-from src.services.config_validator import validate_facility_config
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
 from src.services import (
@@ -98,6 +96,7 @@ from src.services.ocr_job_service import (
     create_job,
     update_job,
     get_job as get_ocr_job,
+    get_latest_order_job,
     get_job_request_mode,
     describe_job_state as describe_ocr_job_state,
     get_stale_minutes as get_ocr_job_stale_minutes,
@@ -108,45 +107,8 @@ from src.services.ocr_pipeline_service import (
     run_ocr_pipeline,
 )
 
-Base.metadata.create_all(bind=engine)
-
-
 HAKODATE_EVIDENCE_PROJECTION_VERSION = "hakodate_projection_truth_v2"
 HAKODATE_CANONICAL_PIPELINE_VERSION = "hakodate_best_method_canonical_v2"
-
-
-def _ensure_orders_lines_updated_at() -> None:
-    inspector = inspect(engine)
-    if "orders" not in inspector.get_table_names():
-        return
-    columns = {col.get("name") for col in inspector.get_columns("orders")}
-    if "lines_updated_at" in columns:
-        return
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE orders ADD COLUMN lines_updated_at TIMESTAMP"))
-
-
-_ensure_orders_lines_updated_at()
-
-
-def _ensure_orders_archive_columns() -> None:
-    inspector = inspect(engine)
-    if "orders" not in inspector.get_table_names():
-        return
-    columns = {col.get("name") for col in inspector.get_columns("orders")}
-    statements: list[str] = []
-    if "archived_at" not in columns:
-        statements.append("ALTER TABLE orders ADD COLUMN archived_at TIMESTAMP")
-    if "archived_by" not in columns:
-        statements.append("ALTER TABLE orders ADD COLUMN archived_by VARCHAR")
-    if not statements:
-        return
-    with engine.begin() as conn:
-        for statement in statements:
-            conn.execute(text(statement))
-
-
-_ensure_orders_archive_columns()
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
@@ -2450,6 +2412,10 @@ class LegacyPositionMappingDisabledError(RuntimeError):
     pass
 
 
+class LegacyOcrEvidenceFallbackDisabledError(RuntimeError):
+    pass
+
+
 def _raise_legacy_position_mapping_disabled() -> None:
     raise LegacyPositionMappingDisabledError(
         "legacy source_row_index menu position mapping is disabled; "
@@ -4592,7 +4558,6 @@ def _purge_order_runtime_state_in_session(session, order_ids: list[str]) -> dict
     normalized_order_ids = [str(item or "").strip() for item in order_ids if str(item or "").strip()]
     if not normalized_order_ids:
         return {}
-    ocr_job_ids = [f"OCR-{order_id}" for order_id in normalized_order_ids]
     orders = session.execute(select(Order).where(Order.id.in_(normalized_order_ids))).scalars().all()
     document_ids: set[str] = set()
     for order in orders:
@@ -4682,7 +4647,7 @@ def _purge_order_runtime_state_in_session(session, order_ids: list[str]) -> dict
             delete(OrderMenuSnapshot).where(OrderMenuSnapshot.order_id.in_(normalized_order_ids)),
         ),
         ("order_lines", delete(OrderLine).where(OrderLine.order_id.in_(normalized_order_ids))),
-        ("ocr_jobs", delete(OcrJob).where(OcrJob.id.in_(ocr_job_ids))),
+        ("ocr_jobs", delete(OcrJob).where(OcrJob.order_id.in_(normalized_order_ids))),
     ]
     if uploaded_pdf_ids:
         statements.append(
@@ -7249,6 +7214,10 @@ def get_bag_summary(order_id: str):
         payload = [
             {
                 "id": bag.id,
+                "confirmed_snapshot_id": bag.confirmed_snapshot_id,
+                "output_bundle_id": bag.output_bundle_id,
+                "source_saved_sheet_id": bag.source_saved_sheet_id,
+                "template_version_id": bag.template_version_id,
                 "date": bag.date.isoformat() if bag.date else None,
                 "daypart": bag.daypart,
                 "menu_name": bag.menu_name,
@@ -7336,9 +7305,8 @@ def _load_cached_ocr(message_id: Optional[str]) -> Optional[dict]:
 
 
 def _load_pipeline_raw_text(order_id: str, message_id: Optional[str]) -> Optional[str]:
-    job = get_ocr_job(f"OCR-{order_id}")
-    if not job and message_id:
-        job = get_ocr_job(f"OCR-{message_id}")
+    _ = message_id
+    job = get_latest_order_job(order_id)
     if not job:
         return None
     output_ref = job.get("output_reference")
@@ -8261,30 +8229,17 @@ def persist_ocr_evidence_run(
     return persisted
 
 
-def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = True) -> Optional[dict]:
+def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = False) -> Optional[dict]:
+    if backfill_from_cache:
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "legacy OCR cache backfill is disabled; use an explicit repair command instead"
+        )
     latest = ocr_evidence_service.get_latest_evidence_run(order_id)
-    if latest is not None or not backfill_from_cache:
-        return latest
-    # Backfill must not depend on active-evidence resolution because the active
-    # path itself resolves through latest evidence state.
-    cached_payload = _load_order_ocr_cache(order_id)
-    if not isinstance(cached_payload, dict):
-        return None
-    cached_payload = _restore_payload_raw_ocr_surface(
-        cached_payload,
-        strip_legacy_surface=True,
-    )
-    return ocr_evidence_service.backfill_evidence_run_from_cached_payload(
-        order_id,
-        cached_payload,
-        schema_version="v1_legacy_backfill",
-        producer_version="legacy-cache-backfill/v1",
-        source="legacy-cache-backfill",
-    )
+    return latest
 
 
 def _resolve_active_ocr_evidence_run(order_id: str) -> Optional[dict]:
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
     if not _draft_record_is_authoritative_current_sheet(latest_draft):
         latest_draft = None
@@ -8298,14 +8253,7 @@ def _load_active_ocr_payload(order_id: str) -> tuple[dict[str, Any] | None, dict
     if not isinstance(payload, dict):
         return None, active_evidence
     template = _resolve_order_fax_template(order_id)
-    cached_payload = _load_order_ocr_cache(order_id)
     prepared_payload = evidence_manifest_service.ensure_evidence_manifest(dict(payload))
-    prepared_payload = _merge_legacy_first_pass_payload(
-        prepared_payload,
-        active_evidence,
-        cached_payload if isinstance(cached_payload, dict) else None,
-        template=template,
-    )
     prepared_payload = _restore_payload_raw_ocr_surface(
         prepared_payload,
         strip_legacy_surface=True,
@@ -8333,7 +8281,7 @@ def persist_sheet_draft(
 ) -> Optional[dict]:
     if not isinstance(draft_sheet_json, dict):
         return None
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     template_resolution_id = None
     if isinstance(latest_evidence, dict):
         payload_json = latest_evidence.get("payload_json")
@@ -9325,7 +9273,7 @@ def ensure_hakodate_evidence_draft_current(
 
 def get_hakodate_pipeline_job_status(order_id: str) -> dict[str, Any]:
     normalized_order_id = str(order_id or "").strip()
-    job = get_ocr_job(f"OCR-{normalized_order_id}") if normalized_order_id else None
+    job = get_latest_order_job(normalized_order_id) if normalized_order_id else None
     if not isinstance(job, dict):
         return describe_ocr_job_state(None)
     request_mode = get_job_request_mode(job)
@@ -9859,7 +9807,7 @@ def _build_canonical_bootstrap_sheet(
     base_evidence_run = (
         evidence_run_override
         if isinstance(evidence_run_override, dict)
-        else get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+        else get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     )
     received_at_value = _parse_iso_datetime_value(order_payload.get("received_at")) or datetime.utcnow()
     cached_payload = _load_order_ocr_cache(order_id)
@@ -11084,7 +11032,7 @@ def _persisted_current_state_is_reusable(
     )
     if current_lines_updated_at_norm != persisted_lines_updated_at_norm:
         return False
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     latest_evidence_run_id = str((latest_evidence or {}).get("id") or "").strip() or None
     persisted_evidence_run_id = str(payload.get("base_evidence_run_id") or payload.get("evidence_run_id") or "").strip() or None
     if latest_evidence_run_id != persisted_evidence_run_id:
@@ -11179,6 +11127,7 @@ def _build_current_sheet_context_uncached(
     refresh_draft_from_semantic: bool = True,
     upgrade_generic_from_sheet: bool = True,
     backfill_from_revision: bool = False,
+    allow_state_mutation: bool = False,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -11193,7 +11142,7 @@ def _build_current_sheet_context_uncached(
             normalized_order_id,
             current_record,
         )
-        if rebase_required:
+        if rebase_required and allow_state_mutation:
             refreshed_record = _rebase_draft_record_to_facility_schema(
                 normalized_order_id,
                 current_record,
@@ -11361,6 +11310,7 @@ def refresh_current_sheet_context(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
+        allow_state_mutation=True,
     )
     if _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -11402,11 +11352,12 @@ def get_current_sheet_context(
             refresh_draft_from_semantic=refresh_draft_from_semantic,
         ):
             return persisted_payload
-    return refresh_current_sheet_context(
+    return _build_current_sheet_context_uncached(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
+        allow_state_mutation=False,
     )
 
 
@@ -11537,9 +11488,11 @@ def _reconcile_finished_ocr_rerun(order_id: str) -> bool:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return False
-    ocr_job_id = f"OCR-{normalized_order_id}"
-    reparse_job = get_ocr_job(ocr_job_id)
+    reparse_job = get_latest_order_job(normalized_order_id)
     if not isinstance(reparse_job, dict):
+        return False
+    ocr_job_id = str(reparse_job.get("id") or "").strip()
+    if not ocr_job_id:
         return False
     status = str(reparse_job.get("status") or "").strip().lower()
     metrics = reparse_job.get("metrics")
@@ -11716,7 +11669,7 @@ def _load_visible_ocr_rerun_output(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None, None, None
-    job = get_ocr_job(f"OCR-{normalized_order_id}")
+    job = get_latest_order_job(normalized_order_id)
     if not isinstance(job, dict):
         return None, None, None
     if get_job_request_mode(job) != "ocr_rerun":
@@ -12035,7 +11988,7 @@ def reconcile_completed_ocr_job(job_id: str) -> bool:
             source="ocr-first-pass-reconcile",
         )
         if not isinstance(persisted_evidence, dict):
-            persisted_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+            persisted_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
         if not isinstance(persisted_evidence, dict):
             update_job(
                 normalized_job_id,
@@ -12118,13 +12071,21 @@ def rerun_ocr_evidence_only(
         return None, "document_not_found"
 
     ocr_job_id = str(job_id or f"OCR-{order_id}").strip() or f"OCR-{order_id}"
-    _, created = create_job(ocr_job_id, input_reference=document_uri)
+    workflow_template_version_id = str(order.get("template_version_id") or "").strip() or None
+    _, created = create_job(
+        ocr_job_id,
+        input_reference=document_uri,
+        order_id=normalized_order_id,
+        template_version_id=workflow_template_version_id,
+    )
     if not created:
         update_job(
             ocr_job_id,
             status="running",
             input_reference=document_uri,
             error_message=None,
+            order_id=normalized_order_id,
+            template_version_id=workflow_template_version_id,
         )
 
     try:
@@ -12484,7 +12445,7 @@ def switch_draft_to_latest_evidence(
     *,
     edited_by: str | None = None,
 ) -> tuple[Optional[dict], Optional[str]]:
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     if not isinstance(latest_evidence, dict):
         return None, "evidence_not_found"
     latest_evidence_id = str(latest_evidence.get("id") or "").strip() or None
@@ -12626,8 +12587,6 @@ def get_candidate_draft_preview(order_id: str) -> tuple[Optional[dict], Optional
 
 
 def get_order_workflow_state(order_id: str, *, refresh: bool = False) -> Optional[dict]:
-    if reconcile_ocr_rerun_state(order_id):
-        refresh = True
     if refresh:
         return workflow_state_service.refresh_workflow_state(order_id)
     state = workflow_state_service.get_workflow_state(order_id)
@@ -12665,7 +12624,7 @@ def get_order_candidate_resolution(order_id: str) -> Optional[dict]:
         if isinstance(resolution, dict):
             return resolution
     order = get_order_by_id(order_id)
-    evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     payload = evidence.get("payload_json") if isinstance(evidence, dict) else None
     return candidate_resolution_service.resolve_order_candidates(
         order_id=order_id,
@@ -12991,7 +12950,7 @@ def flatten_current_sheet_payload(
     )
     if not isinstance(workflow, dict) or not isinstance(workflow.get("apply_gate"), dict):
         workflow = get_order_workflow_state(order_id, refresh=False)
-    evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     if not isinstance(evidence, dict):
         evidence_run_id = str((draft_record or {}).get("base_evidence_run_id") or "").strip()
         if evidence_run_id:
@@ -15687,7 +15646,7 @@ def _resolve_sheet_suppression_metrics(
         projection = payload_metrics.get("structural_row_projection")
         if result_state or (isinstance(projection, dict) and projection):
             return payload_metrics
-    job = get_ocr_job(f"OCR-{order_id}")
+    job = get_latest_order_job(order_id)
     job_metrics = job.get("metrics") if isinstance(job, dict) else None
     if isinstance(job_metrics, dict) and job_metrics:
         return job_metrics
@@ -16203,7 +16162,7 @@ def _augment_sheet_review_payload(
         )
     enriched["warnings"] = list(warnings)
     draft_state = _extract_order_draft_state(order_id, ocr_payload, lines_updated_at=lines_updated_at)
-    job = get_ocr_job(f"OCR-{order_id}")
+    job = get_latest_order_job(order_id)
     menu_diagnostics = (
         dict(payload.get("menu_diagnostics") or {})
         if isinstance(payload.get("menu_diagnostics"), dict)
@@ -18218,7 +18177,7 @@ def review_ocr_table_with_llm(
         "source": "llm_patch_candidate",
         "warnings": ["llm_patch_needs_review"] if needs_more_review else [],
     }
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     patch_candidate = patch_candidate_service.persist_patch_candidate(
         order_id=order_id,
         base_draft_id=(latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
@@ -18502,57 +18461,65 @@ def _sync_reparse_debug_from_job_metrics(
 def get_ocr_output(
     order_id: str,
     *,
-    persist_cache: bool = True,
+    persist_cache: bool = False,
     include_legacy_edits: bool = True,
+    allow_legacy_fallback: bool = False,
+    allow_job_reconcile: bool = False,
 ):
-    reconcile_ocr_rerun_state(order_id)
+    if allow_legacy_fallback:
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "legacy OCR output fallback is disabled; read immutable evidence or run explicit recovery"
+        )
+    if allow_job_reconcile:
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "read-time OCR job reconciliation is disabled; use worker or explicit command recovery"
+        )
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None, "order_not_found"
-        message_id = order.message_id
         facility_id = str(order.facility_code or "").strip() or None
     active_evidence_payload = None
     active_evidence_run = None
     active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
-    job = get_ocr_job(f"OCR-{order_id}")
-    rerun_payload, rerun_error, rerun_job = _load_visible_ocr_rerun_output(order_id)
-    if isinstance(rerun_payload, dict):
-        job = rerun_job if isinstance(rerun_job, dict) else job
-        active_evidence_payload = rerun_payload
-        active_evidence_run = None
-    elif rerun_error == "ocr_output_pending":
-        return None, rerun_error
-    cached_payload = _load_order_ocr_cache(order_id)
+    job = get_latest_order_job(order_id)
+    if allow_legacy_fallback:
+        rerun_payload, rerun_error, rerun_job = _load_visible_ocr_rerun_output(order_id)
+        if isinstance(rerun_payload, dict):
+            job = rerun_job if isinstance(rerun_job, dict) else job
+            active_evidence_payload = rerun_payload
+            active_evidence_run = None
+        elif rerun_error == "ocr_output_pending":
+            return None, rerun_error
+    elif _job_is_pending(job):
+        return None, "ocr_output_pending"
+    cached_payload = _load_order_ocr_cache(order_id) if allow_legacy_fallback else None
     facility_template = _resolve_order_fax_template(order_id)
-    active_evidence_payload = _merge_legacy_first_pass_payload(
-        active_evidence_payload,
-        active_evidence_run,
-        cached_payload,
-        template=facility_template,
-    )
+    if allow_legacy_fallback:
+        active_evidence_payload = _merge_legacy_first_pass_payload(
+            active_evidence_payload,
+            active_evidence_run,
+            cached_payload,
+            template=facility_template,
+        )
     active_evidence_payload = _annotate_payload_with_template_field_schema(
         active_evidence_payload,
         facility_template,
     )
     parsed = None
-    parsed_source = ""
     order_job_pending = _job_is_pending(job)
     if (
         _payload_has_first_pass_ocr_content(active_evidence_payload)
         or _payload_has_hakodate_output_content(active_evidence_payload, order_id=order_id)
     ):
         parsed = active_evidence_payload
-        parsed_source = "active_evidence"
-    elif (
+    elif allow_legacy_fallback and (
         _payload_has_first_pass_ocr_content(cached_payload)
         or _payload_has_hakodate_output_content(cached_payload, order_id=order_id)
     ):
         parsed = cached_payload
-        parsed_source = "cache"
-    else:
+    elif allow_legacy_fallback:
         parsed = _load_job_output(job, "order", wait_for_recovery=False)
-        parsed_source = "job"
         order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
         if _output_is_pending(parsed):
             parsed = None
@@ -18562,24 +18529,8 @@ def get_ocr_output(
         ):
             parsed = None
     fallback_job = None
-    if (
-        message_id
-        and not order_job_pending
-        and parsed is None
-    ):
-        fallback_job = get_ocr_job(f"OCR-{message_id}")
-        fallback_parsed = _load_job_output(fallback_job, "message", wait_for_recovery=False)
-        if _output_is_pending(fallback_parsed):
-            fallback_parsed = None
-        if (
-            _payload_has_first_pass_ocr_content(fallback_parsed)
-            or _payload_has_hakodate_output_content(fallback_parsed, order_id=order_id)
-        ):
-            parsed = fallback_parsed
-            parsed_source = "message"
-    if parsed is None:
+    if allow_legacy_fallback and parsed is None:
         parsed = cached_payload
-        parsed_source = "cache"
     if parsed is None:
         active_job = job or fallback_job
         if not active_job:
@@ -18598,9 +18549,9 @@ def get_ocr_output(
             parsed,
             strip_legacy_surface=not include_legacy_edits,
         )
-    if persist_cache and not _output_is_pending(parsed):
+    if allow_legacy_fallback and persist_cache and not _output_is_pending(parsed):
         _save_order_ocr_cache(order_id, parsed)
-    cached_payload = _load_order_ocr_cache(order_id)
+    cached_payload = _load_order_ocr_cache(order_id) if allow_legacy_fallback else None
     if isinstance(parsed, dict) and isinstance(cached_payload, dict):
         enriched = dict(parsed)
         merged = False
@@ -18615,7 +18566,7 @@ def get_ocr_output(
                 merged = True
         if merged:
             parsed = enriched
-    if include_legacy_edits and isinstance(cached_payload, dict):
+    if include_legacy_edits and allow_legacy_fallback and isinstance(cached_payload, dict):
         cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
         enriched = dict(parsed) if isinstance(parsed, dict) else {}
         merged = False
@@ -18637,7 +18588,7 @@ def get_ocr_output(
     metrics_job = job or fallback_job
     if isinstance(parsed, dict):
         parsed, synced = _sync_reparse_debug_from_job_metrics(parsed, metrics_job)
-        if synced and persist_cache and not _output_is_pending(parsed):
+        if synced and allow_legacy_fallback and persist_cache and not _output_is_pending(parsed):
             _save_order_ocr_cache(order_id, parsed)
     parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     parsed = _attach_facility_candidates(parsed)
@@ -18650,7 +18601,7 @@ def get_ocr_output(
             if isinstance(resolved_template, dict):
                 output_template = dict(resolved_template)
     if isinstance(parsed, dict) and isinstance(output_template, dict):
-        if candidate_resolution_service.position_fallback_allowed_for_facility(
+        if allow_legacy_fallback and candidate_resolution_service.position_fallback_allowed_for_facility(
             current_facility=facility_id,
             payload=parsed,
         ):
@@ -18660,13 +18611,13 @@ def get_ocr_output(
                 template_id=str(parsed.get("template_id") or "").strip() or None,
             )
         parsed = _annotate_payload_with_template_field_schema(parsed, output_template)
-        if include_legacy_edits:
+        if include_legacy_edits and allow_legacy_fallback:
             parsed, edited_latest_synced = _sync_edited_ocr_latest_from_canonical_revision(
                 order_id=order_id,
                 payload=parsed,
                 template=output_template,
             )
-            if edited_latest_synced and persist_cache and not _output_is_pending(parsed):
+            if edited_latest_synced and allow_legacy_fallback and persist_cache and not _output_is_pending(parsed):
                 _save_order_ocr_cache(order_id, parsed)
             parsed, edited_recanonicalized = _recanonicalize_edited_ocr_payload_for_template(
                 parsed,
@@ -18674,13 +18625,14 @@ def get_ocr_output(
             )
             if (
                 (edited_latest_synced or edited_recanonicalized)
+                and allow_legacy_fallback
                 and persist_cache
                 and not _output_is_pending(parsed)
             ):
                 _save_order_ocr_cache(order_id, parsed)
-        if persist_cache and not _output_is_pending(parsed):
+        if allow_legacy_fallback and persist_cache and not _output_is_pending(parsed):
             _save_order_ocr_cache(order_id, parsed)
-    if include_legacy_edits:
+    if include_legacy_edits and allow_legacy_fallback:
         parsed = _attach_edited_ocr_payload(parsed)
     return parsed, None
 
@@ -18688,7 +18640,7 @@ def get_ocr_output(
 def _get_ocr_output_without_legacy_edits(
     order_id: str,
     *,
-    persist_cache: bool = True,
+    persist_cache: bool = False,
 ):
     try:
         return get_ocr_output(
@@ -19252,7 +19204,7 @@ def get_ocr_pages(
         active_evidence_payload,
         facility_template,
     )
-    job = get_ocr_job(f"OCR-{order_id}")
+    job = get_latest_order_job(order_id)
     parsed = None
     parsed_source = ""
     order_job_pending = _job_is_pending(job)
@@ -19271,18 +19223,6 @@ def get_ocr_pages(
         elif not _payload_has_page_artifacts(parsed):
             parsed = None
     fallback_job = None
-    if (
-        message_id
-        and not order_job_pending
-        and parsed is None
-    ):
-        fallback_job = get_ocr_job(f"OCR-{message_id}")
-        fallback_parsed = _load_job_output(fallback_job, "message", wait_for_recovery=False)
-        if _output_is_pending(fallback_parsed):
-            fallback_parsed = None
-        if _payload_has_page_artifacts(fallback_parsed):
-            parsed = fallback_parsed
-            parsed_source = "message"
     if parsed is None:
         parsed = cached_payload
         parsed_source = "cache"
@@ -20177,6 +20117,8 @@ def _canonicalize_sheet_daypart_rows(
         elif current_date_key:
             date_key = current_date_key
         raw_daypart_token = str(raw_daypart or "").strip()
+        if raw_daypart_token in {'"', "＂", "〃"}:
+            raw_daypart_token = ""
         supported_daypart = _canonical_daypart_key(raw_daypart_token)
         if (
             not raw_daypart_token
@@ -27339,7 +27281,7 @@ def get_ocr_edit_history(order_id: str):
     revisions, raw_output = _load_order_sheet_revisions(order_id=order_id, payload=payload, limit=20)
     latest_evidence = None
     if not revisions:
-        latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+        latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
         if isinstance(latest_evidence, dict):
             evidence_payload = latest_evidence.get("payload_json")
             synthetic_revision = _build_ocr_history_fallback_from_evidence_run(latest_evidence)
@@ -27348,11 +27290,11 @@ def get_ocr_edit_history(order_id: str):
                 if not isinstance(raw_output, dict) and isinstance(evidence_payload, dict):
                     raw_output = evidence_payload
     if not revisions and not isinstance(raw_output, dict) and not isinstance(payload, dict):
-        latest_evidence = latest_evidence or get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+        latest_evidence = latest_evidence or get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
         if not isinstance(latest_evidence, dict) and not isinstance(get_order_by_id(order_id), dict):
             return None, "order_not_found"
     latest = revisions[-1] if revisions else None
-    reparse_job = get_ocr_job(f"OCR-{order_id}")
+    reparse_job = get_latest_order_job(order_id)
     reparse_state = None
     latest_reparse_attempt = None
     if isinstance(reparse_job, dict):
@@ -32141,13 +32083,21 @@ def reparse_order(
         "fallback_reason": None,
     }
     ocr_job_id = f"OCR-{order_id}"
-    _, created = create_job(ocr_job_id, input_reference=document_uri)
+    workflow_template_version_id = str(order.get("template_version_id") or "").strip() or None
+    _, created = create_job(
+        ocr_job_id,
+        input_reference=document_uri,
+        order_id=order_id,
+        template_version_id=workflow_template_version_id,
+    )
     if not created:
         job_updates: dict[str, Any] = {
             "status": "running",
             "error_message": None,
             "template_id": None,
             "input_reference": document_uri,
+            "order_id": order_id,
+            "template_version_id": workflow_template_version_id,
             # Always cut the stale first-pass artifact off the shared reparse job row.
             "output_reference": (
                 str(resume_first_pass_output_reference or "").strip() or None
@@ -32605,6 +32555,16 @@ def reparse_order(
                 template=template_to_use,
                 user_prompt=ocr_prompt,
             )
+        policy = config_service.load_ingest_policy()
+        strict_llm_quantity = bool(
+            llm_assist
+            or inference_provider in {"openai", "gemini"}
+            or main_provider in {"openai", "gemini"}
+        )
+        reparse_quantity_rules = _build_reparse_quantity_rules(
+            policy.get("quantity_rules", {}),
+            strict_llm_quantity=strict_llm_quantity,
+        )
         date_strings = extracted.date_strings or []
         rows = extracted.table_rows or []
         tokens = extracted.tokens or []
@@ -33289,8 +33249,6 @@ def reparse_order(
             if not isinstance(parsed_output, dict):
                 if not output_ref:
                     job = get_ocr_job(ocr_job_id)
-                    if not job and message_id:
-                        job = get_ocr_job(f"OCR-{message_id}")
                     output_ref = job.get("output_reference") if job else None
                 parsed_output = _load_pipeline_output_with_retry(output_ref)
             if not isinstance(parsed_output, dict):
@@ -34327,7 +34285,7 @@ def choose_critical_decision(
     *,
     selected_by: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     current_evidence_run_id = str((latest_evidence or {}).get("id") or "").strip() or None
     current_decision = critical_decision_service.get_latest_decision(order_id, decision_type)
     if isinstance(current_decision, dict):
@@ -34510,6 +34468,8 @@ def _serialize_line_with_amount(line: OrderLine, menu_meta: dict[str, dict[str, 
     return {
         "id": line.id,
         "line_id": line.line_id,
+        "confirmed_snapshot_id": line.confirmed_snapshot_id,
+        "line_digest": line.line_digest,
         "date": line.date.isoformat() if line.date else None,
         "daypart": line.daypart,
         "menu_name": line.menu_name,

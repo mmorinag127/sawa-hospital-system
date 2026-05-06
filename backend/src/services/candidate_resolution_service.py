@@ -4,17 +4,12 @@ import re
 from datetime import date, datetime
 from typing import Any
 
-from src.db import Base, engine
 from src.services import (
     config_service,
     position_column_mapping_service,
     sheet_week_service,
     week_candidate_service,
 )
-
-
-Base.metadata.create_all(bind=engine)
-
 
 _DATE_RE = re.compile(r"(?:(20\d{2})[/-])?(\d{1,2})[/-](\d{1,2})")
 

@@ -12,15 +12,12 @@ from uuid import uuid4
 
 from sqlalchemy import delete, func, select
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
 from src.models.order import Order, OrderLine
 from src.models.order_ocr_cache import OrderOcrCache
 from src.services.storage_service import load_bytes_from_uri
-
-
-Base.metadata.create_all(bind=engine)
 
 _EXPORT_DIR = Path(os.getenv("OCR_TRAINING_EXPORT_DIR", "/tmp/ocr-training-exports"))
 _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -108,13 +105,13 @@ def _load_ocr_payload(order: Order) -> tuple[dict | None, str | None]:
                 provider = payload.get("engine") or payload.get("provider")
                 return payload, str(provider) if provider else None
 
-    ocr_job_ids = [f"OCR-{order.id}"]
-    if order.message_id:
-        ocr_job_ids.append(f"OCR-{order.message_id}")
-
     with session_scope() as session:
         jobs = (
-            session.execute(select(OcrJob).where(OcrJob.id.in_(ocr_job_ids)))
+            session.execute(
+                select(OcrJob)
+                .where(OcrJob.order_id == order.id)
+                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+            )
             .scalars()
             .all()
         )
@@ -159,7 +156,17 @@ def register_order_sample(
     has_corrections = any(_has_line_correction(line) for line in lines)
     ocr_output, ocr_provider = _load_ocr_payload(order)
     now = datetime.utcnow()
-    ocr_job_id = f"OCR-{order_id}"
+    with session_scope() as session:
+        latest_job_id = (
+            session.execute(
+                select(OcrJob.id)
+                .where(OcrJob.order_id == order_id)
+                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+    ocr_job_id = str(latest_job_id or "").strip() or None
 
     with session_scope() as session:
         sample = (

@@ -9,15 +9,31 @@ sys.path.append(str(ROOT))
 from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
-from src.services import facility_service, facility_template_version_service  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
+from src.services import config_service, facility_service, facility_template_version_service  # noqa: E402
 
 
 def _clear_facilities():
     with session_scope() as session:
+        session.execute(delete(FacilityTemplateVersion))
         session.execute(delete(FacilityConfig))
         session.execute(delete(FacilityArea))
         session.execute(delete(Facility))
-    facility_service._SYNC_DONE = False  # noqa: SLF001
+
+
+def _seed_facilities_from_master():
+    with session_scope() as session:
+        facility_service._sync_facilities_from_master(session)  # noqa: SLF001
+
+
+def _ensure_active_template_version_for_facility(facility_id: str):
+    with session_scope() as session:
+        facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=facility_id,
+            facility_config=config_service.get_facility_config(facility_id),
+            created_by="test-explicit-template-registration",
+        )
 
 
 def test_facility_config_update_contract():
@@ -36,6 +52,72 @@ def test_facility_config_update_contract():
     assert fetched.status_code == 200
     payload = fetched.json()
     assert payload["config"]["label_profile_override"]["storage_mode"] == "frozen"
+
+
+def test_facility_list_does_not_sync_master_on_read():
+    _clear_facilities()
+    client = TestClient(app)
+
+    fetched = client.get("/facilities")
+
+    assert fetched.status_code == 200
+    assert fetched.json()["facilities"] == []
+    with session_scope() as session:
+        assert session.query(Facility).count() == 0
+
+
+def test_facility_get_does_not_create_template_version_from_resolved_config():
+    _clear_facilities()
+    facility_id = "FAC_READ_NO_CREATE"
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Read No Create Facility"))
+        session.add(FacilityConfig(facility_id=facility_id, config_json={"fax_template_id": "fax_layout_regular_forbidden_v1"}))
+    client = TestClient(app)
+
+    fetched = client.get(f"/facilities/{facility_id}")
+
+    assert fetched.status_code == 200
+    resolved = fetched.json().get("resolved_config") or {}
+    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert resolved.get("facility_template_version") is None
+    with session_scope() as session:
+        versions = (
+            session.query(FacilityTemplateVersion)
+            .filter(FacilityTemplateVersion.facility_id == facility_id)
+            .all()
+        )
+        assert versions == []
+
+
+def test_facility_template_registration_does_not_sync_master_for_missing_facility():
+    _clear_facilities()
+    client = TestClient(app)
+
+    update = client.put(
+        "/facilities/FAC00002/fax-template",
+        json={"fax_template_id": "fax_layout_regular_forbidden_v1"},
+    )
+
+    assert update.status_code == 404
+    with session_scope() as session:
+        assert session.query(Facility).count() == 0
+        assert session.query(FacilityTemplateVersion).count() == 0
+
+
+def test_active_template_version_import_does_not_sync_master_for_missing_facility():
+    _clear_facilities()
+
+    with session_scope() as session:
+        version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id="FAC00002",
+            facility_config=config_service.get_facility_config("FAC00002"),
+            created_by="test-read-boundary",
+        )
+
+        assert version is None
+        assert session.query(Facility).count() == 0
+        assert session.query(FacilityTemplateVersion).count() == 0
 
 
 def test_facility_scoped_fax_template_registration_contract():
@@ -88,6 +170,7 @@ def test_facility_scoped_fax_template_registration_contract():
 
 def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
     _clear_facilities()
+    _seed_facilities_from_master()
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00005")
@@ -113,6 +196,8 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
 
 def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
     _clear_facilities()
+    _seed_facilities_from_master()
+    _ensure_active_template_version_for_facility("FAC00002")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00002")
@@ -146,6 +231,8 @@ def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
 
 def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
     _clear_facilities()
+    _seed_facilities_from_master()
+    _ensure_active_template_version_for_facility("FAC00007")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00007")
@@ -177,6 +264,7 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
 
 def test_fac00003_stale_override_columns_preserve_physical_source_indexes():
     _clear_facilities()
+    _seed_facilities_from_master()
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     stale_override = {

@@ -7,39 +7,16 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import text
-
-from src.db import Base, engine, session_scope
+from src.db import session_scope
+from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services import (
     evidence_manifest_service,
-    facility_template_version_service,
     hakodate_ocr_evidence_service,
     order_current_state_service,
     template_resolution_service,
 )
-
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_order_ocr_evidence_run_schema() -> None:
-    if not str(engine.url).startswith("sqlite"):
-        return
-    with engine.begin() as conn:
-        rows = conn.execute(text("PRAGMA table_info(order_ocr_evidence_runs)")).fetchall()
-        if not rows:
-            return
-        columns = {str(row[1]) for row in rows if len(row) > 1}
-        if "source" not in columns:
-            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN source VARCHAR"))
-        if "template_version_id" not in columns:
-            conn.execute(text("ALTER TABLE order_ocr_evidence_runs ADD COLUMN template_version_id VARCHAR"))
-
-
-_ensure_order_ocr_evidence_run_schema()
-
 
 _EVIDENCE_META_KEYS = (
     "job_id",
@@ -500,13 +477,16 @@ def build_evidence_run_record(
     capabilities["legacy_editable"] = bool(str(schema_version or "").startswith("v1_legacy"))
     degraded_reasons = _build_degraded_reasons(extracted, capabilities)
     artifact_digest = _digest(extracted)
+    normalized_source = str(source or "unknown").strip() or "unknown"
     resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
+    if normalized_source == "legacy-cache-backfill":
+        resolved_status = "repair_blocked"
     return {
         "order_id": normalized_order_id,
         "template_version_id": str(template_version_id or "").strip() or None,
         "schema_version": schema_version,
         "producer_version": producer_version or "legacy-cache-mirror/v1",
-        "source": str(source or "unknown").strip() or "unknown",
+        "source": normalized_source,
         "status": resolved_status,
         "payload_json": extracted,
         "artifact_manifest_json": manifest,
@@ -539,17 +519,33 @@ def persist_evidence_run(
         return None
     with session_scope() as session:
         normalized_template_version_id = str(record.get("template_version_id") or "").strip()
-        if not normalized_template_version_id:
-            order = session.get(Order, record["order_id"])
-            facility_id = str(order.facility_code or "").strip() if order is not None else ""
-            active_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-                session,
-                facility_id=facility_id,
-                created_by="ocr-evidence-persist",
-            )
-            normalized_template_version_id = str(active_version.id if active_version is not None else "").strip()
+        order = session.get(Order, record["order_id"])
+        if not normalized_template_version_id and order is not None:
+            normalized_template_version_id = str(order.template_version_id or "").strip()
         if not normalized_template_version_id:
             return None
+        template_version = session.get(FacilityTemplateVersion, normalized_template_version_id)
+        if template_version is None or template_version.status != "active":
+            return None
+        if order is not None:
+            facility_id = str(order.facility_code or "").strip()
+            if facility_id and str(template_version.facility_id or "").strip() != facility_id:
+                return None
+        existing_identity = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(
+                OrderOcrEvidenceRun.order_id == record["order_id"],
+                OrderOcrEvidenceRun.template_version_id == normalized_template_version_id,
+                OrderOcrEvidenceRun.artifact_digest == record["artifact_digest"],
+                OrderOcrEvidenceRun.status != "repair_blocked",
+            )
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .first()
+        )
+        if existing_identity is not None:
+            existing = _serialize_evidence_run(existing_identity, include_payload=True)
+            existing["created"] = False
+            return existing
         latest = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == record["order_id"])
@@ -615,7 +611,10 @@ def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
     with session_scope() as session:
         latest = (
             session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
+            .filter(
+                OrderOcrEvidenceRun.order_id == normalized_order_id,
+                OrderOcrEvidenceRun.status != "repair_blocked",
+            )
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .first()
         )

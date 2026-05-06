@@ -6,9 +6,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.db import session_scope  # noqa: E402
-from src.models.order import OrderLine  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
+from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.order_sheet_draft import OrderSheetDraft  # noqa: E402
-from src.services import draft_sheet_service, ocr_evidence_service, order_current_state_service, order_service, workflow_state_service  # noqa: E402
+from src.services import draft_sheet_service, ocr_evidence_service, order_current_state_service, order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -84,6 +85,43 @@ def _sample_payload(quantity: str = "3") -> dict:
     }
 
 
+def _attach_active_template_version(order_id: str, facility_id: str = "FAC00001") -> str:
+    version_id = f"FTV-{order_id}"
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if order is not None:
+            order.template_version_id = version_id
+        session.add(
+            FacilityTemplateVersion(
+                id=version_id,
+                facility_id=facility_id,
+                version="test",
+                status="active",
+                template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                source="test",
+                columns_json=[
+                    {"source_index": 0, "role": "date", "header": "日付"},
+                    {"source_index": 1, "role": "daypart", "header": "区分"},
+                    {"source_index": 2, "role": "menu_name", "header": "メニュー"},
+                    {
+                        "source_index": 3,
+                        "role": "quantity",
+                        "header": "常食2F",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                    },
+                ],
+                cells_json=[],
+                template_digest=f"digest-{order_id}",
+                validation_json={"errors": [], "warnings": []},
+                created_by="test",
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+    return version_id
+
+
 def _sample_hakodate_payload(quantity: str = "9") -> dict:
     return {
         "status": "done",
@@ -153,6 +191,12 @@ def _sample_hakodate_base_sheet(order_id: str) -> dict:
         "blockers": [],
         "review_state": "review_required",
     }
+
+
+def _sample_hakodate_base_sheet_with_quantity(order_id: str, quantity: str) -> dict:
+    sheet = _sample_hakodate_base_sheet(order_id)
+    sheet["rows"][0][3] = quantity
+    return sheet
 
 
 def _append_sheet_revision(
@@ -1803,6 +1847,7 @@ def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch) -
 def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_current_draft(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-rerun-evidence-only")
+    _attach_active_template_version(order["id"])
     first = ocr_evidence_service.persist_evidence_run(
         order_id=order["id"],
         payload=_sample_payload("3"),
@@ -1832,6 +1877,11 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
         "_hakodate_canonical_payload_from_manifest_item",
         lambda **_kwargs: _sample_hakodate_payload("9"),
     )
+    monkeypatch.setattr(
+        order_service,
+        "_build_hakodate_weekly_menu_base_sheet",
+        lambda order_id: (_sample_hakodate_base_sheet_with_quantity(order_id, "3"), None),
+    )
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
@@ -1849,7 +1899,7 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
     assert draft_json["rows"][0][regular_index] == "3"
     assert current_draft["base_evidence_run_id"] == rerun["id"]
 
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
     assert isinstance(latest_evidence, dict)
     assert latest_evidence["id"] == rerun["id"]
 
@@ -1917,6 +1967,7 @@ def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(mon
 def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_output(monkeypatch) -> None:
     order_service.clear_all()
     order = _seed_order("msg-rerun-evidence-partial")
+    _attach_active_template_version(order["id"])
     first = ocr_evidence_service.persist_evidence_run(
         order_id=order["id"],
         payload=_sample_payload("3"),
@@ -1941,6 +1992,11 @@ def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_o
 
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
     monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
+    monkeypatch.setattr(
+        order_service,
+        "_build_hakodate_weekly_menu_base_sheet",
+        lambda order_id: (_sample_hakodate_base_sheet_with_quantity(order_id, "3"), None),
+    )
 
     rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
 
@@ -1958,7 +2014,7 @@ def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_o
     assert draft_json["rows"][0][:3] == ["03/22", "朝", "Menu A"]
     assert draft_json["rows"][0][regular_index] == "3"
     assert current_draft["base_evidence_run_id"] == rerun["id"]
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
+    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
     assert isinstance(latest_evidence, dict)
     assert latest_evidence["id"] == rerun["id"]
 

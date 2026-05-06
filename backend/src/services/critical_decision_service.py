@@ -4,11 +4,8 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order_critical_decision import OrderCriticalDecision
-
-
-Base.metadata.create_all(bind=engine)
 
 INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE = "_candidate_evidence_ack"
 
@@ -147,6 +144,74 @@ def sync_pending_decisions(
             .all()
         )
         return [_serialize_decision(row) for row in rows]
+
+
+def project_pending_decisions(
+    order_id: str,
+    critical_choices: list[dict[str, Any]] | None,
+    *,
+    base_evidence_run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the decision projection without creating/deleting decision rows."""
+
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return []
+    normalized_base_evidence_run_id = str(base_evidence_run_id or "").strip() or None
+
+    desired: dict[str, dict[str, Any]] = {}
+    for item in critical_choices or []:
+        if not isinstance(item, dict):
+            continue
+        decision_type = str(item.get("decision_type") or "").strip()
+        if not decision_type:
+            continue
+        candidate_set = dict(item)
+        if normalized_base_evidence_run_id:
+            candidate_set["base_evidence_run_id"] = normalized_base_evidence_run_id
+        elif "base_evidence_run_id" in candidate_set:
+            candidate_set["base_evidence_run_id"] = str(candidate_set.get("base_evidence_run_id") or "").strip() or None
+        desired[decision_type] = candidate_set
+
+    existing_by_type = {
+        str(item.get("decision_type") or "").strip(): item
+        for item in list_decisions(normalized_order_id)
+        if isinstance(item, dict) and str(item.get("decision_type") or "").strip()
+    }
+    projected: list[dict[str, Any]] = []
+    for decision_type, candidate_set in desired.items():
+        previous = existing_by_type.get(decision_type) or {}
+        next_base_evidence_run_id = str(candidate_set.get("base_evidence_run_id") or "").strip() or None
+        previous_base_evidence_run_id = str(previous.get("base_evidence_run_id") or "").strip() or None
+        keep_selection = bool(
+            previous.get("selected_value")
+            and (
+                (
+                    not previous_base_evidence_run_id
+                    and not next_base_evidence_run_id
+                )
+                or (
+                    previous_base_evidence_run_id
+                    and previous_base_evidence_run_id == next_base_evidence_run_id
+                )
+            )
+        )
+        selected_value = str(previous.get("selected_value") or "").strip() or None if keep_selection else None
+        selected_by = str(previous.get("selected_by") or "").strip() or None if keep_selection else None
+        selected_at = previous.get("selected_at") if keep_selection else None
+        projected.append(
+            {
+                "id": str(previous.get("id") or f"pending:{decision_type}").strip(),
+                "order_id": normalized_order_id,
+                "decision_type": decision_type,
+                "candidate_set_json": candidate_set,
+                "base_evidence_run_id": next_base_evidence_run_id,
+                "selected_value": selected_value,
+                "selected_by": selected_by,
+                "selected_at": selected_at,
+            }
+        )
+    return projected
 
 
 def acknowledge_candidate_evidence(

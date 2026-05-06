@@ -72,6 +72,36 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
     assert "template_source_index_missing" in validation_after_placeholder["errors"]
 
 
+def test_multiple_active_template_versions_are_blocker() -> None:
+    facility_id = _id("FAC")
+    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Ambiguous Template Facility"))
+        for index in range(2):
+            session.add(
+                FacilityTemplateVersion(
+                    id=_id("FTV"),
+                    facility_id=facility_id,
+                    version=str(index + 1),
+                    status="active",
+                    template_id="fax_layout_regular_forbidden_v1",
+                    source="test",
+                    columns_json=columns,
+                    cells_json=[],
+                    template_digest=f"digest-{index}",
+                    validation_json={"errors": [], "warnings": []},
+                    created_at=datetime.utcnow(),
+                    activated_at=datetime.utcnow(),
+                )
+            )
+
+    with session_scope() as session:
+        active, error = facility_template_version_service.resolve_single_active_template_version(session, facility_id)
+
+    assert active is None
+    assert error == "facility_template_ambiguous"
+
+
 def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
     facility_id = _id("FAC")
     order_id = _id("ORD")
@@ -97,7 +127,7 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
                 received_at=datetime.utcnow(),
             )
         )
-        session.add(OcrJob(id=job_id, input_reference="file:///input.pdf", status="success"))
+        session.add(OcrJob(id=job_id, order_id=order_id, input_reference="file:///input.pdf", status="success"))
         session.add(
             OrderOcrEvidenceRun(
                 id=evidence_id,
@@ -181,6 +211,37 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
         current_state = session.get(OrderCurrentState, order_id)
         assert current_state.template_version_id == version_id
         assert current_state.state_json["template_version_id"] == version_id
+
+
+def test_backfill_does_not_stamp_ocr_job_by_name_without_explicit_order_lineage(monkeypatch) -> None:
+    facility_id = _id("FAC")
+    order_id = _id("ORD")
+    job_id = f"OCR-{order_id}"
+    monkeypatch.setattr(
+        facility_template_version_service.config_service,
+        "get_facility_config",
+        lambda requested_id: _registered_config(requested_id) if requested_id == facility_id else None,
+    )
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Backfill Facility"))
+        session.add(
+            Order(
+                id=order_id,
+                facility_code=facility_id,
+                week_code="2026-04@2026-04-26~2026-04-30",
+                status="要確認",
+                document_uri=f"file:///{order_id}.pdf",
+                message_id=f"msg-{order_id}",
+                received_at=datetime.utcnow(),
+            )
+        )
+        session.add(OcrJob(id=job_id, input_reference="file:///input.pdf", status="success"))
+
+    with session_scope() as session:
+        facility_template_version_service.backfill_facility_template_version_lineage(session)
+    with session_scope() as session:
+        assert session.get(Order, order_id).template_version_id
+        assert session.get(OcrJob, job_id).template_version_id is None
 
 
 def test_current_state_cache_requires_matching_template_version(monkeypatch) -> None:

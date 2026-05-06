@@ -8,11 +8,9 @@ import re
 
 from sqlalchemy import select, and_
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.output import DailyOutputPortionOverride
 from src.services.menu_vocabulary import normalize_diet_type
-
-Base.metadata.create_all(bind=engine)
 
 _GRAM_UNIT_ALIASES = {"g", "ｇ", "gram", "grams"}
 _CUT_UNIT_ALIASES = {"cut", "slice", "slices"}

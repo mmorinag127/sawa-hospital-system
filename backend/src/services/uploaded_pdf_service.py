@@ -442,6 +442,9 @@ def build_ingest_payload(uploaded_pdf: dict[str, Any]) -> dict[str, Any]:
         "source_kind": uploaded_pdf.get("source_kind") or "manual_upload",
         "original_filename": uploaded_pdf.get("original_filename"),
         "content_sha256": uploaded_pdf.get("content_sha256"),
+        "uploaded_pdf_id": uploaded_pdf.get("id"),
+        "order_id": uploaded_pdf.get("current_order_id") or None,
+        "order_document_id": uploaded_pdf.get("current_document_id") or None,
     }
 
 

@@ -17,6 +17,10 @@ _ORDER_REPARSE_REQUEST_MODES = {"ocr_rerun", "ocr_reparse", "llm_reparse"}
 def _job_to_dict(job: OcrJob) -> dict[str, Any]:
     return {
         "id": job.id,
+        "order_id": job.order_id,
+        "uploaded_pdf_id": job.uploaded_pdf_id,
+        "order_document_id": job.order_document_id,
+        "input_artifact_digest": job.input_artifact_digest,
         "status": job.status,
         "input_reference": job.input_reference,
         "template_id": job.template_id,
@@ -51,8 +55,8 @@ def is_order_reparse_job(job: dict[str, Any] | None, order_id: str) -> bool:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return False
-    normalized_job_id = str(job.get("id") or "").strip()
-    if normalized_job_id != f"OCR-{normalized_order_id}":
+    normalized_job_order_id = str(job.get("order_id") or "").strip()
+    if normalized_job_order_id != normalized_order_id:
         return False
     return get_job_request_mode(job) in _ORDER_REPARSE_REQUEST_MODES
 
@@ -245,6 +249,23 @@ def get_jobs(job_ids: list[str]) -> dict[str, dict[str, Any]]:
         return {job.id: _job_to_dict(job) for job in jobs}
 
 
+def get_latest_order_job(order_id: str) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    with session_scope() as session:
+        job = (
+            session.execute(
+                select(OcrJob)
+                .where(OcrJob.order_id == normalized_order_id)
+                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+        return _job_to_dict(job) if job is not None else None
+
+
 def list_recoverable_jobs(limit: int = 50) -> list[dict[str, Any]]:
     with session_scope() as session:
         jobs = (
@@ -264,7 +285,17 @@ def list_recoverable_jobs(limit: int = 50) -> list[dict[str, Any]]:
         ]
 
 
-def create_job(job_id: str, input_reference: str, status: str = "running") -> tuple[dict[str, Any], bool]:
+def create_job(
+    job_id: str,
+    input_reference: str,
+    status: str = "running",
+    *,
+    order_id: str | None = None,
+    uploaded_pdf_id: str | None = None,
+    order_document_id: str | None = None,
+    input_artifact_digest: str | None = None,
+    template_version_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
     with session_scope() as session:
         existing = session.get(OcrJob, job_id)
         if existing:
@@ -272,8 +303,13 @@ def create_job(job_id: str, input_reference: str, status: str = "running") -> tu
         now = datetime.utcnow()
         job = OcrJob(
             id=job_id,
+            order_id=str(order_id or "").strip() or None,
+            uploaded_pdf_id=str(uploaded_pdf_id or "").strip() or None,
+            order_document_id=str(order_document_id or "").strip() or None,
+            input_artifact_digest=str(input_artifact_digest or "").strip() or None,
             status=status,
             input_reference=input_reference,
+            template_version_id=str(template_version_id or "").strip() or None,
             created_at=now,
             updated_at=now,
         )
