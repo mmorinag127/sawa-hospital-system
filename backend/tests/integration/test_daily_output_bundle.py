@@ -47,6 +47,54 @@ def test_write_delivery_note_blocks_when_template_uri_missing(tmp_path):
         )
 
 
+def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    context = _make_context("ORD-1", "FAC001", "そよかぜ", "献立A")
+    context["order"] = {"id": "ORD-1", "facility": "FAC001", "week": "2026-03"}
+    context["order_lines"] = [
+        {
+            "date": TARGET_DATE,
+            "daypart": "朝",
+            "menu_name": "献立A",
+            "diet_type": "regular",
+            "area_id": "common",
+            "quantity_original": 2,
+        }
+    ]
+    context["order_for_outputs"] = {**context["order"], "lines": context["order_lines"]}
+    context["bags"] = [
+        {
+            "date": TARGET_DATE,
+            "daypart": "朝",
+            "menu_name": "献立A",
+            "diet_type": "regular",
+            "area_id": "common",
+            "bag_type": "standard",
+            "quantity": 2,
+        }
+    ]
+    context["delivery_source_for_outputs"] = {**context["order"], "lines": context["bags"]}
+    monkeypatch.setattr(output_builder, "_prepare_output_context", lambda order_id: context)
+
+    def _blocked_session_scope():
+        raise AssertionError("download output path must not mutate canonical output rows")
+
+    def _fake_write_delivery_note(path, rows, columns, template_uri, include_menu_name, sheet_name=None, facility_name=None):
+        workbook = Workbook()
+        ws = workbook.active
+        ws["A1"] = "delivery"
+        workbook.save(path)
+
+    monkeypatch.setattr(output_builder, "session_scope", _blocked_session_scope)
+    monkeypatch.setattr(output_builder, "_write_delivery_note", _fake_write_delivery_note)
+
+    outputs = output_builder.build_outputs("ORD-1")
+
+    assert pathlib.Path(outputs["labels"]).exists()
+    assert pathlib.Path(outputs["delivery_note"]).exists()
+    assert pathlib.Path(outputs["aggregate"]).exists()
+
+
 def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(

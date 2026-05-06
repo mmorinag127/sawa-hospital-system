@@ -17,7 +17,7 @@ from openpyxl.cell.cell import MergedCell
 
 from src.db import session_scope
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
-from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
+from src.models.output import Bag
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
     config_service,
@@ -71,16 +71,6 @@ def _ensure_date(value):
         return pd.to_datetime(value).date()
     except Exception:
         return None
-
-
-def _serialize_for_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _serialize_for_json(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_serialize_for_json(item) for item in value]
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
 
 
 def _latest_output_lineage_for_order(session, order_id: str) -> dict[str, str | None]:
@@ -2456,12 +2446,10 @@ def build_delivery_preview(order_id: str) -> dict:
 
 def build_outputs(order_id: str) -> Dict[str, Any]:
     ctx = _prepare_output_context(order_id)
-    order = ctx["order"]
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     order_lines = ctx["order_lines"]
-    order_for_outputs = ctx["order_for_outputs"]
     bags = ctx["bags"]
     labels, label_fields, _ = _build_label_rows(
         bags, label_profile, ctx["facility_config"].get("facility_name")
@@ -2495,77 +2483,6 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         order_lines, label_profile, ctx["facility_config"].get("facility_name"), quantity_rules
     )
     _write_aggregate_csv(agg_path, total_rows, total_fields)
-
-    with session_scope() as session:
-        lineage = _latest_output_lineage_for_order(session, order_id)
-        session.query(Bag).filter(Bag.order_id == order_id).delete()
-        session.query(LabelRow).filter(LabelRow.order_id == order_id).delete()
-        session.query(DeliveryNote).filter(DeliveryNote.order_id == order_id).delete()
-
-        for bag in bags:
-            bag_id = f"BAG{uuid4().hex[:8]}"
-            session.add(
-                Bag(
-                    id=bag_id,
-                    order_id=order_id,
-                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
-                    output_bundle_id=lineage["output_bundle_id"],
-                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
-                    template_version_id=lineage["template_version_id"],
-                    date=bag.get("date"),
-                    daypart=bag.get("daypart"),
-                    menu_name=bag.get("menu_name"),
-                    diet_type=bag.get("diet_type"),
-                    area_id=bag.get("area_id"),
-                    bag_type=bag.get("bag_type"),
-                    quantity=bag.get("quantity"),
-                )
-            )
-        labels_payload = _serialize_for_json(labels)
-        delivery_rows_payload = _serialize_for_json(delivery_rows)
-        for label in labels_payload:
-            session.add(
-                LabelRow(
-                    id=f"LAB{uuid4().hex[:8]}",
-                    order_id=order_id,
-                    bag_id=None,
-                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
-                    output_bundle_id=lineage["output_bundle_id"],
-                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
-                    template_version_id=lineage["template_version_id"],
-                    payload_json=label,
-                )
-            )
-        session.add(
-            DeliveryNote(
-                id=f"INV{uuid4().hex[:8]}",
-                order_id=order_id,
-                confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
-                output_bundle_id=lineage["output_bundle_id"],
-                source_saved_sheet_id=lineage["source_saved_sheet_id"],
-                template_version_id=lineage["template_version_id"],
-                facility_code=order.get("facility") or "",
-                date=None,
-                file_uri=str(delivery_path),
-                payload_json={"rows": delivery_rows_payload},
-            )
-        )
-        for row in bags:
-            session.add(
-                ManufacturingAggregateRow(
-                    id=f"MAG{uuid4().hex[:8]}",
-                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
-                    output_bundle_id=lineage["output_bundle_id"],
-                    template_version_id=lineage["template_version_id"],
-                    week_code=order.get("week") or "",
-                    facility_code=order.get("facility") or "",
-                    menu_name=row.get("menu_name"),
-                    diet_type=row.get("diet_type"),
-                    area_id=row.get("area_id"),
-                    bag_type=row.get("bag_type"),
-                    quantity=row.get("quantity") or 0,
-                )
-            )
 
     return {
         "order_id": order_id,
