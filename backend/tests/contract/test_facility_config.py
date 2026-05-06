@@ -9,6 +9,7 @@ sys.path.append(str(ROOT))
 from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
 from src.services import config_service, facility_service, facility_template_version_service  # noqa: E402
 
 
@@ -51,6 +52,41 @@ def test_facility_config_update_contract():
     assert fetched.status_code == 200
     payload = fetched.json()
     assert payload["config"]["label_profile_override"]["storage_mode"] == "frozen"
+
+
+def test_facility_list_does_not_sync_master_on_read():
+    _clear_facilities()
+    client = TestClient(app)
+
+    fetched = client.get("/facilities")
+
+    assert fetched.status_code == 200
+    assert fetched.json()["facilities"] == []
+    with session_scope() as session:
+        assert session.query(Facility).count() == 0
+
+
+def test_facility_get_does_not_create_template_version_from_resolved_config():
+    _clear_facilities()
+    facility_id = "FAC_READ_NO_CREATE"
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Read No Create Facility"))
+        session.add(FacilityConfig(facility_id=facility_id, config_json={"fax_template_id": "fax_layout_regular_forbidden_v1"}))
+    client = TestClient(app)
+
+    fetched = client.get(f"/facilities/{facility_id}")
+
+    assert fetched.status_code == 200
+    resolved = fetched.json().get("resolved_config") or {}
+    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert resolved.get("facility_template_version") is None
+    with session_scope() as session:
+        versions = (
+            session.query(FacilityTemplateVersion)
+            .filter(FacilityTemplateVersion.facility_id == facility_id)
+            .all()
+        )
+        assert versions == []
 
 
 def test_facility_scoped_fax_template_registration_contract():
