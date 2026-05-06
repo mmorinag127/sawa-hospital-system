@@ -427,3 +427,30 @@ Only one 4/28 quantity cell differs between selected OCR source and saved sheet:
 | ORD2a654d51 | FAC00001 | 春雨サラダ | `qty.regular_x` | 92 | 32 | The OCR source still has the bad value, but the saved sheet was corrected. Daily output follows `32`. |
 
 Therefore current daily output is driven by saved sheet and persisted bagging rows, not by stale selected OCR source. The remaining mismatch against the email actuals is not a downstream aggregation bug. It is caused by the saved sheet values themselves: accepted OCR values, accepted OCR zero values, or low-confidence OCR candidates that were not accepted into the saved sheet.
+
+### Visual PDF/OCR/sheet review status
+
+The 4/28 overlay contact sheet was visually checked against the saved-vs-source comparison. This is not a new automated acceptance metric; it is the operator-style visual check requested for the failure class.
+
+| order | facility | visual / PDF-OCR-sheet observation | current classification |
+| --- | --- | --- | --- |
+| ORDe608fed7 | FAC00007 | 4/28 target cells are visually blank/blue in the overlay and saved sheet has no 4/28 quantities. | No downstream bug found; contributes 0 because no accepted/saved quantity exists. |
+| ORDccff9ed3 | FAC00002 | Saved 4/28 values are the same 3 accepted OCR values shown in the overlay. | OCR/saved sheet is the source of truth used downstream. |
+| ORDbd3425d7 | FAC00004 | Saved 4/28 values match selected OCR source values; overlay shows accepted values in the target cells. | Any mismatch against the email actual is already in the OCR/saved-sheet layer. |
+| ORDb6f4d715 | FAC00014 | Saved 4/28 values match selected OCR source values, including large accepted values such as `111`. | OCR numeric reading / acceptance result is the source of the saved quantity. |
+| ORDb6702c19 | FAC00006 | Saved 4/28 values match selected OCR source accepted values; additional weak/deterministic candidates are not saved. | Downstream follows saved accepted values. |
+| ORDab6c77ff | FAC00008 | Saved 4/28 values match selected OCR source accepted values; weak/deterministic candidates are not saved. | Downstream follows saved accepted values. |
+| ORDa1e2e963 | FAC00016 | Overlay shows multiple low/medium confidence candidates on 4/28, but none are accepted into the saved sheet. | Quantity loss happens at OCR confidence/acceptance or sheet-review stage, before bagging/daily output. |
+| ORD8e7e41ad | FAC00003 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
+| ORD386cf1de | FAC00015 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
+| ORD372603e7 | FAC00005 | Saved 4/28 values are accepted OCR `0` values shown in the overlay. | If these cells should be non-zero, the cause is OCR numeric reading, not aggregation. |
+| ORD2a654d51 | FAC00001 | Selected OCR source still has `92`, but saved sheet has corrected `32`; daily output follows `32`. | Stale OCR source does not override the saved sheet; correction path works for this cell. |
+| ORD12df0b1e | FAC00012 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
+| ORD10ba5ca2 | FAC00010 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
+| ORD04cc4e57 | FAC00009 | Saved 4/28 values match selected OCR source accepted values, including soft-related values such as `32`/`34`. | Soft overage is already in the saved/OCR values, not daily output summation. |
+
+Strict conclusion:
+
+- Proven fixed / blocked: workflow-v2 blockers, template-version blockers, sheet-source errors, menu/daypart shift after saved sheet, stale OCR source overriding saved sheet, daily output diverging from persisted bagging rows.
+- Not proven as fully solved: OCR numeric accuracy and OCR confidence acceptance. Some remaining differences require either operator sheet correction or OCR accuracy/threshold improvement.
+- Therefore the remaining current discrepancy cannot honestly be closed as a daily-output or workflow-state bug. It is upstream of saved sheet and belongs to OCR/sheet-review accuracy.
