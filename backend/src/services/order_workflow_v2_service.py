@@ -6,6 +6,8 @@ from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import or_
+
 from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order, OrderLine
@@ -14,6 +16,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, sheet_week_service
 
@@ -622,6 +625,187 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
     }
 
 
+def _workflow_blocker_projection(serialized: dict[str, Any], error: str) -> dict[str, Any]:
+    normalized_error = _normalize_id(error)
+    projected = dict(serialized)
+    projected["blockers"] = [normalized_error]
+    projected["warnings"] = []
+    if normalized_error == "template_version_required":
+        projected["state"] = "template_version_required"
+        projected["headline"] = "施設テンプレートの版が未確定です。Step1で施設テンプレートを確定してください"
+        projected["primary_action"] = "confirm_context"
+    elif normalized_error == "template_version_mismatch":
+        projected["state"] = "template_version_mismatch"
+        projected["headline"] = "施設テンプレートが変更されています。OCRを再実行してください"
+        projected["primary_action"] = "run_ocr"
+    elif normalized_error == "facility_template_unresolved":
+        projected["state"] = "facility_template_unresolved"
+        projected["headline"] = "施設テンプレートが未解決です。施設区分列を確認してください"
+        projected["primary_action"] = "register_facility_template"
+    elif normalized_error == "legacy_ocr_evidence_not_selectable":
+        projected["state"] = "legacy_ocr_evidence_not_selectable"
+        projected["headline"] = "旧キャッシュ由来のOCR結果は正解にできません。OCRを再実行してください"
+        projected["primary_action"] = "run_ocr"
+    elif normalized_error in {"selected_ocr_required", "selected_ocr_missing"}:
+        projected["state"] = normalized_error
+        projected["headline"] = "選択OCRが現在の施設テンプレートと一致しません。OCRを再実行してください"
+        projected["primary_action"] = "run_ocr"
+    elif normalized_error in {"saved_sheet_required", "saved_sheet_missing"}:
+        projected["state"] = normalized_error
+        projected["headline"] = "保存済みシートがありません。Step3でシートを作成して保存してください"
+        projected["primary_action"] = "edit_sheet"
+    elif normalized_error == "bagging_result_required":
+        projected["state"] = "bagging_result_required"
+        projected["headline"] = "袋分け結果がありません。Step4で袋分けを作成してください"
+        projected["primary_action"] = "run_bagging"
+    elif normalized_error == "output_review_required":
+        projected["state"] = "output_review_required"
+        projected["headline"] = "出力確認がありません。Step5の出力確認を作成してください"
+        projected["primary_action"] = "final_confirm"
+    elif normalized_error == "confirmed_snapshot_required":
+        projected["state"] = "confirmed_snapshot_required"
+        projected["headline"] = "確定snapshotがありません。出力確認から確定し直してください"
+        projected["primary_action"] = "final_confirm"
+    else:
+        projected["state"] = normalized_error
+        projected["headline"] = normalized_error
+        projected["primary_action"] = "confirm_context"
+    return projected
+
+
+def _workflow_state_requires_selected_ocr(state: str) -> bool:
+    return state in {
+        "ocr_selected",
+        "sheet_saved",
+        "bagging_ready",
+        "output_review",
+        "confirmed",
+    }
+
+
+def _workflow_state_requires_saved_sheet(state: str) -> bool:
+    return state in {
+        "sheet_saved",
+        "bagging_ready",
+        "output_review",
+        "confirmed",
+    }
+
+
+def _workflow_state_requires_bagging(state: str) -> bool:
+    return state in {"bagging_ready", "output_review", "confirmed"}
+
+
+def _workflow_state_requires_output_review(state: str) -> bool:
+    return state in {"output_review", "confirmed"}
+
+
+def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkflowState) -> str | None:
+    state = _normalize_id(workflow.state)
+    if not state or state in {
+        "uploaded",
+        "not_initialized",
+        "facility_template_unresolved",
+        "template_version_required",
+        "template_version_mismatch",
+        "ocr_failed",
+    }:
+        return None
+
+    meta = _workflow_meta(workflow)
+    if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
+        context_error = _workflow_v2_projection_context_error(meta)
+        if context_error:
+            return context_error
+
+    template_version_id = _effective_workflow_template_version_id(workflow, meta)
+    if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
+        if not template_version_id:
+            return "template_version_required"
+        version = session.get(FacilityTemplateVersion, template_version_id)
+        facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
+        if version is None or version.status != "active":
+            return "template_version_mismatch"
+        if facility_id and _normalize_id(version.facility_id) != facility_id:
+            return "template_version_mismatch"
+        validation = facility_template_version_service.validate_template_columns(list(version.columns_json or []))
+        if validation.get("errors"):
+            return "facility_template_unresolved"
+
+    if _workflow_state_requires_selected_ocr(state):
+        if not workflow.evidence_run_id:
+            return "selected_ocr_required"
+        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        if evidence is None or evidence.order_id != order.id:
+            return "selected_ocr_missing"
+        if _evidence_is_legacy_cache_backfill(evidence) or _normalize_id(evidence.status) == "repair_blocked":
+            return "legacy_ocr_evidence_not_selectable"
+        _evidence_template_version_id, template_error = _resolve_evidence_template_version(
+            evidence,
+            workflow,
+            meta,
+            required_template_version_id=template_version_id,
+        )
+        if template_error:
+            return template_error
+
+    if _workflow_state_requires_saved_sheet(state):
+        if not workflow.draft_id:
+            return "saved_sheet_required"
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order.id:
+            return "saved_sheet_missing"
+        if template_version_id and _normalize_id(draft.template_version_id) != template_version_id:
+            return "template_version_mismatch"
+
+    bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
+    if _workflow_state_requires_bagging(state):
+        if not bagging_result:
+            return "bagging_result_required"
+        if template_version_id and _normalize_id(bagging_result.get("template_version_id")) != template_version_id:
+            return "template_version_mismatch"
+        if workflow.draft_id and _normalize_id(bagging_result.get("source_saved_sheet_id")) != _normalize_id(workflow.draft_id):
+            return "bagging_result_source_mismatch"
+
+    output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+    if _workflow_state_requires_output_review(state):
+        if not output_bundle:
+            return "output_review_required"
+        if template_version_id and _normalize_id(output_bundle.get("template_version_id")) != template_version_id:
+            return "template_version_mismatch"
+        if workflow.draft_id and _normalize_id(output_bundle.get("source_saved_sheet_id")) != _normalize_id(workflow.draft_id):
+            return "output_bundle_source_mismatch"
+        bagging_result_id = _normalize_id(bagging_result.get("bagging_result_id")) if isinstance(bagging_result, dict) else None
+        if bagging_result_id and _normalize_id(output_bundle.get("source_bagging_result_id")) != bagging_result_id:
+            return "output_bundle_source_mismatch"
+
+    if state == "confirmed":
+        if not workflow.confirmed_snapshot_id:
+            return "confirmed_snapshot_required"
+        snapshot = session.get(OrderConfirmedSnapshot, workflow.confirmed_snapshot_id)
+        if snapshot is None or snapshot.order_id != order.id:
+            return "confirmed_snapshot_required"
+        if workflow.draft_id and _normalize_id(snapshot.draft_id) != _normalize_id(workflow.draft_id):
+            return "confirmed_snapshot_required"
+        if template_version_id and _normalize_id(snapshot.template_version_id) != template_version_id:
+            return "template_version_mismatch"
+    return None
+
+
+def _serialize_workflow_checked(
+    session: Any,
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    ocr_job: OcrJob | None = None,
+) -> dict[str, Any]:
+    serialized = _serialize_workflow(workflow, ocr_job=ocr_job)
+    lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow)
+    if lineage_error:
+        return _workflow_blocker_projection(serialized, lineage_error)
+    return serialized
+
+
 def _get_order_or_error(session: Any, order_id: str) -> tuple[Order | None, str | None]:
     normalized_order_id = _normalize_id(order_id)
     if not normalized_order_id:
@@ -717,7 +901,7 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         meta = _workflow_meta(row)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
-        serialized = _serialize_workflow(row, ocr_job=ocr_job)
+        serialized = _serialize_workflow_checked(session, order=order, workflow=row, ocr_job=ocr_job)
         if not serialized.get("context_suggestion"):
             serialized["context_suggestion"] = _order_context_suggestion(order)
         return serialized, None
@@ -1160,11 +1344,16 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 else:
                     hidden_template_mismatch_result_count += 1
         selected_ocr_result_id = workflow.evidence_run_id if workflow is not None else None
+        checked_workflow = (
+            _serialize_workflow_checked(session, order=order, workflow=workflow)
+            if workflow is not None
+            else None
+        )
         return {
             "order_id": order.id,
             "selected_ocr_result_id": selected_ocr_result_id,
-            "workflow_state": workflow.state if workflow is not None else "not_initialized",
-            "blockers": [] if workflow is not None else ["workflow_not_initialized"],
+            "workflow_state": checked_workflow["state"] if checked_workflow is not None else "not_initialized",
+            "blockers": checked_workflow["blockers"] if checked_workflow is not None else ["workflow_not_initialized"],
             "candidate_template_version_id": workflow_template_version_id,
             "hidden_template_mismatch_result_count": hidden_template_mismatch_result_count,
             "results": [
@@ -1192,10 +1381,47 @@ def _clear_downstream_references_before_delete(
         if clear_evidence:
             current_state.evidence_run_id = None
             current_state.template_version_id = None
+    order = session.get(Order, order_id)
+    if order is not None and _normalize_id(order.status) == "確定":
+        order.status = "要確認"
+    session.flush()
+
+
+def _delete_materialized_downstream_rows_for_order(session: Any, order_id: str) -> None:
+    workflow = session.get(OrderWorkflowState, order_id)
+    meta = _workflow_meta(workflow) if workflow is not None else {}
+    snapshot_ids = [
+        _normalize_id(row[0])
+        for row in session.query(OrderConfirmedSnapshot.id)
+        .filter(OrderConfirmedSnapshot.order_id == order_id)
+        .all()
+        if _normalize_id(row[0])
+    ]
+    output_bundle_ids = {
+        _normalize_id(meta.get("output_bundle_id")),
+    }
+    output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+    if output_bundle is not None:
+        output_bundle_ids.add(_normalize_id(output_bundle.get("output_bundle_id")))
+    output_bundle_ids = {item for item in output_bundle_ids if item}
+
+    session.query(LabelRow).filter(LabelRow.order_id == order_id).delete(synchronize_session=False)
+    session.query(Bag).filter(Bag.order_id == order_id).delete(synchronize_session=False)
+    session.query(DeliveryNote).filter(DeliveryNote.order_id == order_id).delete(synchronize_session=False)
+    aggregate_query = session.query(ManufacturingAggregateRow)
+    aggregate_filters = []
+    if snapshot_ids:
+        aggregate_filters.append(ManufacturingAggregateRow.confirmed_snapshot_id.in_(snapshot_ids))
+    if output_bundle_ids:
+        aggregate_filters.append(ManufacturingAggregateRow.output_bundle_id.in_(sorted(output_bundle_ids)))
+    if aggregate_filters:
+        aggregate_query.filter(or_(*aggregate_filters)).delete(synchronize_session=False)
+    session.query(OrderLine).filter(OrderLine.order_id == order_id).delete(synchronize_session=False)
     session.flush()
 
 
 def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+    _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     session.flush()
@@ -1506,6 +1732,7 @@ def save_sheet(
 
 
 def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
+    _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=False)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     session.flush()
@@ -2222,7 +2449,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             "order_id": order.id,
             "source": "workflow_v2_inspection",
             "workflow": (
-                _serialize_workflow(workflow)
+                _serialize_workflow_checked(session, order=order, workflow=workflow)
                 if workflow is not None
                 else _serialize_uninitialized_workflow(order)
             ),

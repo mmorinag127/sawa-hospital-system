@@ -1644,3 +1644,83 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert isinstance(lines[0].line_digest, str) and len(lines[0].line_digest) == 64
         assert snapshot.snapshot_json["order_lines"][0]["line_digest"] == lines[0].line_digest
         assert session.get(Order, order_id).status == "確定"
+
+
+def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    assert order_workflow_v2_service.run_bagging(order_id)[1] is None
+    assert order_workflow_v2_service.confirm_bagging(order_id)[1] is None
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert error is None
+    snapshot_id = confirmed["confirmed_snapshot_id"]
+
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "71"}]},
+        edited_by="test",
+    )
+
+    assert error is None
+    assert saved["workflow"]["state"] == "sheet_saved"
+    assert saved["workflow"]["confirmed_snapshot_id"] is None
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        assert workflow.confirmed_snapshot_id is None
+        assert workflow.draft_id == saved["saved_sheet"]["saved_sheet_id"]
+        assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
+        assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 0
+        assert session.get(Order, order_id).status == "要確認"
+
+
+def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    assert error is None
+    assert workflow is not None
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        assert row is not None
+        assert evidence is not None
+        row.state = "confirmed"
+        row.headline = "確定済み"
+        row.primary_action = None
+        row.evidence_run_id = evidence_id_1
+        row.draft_id = None
+        row.confirmed_snapshot_id = None
+        row.blockers_json = []
+        evidence.template_version_id = None
+
+    projected, error = order_workflow_v2_service.get_workflow(order_id)
+    results, result_error = order_workflow_v2_service.list_ocr_results(order_id)
+
+    assert error is None
+    assert projected["state"] == "template_version_mismatch"
+    assert projected["primary_action"] == "run_ocr"
+    assert projected["blockers"] == ["template_version_mismatch"]
+    assert result_error is None
+    assert results["workflow_state"] == "template_version_mismatch"
+    assert results["blockers"] == ["template_version_mismatch"]
+    assert results["results"] == []
