@@ -452,5 +452,5 @@ The 4/28 overlay contact sheet was visually checked against the saved-vs-source 
 Strict conclusion:
 
 - Proven fixed / blocked: workflow-v2 blockers, template-version blockers, sheet-source errors, menu/daypart shift after saved sheet, stale OCR source overriding saved sheet, daily output diverging from persisted bagging rows.
-- Remaining cause class: OCR quantity extraction and OCR confidence acceptance. Some cells are accepted OCR values, some are accepted OCR `0`, and some visible candidates remain below the acceptance threshold and therefore do not enter the saved sheet.
-- Therefore the remaining current discrepancy is not a daily-output, workflow-state, template-lineage, stale-source, or menu-shift bug. It is upstream of saved sheet and should be handled as OCR quantity reading / acceptance accuracy plus operator sheet correction.
+- Remaining cause class: OCR quantity reading failure. This includes accepted-but-wrong numeric values, accepted OCR `0` values, and values that remain below the OCR acceptance threshold and therefore do not enter the saved sheet.
+- Therefore the remaining current discrepancy is not a daily-output, workflow-state, template-lineage, stale-source, menu-shift, or saved-sheet propagation bug. It is upstream of saved sheet and is isolated to OCR quantity reading.
