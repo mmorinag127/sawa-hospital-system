@@ -150,6 +150,74 @@ def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_pat
     assert workbook["そよかぜ"]["B2"].value == 5
 
 
+def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda target_date, status=None: [
+            {"id": "ORD-1", "facility": "FAC001"},
+            {"id": "ORD-2", "facility": "FAC002"},
+        ],
+    )
+    monkeypatch.setattr(
+        output_builder.config_service,
+        "get_facility_config",
+        lambda facility_code: {
+            "FAC001": {"facility_name": "そよかぜ"},
+            "FAC002": {"facility_name": "池袋"},
+        }.get(facility_code, {}),
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id: _make_context(
+            order_id,
+            "FAC001" if order_id == "ORD-1" else "FAC002",
+            "そよかぜ" if order_id == "ORD-1" else "池袋",
+            "献立A",
+        ),
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_build_delivery_rows",
+        lambda order, template, quantity_rules, facility_config, menu_meta: [
+            {
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_category": "主菜",
+                "menu_name": "献立A",
+                "menu_display": "主菜 献立A",
+                "_order_index": 1,
+                "常食": 2,
+            }
+        ]
+        if order.get("id") == "ORD-1"
+        else [],
+    )
+
+    def _fake_write_delivery_note(path, rows, columns, template_uri, include_menu_name, sheet_name=None, facility_name=None):
+        workbook = Workbook()
+        ws = workbook.active
+        ws.title = "納品書"
+        ws["A1"] = "メニュー"
+        ws["A2"] = rows[0].get("menu_name") if rows else ""
+        workbook.save(path)
+
+    monkeypatch.setattr(output_builder, "_write_delivery_note", _fake_write_delivery_note)
+
+    bundle_path, summary = output_builder.build_daily_output_bundle(
+        TARGET_DATE,
+        bundle_type="delivery",
+    )
+
+    assert bundle_path.suffix == ".xlsx"
+    assert summary["success_orders"] == 1
+    assert summary["empty_orders"] == 1
+    assert summary["error_orders"] == 0
+    assert [item["status"] for item in summary["items"]] == ["ok", "empty"]
+
+
 def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(

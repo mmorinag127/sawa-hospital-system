@@ -666,6 +666,7 @@ test("daily delivery notes bundle download survives responses longer than the ol
           "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           "content-disposition": "attachment; filename=\"daily_outputs_2026-03-24_delivery.xlsx\"",
           "x-daily-bundle-success-orders": "1",
+          "x-daily-bundle-empty-orders": "0",
           "x-daily-bundle-error-orders": "0",
         },
         body: "bundle",

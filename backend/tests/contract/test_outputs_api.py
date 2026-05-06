@@ -27,6 +27,7 @@ def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
                 "bundle_type": bundle_type,
                 "total_orders": 1,
                 "success_orders": 1,
+                "empty_orders": 0,
                 "error_orders": 0,
             },
         ),
@@ -43,6 +44,7 @@ def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert "daily_outputs_2026-03-22_labels.xlsx" in response.headers["content-disposition"]
+    assert response.headers["x-daily-bundle-empty-orders"] == "0"
 
 
 def test_daily_bundle_returns_400_when_no_rows(monkeypatch):

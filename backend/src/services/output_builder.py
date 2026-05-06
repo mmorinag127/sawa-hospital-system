@@ -2841,6 +2841,8 @@ def build_daily_output_bundle(
         raise ValueError("対象日の出力対象がありません")
 
     workbook.save(bundle_path)
+    error_count = sum(1 for item in manifest_items if item.get("status") == "error")
+    empty_count = sum(1 for item in manifest_items if item.get("status") == "empty")
     manifest = {
         "date": target_date.isoformat(),
         "bundle_type": normalized_type,
@@ -2848,7 +2850,8 @@ def build_daily_output_bundle(
         "created_at": datetime.utcnow().isoformat(),
         "total_orders": len(manifest_items),
         "success_orders": success_count,
-        "error_orders": max(len(manifest_items) - success_count, 0),
+        "empty_orders": empty_count,
+        "error_orders": error_count,
         "items": manifest_items,
         "file_format": "xlsx",
     }

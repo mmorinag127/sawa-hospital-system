@@ -822,8 +822,10 @@ export default function DailyDeliveryNotesPage() {
       link.remove();
       URL.revokeObjectURL(url);
       const successOrders = Number(res.headers?.["x-daily-bundle-success-orders"] || 0);
+      const emptyOrders = Number(res.headers?.["x-daily-bundle-empty-orders"] || 0);
       const errorOrders = Number(res.headers?.["x-daily-bundle-error-orders"] || 0);
-      setMessage(`${label}をダウンロードしました。成功 ${successOrders}件 / 失敗 ${errorOrders}件`);
+      const skippedPart = emptyOrders > 0 ? ` / 対象なし ${emptyOrders}件` : "";
+      setMessage(`${label}をダウンロードしました。成功 ${successOrders}件${skippedPart} / 失敗 ${errorOrders}件`);
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
       setMessage(detail ? `一括ダウンロードに失敗しました: ${detail}` : "一括ダウンロードに失敗しました。");

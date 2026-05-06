@@ -130,6 +130,7 @@ def download_daily_bundle(
     headers = {
         "X-Daily-Bundle-Total-Orders": str(summary.get("total_orders", 0)),
         "X-Daily-Bundle-Success-Orders": str(summary.get("success_orders", 0)),
+        "X-Daily-Bundle-Empty-Orders": str(summary.get("empty_orders", 0)),
         "X-Daily-Bundle-Error-Orders": str(summary.get("error_orders", 0)),
         "X-Daily-Bundle-Type": str(summary.get("bundle_type", bundle_type)),
     }
