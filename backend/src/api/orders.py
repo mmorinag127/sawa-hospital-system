@@ -268,7 +268,6 @@ def _mark_stale_order_reparse_job(order: dict, job: dict | None, *, force: bool 
 def _apply_stale_ocr_status(order: dict, job: dict | None) -> dict | None:
     if not job:
         return job
-    job = _mark_stale_order_reparse_job(order, job)
     status = (job.get("status") or order.get("ocr_status") or "").lower()
     if status not in {"running", "pending", "awaiting_output", "recovering"}:
         if job.get("status"):
@@ -311,18 +310,8 @@ def _apply_cached_status_override(order: dict, order_id: str, job: dict | None) 
         return job
     if job and _is_order_reparse_job(job, order_id):
         return job
-    if job:
-        try:
-            update_ocr_job(
-                job["id"],
-                status=cached_status,
-                template_id=cached_payload.get("template_id") if isinstance(cached_payload, dict) else None,
-                error_message=cached_payload.get("error") if isinstance(cached_payload, dict) else None,
-                metrics=cached_payload.get("metrics") if isinstance(cached_payload, dict) else None,
-            )
-            job = get_ocr_job(job["id"]) or job
-        except Exception:
-            pass
+    # Read surfaces may project cache-derived legacy status, but cache is not
+    # canonical and must not rewrite OCR job state.
     order["ocr_status"] = cached_status
     order.pop("ocr_error", None)
     if isinstance(cached_payload, dict) and cached_payload.get("error"):
@@ -1291,53 +1280,8 @@ def get_order(order_id: str):
         if isinstance(message_id, str) and message_id:
             job = get_ocr_job(f"OCR-{message_id}")
     if job:
-        job_status = str(job.get("status") or "").strip().lower()
-        job_metrics = job.get("metrics")
-        job_metrics = job_metrics if isinstance(job_metrics, dict) else {}
-        preserve_terminal_reparse_state = _should_preserve_terminal_reparse_state(job, order_id)
-        job_evidence_run_id = str(job_metrics.get("evidence_run_id") or "").strip()
-        job_evidence_run = (
-            order_service.get_ocr_evidence_run(job_evidence_run_id)
-            if job_evidence_run_id
-            else None
-        )
-        latest_persisted_evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
-        needs_done_reconcile = (
-            not _is_order_reparse_job(job, order_id)
-            and job_status in {"done", "success", "completed"}
-            and not isinstance(job_evidence_run, dict)
-            and not isinstance(latest_persisted_evidence, dict)
-        )
-        if job.get("output_reference") and (job_status in {"running", "failed"} or needs_done_reconcile):
-            try:
-                payload = load_bytes_from_uri(job["output_reference"])
-                parsed = json.loads(payload.decode("utf-8"))
-                output_status = parsed.get("status")
-                output_template = parsed.get("template_id")
-                job_error = job.get("error_message")
-                should_update = bool(output_status and output_status != job.get("status"))
-                should_update = should_update or bool(job_error)
-                should_update = should_update or needs_done_reconcile
-                if job.get("status") == "running" and _is_order_reparse_job(job, order_id):
-                    # Reparse jobs keep running until post-processing/validation finishes.
-                    # OCR output JSON "done" must not terminate the job early.
-                    should_update = False
-                if preserve_terminal_reparse_state:
-                    should_update = False
-                if should_update:
-                    if _is_order_reparse_job(job, order_id):
-                        update_ocr_job(
-                            job["id"],
-                            status=output_status or job.get("status"),
-                            template_id=output_template or job.get("template_id"),
-                            error_message=parsed.get("error"),
-                            metrics=parsed.get("metrics"),
-                        )
-                    else:
-                        order_service.reconcile_completed_ocr_job(str(job.get("id") or ""))
-                    job = get_ocr_job(job["id"]) or job
-            except Exception:
-                pass
+        # GET /orders/{id} is a read projection. Finished OCR jobs are
+        # reconciled by workers or explicit commands, not by page reads.
         _apply_job_status_to_order(order, job)
     job = _apply_stale_ocr_status(order, job)
     # Order detail is the first request that gates the page-level Loading state.
@@ -1393,7 +1337,7 @@ def _load_document_bytes(uri: str) -> tuple[bytes, str, str]:
 
 
 def _load_archived_original_document_bytes(order_id: str, current_uri: str | None) -> tuple[bytes, str, str] | None:
-    payload, error = order_service.get_ocr_output(order_id)
+    payload, error = order_service.get_ocr_output(order_id, persist_cache=False)
     if error or not isinstance(payload, dict):
         return None
     input_reference = str(payload.get("input_reference") or "").strip()
@@ -1519,7 +1463,7 @@ def get_ocr_evidence(order_id: str):
     order = order_service.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=True)
+    evidence = order_service.get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     if not isinstance(evidence, dict):
         raise HTTPException(status_code=404, detail="ocr evidence not found")
     return evidence
@@ -1530,7 +1474,7 @@ def _attach_reparse_sheet_state(order_id: str, payload: dict) -> dict:
         str(payload.get("source") or "").strip() == "hakodate_ocr_evidence_sheet"
         and isinstance(payload.get("hakodate_evidence_projection"), dict)
     ):
-        order_service.reconcile_ocr_rerun_state(order_id)
+        payload["reparse_recovery_required"] = True
     reparse_job = get_ocr_job(f"OCR-{order_id}")
     reparse_state = describe_ocr_job_state(
         reparse_job if isinstance(reparse_job, dict) and _is_order_reparse_job(reparse_job, order_id) else None

@@ -14,6 +14,7 @@ from src.db import session_scope  # noqa: E402
 from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
 from src.models.order import Order  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: E402
 from src.services import draft_sheet_service, ocr_evidence_service, order_service, template_resolution_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
@@ -328,25 +329,91 @@ def test_classify_evidence_payload_rejects_hakodate_target_map_without_ocr_evide
     assert result["error"] == "evidence_unusable"
 
 
-def test_get_evidence_endpoint_backfills_from_cache_when_run_missing():
+def test_get_evidence_endpoint_does_not_backfill_from_cache_when_run_missing():
     order_service.clear_all()
     client = TestClient(app)
-    order = _seed_order("msg-evidence-endpoint-backfill")
+    order = _seed_order("msg-evidence-endpoint-no-backfill")
     _attach_active_template_version(order["id"])
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("5")))
 
     res = client.get(f"/orders/{order['id']}/evidence")
 
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["order_id"] == order["id"]
-    assert payload["schema_version"] == "v1_legacy_backfill"
-    assert payload["capabilities_json"]["step2_view_ready"] is True
-    assert payload["capabilities_json"]["step2_edit_ready"] is True
+    assert res.status_code == 404
+    assert order_service.get_latest_ocr_evidence_run(order["id"]) is None
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert rows == []
+
+
+def test_get_latest_ocr_evidence_run_default_does_not_backfill_from_cache():
+    order_service.clear_all()
+    order = _seed_order("msg-evidence-service-no-backfill")
+    _attach_active_template_version(order["id"])
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("4")))
+
     latest = order_service.get_latest_ocr_evidence_run(order["id"])
-    assert isinstance(latest, dict)
-    assert latest["id"] == payload["id"]
+
+    assert latest is None
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert rows == []
+
+
+def test_get_ocr_output_endpoint_does_not_promote_cache_only_payload_to_current():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _seed_order("msg-ocr-output-cache-only-not-current")
+    _attach_active_template_version(order["id"])
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("6")))
+
+    res = client.get(f"/orders/{order['id']}/ocr-output")
+
+    assert res.status_code == 404
+    assert order_service.get_latest_ocr_evidence_run(order["id"]) is None
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        cache_payload = cache.payload if cache is not None else None
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert isinstance(cache_payload, dict)
+    assert rows == []
+
+
+def test_get_document_does_not_use_cache_only_ocr_artifact_as_current_source():
+    order_service.clear_all()
+    client = TestClient(app)
+    order = _seed_order("msg-document-cache-only-not-current")
+    _attach_active_template_version(order["id"])
+    payload = dict(_sample_payload("8"))
+    payload["input_reference"] = "file://archived-source.pdf"
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=order["id"], payload=payload))
+
+    res = client.get(f"/orders/{order['id']}/document")
+
+    assert res.status_code == 404
+    assert order_service.get_latest_ocr_evidence_run(order["id"]) is None
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert rows == []
 
 
 def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence():
