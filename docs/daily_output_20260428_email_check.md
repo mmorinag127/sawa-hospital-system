@@ -207,3 +207,39 @@ API probe on 2026-05-06:
 
 - `GET /api/outputs/daily-bundle?date=2026-04-28&bundle_type=delivery` did not return within roughly 100 seconds and was stopped locally.
 - This was not counted as a successful reproduction of the exact browser error, but it is still a failure mode for the operator flow because the request is too slow or stuck for interactive use.
+
+### Delivery Note / Output Issues To Keep Separate From Daily Totals
+
+These items are intentionally documented as a separate unresolved track. They should not be treated as fixed by daily-total comparison work.
+
+Observed or reported symptoms:
+
+- Bulk delivery-note Excel download fails from the operator UI.
+- Facility-level output type is inconsistent: some facilities produce delivery-note-shaped Excel, while others produce label-like Excel.
+- Delivery-note-shaped Excel can contain menu/daypart misalignment, such as breakfast menus appearing in dinner slots or lunch side dishes appearing in breakfast slots.
+- Quantity reflection into delivery notes is unreliable.
+- そよかぜ 軟菜 has area-specific columns such as 2F/3F, but the reported delivery-note output merges them into one value.
+
+Likely failure classes to investigate:
+
+- Delivery-note generation may not be reading the same canonical confirmed order lines that daily totals read.
+- Facility output template selection may be split across multiple data sources instead of one canonical facility-template/version source.
+- Menu/date/daypart placement may be re-derived by position or legacy menu mapping instead of using saved semantic sheet values.
+- Diet/area semantics may be transformed differently by delivery-note code than by daily totals and bagging.
+- Bulk download may be synchronously generating too many facility workbooks or blocking on one bad facility/template instead of returning a controlled error.
+
+Debug entry points:
+
+- Browser action: `日別出力 -> 当日納品書Excel`.
+- API: `GET /api/outputs/daily-bundle?date=2026-04-28&bundle_type=delivery`.
+- Compare the input rows used by delivery-note generation against `/api/orders/daily-bags?date=2026-04-28` and `/api/totals?date=2026-04-28&include_order_refs=true`.
+- For each facility, log the selected output template, facility template version, diet columns, area handling, and generated workbook type.
+- For そよかぜ, explicitly compare 軟菜 2F/3F behavior across saved sheet, confirmed order lines, daily totals, bagging, and delivery-note output.
+
+Deferred success criteria:
+
+- Bulk delivery-note download either completes or returns a facility-specific blocker with enough detail to recover.
+- Every facility uses the intended delivery-note output type, not a label-like fallback.
+- Menu, date, and daypart in delivery notes match the confirmed semantic order lines.
+- Quantity values in delivery notes reconcile with confirmed order lines under an explicit diet/area aggregation rule.
+- Area-specific columns are either preserved or intentionally aggregated according to a documented facility/output rule.
