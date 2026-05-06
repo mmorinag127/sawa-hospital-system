@@ -23,6 +23,7 @@ from src.services.config_validator import validate_facility_config
 from src.services.template_field_schema_service import derive_row_fields_from_columns
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
+VALID_TEMPLATE_VERSION_STATUSES = {"draft", "active", "archived", "invalid", "repair_blocked"}
 
 
 def _now() -> datetime:
@@ -167,19 +168,45 @@ def _next_version_label(session: Any, facility_id: str) -> str:
     return str(count + 1)
 
 
-def get_active_template_version(session: Any, facility_id: str) -> FacilityTemplateVersion | None:
+def get_active_template_versions(session: Any, facility_id: str) -> list[FacilityTemplateVersion]:
     normalized_facility_id = str(facility_id or "").strip()
     if not normalized_facility_id:
-        return None
-    return (
+        return []
+    return list(
         session.query(FacilityTemplateVersion)
         .filter(
             FacilityTemplateVersion.facility_id == normalized_facility_id,
             FacilityTemplateVersion.status == "active",
         )
         .order_by(FacilityTemplateVersion.activated_at.desc(), FacilityTemplateVersion.created_at.desc())
-        .first()
+        .all()
     )
+
+
+def get_active_template_version(session: Any, facility_id: str) -> FacilityTemplateVersion | None:
+    active_versions = get_active_template_versions(session, facility_id)
+    if len(active_versions) != 1:
+        return None
+    return active_versions[0]
+
+
+def resolve_single_active_template_version(
+    session: Any,
+    facility_id: str,
+) -> tuple[FacilityTemplateVersion | None, str | None]:
+    active_versions = get_active_template_versions(session, facility_id)
+    if not active_versions:
+        return None, "facility_template_unresolved"
+    if len(active_versions) > 1:
+        return None, "facility_template_ambiguous"
+    version = active_versions[0]
+    status = str(version.status or "").strip()
+    if status not in VALID_TEMPLATE_VERSION_STATUSES or status != "active":
+        return None, "facility_template_unresolved"
+    validation = validate_template_columns(list(version.columns_json or []))
+    if validation.get("errors"):
+        return None, "facility_template_unresolved"
+    return version, None
 
 
 def serialize_template_version(row: FacilityTemplateVersion | None) -> dict[str, Any] | None:
@@ -264,7 +291,11 @@ def _ensure_active_version_for_backfill(
         return None
     if normalized_facility_id in cache:
         return cache[normalized_facility_id]
-    active_before = get_active_template_version(session, normalized_facility_id)
+    active_before, active_error = resolve_single_active_template_version(session, normalized_facility_id)
+    if active_error == "facility_template_ambiguous":
+        skipped = summary.setdefault("skipped", {})
+        skipped["facility_template_ambiguous"] = int(skipped.get("facility_template_ambiguous") or 0) + 1
+        return None
     try:
         facility_config = config_service.get_facility_config(normalized_facility_id)
     except Exception:
@@ -467,7 +498,10 @@ def ensure_active_template_version_from_resolved_config(
         return None
     template_id = str(config.get("fax_template_id") or template.get("template_id") or "").strip() or None
     digest = template_digest(template_id=template_id, columns=columns)
-    active = get_active_template_version(session, normalized_facility_id)
+    active_versions = get_active_template_versions(session, normalized_facility_id)
+    if len(active_versions) > 1:
+        return None
+    active = active_versions[0] if active_versions else None
     if active is not None and active.template_digest == digest:
         return active
     now = _now()

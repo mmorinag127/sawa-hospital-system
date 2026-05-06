@@ -1,12 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, JSON, String
 
 from src.db import Base
 
 
 class FacilityTemplateVersion(Base):
     __tablename__ = "facility_template_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'active', 'archived', 'invalid', 'repair_blocked')",
+            name="ck_facility_template_versions_status",
+        ),
+    )
 
     id = Column(String, primary_key=True)
     facility_id = Column(String, ForeignKey("facilities.id"), nullable=False, index=True)

@@ -2,6 +2,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order import OrderLine
@@ -11,6 +13,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.facility_template_version import FacilityTemplateVersion
+from src.models.facility import Facility
 from src.models.ocr_job import OcrJob
 from src.services import order_workflow_v2_service
 
@@ -149,6 +152,67 @@ def _registered_template_config(facility_id: str) -> dict:
             ],
         },
     }
+
+
+def _template_columns() -> list[dict]:
+    return [
+        {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+        {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+        {"index": 2, "role": "menu_name", "header": "献立", "source_index": 2},
+        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 3},
+        {"index": 4, "role": "note", "header": "備考欄", "source_index": 4},
+    ]
+
+
+def _install_active_template_version(
+    facility_id: str = "FAC00001",
+    template_id: str = "template-fac00001",
+    *,
+    columns: list[dict] | None = None,
+) -> str:
+    normalized_columns = order_workflow_v2_service.facility_template_version_service.normalize_template_columns(
+        columns if columns is not None else _template_columns()
+    )
+    digest = order_workflow_v2_service.facility_template_version_service.template_digest(
+        template_id=template_id,
+        columns=normalized_columns,
+    )
+    version_id = _id("FTV")
+    with session_scope() as session:
+        if session.get(Facility, facility_id) is None:
+            session.add(Facility(id=facility_id, name=f"Template Facility {facility_id}"))
+        for active in (
+            session.query(FacilityTemplateVersion)
+            .filter(
+                FacilityTemplateVersion.facility_id == facility_id,
+                FacilityTemplateVersion.status == "active",
+            )
+            .all()
+        ):
+            active.status = "archived"
+            active.archived_at = datetime.utcnow()
+        session.add(
+            FacilityTemplateVersion(
+                id=version_id,
+                facility_id=facility_id,
+                version="test",
+                status="active",
+                template_id=template_id,
+                source="test-active-template",
+                columns_json=normalized_columns,
+                cells_json=[],
+                template_digest=digest,
+                validation_json={"errors": [], "warnings": []},
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+    return version_id
+
+
+@pytest.fixture(autouse=True)
+def _standard_active_template_for_workflow_tests() -> None:
+    _install_active_template_version("FAC00001", "template-fac00001")
 
 
 def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
@@ -342,9 +406,9 @@ def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypat
     workflow, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
 
     assert workflow is not None
-    assert error == "facility_template_unresolved"
-    assert workflow["state"] == "facility_template_unresolved"
-    assert workflow["blockers"] == ["facility_template_unresolved"]
+    assert error == "template_version_required"
+    assert workflow["state"] == "template_version_required"
+    assert workflow["blockers"] == ["template_version_required"]
     with session_scope() as session:
         versions = session.query(FacilityTemplateVersion).filter(FacilityTemplateVersion.facility_id == facility_id).all()
         assert versions == []
@@ -353,6 +417,8 @@ def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypat
 
 def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
+    facility_id = _id("FACREG")
+    _install_active_template_version(facility_id, "fax_layout_regular_forbidden_v1")
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
         "get_facility_config",
@@ -370,7 +436,7 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
-        facility_id="FAC00001",
+        facility_id=facility_id,
         week_start="2026-04-26",
         week_end="2026-04-30",
     )
@@ -384,6 +450,15 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
 
 def test_context_confirm_blocks_template_id_only_without_source_indexes(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
+    facility_id = _id("FACBAD")
+    _install_active_template_version(
+        facility_id,
+        "fax_layout_regular_forbidden_v1",
+        columns=[
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+        ],
+    )
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
         "get_facility_config",
@@ -401,7 +476,7 @@ def test_context_confirm_blocks_template_id_only_without_source_indexes(monkeypa
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
-        facility_id="FAC00001",
+        facility_id=facility_id,
         week_start="2026-04-26",
         week_end="2026-04-30",
     )
@@ -515,15 +590,15 @@ def test_save_sheet_blocks_legacy_selected_evidence_without_template_version(mon
     )
 
     assert saved is None
-    assert error == "template_version_mismatch"
+    assert error == "template_version_required"
     with session_scope() as session:
         order = session.get(Order, order_id)
         row = session.get(OrderWorkflowState, order_id)
         evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
         assert order.template_version_id is None
         assert row.template_version_id is None
-        assert row.state == "template_version_mismatch"
-        assert row.blockers_json == ["template_version_mismatch"]
+        assert row.state == "template_version_required"
+        assert row.blockers_json == ["template_version_required"]
         assert evidence.template_version_id is None
 
 
@@ -1041,6 +1116,7 @@ def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypa
 
 def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypatch) -> None:
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
+    _install_active_template_version("FAC00016", "template-fac00016")
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
         facility_id="FAC00016",
@@ -1101,6 +1177,7 @@ def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypa
 def test_facility_template_columns_save_on_confirmed_order_clears_snapshot_reference(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
+    _install_active_template_version("FAC00016", "template-fac00016")
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
         facility_id="FAC00016",

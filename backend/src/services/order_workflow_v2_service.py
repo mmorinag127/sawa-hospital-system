@@ -237,22 +237,14 @@ def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
 
 
 def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
-    template_id = _normalize_id(meta.get("template_id")) or None
-    facility_id = _normalize_id(meta.get("facility_id"))
-    if not facility_id:
-        return False
-    try:
-        facility_config = config_service.get_facility_config(facility_id)
-    except Exception:
-        return False
-    return _facility_config_has_resolved_fax_template(facility_config, template_id=template_id)
+    return bool(_normalize_id(meta.get("template_version_id")))
 
 
 def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
     if not _workflow_meta_has_confirmed_context(meta):
         return "context_not_confirmed"
     if not _workflow_meta_has_resolved_template(meta):
-        return "facility_template_unresolved"
+        return "template_version_required"
     return None
 
 
@@ -263,7 +255,7 @@ def workflow_has_confirmed_ocr_context(workflow: dict[str, Any] | None) -> bool:
         "facility_id": workflow.get("facility_id"),
         "week_start": workflow.get("week_start"),
         "week_end": workflow.get("week_end"),
-        "template_id": workflow.get("template_id"),
+        "template_version_id": workflow.get("template_version_id"),
     }
     return _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta)
 
@@ -396,7 +388,8 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
-            return None, "facility_template_unresolved"
+            _apply_template_lineage_blocker(row, "template_version_required")
+            return _serialize_workflow(row), "template_version_required"
         _refresh_ocr_prerequisite_state(session, order, row)
         blockers = [
             _normalize_id(item)
@@ -488,17 +481,16 @@ def _require_workflow_template_version_from_context(
     if not _workflow_meta_has_confirmed_context(meta):
         return None, "context_not_confirmed"
     if not _workflow_meta_has_resolved_template(meta):
-        return None, "facility_template_unresolved"
+        return None, "template_version_required"
     facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
     if not facility_id:
         return None, "facility_missing"
-    template_version = facility_template_version_service.get_active_template_version(session, facility_id)
-    if template_version is None:
-        return None, "facility_template_unresolved"
-    columns = list(template_version.columns_json or [])
-    validation = facility_template_version_service.validate_template_columns(columns)
-    if validation.get("errors"):
-        return None, "facility_template_unresolved"
+    template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
+        session,
+        facility_id,
+    )
+    if template_error:
+        return None, template_error
     return template_version.id, None
 
 
@@ -532,10 +524,18 @@ def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | N
         workflow.state = "facility_template_unresolved"
         workflow.headline = "施設テンプレートが未登録または無効です"
         workflow.primary_action = "register_facility_template"
+    elif normalized_error == "template_version_required":
+        workflow.state = "template_version_required"
+        workflow.headline = "施設テンプレートの版が未確定です。Step1で施設テンプレートを確定してください"
+        workflow.primary_action = "confirm_context"
     elif normalized_error == "template_version_mismatch":
         workflow.state = "template_version_mismatch"
         workflow.headline = "施設テンプレートが変更されています。OCRを再実行してください"
         workflow.primary_action = "run_ocr"
+    elif normalized_error == "facility_template_ambiguous":
+        workflow.state = "facility_template_ambiguous"
+        workflow.headline = "施設テンプレートが複数有効です。管理画面で一つに確定してください"
+        workflow.primary_action = "register_facility_template"
     else:
         workflow.state = normalized_error
         workflow.headline = normalized_error
@@ -727,12 +727,8 @@ def confirm_context(
     facility_config = config_service.get_facility_config(normalized_facility_id)
     if not facility_config:
         return None, "facility_not_found"
-    normalized_template_id = _normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id"))
-    template_ready = _facility_config_has_resolved_fax_template(
-        facility_config,
-        template_id=normalized_template_id or None,
-    )
-
+    requested_template_id = _normalize_id(template_id)
+    normalized_template_id = requested_template_id or _normalize_id(facility_config.get("fax_template_id"))
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -742,15 +738,23 @@ def confirm_context(
         row = _get_or_create_workflow(session, order.id)
         current_meta = _workflow_meta(row)
         expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
-        if not template_ready:
+        template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
+            session,
+            normalized_facility_id,
+        )
+        if template_error:
             row.state = "facility_template_unresolved"
-            row.headline = "施設テンプレートが未登録です"
+            row.headline = (
+                "施設テンプレートが複数有効です。管理画面で一つに確定してください"
+                if template_error == "facility_template_ambiguous"
+                else "施設テンプレートが未登録です"
+            )
             row.primary_action = "register_facility_template"
             row.template_version_id = None
             row.evidence_run_id = None
             row.draft_id = None
             row.confirmed_snapshot_id = None
-            row.blockers_json = ["facility_template_unresolved"]
+            row.blockers_json = [template_error]
             row.warnings_json = []
             row.last_transition_at = _now()
             _write_workflow_meta(
@@ -768,23 +772,16 @@ def confirm_context(
                     "output_bundle_id": None,
                 },
             )
-            return None, "facility_template_unresolved"
-
-        template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-            session,
-            facility_id=normalized_facility_id,
-            facility_config=facility_config,
-            created_by="workflow-v2-context-confirm",
-        )
-        if template_version is None:
-            row.state = "facility_template_unresolved"
-            row.headline = "施設テンプレートが未登録です"
+            return None, template_error
+        if requested_template_id and _normalize_id(template_version.template_id) != requested_template_id:
+            row.state = "template_version_mismatch"
+            row.headline = "選択されたテンプレートと施設の有効テンプレートが一致しません"
             row.primary_action = "register_facility_template"
             row.template_version_id = None
             row.evidence_run_id = None
             row.draft_id = None
             row.confirmed_snapshot_id = None
-            row.blockers_json = ["facility_template_unresolved"]
+            row.blockers_json = ["template_version_mismatch"]
             row.warnings_json = []
             row.last_transition_at = _now()
             _write_workflow_meta(
@@ -794,7 +791,7 @@ def confirm_context(
                     "week_start": normalized_week_start,
                     "week_end": normalized_week_end,
                     "week_code": normalized_week_code,
-                    "template_id": normalized_template_id or None,
+                    "template_id": requested_template_id or None,
                     "template_version_id": None,
                     "template_source": None,
                     "expanded_cell_copy_mode": expanded_cell_copy_mode,
@@ -802,7 +799,7 @@ def confirm_context(
                     "output_bundle_id": None,
                 },
             )
-            return None, "facility_template_unresolved"
+            return None, "template_version_mismatch"
 
         row.state = "context_confirmed"
         row.headline = "施設・週次・テンプレートが確定しました"
@@ -822,10 +819,10 @@ def confirm_context(
                 "week_start": normalized_week_start,
                 "week_end": normalized_week_end,
                 "week_code": normalized_week_code,
-                "template_id": normalized_template_id or None,
+                "template_id": _normalize_id(template_version.template_id) or normalized_template_id or None,
                 "template_version_id": template_version.id,
                 "template_version_digest": template_version.template_digest,
-                "template_source": "registered_template_id" if normalized_template_id else "facility_resolved_template",
+                "template_source": "facility_template_version",
                 "expanded_cell_copy_mode": expanded_cell_copy_mode,
                 "bagging_result_id": None,
                 "output_bundle_id": None,
@@ -848,7 +845,8 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
-            return None, "facility_template_unresolved"
+            _apply_template_lineage_blocker(workflow, "template_version_required")
+            return _serialize_workflow(workflow), "template_version_required"
         template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
@@ -921,7 +919,8 @@ def mark_ocr_run_completed(
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
-            return None, "facility_template_unresolved"
+            _apply_template_lineage_blocker(workflow, "template_version_required")
+            return _serialize_workflow(workflow), "template_version_required"
         workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
@@ -1365,6 +1364,7 @@ def save_sheet(
         workflow_meta = _workflow_meta(workflow)
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
+            _apply_template_lineage_blocker(workflow, context_error)
             return None, context_error
         workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,

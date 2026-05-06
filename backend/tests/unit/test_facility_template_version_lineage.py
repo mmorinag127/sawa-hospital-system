@@ -72,6 +72,36 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
     assert "template_source_index_missing" in validation_after_placeholder["errors"]
 
 
+def test_multiple_active_template_versions_are_blocker() -> None:
+    facility_id = _id("FAC")
+    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Ambiguous Template Facility"))
+        for index in range(2):
+            session.add(
+                FacilityTemplateVersion(
+                    id=_id("FTV"),
+                    facility_id=facility_id,
+                    version=str(index + 1),
+                    status="active",
+                    template_id="fax_layout_regular_forbidden_v1",
+                    source="test",
+                    columns_json=columns,
+                    cells_json=[],
+                    template_digest=f"digest-{index}",
+                    validation_json={"errors": [], "warnings": []},
+                    created_at=datetime.utcnow(),
+                    activated_at=datetime.utcnow(),
+                )
+            )
+
+    with session_scope() as session:
+        active, error = facility_template_version_service.resolve_single_active_template_version(session, facility_id)
+
+    assert active is None
+    assert error == "facility_template_ambiguous"
+
+
 def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
     facility_id = _id("FAC")
     order_id = _id("ORD")
