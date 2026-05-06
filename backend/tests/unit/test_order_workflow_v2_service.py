@@ -1532,6 +1532,53 @@ def test_changing_selected_ocr_deletes_confirmed_snapshot_too(monkeypatch) -> No
         assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
 
 
+def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    assert error is None
+    saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
+    order_workflow_v2_service.run_bagging(order_id)
+    order_workflow_v2_service.confirm_bagging(order_id)
+    order_workflow_v2_service.prepare_output_review(order_id)
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert error is None
+    snapshot_id = confirmed["confirmed_snapshot_id"]
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+
+    assert error is None
+    assert workflow["state"] == "context_confirmed"
+    assert workflow["selected_ocr_result_id"] is None
+    assert workflow["saved_sheet_id"] is None
+    assert workflow["confirmed_snapshot_id"] is None
+    with session_scope() as session:
+        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is None
+        assert session.get(OrderSheetDraft, saved_sheet_id) is None
+        assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
+        assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 0
+        assert session.get(Order, order_id).status == "要確認"
+
+
 def test_sheet_cannot_be_saved_without_selected_ocr() -> None:
     order_id, _, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(

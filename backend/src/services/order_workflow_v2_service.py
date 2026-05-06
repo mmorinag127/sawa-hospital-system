@@ -824,6 +824,22 @@ def _workflow_state_requires_output_review(state: str) -> bool:
     return state in {"output_review", "confirmed"}
 
 
+def _workflow_has_downstream_lineage(row: OrderWorkflowState) -> bool:
+    meta = _workflow_meta(row)
+    return bool(
+        row.evidence_run_id
+        or row.draft_id
+        or row.confirmed_snapshot_id
+        or _normalize_id(row.template_version_id)
+        or _normalize_id(meta.get("template_version_id"))
+        or _normalize_id(meta.get("latest_ocr_result_id"))
+        or _normalize_id(meta.get("bagging_result_id"))
+        or _normalize_id(meta.get("output_bundle_id"))
+        or isinstance(meta.get("bagging_result"), dict)
+        or isinstance(meta.get("output_bundle"), dict)
+    )
+
+
 def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkflowState) -> str | None:
     meta = _workflow_meta(workflow)
     state = _canonical_workflow_v2_state(workflow, meta)
@@ -1092,7 +1108,10 @@ def confirm_context(
             return None, error
         order.facility_code = normalized_facility_id
         order.week_code = normalized_week_code
-        row = _get_or_create_workflow(session, order.id)
+        existing_workflow = _get_workflow(session, order.id)
+        row = existing_workflow or _get_or_create_workflow(session, order.id)
+        if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
+            _delete_all_ocr_and_downstream_after_template_change(session, order.id)
         current_meta = _workflow_meta(row)
         expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
         template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
