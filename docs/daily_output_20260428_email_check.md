@@ -454,3 +454,52 @@ Strict conclusion:
 - Proven fixed / blocked: workflow-v2 blockers, template-version blockers, sheet-source errors, menu/daypart shift after saved sheet, stale OCR source overriding saved sheet, daily output diverging from persisted bagging rows.
 - Remaining cause class: OCR quantity reading failure. This includes accepted-but-wrong numeric values, accepted OCR `0` values, and values that remain below the OCR acceptance threshold and therefore do not enter the saved sheet.
 - Therefore the remaining current discrepancy is not a daily-output, workflow-state, template-lineage, stale-source, menu-shift, or saved-sheet propagation bug. It is upstream of saved sheet and is isolated to OCR quantity reading.
+
+## 2026-05-07 stg Postdeploy Verification
+
+Deployed revisions:
+
+- `worker-stg-00320-m6s`
+- `web-stg-00119-ptb`
+
+Daily delivery-note bundle verification:
+
+- Endpoint: `/outputs/daily-bundle?date=2026-04-28&bundle_type=delivery`
+- Artifact: `/tmp/sawa_stg_check_20260507_daily_bundle_after/delivery.xlsx`
+- Headers:
+  - `x-daily-bundle-total-orders: 12`
+  - `x-daily-bundle-success-orders: 11`
+  - `x-daily-bundle-empty-orders: 1`
+  - `x-daily-bundle-error-orders: 0`
+
+The previous failure class was that an order with no output rows for the target day was counted as `error`. Under the strict dependency model this is not an error; it is an explicit empty/no-output state. The fixed invariant is:
+
+- `error` means a generation failure.
+- `empty` means the order resolved correctly but has no rows for that bundle/date.
+- UI and API must not collapse `empty` into `error`.
+
+Postdeploy full scan artifacts:
+
+- Raw/API artifacts: `/tmp/sawa_stg_check_20260507_full_after_deploy`
+- Summary: `/tmp/sawa_stg_check_20260507_full_after_deploy/workflow_daily_reconciliation.md`
+- OCR source vs saved sheet cell comparison: `/tmp/sawa_stg_check_20260507_full_after_deploy/saved_vs_ocr_source_0428.md`
+
+Postdeploy full scan result:
+
+- `order_count=14`
+- `endpoint_error_count=0`
+- `workflow_error_count=0`
+- `daily_vs_bagging_rows_mismatch_count=0`
+- `daily_vs_order_lines_mismatch_count=9`, still informational for transformed/split output rows.
+
+Postdeploy saved-vs-OCR result:
+
+- 14 orders compared.
+- Only one 4/28 quantity cell differs between selected OCR source and saved sheet: `ORD2a654d51` / `FAC00001` / `春雨サラダ` / `qty.regular_x`, OCR source `92`, saved sheet `32`.
+- Daily output follows the saved sheet value `32`.
+
+Postdeploy conclusion:
+
+- The daily-bundle empty/error classification bug is fixed on stg.
+- The workflow/menu-shift/stale-source/downstream aggregation failure classes are not reproduced after deploy.
+- Remaining email-vs-stg quantity differences remain isolated to OCR quantity reading and operator-saved sheet values, not to daily output generation.
