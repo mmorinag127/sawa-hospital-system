@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from src.db import Base, engine, session_scope
+from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services import (
@@ -539,17 +540,18 @@ def persist_evidence_run(
         return None
     with session_scope() as session:
         normalized_template_version_id = str(record.get("template_version_id") or "").strip()
-        if not normalized_template_version_id:
-            order = session.get(Order, record["order_id"])
-            facility_id = str(order.facility_code or "").strip() if order is not None else ""
-            active_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-                session,
-                facility_id=facility_id,
-                created_by="ocr-evidence-persist",
-            )
-            normalized_template_version_id = str(active_version.id if active_version is not None else "").strip()
+        order = session.get(Order, record["order_id"])
+        if not normalized_template_version_id and order is not None:
+            normalized_template_version_id = str(order.template_version_id or "").strip()
         if not normalized_template_version_id:
             return None
+        template_version = session.get(FacilityTemplateVersion, normalized_template_version_id)
+        if template_version is None or template_version.status != "active":
+            return None
+        if order is not None:
+            facility_id = str(order.facility_code or "").strip()
+            if facility_id and str(template_version.facility_id or "").strip() != facility_id:
+                return None
         latest = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == record["order_id"])

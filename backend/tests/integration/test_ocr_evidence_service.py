@@ -11,6 +11,8 @@ sys.path.append(str(ROOT))
 
 import src.api.orders as orders_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
+from src.models.order import Order  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import draft_sheet_service, ocr_evidence_service, order_service, template_resolution_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
@@ -75,9 +77,47 @@ def _sample_payload(quantity: str = "3") -> dict:
     }
 
 
+def _attach_active_template_version(order_id: str, facility_id: str = "FAC00001") -> str:
+    template_version_id = f"FTV{order_id[-8:]}"
+    with session_scope() as session:
+        session.add(
+            FacilityTemplateVersion(
+                id=template_version_id,
+                facility_id=facility_id,
+                version="test-active",
+                status="active",
+                template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                source="test",
+                columns_json=[
+                    {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+                    {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+                    {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 2},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "header": "常食2F",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "source_index": 3,
+                    },
+                ],
+                cells_json=[],
+                template_digest=f"digest-{template_version_id}",
+                validation_json={"errors": [], "warnings": []},
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+        order = session.get(Order, order_id)
+        assert order is not None
+        order.template_version_id = template_version_id
+    return template_version_id
+
+
 def test_persist_evidence_run_dedupes_identical_payload_digest():
     order_service.clear_all()
     order = _seed_order("msg-evidence-dedupe")
+    _attach_active_template_version(order["id"])
 
     first = ocr_evidence_service.persist_evidence_run(
         order_id=order["id"],
@@ -110,6 +150,7 @@ def test_persist_evidence_run_dedupes_identical_payload_digest():
 def test_persist_evidence_run_does_not_dedupe_different_record_identity_for_same_digest():
     order_service.clear_all()
     order = _seed_order("msg-evidence-dedupe-identity")
+    _attach_active_template_version(order["id"])
 
     legacy = ocr_evidence_service.persist_evidence_run(
         order_id=order["id"],
@@ -131,6 +172,22 @@ def test_persist_evidence_run_does_not_dedupe_different_record_identity_for_same
     assert legacy["artifact_digest"] == hakodate["artifact_digest"]
     assert legacy["id"] != hakodate["id"]
     assert hakodate["created"] is True
+
+
+def test_persist_evidence_run_blocks_without_template_version():
+    order_service.clear_all()
+    order = _seed_order("msg-evidence-no-template-version")
+
+    evidence = ocr_evidence_service.persist_evidence_run(
+        order_id=order["id"],
+        payload=_sample_payload("3"),
+        schema_version="v1_legacy",
+        producer_version="test",
+        source="test",
+    )
+
+    assert evidence is None
+    assert ocr_evidence_service.get_latest_evidence_run(order["id"]) is None
 
 
 def test_save_order_ocr_cache_does_not_create_legacy_mirror_for_hakodate_payload():
@@ -275,6 +332,7 @@ def test_get_evidence_endpoint_backfills_from_cache_when_run_missing():
     order_service.clear_all()
     client = TestClient(app)
     order = _seed_order("msg-evidence-endpoint-backfill")
+    _attach_active_template_version(order["id"])
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("5")))
 
@@ -291,10 +349,11 @@ def test_get_evidence_endpoint_backfills_from_cache_when_run_missing():
     assert latest["id"] == payload["id"]
 
 
-def test_get_draft_sheet_endpoint_builds_initial_draft_from_evidence():
+def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence():
     order_service.clear_all()
     client = TestClient(app)
     order = _seed_order("msg-draft-endpoint-build")
+    _attach_active_template_version(order["id"])
     ocr_evidence_service.persist_evidence_run(
         order_id=order["id"],
         payload=_sample_payload("5"),
@@ -305,21 +364,8 @@ def test_get_draft_sheet_endpoint_builds_initial_draft_from_evidence():
 
     res = client.get(f"/orders/{order['id']}/draft-sheet")
 
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["order_id"] == order["id"]
-    assert payload["id"] is None
-    draft_json = payload["draft_sheet_json"]
-    assert draft_json["source"] == "ocr_table+ocr_payload"
-    assert draft_json["fields"][:3] == ["date_mmdd", "daypart", "menu"]
-    assert all(not str(field or "").startswith("col") for field in draft_json["fields"])
-    assert draft_json["rows"][0][0] == "03/22"
-    assert draft_json["rows"][0][3] == "5"
-    assert payload["source"] == "ocr_table+ocr_payload"
-    assert payload["rows"][0][0] == "03/22"
-    assert payload["rows"][0][3] == "5"
-    assert isinstance(payload.get("workflow_state"), dict)
-    assert isinstance(payload.get("evidence_capabilities"), dict)
+    assert res.status_code == 410
+    assert res.json()["detail"]["error"] == "legacy_order_workflow_disabled"
 
 
 def test_get_draft_sheet_endpoint_prefers_semantic_shell_over_raw_evidence_when_recovery_warning_remains(monkeypatch):
@@ -372,6 +418,13 @@ def test_get_draft_sheet_endpoint_prefers_semantic_shell_over_raw_evidence_when_
 
 def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkeypatch):
     order_service.clear_all()
+    original_create_order = ingest_worker.create_order_from_ingest
+
+    def create_order_with_template(*args, **kwargs):
+        order = original_create_order(*args, **kwargs)
+        if isinstance(order, dict):
+            _attach_active_template_version(order["id"], facility_id=order.get("facility_code") or "FAC00001")
+        return order
 
     monkeypatch.setattr(ingest_worker.config_service, "load_ingest_policy", lambda: {"ocr_retry_limit": 1, "quantity_rules": {}})
     monkeypatch.setattr(
@@ -394,6 +447,7 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
     )
     monkeypatch.setattr(ingest_worker.config_service, "get_facility_config", lambda _facility_id: None)
     monkeypatch.setattr(ingest_worker, "_enqueue_auto_llm_reparse", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ingest_worker, "create_order_from_ingest", create_order_with_template)
 
     ingest_worker._process_ingest_inline(
         message_id="msg-evidence-inline-ingest",
@@ -414,6 +468,7 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
 def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when_classifier_differs():
     order_service.clear_all()
     order = _seed_order("msg-evidence-registry-grid")
+    _attach_active_template_version(order["id"])
     payload = _sample_payload("6")
     payload["template_resolution"] = template_resolution_service.build_template_resolution(
         requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",

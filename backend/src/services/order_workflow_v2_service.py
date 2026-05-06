@@ -468,13 +468,12 @@ def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[
     return _normalize_id(row.template_version_id) or _normalize_id(meta.get("template_version_id")) or None
 
 
-def _ensure_workflow_template_version_from_context(
+def _require_workflow_template_version_from_context(
     session: Any,
     *,
     order: Order,
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
-    created_by: str,
 ) -> tuple[str | None, str | None]:
     template_version_id = _effective_workflow_template_version_id(workflow, meta)
     if template_version_id:
@@ -496,21 +495,13 @@ def _ensure_workflow_template_version_from_context(
     facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
     if not facility_id:
         return None, "facility_missing"
-    facility_config = config_service.get_facility_config(facility_id)
-    template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-        session,
-        facility_id=facility_id,
-        facility_config=facility_config if isinstance(facility_config, dict) else None,
-        created_by=created_by,
-    )
+    template_version = facility_template_version_service.get_active_template_version(session, facility_id)
     if template_version is None:
         return None, "facility_template_unresolved"
-    workflow.template_version_id = template_version.id
-    order.template_version_id = template_version.id
-    meta["template_version_id"] = template_version.id
-    meta["template_version_digest"] = template_version.template_digest
-    if not _normalize_id(meta.get("template_id")) and _normalize_id(template_version.template_id):
-        meta["template_id"] = template_version.template_id
+    columns = list(template_version.columns_json or [])
+    validation = facility_template_version_service.validate_template_columns(columns)
+    if validation.get("errors"):
+        return None, "facility_template_unresolved"
     return template_version.id, None
 
 
@@ -518,8 +509,14 @@ def _resolve_evidence_template_version(
     evidence: OrderOcrEvidenceRun,
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
+    *,
+    required_template_version_id: str | None = None,
 ) -> tuple[str | None, str | None]:
-    workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
+    workflow_template_version_id = (
+        _normalize_id(required_template_version_id)
+        or _normalize_id(workflow.template_version_id)
+        or _normalize_id(meta.get("template_version_id"))
+    )
     evidence_template_version_id = _normalize_id(evidence.template_version_id)
     if workflow_template_version_id and not evidence_template_version_id:
         return None, "template_version_mismatch"
@@ -528,6 +525,30 @@ def _resolve_evidence_template_version(
     if evidence_template_version_id and not workflow_template_version_id:
         return None, "template_version_mismatch"
     return evidence_template_version_id or workflow_template_version_id or None, None
+
+
+def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | None) -> None:
+    normalized_error = _normalize_id(error)
+    if not normalized_error:
+        return
+    if normalized_error == "facility_template_unresolved":
+        workflow.state = "facility_template_unresolved"
+        workflow.headline = "施設テンプレートが未登録または無効です"
+        workflow.primary_action = "register_facility_template"
+    elif normalized_error == "template_version_mismatch":
+        workflow.state = "template_version_mismatch"
+        workflow.headline = "施設テンプレートが変更されています。OCRを再実行してください"
+        workflow.primary_action = "run_ocr"
+    else:
+        workflow.state = normalized_error
+        workflow.headline = normalized_error
+        workflow.primary_action = "confirm_context"
+    workflow.evidence_run_id = None
+    workflow.draft_id = None
+    workflow.confirmed_snapshot_id = None
+    workflow.blockers_json = [normalized_error]
+    workflow.warnings_json = []
+    workflow.last_transition_at = _now()
 
 
 def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = None) -> dict[str, Any]:
@@ -780,26 +801,18 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
             return None, "facility_template_unresolved"
-        facility_id = _normalize_id(meta.get("facility_id"))
-        template_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+        template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
-            facility_id=facility_id,
-            facility_config=config_service.get_facility_config(facility_id) if facility_id else None,
-            created_by="workflow-v2-ocr-run",
+            order=order,
+            workflow=workflow,
+            meta=meta,
         )
+        if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
+            return _serialize_workflow(workflow), template_error
+        template_version = session.get(FacilityTemplateVersion, template_version_id) if template_version_id else None
         if template_version is None:
-            workflow.state = "facility_template_unresolved"
-            workflow.headline = "施設テンプレートが未登録です"
-            workflow.primary_action = "register_facility_template"
-            workflow.template_version_id = None
-            workflow.evidence_run_id = None
-            workflow.draft_id = None
-            workflow.confirmed_snapshot_id = None
-            workflow.blockers_json = ["facility_template_unresolved"]
-            workflow.warnings_json = []
-            workflow.last_transition_at = _now()
-            meta["template_version_id"] = None
-            _write_workflow_meta(workflow, meta)
+            _apply_template_lineage_blocker(workflow, "facility_template_unresolved")
             return _serialize_workflow(workflow), "facility_template_unresolved"
         _refresh_ocr_prerequisite_state(session, order, workflow)
         blockers = [
@@ -861,6 +874,29 @@ def mark_ocr_run_completed(
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
             return None, "facility_template_unresolved"
+        workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
+            session,
+            order=order,
+            workflow=workflow,
+            meta=meta,
+        )
+        if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
+            return _serialize_workflow(workflow), template_error
+        if normalized_evidence_run_id and not normalized_error:
+            evidence = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
+            if evidence is None or evidence.order_id != order.id:
+                _apply_template_lineage_blocker(workflow, "template_version_mismatch")
+                return _serialize_workflow(workflow), "template_version_mismatch"
+            _evidence_template_version_id, template_error = _resolve_evidence_template_version(
+                evidence,
+                workflow,
+                meta,
+                required_template_version_id=workflow_template_version_id,
+            )
+            if template_error:
+                _apply_template_lineage_blocker(workflow, template_error)
+                return _serialize_workflow(workflow), template_error
         if normalized_error:
             workflow.state = "ocr_failed"
             workflow.headline = "OCR処理に失敗しました。Step1から再実行してください"
@@ -876,7 +912,7 @@ def mark_ocr_run_completed(
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
-        workflow.template_version_id = _normalize_id(meta.get("template_version_id")) or workflow.template_version_id
+        workflow.template_version_id = workflow_template_version_id or workflow.template_version_id
         workflow.last_transition_at = _now()
         meta["ocr_job_id"] = normalized_job_id
         meta["latest_ocr_result_id"] = normalized_evidence_run_id or None
@@ -888,10 +924,6 @@ def mark_ocr_run_completed(
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
         if ocr_job is not None and workflow_template_version_id:
             ocr_job.template_version_id = workflow_template_version_id
-        if normalized_evidence_run_id and workflow_template_version_id:
-            evidence = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
-            if evidence is not None and evidence.order_id == order.id and not _normalize_id(evidence.template_version_id):
-                evidence.template_version_id = workflow_template_version_id
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -1119,30 +1151,30 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         if context_error:
             return None, context_error
         meta = _workflow_meta(workflow)
-        _workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+        workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
             workflow=workflow,
             meta=meta,
-            created_by="workflow-v2-ocr-select",
         )
         if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
-        evidence_template_version_id, template_error = _resolve_evidence_template_version(ocr_result, workflow, meta)
+        evidence_template_version_id, template_error = _resolve_evidence_template_version(
+            ocr_result,
+            workflow,
+            meta,
+            required_template_version_id=workflow_template_version_id,
+        )
         if template_error:
-            workflow.state = "template_version_mismatch"
-            workflow.headline = "施設テンプレートが変更されています。OCRを再実行してください"
-            workflow.primary_action = "run_ocr"
-            workflow.blockers_json = ["template_version_mismatch"]
-            workflow.warnings_json = []
-            workflow.last_transition_at = _now()
+            _apply_template_lineage_blocker(workflow, template_error)
             return _serialize_workflow(workflow), "template_version_mismatch"
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
             session.flush()
             _delete_downstream_after_ocr_change(session, order.id)
-        workflow.template_version_id = evidence_template_version_id or None
+        workflow.template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.evidence_run_id = normalized_ocr_result_id
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -1283,17 +1315,23 @@ def save_sheet(
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
             return None, context_error
-        workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+        workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
             workflow=workflow,
             meta=workflow_meta,
-            created_by="workflow-v2-sheet-save",
         )
         if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
-        evidence_template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, workflow_meta)
+        evidence_template_version_id, template_error = _resolve_evidence_template_version(
+            evidence,
+            workflow,
+            workflow_meta,
+            required_template_version_id=workflow_template_version_id,
+        )
         if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
         resolved_template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.draft_id = None
@@ -1677,17 +1715,23 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
             return None, context_error
-        _workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+        workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
             workflow=workflow,
             meta=meta,
-            created_by="workflow-v2-sheet-build",
         )
         if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
-        template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, meta)
+        template_version_id, template_error = _resolve_evidence_template_version(
+            evidence,
+            workflow,
+            meta,
+            required_template_version_id=workflow_template_version_id,
+        )
         if template_error:
+            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
         facility_id = _normalize_id(meta.get("facility_id"))
         template_id = _normalize_id(meta.get("template_id"))

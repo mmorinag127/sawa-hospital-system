@@ -9,7 +9,7 @@ sys.path.append(str(ROOT))
 from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
-from src.services import facility_service, facility_template_version_service  # noqa: E402
+from src.services import config_service, facility_service, facility_template_version_service  # noqa: E402
 
 
 def _clear_facilities():
@@ -18,6 +18,21 @@ def _clear_facilities():
         session.execute(delete(FacilityArea))
         session.execute(delete(Facility))
     facility_service._SYNC_DONE = False  # noqa: SLF001
+
+
+def _seed_facilities_from_master():
+    with session_scope() as session:
+        facility_service._sync_facilities_from_master(session)  # noqa: SLF001
+
+
+def _ensure_active_template_version_for_facility(facility_id: str):
+    with session_scope() as session:
+        facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=facility_id,
+            facility_config=config_service.get_facility_config(facility_id),
+            created_by="test-explicit-template-registration",
+        )
 
 
 def test_facility_config_update_contract():
@@ -88,6 +103,7 @@ def test_facility_scoped_fax_template_registration_contract():
 
 def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
     _clear_facilities()
+    _seed_facilities_from_master()
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00005")
@@ -113,6 +129,8 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
 
 def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
     _clear_facilities()
+    _seed_facilities_from_master()
+    _ensure_active_template_version_for_facility("FAC00002")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00002")
@@ -146,6 +164,8 @@ def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
 
 def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
     _clear_facilities()
+    _seed_facilities_from_master()
+    _ensure_active_template_version_for_facility("FAC00007")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00007")

@@ -228,14 +228,12 @@ def update_config(
 
 def list_facilities() -> list[dict]:
     with session_scope() as session:
-        _ensure_facility_sync(session)
         facilities = session.execute(select(Facility)).scalars().all()
         return [serialize_facility(fac) for fac in facilities]
 
 
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
-        _ensure_facility_sync(session)
         fac = session.get(Facility, facility_id)
         if not fac:
             return None

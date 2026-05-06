@@ -88,12 +88,7 @@ def get_facility(facility_id: str):
     config = facility_service.get_facility_config(facility_id) or {}
     resolved = config_service.get_facility_config(facility_id)
     with session_scope() as session:
-        active_version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-            session,
-            facility_id=facility_id,
-            facility_config=resolved,
-            created_by="facility-api-get",
-        )
+        active_version = facility_template_version_service.get_active_template_version(session, facility_id)
         if active_version is not None and isinstance(resolved, dict):
             resolved = dict(resolved)
             fax_template = dict(resolved.get("fax_template") or {})

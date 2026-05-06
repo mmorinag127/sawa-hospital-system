@@ -247,6 +247,54 @@ def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch) -
         assert order.facility_code == "FAC_TEMPLATELESS"
 
 
+def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    facility_id = _id("FAC_NO_ACTIVE")
+    job_id = _id("OCRnoactive")
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        _registered_template_config,
+    )
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        assert order is not None
+        order.facility_code = facility_id
+        order.week_code = "2026-04@2026-04-26~2026-04-30"
+        session.add(OcrJob(id=job_id, status="queued", input_reference="file:///input.pdf"))
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                state="context_confirmed",
+                headline="施設・週次・テンプレートが確定しました",
+                primary_action="run_ocr",
+                secondary_actions_json={
+                    order_workflow_v2_service.WORKFLOW_V2_META_KEY: {
+                        "facility_id": facility_id,
+                        "week_start": "2026-04-26",
+                        "week_end": "2026-04-30",
+                        "week_code": "2026-04@2026-04-26~2026-04-30",
+                        "template_id": "fax_layout_regular_forbidden_v1",
+                    }
+                },
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    workflow, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
+
+    assert workflow is not None
+    assert error == "facility_template_unresolved"
+    assert workflow["state"] == "facility_template_unresolved"
+    assert workflow["blockers"] == ["facility_template_unresolved"]
+    with session_scope() as session:
+        versions = session.query(FacilityTemplateVersion).filter(FacilityTemplateVersion.facility_id == facility_id).all()
+        assert versions == []
+        assert session.get(OcrJob, job_id).template_version_id is None
+
+
 def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(
@@ -332,6 +380,7 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
     assert error is None
     assert queued["template_version_id"] == template_version_id
 
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
     completed, error = order_workflow_v2_service.mark_ocr_run_completed(
         order_id,
         job_id=job_id,
@@ -415,8 +464,10 @@ def test_save_sheet_blocks_legacy_selected_evidence_without_template_version(mon
         order = session.get(Order, order_id)
         row = session.get(OrderWorkflowState, order_id)
         evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
-        assert order.template_version_id == template_version_id
-        assert row.template_version_id == template_version_id
+        assert order.template_version_id is None
+        assert row.template_version_id is None
+        assert row.state == "template_version_mismatch"
+        assert row.blockers_json == ["template_version_mismatch"]
         assert evidence.template_version_id is None
 
 
@@ -701,6 +752,7 @@ def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result(mon
     )
     _install_fake_ocr_prerequisite(monkeypatch)
     order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job")
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
 
     completed, error = order_workflow_v2_service.mark_ocr_run_completed(
         order_id,
