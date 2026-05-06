@@ -2412,6 +2412,10 @@ class LegacyPositionMappingDisabledError(RuntimeError):
     pass
 
 
+class LegacyOcrEvidenceFallbackDisabledError(RuntimeError):
+    pass
+
+
 def _raise_legacy_position_mapping_disabled() -> None:
     raise LegacyPositionMappingDisabledError(
         "legacy source_row_index menu position mapping is disabled; "
@@ -8222,25 +8226,12 @@ def persist_ocr_evidence_run(
 
 
 def get_latest_ocr_evidence_run(order_id: str, *, backfill_from_cache: bool = False) -> Optional[dict]:
+    if backfill_from_cache:
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "legacy OCR cache backfill is disabled; use an explicit repair command instead"
+        )
     latest = ocr_evidence_service.get_latest_evidence_run(order_id)
-    if latest is not None or not backfill_from_cache:
-        return latest
-    # Backfill must not depend on active-evidence resolution because the active
-    # path itself resolves through latest evidence state.
-    cached_payload = _load_order_ocr_cache(order_id)
-    if not isinstance(cached_payload, dict):
-        return None
-    cached_payload = _restore_payload_raw_ocr_surface(
-        cached_payload,
-        strip_legacy_surface=True,
-    )
-    return ocr_evidence_service.backfill_evidence_run_from_cached_payload(
-        order_id,
-        cached_payload,
-        schema_version="v1_legacy_backfill",
-        producer_version="legacy-cache-backfill/v1",
-        source="legacy-cache-backfill",
-    )
+    return latest
 
 
 def _resolve_active_ocr_evidence_run(order_id: str) -> Optional[dict]:
@@ -18471,13 +18462,18 @@ def get_ocr_output(
     allow_legacy_fallback: bool = False,
     allow_job_reconcile: bool = False,
 ):
+    if allow_legacy_fallback:
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "legacy OCR output fallback is disabled; read immutable evidence or run explicit recovery"
+        )
     if allow_job_reconcile:
-        reconcile_ocr_rerun_state(order_id)
+        raise LegacyOcrEvidenceFallbackDisabledError(
+            "read-time OCR job reconciliation is disabled; use worker or explicit command recovery"
+        )
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None, "order_not_found"
-        message_id = order.message_id
         facility_id = str(order.facility_code or "").strip() or None
     active_evidence_payload = None
     active_evidence_run = None
@@ -18507,23 +18503,19 @@ def get_ocr_output(
         facility_template,
     )
     parsed = None
-    parsed_source = ""
     order_job_pending = _job_is_pending(job)
     if (
         _payload_has_first_pass_ocr_content(active_evidence_payload)
         or _payload_has_hakodate_output_content(active_evidence_payload, order_id=order_id)
     ):
         parsed = active_evidence_payload
-        parsed_source = "active_evidence"
     elif allow_legacy_fallback and (
         _payload_has_first_pass_ocr_content(cached_payload)
         or _payload_has_hakodate_output_content(cached_payload, order_id=order_id)
     ):
         parsed = cached_payload
-        parsed_source = "cache"
     elif allow_legacy_fallback:
         parsed = _load_job_output(job, "order", wait_for_recovery=False)
-        parsed_source = "job"
         order_job_pending = _job_is_pending(job) or _output_is_pending(parsed)
         if _output_is_pending(parsed):
             parsed = None
@@ -18535,7 +18527,6 @@ def get_ocr_output(
     fallback_job = None
     if allow_legacy_fallback and parsed is None:
         parsed = cached_payload
-        parsed_source = "cache"
     if parsed is None:
         active_job = job or fallback_job
         if not active_job:

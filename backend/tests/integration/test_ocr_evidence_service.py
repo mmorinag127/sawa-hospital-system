@@ -3,6 +3,7 @@ import sys
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -360,6 +361,46 @@ def test_get_latest_ocr_evidence_run_default_does_not_backfill_from_cache():
     latest = order_service.get_latest_ocr_evidence_run(order["id"])
 
     assert latest is None
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert rows == []
+
+
+def test_legacy_cache_backfill_option_is_disabled():
+    order_service.clear_all()
+    order = _seed_order("msg-evidence-service-backfill-disabled")
+    _attach_active_template_version(order["id"])
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("4")))
+
+    with pytest.raises(order_service.LegacyOcrEvidenceFallbackDisabledError):
+        order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=True)
+
+    with session_scope() as session:
+        rows = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(OrderOcrEvidenceRun.order_id == order["id"])
+            .all()
+        )
+    assert rows == []
+
+
+def test_legacy_ocr_output_fallback_options_are_disabled():
+    order_service.clear_all()
+    order = _seed_order("msg-ocr-output-fallback-disabled")
+    _attach_active_template_version(order["id"])
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("6")))
+
+    with pytest.raises(order_service.LegacyOcrEvidenceFallbackDisabledError):
+        order_service.get_ocr_output(order["id"], allow_legacy_fallback=True)
+    with pytest.raises(order_service.LegacyOcrEvidenceFallbackDisabledError):
+        order_service.get_ocr_output(order["id"], allow_job_reconcile=True)
+
     with session_scope() as session:
         rows = (
             session.query(OrderOcrEvidenceRun)
