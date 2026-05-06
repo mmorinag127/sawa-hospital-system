@@ -841,21 +841,6 @@ def build_order_lines_for_outputs(order: dict) -> list[dict]:
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
-    if order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
-        facility_config,
-        week_sheet_name=order_service._week_sheet_name_from_week_value(week_value),  # noqa: SLF001
-    ):
-        order_id = order.get("id")
-        if order_id:
-            materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
-            candidate_lines = (
-                materialization_candidate.get("lines")
-                if isinstance(materialization_candidate, dict)
-                and not materialization_candidate.get("error")
-                else None
-            )
-            if isinstance(candidate_lines, list) and candidate_lines:
-                raw_lines = candidate_lines
     raw_lines = order_service._apply_change_override_priority_to_lines(raw_lines)  # noqa: SLF001
     raw_lines = _apply_garnish_lines(raw_lines)
     menu_entries = order_service._collect_menu_entries_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001

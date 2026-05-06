@@ -224,6 +224,10 @@ def test_build_order_lines_for_outputs_auto_detects_template_merged_quantity_cel
         assert error is None
         assert saved is not None
 
+        applied, apply_error = order_service.apply_latest_draft(order["id"])
+        assert apply_error is None
+        assert applied is not None
+
         lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(order["id"]))
 
         assert [

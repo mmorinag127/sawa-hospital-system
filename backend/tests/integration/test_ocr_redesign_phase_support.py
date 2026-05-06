@@ -4042,7 +4042,7 @@ def test_equivalent_fac00014_templates_do_not_block_current_sheet_or_workflow():
     assert "qty.change_1_x" in (sheet.get("fields") or [])
 
 
-def test_apply_latest_draft_rejects_materialization_mismatch_for_semantic_sheet(monkeypatch):
+def test_apply_latest_draft_does_not_run_legacy_position_mapping_for_semantic_sheet(monkeypatch):
     order_service.clear_all()
     order = _seed_order_for_facility(
         message_id="msg-ocr-redesign-apply-mismatch-guard-fac00014",
@@ -4072,66 +4072,20 @@ def test_apply_latest_draft_rejects_materialization_mismatch_for_semantic_sheet(
     assert error is None
     assert saved is not None
 
-    def _corrupt_position_mapping(lines, week_id, *, facility_id=None, entries_override=None):
-        mutated = [dict(line) for line in lines]
-        if mutated:
-            mutated[0].pop("source_row_index", None)
-            mutated[0]["quantity_original"] = 2
-        return mutated, 1
+    def _fail_position_mapping(*_args, **_kwargs):
+        raise AssertionError("legacy position mapping must not run for semantic saved sheets")
 
-    monkeypatch.setattr(order_service, "_apply_menu_position_mapping_safe", _corrupt_position_mapping)
+    monkeypatch.setattr(order_service, "_apply_menu_position_mapping_safe", _fail_position_mapping)
 
     applied, apply_error = order_service.apply_latest_draft(order["id"])
 
-    assert applied is None
-    assert apply_error == "draft_materialization_mismatch"
-
-
-def test_confirm_order_rejects_materialization_mismatch_for_semantic_sheet(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        message_id="msg-ocr-redesign-confirm-mismatch-guard-fac00004",
-        facility_id="FAC00004",
-    )
-
-    saved, error = order_service.save_ocr_sheet_exact(
-        order["id"],
-        header=["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-        rows=[["03/24", "昼", "ホイコーロー", "65", "45", "", "2", "", "", "", "豚肉2"]],
-        fields=[
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_x",
-            "qty.daycare_x",
-            "qty.staff_x",
-            "qty.no_meat_x",
-            "qty.no_fish_x",
-            "qty.no_fried_x",
-            "qty.change_1_x",
-            "remarks",
-        ],
-        row_ids=["draft-row-1"],
-        ui_mode="sheet",
-    )
-
-    assert error is None
-    assert saved is not None
-
-    def _corrupt_position_mapping(lines, week_id, *, facility_id=None, entries_override=None):
-        mutated = [dict(line) for line in lines]
-        if mutated:
-            mutated[0].pop("source_row_index", None)
-            mutated[0]["quantity_original"] = 2
-        return mutated, 1
-
-    monkeypatch.setattr(order_service, "_apply_menu_position_mapping_safe", _corrupt_position_mapping)
-
-    try:
-        order_service.confirm_order(order["id"])
-        assert False, "confirm should have raised for a semantic draft materialization mismatch"
-    except order_service.ConfirmMaterializationError as exc:
-        assert exc.code == "draft_materialization_mismatch"
+    assert apply_error is None
+    assert applied is not None
+    line = applied["lines"][0]
+    assert line["date"] == "2026-03-24"
+    assert line["daypart"] == "昼"
+    assert line["menu_name"] == "ホイコーロー"
+    assert line["quantity_original"] == 102
 
 
 def test_confirm_materialization_rejects_semantic_draft_fallback(monkeypatch):
@@ -4174,53 +4128,21 @@ def test_confirm_materialization_rejects_semantic_draft_fallback(monkeypatch):
         assert exc.code == "draft_semantic_materialization_failed"
 
 
-def test_confirm_materialization_guard_rejects_source_row_mismatch(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        message_id="msg-ocr-redesign-confirm-source-row-guard",
-        facility_id="FAC00014",
-    )
-
-    saved, error = order_service.save_ocr_sheet_exact(
-        order["id"],
-        header=["日付", "区分", "メニュー", "常食", "職員", "肉禁", "魚禁", "ゴマアレルギー", "変更1", "備考欄"],
-        rows=[["03/24", "昼", "ホイコーロー", "102", "2", "2", "1", "", "", ""]],
-        fields=[
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_x",
-            "qty.staff_x",
-            "qty.no_meat_x",
-            "qty.no_fish_x",
-            "qty.sesame_allergy_x",
-            "qty.change_1_x",
-            "remarks",
-        ],
-        row_ids=["draft-row-1"],
-        ui_mode="sheet",
-    )
-
-    assert error is None
-    assert saved is not None
-
-    def _drop_source_row_indexes(lines, *_args, **_kwargs):
-        mutated = []
-        for line in lines:
-            if not isinstance(line, dict):
-                continue
-            copied = dict(line)
-            copied.pop("source_row_index", None)
-            mutated.append(copied)
-        return mutated, len(mutated)
-
-    monkeypatch.setattr(order_service, "_apply_menu_position_mapping_safe", _drop_source_row_indexes)
-
-    try:
-        order_service.confirm_order(order["id"])
-        assert False, "confirm should fail when materialized lines no longer match draft source rows"
-    except order_service.ConfirmMaterializationError as exc:
-        assert exc.code == "draft_materialization_mismatch"
+def test_legacy_position_mapping_wrapper_is_not_executable():
+    with pytest.raises(order_service.LegacyPositionMappingDisabledError):
+        order_service._apply_menu_position_mapping(  # noqa: SLF001
+            [
+                {
+                    "date": "2026-03-24",
+                    "daypart": "昼",
+                    "menu_name": "ホイコーロー",
+                    "source_row_index": 0,
+                    "diet_type": "regular",
+                    "quantity_original": 102,
+                }
+            ],
+            "2026-03",
+        )
 
 
 def test_apply_latest_draft_blocks_when_sheet_quantities_diverge_for_fac00004(monkeypatch):

@@ -1548,7 +1548,7 @@ def test_validate_reparse_lines_against_weekly_menu_accepts_body_only_blank_anch
     assert detail is None
 
 
-def test_apply_menu_position_mapping_overrides_daypart_and_date_from_weekly_menu(monkeypatch):
+def test_legacy_menu_position_mapping_is_disabled(monkeypatch):
     lines = [
         {
             "date": "2026-02-15",
@@ -1586,18 +1586,11 @@ def test_apply_menu_position_mapping_overrides_daypart_and_date_from_weekly_menu
 
     monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_build_position_menu_entries)
 
-    mapped, mapped_rows = order_service._apply_menu_position_mapping(lines, "2026-02")
-
-    assert mapped_rows == 2
-    assert mapped[0]["menu_name"] == "Menu X"
-    assert mapped[0]["daypart"] == "夕"
-    assert mapped[0]["date"] == date(2026, 2, 15)
-    assert mapped[1]["menu_name"] == "Menu Y"
-    assert mapped[1]["daypart"] == "朝"
-    assert mapped[1]["date"] == date(2026, 2, 16)
+    with pytest.raises(order_service.LegacyPositionMappingDisabledError):
+        order_service._apply_menu_position_mapping(lines, "2026-02")
 
 
-def test_apply_menu_position_mapping_prefers_source_row_index(monkeypatch):
+def test_legacy_menu_position_mapping_safe_wrapper_is_disabled(monkeypatch):
     lines = [
         {
             "date": "2026-02-15",
@@ -1626,12 +1619,8 @@ def test_apply_menu_position_mapping_prefers_source_row_index(monkeypatch):
 
     monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_build_position_menu_entries)
 
-    mapped, mapped_rows = order_service._apply_menu_position_mapping(lines, "2026-02")
-
-    assert mapped_rows == 1
-    assert mapped[0]["menu_name"] == "Menu 1"
-    assert mapped[0]["daypart"] == "昼"
-    assert mapped[0]["date"] == date(2026, 2, 15)
+    with pytest.raises(order_service.LegacyPositionMappingDisabledError):
+        order_service._apply_menu_position_mapping_safe(lines, "2026-02")
 
 
 def test_build_position_entries_for_lines_scopes_single_payload_date_when_line_dates_missing(monkeypatch):
@@ -2304,7 +2293,7 @@ def test_build_reparse_position_entries_extends_payload_anchor_scope_for_moderat
     assert date(2026, 2, 13) in scoped_dates
 
 
-def test_create_order_from_ingest_scopes_position_mapping_entries_to_line_dates(monkeypatch, tmp_path):
+def test_create_order_from_ingest_does_not_apply_legacy_position_mapping(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-ingest-position-scope.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -2356,10 +2345,10 @@ def test_create_order_from_ingest_scopes_position_mapping_entries_to_line_dates(
     assert refreshed["lines"]
     first = refreshed["lines"][0]
     assert first.get("date") == "2026-02-08"
-    assert str(first.get("menu_name") or "").startswith("2026-02-08-")
+    assert first.get("menu_name") == "OCR-0"
 
 
-def test_apply_ocr_table_scopes_position_mapping_entries_to_line_dates(monkeypatch, tmp_path):
+def test_apply_ocr_table_does_not_apply_legacy_position_mapping(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-apply-position-scope.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -2441,13 +2430,10 @@ def test_apply_ocr_table_scopes_position_mapping_entries_to_line_dates(monkeypat
     assert updated is not None
     assert updated.get("lines")
     assert {line.get("date") for line in updated["lines"]} == {"2026-02-08"}
-    assert all(
-        str(line.get("menu_name") or "").startswith("2026-02-08-")
-        for line in updated["lines"]
-    )
+    assert [line.get("menu_name") for line in updated["lines"]] == ["dummy-0", "dummy-1"]
 
 
-def test_apply_ocr_table_scopes_position_mapping_from_submitted_rows_when_line_dates_missing(
+def test_apply_ocr_table_preserves_parse_output_when_line_dates_missing_without_legacy_mapping(
     monkeypatch, tmp_path
 ):
     order_service.clear_all()
@@ -2518,10 +2504,10 @@ def test_apply_ocr_table_scopes_position_mapping_from_submitted_rows_when_line_d
     assert updated is not None
     assert updated.get("lines")
     assert updated["lines"][0].get("date") == "2026-02-08"
-    assert str(updated["lines"][0].get("menu_name") or "").startswith("2026-02-08-")
+    assert updated["lines"][0].get("menu_name") == "dummy"
 
 
-def test_reparse_order_scopes_position_mapping_entries_on_single_date_anchor(monkeypatch, tmp_path):
+def test_reparse_order_does_not_apply_legacy_position_mapping_on_single_date_anchor(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-reparse-position-scope.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -2594,11 +2580,8 @@ def test_reparse_order_scopes_position_mapping_entries_on_single_date_anchor(mon
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="pipeline")
 
-    assert error is None
-    assert updated is not None
-    assert updated.get("lines")
-    assert updated["lines"][0].get("date") == "2026-02-08"
-    assert str(updated["lines"][0].get("menu_name") or "").startswith("2026-02-08-")
+    assert updated is None
+    assert error == "sheet_canonical_mismatch"
 
 
 def test_reparse_order_rejects_date_anchor_drift_when_llm_quantity_only(monkeypatch, tmp_path):

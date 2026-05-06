@@ -2446,33 +2446,15 @@ def _resolve_llm_expected_row_count(
     return expected
 
 
-def _group_lines_for_position_mapping(lines: list[dict]) -> list[list[dict]]:
-    grouped: list[list[dict]] = []
-    current: list[dict] = []
-    current_key: tuple | None = None
-    for row_idx, line in enumerate(lines):
-        source_idx_raw = line.get("source_row_index")
-        try:
-            source_idx = int(source_idx_raw) if source_idx_raw is not None else None
-        except Exception:
-            source_idx = None
-        key = (
-            source_idx,
-            line.get("date"),
-            _normalize_daypart_key(line.get("daypart")),
-            line.get("menu_name"),
-        )
-        if current and key != current_key:
-            grouped.append(current)
-            current = []
-        if not current:
-            current_key = key
-        line_copy = dict(line)
-        line_copy["_row_order"] = row_idx
-        current.append(line_copy)
-    if current:
-        grouped.append(current)
-    return grouped
+class LegacyPositionMappingDisabledError(RuntimeError):
+    pass
+
+
+def _raise_legacy_position_mapping_disabled() -> None:
+    raise LegacyPositionMappingDisabledError(
+        "legacy source_row_index menu position mapping is disabled; "
+        "saved semantic sheets must preserve their own date/daypart/menu values"
+    )
 
 
 def _apply_menu_position_mapping(
@@ -2482,97 +2464,8 @@ def _apply_menu_position_mapping(
     facility_id: str | None = None,
     entries_override: list[dict] | None = None,
 ) -> tuple[list[dict], int]:
-    entries: list[dict]
-    if isinstance(entries_override, list):
-        entries = [item for item in entries_override if isinstance(item, dict)]
-    else:
-        if not week_id:
-            return lines, 0
-        entries = _build_position_menu_entries_safe(week_id, facility_id)
-    if not entries:
-        return lines, 0
-
-    entries_by_date_daypart: dict[tuple[date, str], list[dict]] = {}
-    entries_by_date: dict[date, list[dict]] = {}
-    entries_by_daypart: dict[str, list[dict]] = {}
-    for entry in entries:
-        entry_date = entry.get("menu_date")
-        daypart_key = entry.get("daypart_key") or ""
-        if isinstance(entry_date, date) and daypart_key:
-            entries_by_date_daypart.setdefault((entry_date, daypart_key), []).append(entry)
-        if isinstance(entry_date, date):
-            entries_by_date.setdefault(entry_date, []).append(entry)
-        if daypart_key:
-            entries_by_daypart.setdefault(daypart_key, []).append(entry)
-
-    grouped_rows = _group_lines_for_position_mapping(lines)
-    counters_date_daypart: dict[tuple[date, str], int] = {}
-    counters_date: dict[date, int] = {}
-    counters_daypart: dict[str, int] = {}
-    mapped_rows = 0
-    mapped_lines: list[dict] = []
-
-    for row in grouped_rows:
-        first = row[0]
-        row_date = _parse_date_value(first.get("date"))
-        daypart_key = _normalize_daypart_key(first.get("daypart"))
-        source_row_raw = first.get("source_row_index")
-        try:
-            source_row_index = int(source_row_raw) if source_row_raw is not None else None
-        except Exception:
-            source_row_index = None
-
-        selected = None
-        if (
-            source_row_index is not None
-            and source_row_index >= 0
-            and source_row_index < len(entries)
-        ):
-            selected = entries[source_row_index]
-        if selected is None and isinstance(row_date, date) and daypart_key:
-            dd_key = (row_date, daypart_key)
-            candidates = entries_by_date_daypart.get(dd_key) or []
-            idx = counters_date_daypart.get(dd_key, 0)
-            if idx < len(candidates):
-                selected = candidates[idx]
-                counters_date_daypart[dd_key] = idx + 1
-        if selected is None and isinstance(row_date, date):
-            candidates = entries_by_date.get(row_date) or []
-            idx = counters_date.get(row_date, 0)
-            if idx < len(candidates):
-                selected = candidates[idx]
-                counters_date[row_date] = idx + 1
-        if selected is None and daypart_key:
-            candidates = entries_by_daypart.get(daypart_key) or []
-            idx = counters_daypart.get(daypart_key, 0)
-            if idx < len(candidates):
-                selected = candidates[idx]
-                counters_daypart[daypart_key] = idx + 1
-
-        if selected is None:
-            for line in row:
-                line.pop("_row_order", None)
-                mapped_lines.append(line)
-            continue
-
-        mapped_rows += 1
-        selected_name = str(selected.get("menu_name") or "").strip()
-        selected_date = selected.get("menu_date")
-        selected_daypart = selected.get("daypart_key") or ""
-        for line in row:
-            if selected_name:
-                line["menu_name"] = selected_name
-            # In weekly-menu position mapping, week menu is source of truth for
-            # non-quantity fields. OCR daypart/date drift (especially around
-            # noon/evening boundaries) must not survive into persisted lines.
-            if selected_daypart:
-                line["daypart"] = selected_daypart
-            if isinstance(selected_date, date):
-                line["date"] = selected_date
-            line.pop("_row_order", None)
-            mapped_lines.append(line)
-
-    return mapped_lines, mapped_rows
+    _ = (lines, week_id, facility_id, entries_override)
+    _raise_legacy_position_mapping_disabled()
 
 
 def _apply_menu_position_mapping_safe(
@@ -2582,17 +2475,7 @@ def _apply_menu_position_mapping_safe(
     facility_id: str | None = None,
     entries_override: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    if entries_override:
-        try:
-            return _apply_menu_position_mapping(
-                lines,
-                week_id,
-                facility_id=facility_id,
-                entries_override=entries_override,
-            )
-        except TypeError as exc:
-            if "entries_override" not in str(exc):
-                raise
+    _ = entries_override
     return _apply_menu_position_mapping(lines, week_id, facility_id=facility_id)
 
 
@@ -4483,18 +4366,7 @@ def create_order_from_ingest(
             if not week_id:
                 line_dates = [line.get("date") for line in lines if line.get("date")]
                 week_id = month_id_from_dates(line_dates, received_at, policy)
-            position_entries = _build_position_entries_for_lines(
-                week_id=week_id,
-                lines=lines,
-                facility_id=payload.facility_hint,
-            )
-            lines, mapped_rows = _apply_menu_position_mapping_safe(
-                lines,
-                week_id,
-                facility_id=payload.facility_hint,
-                entries_override=position_entries if position_entries else None,
-            )
-            if mapped_rows <= 0:
+            if week_id:
                 lines = _apply_menu_matching(lines, week_id, payload.facility_hint, min_ratio)
             lines = _ensure_unique_line_ids(lines)
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
@@ -5383,7 +5255,6 @@ def _build_materialization_candidate_from_draft_record(
     payload_for_week, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
     if isinstance(payload_for_week, dict):
         ocr_payload_for_week = payload_for_week
-    min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
     draft_week_id = str(
         draft_sheet.get("resolved_week_id") or draft_sheet.get("week_id") or ""
     ).strip() or None
@@ -5401,33 +5272,6 @@ def _build_materialization_candidate_from_draft_record(
             existing_week_code=existing_week_code,
             facility_id=facility_id,
         )
-    payload_dates_for_position = _collect_sheet_dates_from_rows(
-        effective_rows_payload,
-        received_at=effective_received_at,
-    )
-    if isinstance(ocr_payload_for_week, dict):
-        payload_dates_for_position |= {
-            item
-            for item in _collect_sheet_dates_from_payload(ocr_payload_for_week, effective_received_at)
-            if isinstance(item, date)
-        }
-    position_entries_for_apply = _build_position_entries_for_lines(
-        week_id=week_id,
-        lines=week_resolution_lines,
-        payload_dates=payload_dates_for_position,
-    )
-    enable_position_mapping = bool(template.get("map_menu_by_position", True))
-    mapped_rows = 0
-    if enable_position_mapping:
-        candidate_lines, mapped_rows = _apply_menu_position_mapping_safe(
-            candidate_lines,
-            week_id,
-            facility_id=facility_id,
-            entries_override=position_entries_for_apply if position_entries_for_apply else None,
-        )
-    if mapped_rows <= 0:
-        candidate_lines = _apply_menu_matching(candidate_lines, week_id, facility_id, min_ratio)
-
     materialization_guard = _build_materialization_quantity_guard_detail(
         fields=draft_sheet.get("fields"),
         rows_payload=effective_rows_payload,
@@ -31447,8 +31291,8 @@ def _build_reparse_quantity_rules(
     rules["zero_as_empty"] = False
     rules["strict_numeric_quantity_cell"] = True
     # LLM quantity-only mode can intentionally omit non-quantity columns.
-    # Keep these rows so source_row_index-based position mapping can restore
-    # date/daypart/menu from weekly menu entries.
+    # Keep these rows for quality/blocker evaluation only; legacy
+    # source_row_index-based date/daypart/menu restoration is disabled.
     rules["allow_blank_structure_rows"] = True
     # LLM quantity-only rows already represent table-body row indexes.
     # Do not skip template header rows again when parsing them.
@@ -33787,16 +33631,7 @@ def reparse_order(
                 reference_rows=[list(row) for row in pipeline_rows_for_rescue if isinstance(row, list)],
                 reference_fields=_row_fields_from_template(template_to_use) or _resolve_reparse_baseline_rows_for_structure(llm_reparse_baseline)[0],
             )
-    enable_position_mapping = bool(template_to_use.get("map_menu_by_position", True))
-    mapped_rows = 0
-    if enable_position_mapping:
-        lines, mapped_rows = _apply_menu_position_mapping_safe(
-            lines,
-            week_id,
-            facility_id=facility_id,
-            entries_override=reparse_position_entries if reparse_position_entries else None,
-        )
-    if mapped_rows <= 0:
+    if week_id:
         lines = _apply_menu_matching(lines, week_id, facility_id, min_ratio)
     lines, quantity_sanitize_stats = _sanitize_reparse_line_quantities(lines)
     if quantity_sanitize_stats and (
