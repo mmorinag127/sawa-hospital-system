@@ -236,6 +236,44 @@ Parenthesized email numbers are intentionally ignored in this section.
 - Examples: `ORDe608fed7` and `ORDa1e2e963` have no 4/28 quantity cells in the saved sheet, so they contribute 0 to 4/28 daily output. `ORD372603e7` has OCR-derived 0 values for 4/28. `ORD04cc4e57` has OCR-derived `34` in several 軟菜 cells.
 - Therefore, after the current lineage/blocker fixes, the remaining 4/28 mismatch should be treated as OCR quantity reading / operator sheet-correction debt unless a later scan finds a saved-sheet-to-confirmed-lines mismatch on the same 4/28 rows.
 
+### 2026-05-07 Full Order Reconciliation
+
+This scan checks the system path, not the visual PDF content:
+
+1. saved sheet quantity cells -> confirmed order lines
+2. confirmed order lines -> persisted bagging rows
+3. persisted bagging rows -> `/orders/daily-bags?date=2026-04-28`
+
+Result:
+
+- 14/14 orders had `sheet_order_mismatch=0` after applying the currently encoded change-column rule.
+- `BAGGING_DAILY_MISMATCHES=none`.
+- Therefore the current stg daily output is not diverging after the saved sheet. The remaining quantity differences are already present in the saved sheet / OCR evidence layer.
+
+| order_id | facility | sheet/order mismatch | 4/28 positive OCR-derived quantity cells | 4/28 zero OCR-derived quantity cells |
+| --- | --- | ---: | ---: | ---: |
+| `ORDe608fed7` | FAC00007 | 0 | 0 | 0 |
+| `ORDccff9ed3` | FAC00002 | 0 | 3 | 0 |
+| `ORDbd3425d7` | FAC00004 | 0 | 22 | 0 |
+| `ORDb6f4d715` | FAC00014 | 0 | 12 | 0 |
+| `ORDb6702c19` | FAC00006 | 0 | 21 | 0 |
+| `ORDab6c77ff` | FAC00008 | 0 | 11 | 0 |
+| `ORDa1e2e963` | FAC00016 | 0 | 0 | 0 |
+| `ORD8e7e41ad` | FAC00003 | 0 | 25 | 0 |
+| `ORD386cf1de` | FAC00015 | 0 | 8 | 0 |
+| `ORD372603e7` | FAC00005 | 0 | 0 | 13 |
+| `ORD2a654d51` | FAC00001 | 0 | 7 | 0 |
+| `ORD12df0b1e` | FAC00012 | 0 | 4 | 0 |
+| `ORD10ba5ca2` | FAC00010 | 0 | 35 | 0 |
+| `ORD04cc4e57` | FAC00009 | 0 | 27 | 0 |
+
+Interpretation:
+
+- `ORDe608fed7` and `ORDa1e2e963` are not daily-output omissions. Their saved sheets contain no 4/28 quantity cells, so the system has no quantity to carry forward.
+- `ORD372603e7` is not a daily-output omission. Its 4/28 cells are OCR-derived `0`, so the system carries zero forward.
+- `ORD04cc4e57` explains several overages because the saved sheet contains OCR-derived `34` in 軟菜 cells for 4/28.
+- If these sheet values are visually wrong against the original PDFs, the correction point is OCR/sheet review, not daily-output aggregation.
+
 ## Regular + Soft + Mixer Total Check
 
 The email specifically says the total of `常食 + 軟菜 + ミキサー` does not match. 禁食 is excluded from this total because the email defines the problematic total as 常食+軟菜+ミキサー.
