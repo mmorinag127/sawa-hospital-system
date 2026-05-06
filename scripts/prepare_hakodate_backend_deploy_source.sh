@@ -46,29 +46,29 @@ mkdir -p \
   "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/preprocess_v10_template_snap_real_orders_20260425_0430/templates" \
   "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427"
 
-MANIFEST="${HAKODATE_DEPLOY_MANIFEST:-${WORKSPACE_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json}"
-if [[ ! -f "$MANIFEST" ]]; then
-  printf 'missing Hakodate deploy manifest: %s\n' "$MANIFEST" >&2
-  printf 'set HAKODATE_DEPLOY_MANIFEST to an explicit manifest path before building this backend image.\n' >&2
-  exit 1
+MANIFEST="${HAKODATE_DEPLOY_MANIFEST:-}"
+if [[ -n "$MANIFEST" ]]; then
+  if [[ ! -f "$MANIFEST" ]]; then
+    printf 'missing explicit Hakodate deploy manifest: %s\n' "$MANIFEST" >&2
+    exit 1
+  fi
+  rsync -a "$MANIFEST" "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json"
+  python3 "${SCRIPT_DIR}/materialize_hakodate_deploy_artifacts.py" "$WORKSPACE_DIR" "$DEST_BACKEND_DIR" "$MANIFEST"
 fi
-rsync -a "$MANIFEST" "${DEST_BACKEND_DIR}/tmp/outer_quad_eval_correct_20260426/step123_no_code_change_20260427/manifest.json"
 
-python3 "${SCRIPT_DIR}/materialize_hakodate_deploy_artifacts.py" "$WORKSPACE_DIR" "$DEST_BACKEND_DIR" "$MANIFEST"
-
-cat > "${DEST_BACKEND_DIR}/.gcloudignore" <<'EOF'
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-dev.db
-tests/
-ocr_pipeline/tests/
-*.log
-EOF
+{
+  printf '%s\n' '__pycache__/'
+  printf '%s\n' '*.pyc'
+  printf '%s\n' '*.pyo'
+  printf '%s\n' '*.pyd'
+  printf '%s\n' '.pytest_cache/'
+  printf '%s\n' '.mypy_cache/'
+  printf '%s\n' '.ruff_cache/'
+  printf '%s\n' '.venv/'
+  printf '%s\n' 'dev.db'
+  printf '%s\n' 'tests/'
+  printf '%s\n' 'ocr_pipeline/tests/'
+  printf '%s\n' '*.log'
+} > "${DEST_BACKEND_DIR}/.gcloudignore"
 
 printf '%s\n' "$DEST_BACKEND_DIR"
