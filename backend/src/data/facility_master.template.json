@@ -317,7 +317,7 @@
         ]
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "大和なでしこ",
         "include_menu_name": false,
         "columns": [
@@ -376,7 +376,7 @@
       "areas": [],
       "facility_id": "FAC00002",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "なごみ",
         "include_menu_name": false,
         "columns": [
@@ -528,7 +528,7 @@
         "fax_layout_regular_forbidden_v1"
       ],
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -612,7 +612,7 @@
       "areas": [],
       "facility_id": "FAC00004",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -784,7 +784,7 @@
       "areas": [],
       "facility_id": "FAC00005",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -960,7 +960,7 @@
       "areas": [],
       "facility_id": "FAC00006",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1187,7 +1187,7 @@
         "2026-04": "百々家 2604.xlsx"
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1348,7 +1348,7 @@
       "facility_id": "FAC00008",
       "fax_template_id": "fax_layout_floor_2f3f_v1",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1429,7 +1429,7 @@
       "facility_id": "FAC00009",
       "fax_template_id": "fax_layout_floor_2f3f_v1",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1517,7 +1517,7 @@
         "grid_line_scale_horizontal": 20
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1597,7 +1597,7 @@
       "facility_id": "FAC00011",
       "fax_template_id": "fax_layout_regular_forbidden_v1",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1676,7 +1676,7 @@
       "areas": [],
       "facility_id": "FAC00012",
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -1832,7 +1832,7 @@
         "fax_layout_regular_forbidden_v1"
       ],
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "いこいの森",
         "include_menu_name": false,
         "columns": [
@@ -1957,7 +1957,7 @@
         ]
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -2051,7 +2051,7 @@
         ]
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [
@@ -2148,7 +2148,7 @@
         ]
       },
       "invoice_template": {
-        "template_uri": "gs://sawahospitalsystem-prod-templates/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
         "include_menu_name": false,
         "columns": [

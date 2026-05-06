@@ -24,6 +24,8 @@ WORKER_MEMORY="${WORKER_MEMORY:-8Gi}"
 WORKER_CPU="${WORKER_CPU:-2}"
 WORKER_TIMEOUT="${WORKER_TIMEOUT:-1800}"
 WORKER_CONCURRENCY="${WORKER_CONCURRENCY:-2}"
+SERVICE_ENV_SUFFIX="${SERVICE##*-}"
+TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-${PROJECT_ID}-${SERVICE_ENV_SUFFIX}-templates}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
 ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh}"
 
@@ -133,6 +135,7 @@ gcloud run deploy "${SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${IMAGE}" \
+  --update-env-vars="TEMPLATE_BUCKET=${TEMPLATE_BUCKET}" \
   --memory="${WORKER_MEMORY}" \
   --cpu="${WORKER_CPU}" \
   --timeout="${WORKER_TIMEOUT}" \

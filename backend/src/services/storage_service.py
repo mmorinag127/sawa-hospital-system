@@ -6,9 +6,11 @@ import threading
 from typing import Union
 from urllib.parse import urlparse
 import json
+import re
 
 StoragePath = Union[str, Path]
 _GCS_CLIENT_LOCAL = threading.local()
+_ENV_REF_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
 class StorageService:
@@ -28,20 +30,24 @@ class StorageService:
 
 
 def load_bytes_from_uri(uri: str) -> bytes:
+    def _replace_env_ref(match: re.Match[str]) -> str:
+        name = match.group(1)
+        value = os.getenv(name)
+        if not value:
+            raise ValueError(f"storage_uri_env_required:{name}")
+        return value
+
+    uri = _ENV_REF_PATTERN.sub(_replace_env_ref, uri)
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         path = Path(parsed.path if parsed.scheme else uri)
         return path.read_bytes()
     if parsed.scheme == "gs":
-        try:
-            from google.cloud import storage  # type: ignore
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ValueError("google-cloud-storage is not installed") from exc
         bucket_name = parsed.netloc
         blob_name = parsed.path.lstrip("/")
         if not bucket_name or not blob_name:
             raise ValueError(f"invalid gs uri: {uri}")
-        client = storage.Client()
+        client = _get_thread_gcs_client()
         blob = client.bucket(bucket_name).blob(blob_name)
         return blob.download_as_bytes()
     raise ValueError(f"unsupported storage uri: {uri}")

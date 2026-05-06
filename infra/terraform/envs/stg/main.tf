@@ -34,6 +34,7 @@ module "storage" {
     "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}",
   ]
   templates_bucket_readers = [
+    "serviceAccount:${module.cloudrun.service_accounts["worker"]}",
     "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}",
   ]
   depends_on = [module.apis, module.cloudrun]
@@ -91,6 +92,7 @@ module "cloudrun" {
     ADMIN_EMAILS                = join(",", var.admin_emails)
     GCP_PROJECT_ID              = var.project_id
     RAW_BUCKET                  = "${var.project_id}-${local.env}-raw"
+    TEMPLATE_BUCKET             = "${var.project_id}-${local.env}-templates"
     FACILITY_MASTER_PATH        = "/app/src/data/facility_master.template.json"
     CORS_ALLOW_ORIGINS          = ""
     TEMPLATE_COLLECTION         = "templates-${local.env}"

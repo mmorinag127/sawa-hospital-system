@@ -8,6 +8,49 @@ sys.path.append(str(ROOT))
 from src.services import storage_service  # noqa: E402
 
 
+def test_load_bytes_from_uri_requires_configured_env_reference(monkeypatch):
+    monkeypatch.delenv("TEMPLATE_BUCKET", raising=False)
+
+    try:
+        storage_service.load_bytes_from_uri("gs://${TEMPLATE_BUCKET}/invoice_templates/template.xlsx")
+    except ValueError as exc:
+        assert str(exc) == "storage_uri_env_required:TEMPLATE_BUCKET"
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected unresolved storage URI env reference to block")
+
+
+def test_load_bytes_from_uri_expands_configured_env_reference(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class _FakeBlob:
+        def download_as_bytes(self) -> bytes:
+            return b"template"
+
+    class _FakeBucket:
+        def __init__(self, bucket: str):
+            self.bucket = bucket
+
+        def blob(self, object_path: str) -> _FakeBlob:
+            calls.append((self.bucket, object_path))
+            return _FakeBlob()
+
+    class _FakeClient:
+        def bucket(self, bucket: str) -> _FakeBucket:
+            return _FakeBucket(bucket)
+
+    class _FakeStorageModule:
+        Client = _FakeClient
+
+    monkeypatch.setenv("TEMPLATE_BUCKET", "configured-template-bucket")
+    storage_service._GCS_CLIENT_LOCAL.__dict__.clear()
+    monkeypatch.setattr(storage_service, "_import_google_cloud_storage", lambda: _FakeStorageModule)
+
+    payload = storage_service.load_bytes_from_uri("gs://${TEMPLATE_BUCKET}/invoice_templates/template.xlsx")
+
+    assert payload == b"template"
+    assert calls == [("configured-template-bucket", "invoice_templates/template.xlsx")]
+
+
 def test_save_bytes_to_gcs_reuses_thread_local_client(monkeypatch):
     created_clients: list[object] = []
     uploaded_objects: list[str] = []
