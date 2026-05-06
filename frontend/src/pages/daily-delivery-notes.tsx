@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -117,6 +117,15 @@ type TotalRow = {
   menu_name?: string | null;
   diet_type?: string | null;
   quantity?: number | null;
+  order_refs?: {
+    order_id?: string | null;
+    facility_id?: string | null;
+    facility_name?: string | null;
+    source_diet_type?: string | null;
+    aggregated_diet_type?: string | null;
+    area_id?: string | null;
+    quantity?: number | null;
+  }[];
 };
 
 const dietTypeLabels: Record<string, string> = {
@@ -183,6 +192,16 @@ const formatQuantity = (value?: number | null) => {
   if (value == null || Number.isNaN(value)) return "-";
   return Number(value).toLocaleString("ja-JP");
 };
+
+const buildTotalRowKey = (row: TotalRow, index: number) =>
+  [
+    row.date || "-",
+    row.daypart || "-",
+    row.menu_category || "-",
+    row.menu_name || "-",
+    row.diet_type || "-",
+    index,
+  ].join("__");
 
 const formatBagOrderRef = (value: NonNullable<DailyBagBreakdown["order_refs"]>[number]) => {
   const parts = [
@@ -299,6 +318,7 @@ export default function DailyDeliveryNotesPage() {
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
   const [dailyBagSummary, setDailyBagSummary] = useState<DailyBagSummaryResponse>({});
   const [totalsRows, setTotalsRows] = useState<TotalRow[]>([]);
+  const [expandedTotalRows, setExpandedTotalRows] = useState<Set<string>>(() => new Set());
   const [overrideEditor, setOverrideEditor] = useState<DailyOutputOverrideResponse | null>(null);
   const [overrideEditorLoading, setOverrideEditorLoading] = useState(false);
   const [overrideEditorMessage, setOverrideEditorMessage] = useState("");
@@ -394,13 +414,14 @@ export default function DailyDeliveryNotesPage() {
     setTotalsMessage("");
     setDailyBagSummary({});
     setTotalsRows([]);
+    setExpandedTotalRows(new Set());
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
       const [ordersRes, bagRes, totalsRes] = await Promise.allSettled([
         apiClient.get("/orders/by-line-date", { params }),
         apiClient.get("/orders/daily-bags", { params }),
-        apiClient.get("/totals", { params: { date } }),
+        apiClient.get("/totals", { params: { date, include_order_refs: true } }),
       ]);
 
       if (ordersRes.status === "fulfilled") {
@@ -829,6 +850,18 @@ export default function DailyDeliveryNotesPage() {
     return rows;
   }, [totalsRows]);
 
+  const toggleTotalRow = (rowKey: string) => {
+    setExpandedTotalRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) {
+        next.delete(rowKey);
+      } else {
+        next.add(rowKey);
+      }
+      return next;
+    });
+  };
+
   return (
     <main className="page">
       <header className="hero">
@@ -1096,32 +1129,95 @@ export default function DailyDeliveryNotesPage() {
                 <th>メニュー</th>
                 <th>区分</th>
                 <th>注文数</th>
+                <th>施設別</th>
               </tr>
             </thead>
             <tbody>
               {totalsSummaryRows.length === 0 ? (
                 <tr>
-                  <td colSpan={5}>該当データなし</td>
+                  <td colSpan={6}>該当データなし</td>
                 </tr>
               ) : (
-                totalsSummaryRows.map((row, index) => (
-                  <tr
-                    key={[
-                      row.date || "-",
-                      row.daypart || "-",
-                      row.menu_category || "-",
-                      row.menu_name || "-",
-                      row.diet_type || "-",
-                      index,
-                    ].join("__")}
-                  >
-                    <td>{row.daypart || "-"}</td>
-                    <td>{row.menu_category || "-"}</td>
-                    <td>{row.menu_name || "-"}</td>
-                    <td>{formatDietType(row.diet_type)}</td>
-                    <td className="numeric">{formatQuantity(row.quantity)}</td>
-                  </tr>
-                ))
+                totalsSummaryRows.map((row, index) => {
+                  const rowKey = buildTotalRowKey(row, index);
+                  const refs = Array.isArray(row.order_refs) ? row.order_refs : [];
+                  const expanded = expandedTotalRows.has(rowKey);
+                  return (
+                    <Fragment key={rowKey}>
+                      <tr key={rowKey}>
+                        <td>{row.daypart || "-"}</td>
+                        <td>{row.menu_category || "-"}</td>
+                        <td>{row.menu_name || "-"}</td>
+                        <td>{formatDietType(row.diet_type)}</td>
+                        <td className="numeric">{formatQuantity(row.quantity)}</td>
+                        <td>
+                          <button
+                            className="btn ghost total-breakdown-toggle"
+                            type="button"
+                            onClick={() => toggleTotalRow(rowKey)}
+                            disabled={!refs.length}
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? "閉じる" : "施設別"}
+                          </button>
+                        </td>
+                      </tr>
+                      {expanded ? (
+                        <tr key={`${rowKey}__breakdown`} className="total-breakdown-row">
+                          <td colSpan={6}>
+                            <div className="total-breakdown-panel">
+                              {refs.length ? (
+                                <table className="total-breakdown-table">
+                                  <thead>
+                                    <tr>
+                                      <th>施設</th>
+                                      <th>元区分</th>
+                                      <th>エリア</th>
+                                      <th>注文ID</th>
+                                      <th>数量</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {refs.map((ref, refIndex) => (
+                                      <tr
+                                        key={[
+                                          ref.order_id || "-",
+                                          ref.facility_id || "-",
+                                          ref.source_diet_type || "-",
+                                          ref.area_id || "-",
+                                          refIndex,
+                                        ].join("__")}
+                                      >
+                                        <td>
+                                          {ref.facility_name || ref.facility_id || "-"}
+                                          {ref.facility_id ? <span className="total-breakdown-facility-id"> {ref.facility_id}</span> : null}
+                                        </td>
+                                        <td>{formatDietType(ref.source_diet_type)}</td>
+                                        <td>{ref.area_id || "-"}</td>
+                                        <td>
+                                          {ref.order_id ? (
+                                            <Link className="link" href={`/orders/${ref.order_id}/workflow-v2`}>
+                                              {ref.order_id}
+                                            </Link>
+                                          ) : (
+                                            "-"
+                                          )}
+                                        </td>
+                                        <td className="numeric">{formatQuantity(ref.quantity)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <p className="subtle">施設別内訳がありません。</p>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -1711,6 +1807,38 @@ export default function DailyDeliveryNotesPage() {
           gap: 12px;
           font-size: 12px;
           color: #758680;
+        }
+
+        .total-breakdown-toggle {
+          padding: 6px 10px;
+          font-size: 12px;
+        }
+
+        .total-breakdown-row {
+          background: #f8fbfa !important;
+        }
+
+        .total-breakdown-panel {
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          border-radius: 14px;
+          background: #ffffff;
+          padding: 10px;
+        }
+
+        .total-breakdown-table {
+          min-width: 100%;
+          font-size: 12px;
+        }
+
+        .total-breakdown-table th,
+        .total-breakdown-table td {
+          padding: 7px 8px;
+          white-space: nowrap;
+        }
+
+        .total-breakdown-facility-id {
+          color: #778680;
+          font-size: 11px;
         }
 
         .override-modal-backdrop {
