@@ -1711,6 +1711,9 @@ def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage() -> N
         row.draft_id = None
         row.confirmed_snapshot_id = None
         row.blockers_json = []
+        meta = order_workflow_v2_service._workflow_meta(row)
+        meta.pop("template_version_id", None)
+        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
         evidence.template_version_id = None
 
     projected, error = order_workflow_v2_service.get_workflow(order_id)

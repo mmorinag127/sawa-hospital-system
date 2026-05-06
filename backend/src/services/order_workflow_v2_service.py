@@ -714,9 +714,8 @@ def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkfl
 
     meta = _workflow_meta(workflow)
     if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
-        context_error = _workflow_v2_projection_context_error(meta)
-        if context_error:
-            return context_error
+        if not _workflow_meta_has_confirmed_context(meta):
+            return "context_not_confirmed"
 
     template_version_id = _effective_workflow_template_version_id(workflow, meta)
     if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
