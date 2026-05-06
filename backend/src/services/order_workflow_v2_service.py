@@ -612,24 +612,75 @@ def _get_or_create_workflow(session: Any, order_id: str) -> OrderWorkflowState:
     return row
 
 
+def _get_workflow(session: Any, order_id: str) -> OrderWorkflowState | None:
+    return session.get(OrderWorkflowState, order_id)
+
+
+def _serialize_uninitialized_workflow(order: Order) -> dict[str, Any]:
+    return {
+        "order_id": order.id,
+        "state": "not_initialized",
+        "headline": "Step1で施設・週次を確定してください",
+        "primary_action": "confirm_context",
+        "selected_ocr_result_id": None,
+        "saved_sheet_id": None,
+        "confirmed_snapshot_id": None,
+        "facility_id": None,
+        "week_start": None,
+        "week_end": None,
+        "template_id": None,
+        "template_version_id": None,
+        "template_source": None,
+        "expanded_cell_copy_mode": "auto",
+        "context_suggestion": _order_context_suggestion(order),
+        "bagging_result_id": None,
+        "output_bundle_id": None,
+        "ocr_job": None,
+        "blockers": ["workflow_not_initialized"],
+        "warnings": [],
+        "updated_at": None,
+        "source": "workflow_v2_projection",
+    }
+
+
+def _require_existing_workflow_template_version(
+    session: Any,
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    meta: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    template_version_id = _effective_workflow_template_version_id(workflow, meta)
+    if not template_version_id:
+        return None, "template_version_required"
+    facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
+    version = session.get(FacilityTemplateVersion, template_version_id)
+    if version is None or version.status != "active":
+        return None, "template_version_mismatch"
+    if facility_id and _normalize_id(version.facility_id) != facility_id:
+        return None, "template_version_mismatch"
+    columns = list(version.columns_json or [])
+    validation = facility_template_version_service.validate_template_columns(columns)
+    if validation.get("errors"):
+        return None, "facility_template_unresolved"
+    return template_version_id, None
+
+
 def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        row = _get_or_create_workflow(session, order.id)
-        meta = _workflow_meta(row)
-        if not isinstance(meta.get("context_suggestion"), dict):
-            suggestion = _order_context_suggestion(order)
-            if suggestion is not None:
-                meta["context_suggestion"] = suggestion
-                _write_workflow_meta(row, meta)
-                session.flush()
-        _refresh_ocr_prerequisite_state(session, order, row)
+        row = _get_workflow(session, order.id)
+        if row is None:
+            return _serialize_uninitialized_workflow(order), None
         meta = _workflow_meta(row)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
-        return _serialize_workflow(row, ocr_job=ocr_job), None
+        serialized = _serialize_workflow(row, ocr_job=ocr_job)
+        if not serialized.get("context_suggestion"):
+            serialized["context_suggestion"] = _order_context_suggestion(order)
+        return serialized, None
 
 
 def record_context_suggestion(
@@ -1032,18 +1083,21 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
         rows = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .all()
         )
+        selected_ocr_result_id = workflow.evidence_run_id if workflow is not None else None
         return {
             "order_id": order.id,
-            "selected_ocr_result_id": workflow.evidence_run_id,
+            "selected_ocr_result_id": selected_ocr_result_id,
+            "workflow_state": workflow.state if workflow is not None else "not_initialized",
+            "blockers": [] if workflow is not None else ["workflow_not_initialized"],
             "results": [
-                _serialize_ocr_result(row, selected=row.id == workflow.evidence_run_id)
+                _serialize_ocr_result(row, selected=row.id == selected_ocr_result_id)
                 for row in rows
             ],
         }, None
@@ -1686,13 +1740,17 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
         if not workflow.draft_id:
             return None, "saved_sheet_missing"
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(
+            _workflow_meta(workflow).get("template_version_id")
+        )
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
             return None, "template_version_mismatch"
@@ -1704,7 +1762,9 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
         if not workflow.evidence_run_id:
             return None, "selected_ocr_required"
         evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
@@ -1715,14 +1775,13 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
             return None, context_error
-        workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
             session,
             order=order,
             workflow=workflow,
             meta=meta,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
         template_version_id, template_error = _resolve_evidence_template_version(
             evidence,
@@ -1731,7 +1790,6 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
             return None, template_error
         facility_id = _normalize_id(meta.get("facility_id"))
         template_id = _normalize_id(meta.get("template_id"))
@@ -2001,7 +2059,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
         ocr_results = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
@@ -2009,7 +2067,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             .all()
         )
         saved_sheet = None
-        if workflow.draft_id:
+        if workflow is not None and workflow.draft_id:
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is not None and draft.order_id == order.id:
                 evidence_payload = None
@@ -2027,19 +2085,30 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         return {
             "order_id": order.id,
             "source": "workflow_v2_inspection",
-            "workflow": _serialize_workflow(workflow),
+            "workflow": (
+                _serialize_workflow(workflow)
+                if workflow is not None
+                else _serialize_uninitialized_workflow(order)
+            ),
             "ocr_results": [
-                _serialize_ocr_result(row, selected=row.id == workflow.evidence_run_id)
+                _serialize_ocr_result(
+                    row,
+                    selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
+                )
                 for row in ocr_results
             ],
             "saved_sheet": saved_sheet,
             "artifact_lineage": {
-                "selected_ocr_result_id": workflow.evidence_run_id,
-                "saved_sheet_id": workflow.draft_id,
-                "confirmed_snapshot_id": workflow.confirmed_snapshot_id,
-                "bagging_result_id": _workflow_meta(workflow).get("bagging_result_id"),
-                "output_bundle_id": _workflow_meta(workflow).get("output_bundle_id"),
+                "selected_ocr_result_id": workflow.evidence_run_id if workflow is not None else None,
+                "saved_sheet_id": workflow.draft_id if workflow is not None else None,
+                "confirmed_snapshot_id": workflow.confirmed_snapshot_id if workflow is not None else None,
+                "bagging_result_id": (
+                    _workflow_meta(workflow).get("bagging_result_id") if workflow is not None else None
+                ),
+                "output_bundle_id": (
+                    _workflow_meta(workflow).get("output_bundle_id") if workflow is not None else None
+                ),
             },
-            "bagging_result": _workflow_meta(workflow).get("bagging_result"),
-            "output_bundle": _workflow_meta(workflow).get("output_bundle"),
+            "bagging_result": _workflow_meta(workflow).get("bagging_result") if workflow is not None else None,
+            "output_bundle": _workflow_meta(workflow).get("output_bundle") if workflow is not None else None,
         }, None

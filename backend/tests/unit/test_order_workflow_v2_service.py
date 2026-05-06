@@ -206,6 +206,62 @@ def test_context_suggestion_is_recorded_without_confirming_step1() -> None:
         assert order.week_code == "2026-04-26"
 
 
+def test_workflow_v2_get_endpoints_do_not_create_workflow_rows() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+    assert error is None
+    assert workflow["state"] == "not_initialized"
+    assert workflow["blockers"] == ["workflow_not_initialized"]
+
+    results, error = order_workflow_v2_service.list_ocr_results(order_id)
+    assert error is None
+    assert results["workflow_state"] == "not_initialized"
+    assert results["selected_ocr_result_id"] is None
+    assert any(item["ocr_result_id"] == evidence_id_1 and not item["selected"] for item in results["results"])
+
+    saved_sheet, error = order_workflow_v2_service.get_saved_sheet(order_id)
+    assert saved_sheet is None
+    assert error == "workflow_not_initialized"
+
+    sheet_source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+    assert sheet_source is None
+    assert error == "workflow_not_initialized"
+
+    inspection, error = order_workflow_v2_service.get_inspection(order_id)
+    assert error is None
+    assert inspection["workflow"]["state"] == "not_initialized"
+    assert inspection["artifact_lineage"]["selected_ocr_result_id"] is None
+
+    with session_scope() as session:
+        assert session.get(OrderWorkflowState, order_id) is None
+
+
+def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    monkeypatch.setattr(
+        order_workflow_v2_service,
+        "_hakodate_weekly_menu_base_sheet_error",
+        lambda _order_id: "menu_entries_missing",
+    )
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "context_confirmed"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row.state == "context_confirmed"
+        assert row.blockers_json == []
+
+
 def test_select_ocr_result_requires_confirmed_context() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 
@@ -434,7 +490,7 @@ def test_save_sheet_blocks_legacy_selected_evidence_without_template_version(mon
         week_end="2026-04-30",
     )
     assert error is None
-    template_version_id = workflow["template_version_id"]
+    assert workflow["template_version_id"]
     with session_scope() as session:
         order = session.get(Order, order_id)
         row = session.get(OrderWorkflowState, order_id)
@@ -852,6 +908,49 @@ def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context() -> Non
 
     assert source is None
     assert error == "context_not_confirmed"
+
+
+def test_sheet_source_requires_fixed_workflow_template_version(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: _registered_template_config(facility_id),
+    )
+    with session_scope() as session:
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        evidence.template_version_id = None
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                evidence_run_id=evidence_id_1,
+                state="ocr_selected",
+                headline="selected OCR without fixed template version",
+                primary_action="edit_sheet",
+                secondary_actions_json={
+                    order_workflow_v2_service.WORKFLOW_V2_META_KEY: {
+                        "facility_id": "FAC00001",
+                        "week_start": "2026-04-26",
+                        "week_end": "2026-04-30",
+                        "week_code": "2026-04@2026-04-26~2026-04-30",
+                        "template_id": "template-fac00001",
+                    }
+                },
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+
+    assert source is None
+    assert error == "template_version_required"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row.state == "ocr_selected"
+        assert row.template_version_id is None
+        assert row.blockers_json == []
 
 
 def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
