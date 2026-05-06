@@ -477,12 +477,7 @@ def ensure_active_template_version_from_resolved_config(
     if not normalized_facility_id:
         return None
     if session.get(Facility, normalized_facility_id) is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        if session.get(Facility, normalized_facility_id) is None:
-            return None
+        return None
     config = facility_config if isinstance(facility_config, dict) else config_service.get_facility_config(normalized_facility_id)
     if not isinstance(config, dict):
         return None
@@ -536,12 +531,6 @@ def save_columns_for_order(
     if not facility_id:
         return None, "facility_missing"
     facility = session.get(Facility, facility_id)
-    if facility is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        facility = session.get(Facility, facility_id)
     if facility is None:
         return None, "facility_not_found"
 
@@ -656,12 +645,6 @@ def save_template_registration_for_facility(
         return {"error": "fax_template_not_found", "template_ids": missing_template_ids}, "fax_template_not_found"
 
     facility = session.get(Facility, normalized_facility_id)
-    if facility is None:
-        from src.services import facility_service  # local import avoids service startup cycles
-
-        facility_service._ensure_facility_sync(session)  # noqa: SLF001
-        session.flush()
-        facility = session.get(Facility, normalized_facility_id)
     if facility is None:
         return None, "facility_not_found"
 

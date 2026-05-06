@@ -15,10 +15,10 @@ from src.services import config_service, facility_service, facility_template_ver
 
 def _clear_facilities():
     with session_scope() as session:
+        session.execute(delete(FacilityTemplateVersion))
         session.execute(delete(FacilityConfig))
         session.execute(delete(FacilityArea))
         session.execute(delete(Facility))
-    facility_service._SYNC_DONE = False  # noqa: SLF001
 
 
 def _seed_facilities_from_master():
@@ -87,6 +87,37 @@ def test_facility_get_does_not_create_template_version_from_resolved_config():
             .all()
         )
         assert versions == []
+
+
+def test_facility_template_registration_does_not_sync_master_for_missing_facility():
+    _clear_facilities()
+    client = TestClient(app)
+
+    update = client.put(
+        "/facilities/FAC00002/fax-template",
+        json={"fax_template_id": "fax_layout_regular_forbidden_v1"},
+    )
+
+    assert update.status_code == 404
+    with session_scope() as session:
+        assert session.query(Facility).count() == 0
+        assert session.query(FacilityTemplateVersion).count() == 0
+
+
+def test_active_template_version_import_does_not_sync_master_for_missing_facility():
+    _clear_facilities()
+
+    with session_scope() as session:
+        version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id="FAC00002",
+            facility_config=config_service.get_facility_config("FAC00002"),
+            created_by="test-read-boundary",
+        )
+
+        assert version is None
+        assert session.query(Facility).count() == 0
+        assert session.query(FacilityTemplateVersion).count() == 0
 
 
 def test_facility_scoped_fax_template_registration_contract():
@@ -233,6 +264,7 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
 
 def test_fac00003_stale_override_columns_preserve_physical_source_indexes():
     _clear_facilities()
+    _seed_facilities_from_master()
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     stale_override = {

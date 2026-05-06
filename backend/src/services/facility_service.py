@@ -1,6 +1,4 @@
-from datetime import datetime, timedelta
 import json
-import threading
 from uuid import uuid4
 from loguru import logger
 from sqlalchemy import delete, select, update
@@ -11,10 +9,6 @@ from src.models.order import Order
 from src.services import config_service
 from src.services.notification_service import record_event
 
-_SYNC_LOCK = threading.Lock()
-_SYNC_DONE = False
-_SYNC_LAST_ERROR_AT: datetime | None = None
-_SYNC_RETRY_WINDOW = timedelta(seconds=60)
 _TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
 
 
@@ -29,26 +23,6 @@ def _contains_template_definition_change(current_config: dict, next_config: dict
         if _stable_json(next_config.get(key)) != _stable_json(current_config.get(key)):
             return True
     return False
-
-
-def _ensure_facility_sync(session) -> None:
-    global _SYNC_DONE, _SYNC_LAST_ERROR_AT
-    if _SYNC_DONE:
-        return
-    if _SYNC_LAST_ERROR_AT and datetime.utcnow() - _SYNC_LAST_ERROR_AT < _SYNC_RETRY_WINDOW:
-        return
-    with _SYNC_LOCK:
-        if _SYNC_DONE:
-            return
-        if _SYNC_LAST_ERROR_AT and datetime.utcnow() - _SYNC_LAST_ERROR_AT < _SYNC_RETRY_WINDOW:
-            return
-        try:
-            _sync_facilities_from_master(session)
-            _SYNC_DONE = True
-            _SYNC_LAST_ERROR_AT = None
-        except Exception as exc:  # noqa: BLE001
-            _SYNC_LAST_ERROR_AT = datetime.utcnow()
-            logger.warning("Facility sync failed", error=str(exc))
 
 
 def _normalize_area_payload(areas: list | None) -> list[dict]:
@@ -168,13 +142,7 @@ def update_config(
 ) -> bool:
     updated = False
     with session_scope() as session:
-        _ensure_facility_sync(session)
-        session.flush()
         fac = session.get(Facility, facility_id)
-        if not fac:
-            _sync_facilities_from_master(session)
-            session.flush()
-            fac = session.get(Facility, facility_id)
         if not fac:
             return False
         current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
