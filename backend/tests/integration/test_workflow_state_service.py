@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
+from src.db import session_scope  # noqa: E402
+from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
@@ -146,6 +148,42 @@ def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
     assert snapshot["source"] == "manual_draft"
     assert snapshot["draft_id"]
     assert snapshot["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
+
+
+def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row() -> None:
+    order_service.clear_all()
+    order = _seed_order(message_id="msg-workflow-v2-owned-row-001")
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order["id"])
+        if row is None:
+            row = OrderWorkflowState(order_id=order["id"], last_transition_at=datetime.utcnow())
+            session.add(row)
+        row.state = "sheet_saved"
+        row.headline = "シートが保存されました"
+        row.primary_action = "run_bagging"
+        row.secondary_actions_json = {
+            "workflow_v2": {
+                "facility_id": "FAC00001",
+                "week_start": "2026-03-22",
+                "week_end": "2026-03-28",
+            }
+        }
+        row.blockers_json = []
+        row.warnings_json = []
+        row.last_transition_at = datetime.utcnow()
+
+    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+
+    assert workflow["state"] == "sheet_saved"
+    assert workflow["primary_action"] == "run_bagging"
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order["id"])
+        assert row is not None
+        assert row.state == "sheet_saved"
+        assert row.primary_action == "run_bagging"
+        assert isinstance(row.secondary_actions_json, dict)
+        assert row.secondary_actions_json["workflow_v2"]["facility_id"] == "FAC00001"
+        assert row.secondary_actions_json["legacy_workflow_state"]["state"] == "uploaded"
 
 
 def test_persist_current_state_upserts_existing_order_row() -> None:

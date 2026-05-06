@@ -1727,3 +1727,45 @@ def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage() -> N
     assert results["workflow_state"] == "template_version_mismatch"
     assert results["blockers"] == ["template_version_mismatch"]
     assert results["results"] == []
+
+
+def test_get_workflow_projects_legacy_state_from_v2_lineage() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    assert error is None
+    assert workflow is not None
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    assert error is None
+    assert selected["state"] == "ocr_selected"
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    assert error is None
+    assert saved["workflow"]["state"] == "sheet_saved"
+
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        row.state = "apply_ready"
+        row.headline = "下書きを明細へ反映できます"
+        row.primary_action = "apply_draft"
+        row.blockers_json = ["draft_newer_than_lines"]
+        row.warnings_json = ["draft_newer_than_lines"]
+
+    projected, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert projected["state"] == "sheet_saved"
+    assert projected["primary_action"] == "run_bagging"
+    assert projected["blockers"] == []
+    assert projected["warnings"] == []
+    assert projected["legacy_state"] == "apply_ready"

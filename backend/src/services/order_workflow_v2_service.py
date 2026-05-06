@@ -22,6 +22,49 @@ from src.services import config_service, facility_template_version_service, shee
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
+_WORKFLOW_V2_CANONICAL_STATES = {
+    "uploaded",
+    "context_confirmed",
+    "ocr_blocked",
+    "ocr_running",
+    "ocr_failed",
+    "ocr_completed",
+    "ocr_selected",
+    "sheet_saved",
+    "bagging_ready",
+    "output_review",
+    "confirmed",
+    "facility_template_unresolved",
+    "facility_template_ambiguous",
+    "template_version_required",
+    "template_version_mismatch",
+    "ocr_job_not_found",
+    "ocr_job_order_mismatch",
+    "legacy_ocr_evidence_not_selectable",
+}
+_WORKFLOW_V2_LEGACY_STATES = {
+    "apply_ready",
+    "draft_ready",
+    "draft_blocked",
+    "review_required",
+    "evidence_ready",
+    "semantic_shell_only",
+    "identity_choice_required",
+    "layout_choice_required",
+    "recovery_required",
+    "rerun_in_progress",
+    "rerun_failed_keep_current",
+}
+_WORKFLOW_STATE_UI: dict[str, tuple[str | None, str | None]] = {
+    "uploaded": ("PDFから施設・週次を確認してください", "confirm_context"),
+    "context_confirmed": ("施設・週次・テンプレートが確定しました", "run_ocr"),
+    "ocr_completed": ("OCR結果が作成されました。正解OCRを一つ選択してください", "select_ocr"),
+    "ocr_selected": ("正解OCRが選択されました", "edit_sheet"),
+    "sheet_saved": ("シートが保存されました", "run_bagging"),
+    "bagging_ready": ("袋分け結果を確認してください", "confirm_bagging"),
+    "output_review": ("出力内容を確認してください", "final_confirm"),
+    "confirmed": ("注文が確定されました", None),
+}
 
 _OCR_PROGRESS_STEPS: dict[str, tuple[int, str]] = {
     "queued": (1, "OCR準備中"),
@@ -625,6 +668,57 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
     }
 
 
+def _workflow_v2_meta_exists(row: OrderWorkflowState) -> bool:
+    if not isinstance(row.secondary_actions_json, dict):
+        return False
+    return isinstance(row.secondary_actions_json.get(WORKFLOW_V2_META_KEY), dict)
+
+
+def _canonical_workflow_v2_state(row: OrderWorkflowState, meta: dict[str, Any] | None = None) -> str:
+    state = _normalize_id(row.state)
+    if state in _WORKFLOW_V2_CANONICAL_STATES:
+        return state
+    if state and state not in _WORKFLOW_V2_LEGACY_STATES:
+        return state
+    workflow_meta = meta if isinstance(meta, dict) else _workflow_meta(row)
+    if not _workflow_v2_meta_exists(row):
+        return state
+    if row.confirmed_snapshot_id:
+        return "confirmed"
+    if _normalize_id(workflow_meta.get("output_bundle_id")) and isinstance(workflow_meta.get("output_bundle"), dict):
+        return "output_review"
+    if _normalize_id(workflow_meta.get("bagging_result_id")) and isinstance(workflow_meta.get("bagging_result"), dict):
+        return "bagging_ready"
+    if row.draft_id:
+        return "sheet_saved"
+    if row.evidence_run_id:
+        return "ocr_selected"
+    if _workflow_meta_has_confirmed_context(workflow_meta):
+        return "context_confirmed"
+    return state or "uploaded"
+
+
+def _apply_canonical_workflow_state_projection(
+    payload: dict[str, Any],
+    *,
+    row: OrderWorkflowState,
+    state: str,
+) -> dict[str, Any]:
+    current_state = _normalize_id(payload.get("state"))
+    if not _workflow_v2_meta_exists(row) or not state or state == current_state:
+        return payload
+    projected = dict(payload)
+    projected["state"] = state
+    headline, primary_action = _WORKFLOW_STATE_UI.get(state, (projected.get("headline"), projected.get("primary_action")))
+    projected["headline"] = headline
+    projected["primary_action"] = primary_action
+    projected["blockers"] = []
+    projected["warnings"] = []
+    projected["legacy_state"] = current_state or None
+    projected["source"] = "workflow_v2_lineage_projection"
+    return projected
+
+
 def _workflow_blocker_projection(serialized: dict[str, Any], error: str) -> dict[str, Any]:
     normalized_error = _normalize_id(error)
     projected = dict(serialized)
@@ -701,7 +795,8 @@ def _workflow_state_requires_output_review(state: str) -> bool:
 
 
 def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkflowState) -> str | None:
-    state = _normalize_id(workflow.state)
+    meta = _workflow_meta(workflow)
+    state = _canonical_workflow_v2_state(workflow, meta)
     if not state or state in {
         "uploaded",
         "not_initialized",
@@ -712,7 +807,6 @@ def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkfl
     }:
         return None
 
-    meta = _workflow_meta(workflow)
     if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
         if not _workflow_meta_has_confirmed_context(meta):
             return "context_not_confirmed"
@@ -799,9 +893,16 @@ def _serialize_workflow_checked(
     ocr_job: OcrJob | None = None,
 ) -> dict[str, Any]:
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job)
+    meta = _workflow_meta(workflow)
+    canonical_state = _canonical_workflow_v2_state(workflow, meta)
     lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow)
     if lineage_error:
         return _workflow_blocker_projection(serialized, lineage_error)
+    serialized = _apply_canonical_workflow_state_projection(
+        serialized,
+        row=workflow,
+        state=canonical_state,
+    )
     return serialized
 
 

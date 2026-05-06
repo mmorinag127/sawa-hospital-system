@@ -32,6 +32,8 @@ _WORKFLOW_REFRESH_STACK: ContextVar[tuple[str, ...]] = ContextVar(
     "workflow_refresh_stack",
     default=(),
 )
+_WORKFLOW_V2_META_KEY = "workflow_v2"
+_LEGACY_WORKFLOW_STATE_KEY = "legacy_workflow_state"
 
 
 def _serialize(row: OrderWorkflowState) -> dict[str, Any]:
@@ -53,6 +55,34 @@ def _serialize(row: OrderWorkflowState) -> dict[str, Any]:
         "warnings_json": list(row.warnings_json or []),
         "confidence_band": row.confidence_band,
         "last_transition_at": row.last_transition_at.isoformat() if isinstance(row.last_transition_at, datetime) else None,
+    }
+
+
+def _workflow_v2_meta(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    meta = value.get(_WORKFLOW_V2_META_KEY)
+    return dict(meta) if isinstance(meta, dict) else None
+
+
+def _legacy_refresh_snapshot(
+    update_payload: dict[str, Any],
+    *,
+    secondary_actions: list[str],
+    last_transition_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "evidence_run_id": update_payload.get("evidence_run_id"),
+        "draft_id": update_payload.get("draft_id"),
+        "confirmed_snapshot_id": update_payload.get("confirmed_snapshot_id"),
+        "state": update_payload.get("state"),
+        "headline": update_payload.get("headline"),
+        "primary_action": update_payload.get("primary_action"),
+        "secondary_actions_json": list(secondary_actions),
+        "blockers_json": list(update_payload.get("blockers_json") or []),
+        "warnings_json": list(update_payload.get("warnings_json") or []),
+        "confidence_band": update_payload.get("confidence_band"),
+        "last_transition_at": last_transition_at.isoformat(),
     }
 
 
@@ -1131,14 +1161,14 @@ def _build_workflow_state_projection(
     draft_id = str((draft_sheet or {}).get("id") or "").strip() or None
     confirmed_snapshot_id = _latest_confirmed_snapshot_id(normalized_order_id)
     stored_secondary_actions: object = secondary_actions
+    existing_workflow = get_workflow_state(normalized_order_id) if persist else None
+    existing_secondary = (
+        existing_workflow.get("secondary_actions_json")
+        if isinstance(existing_workflow, dict)
+        else None
+    )
     if persist:
-        existing_workflow = get_workflow_state(normalized_order_id)
-        existing_secondary = (
-            existing_workflow.get("secondary_actions_json")
-            if isinstance(existing_workflow, dict)
-            else None
-        )
-        if isinstance(existing_secondary, dict) and isinstance(existing_secondary.get("workflow_v2"), dict):
+        if isinstance(existing_secondary, dict) and _workflow_v2_meta(existing_secondary) is not None:
             stored_secondary_actions = {
                 **existing_secondary,
                 "legacy_actions": secondary_actions,
@@ -1158,35 +1188,49 @@ def _build_workflow_state_projection(
     if persist:
         last_transition_at = datetime.utcnow()
         with session_scope() as session:
-            updated = session.execute(
-                update(OrderWorkflowState)
-                .where(OrderWorkflowState.order_id == normalized_order_id)
-                .values(**update_payload, last_transition_at=last_transition_at)
-            ).rowcount
-            if not updated:
-                session.add(
-                    OrderWorkflowState(
-                        order_id=normalized_order_id,
-                        last_transition_at=last_transition_at,
-                        **update_payload,
-                    )
-                )
-            session.flush()
             row = session.get(OrderWorkflowState, normalized_order_id)
-            serialized = _serialize(row) if isinstance(row, OrderWorkflowState) else {
-                "order_id": normalized_order_id,
-                "evidence_run_id": evidence_run_id,
-                "draft_id": draft_id,
-                "confirmed_snapshot_id": confirmed_snapshot_id,
-                "state": state,
-                "headline": headline,
-                "primary_action": primary_action,
-                "secondary_actions_json": list(secondary_actions),
-                "blockers_json": list(blockers),
-                "warnings_json": list(warnings),
-                "confidence_band": confidence_band,
-                "last_transition_at": last_transition_at.isoformat(),
-            }
+            if row is not None and _workflow_v2_meta(row.secondary_actions_json) is not None:
+                secondary = dict(row.secondary_actions_json or {})
+                secondary[_LEGACY_WORKFLOW_STATE_KEY] = _legacy_refresh_snapshot(
+                    update_payload,
+                    secondary_actions=secondary_actions,
+                    last_transition_at=last_transition_at,
+                )
+                secondary["legacy_actions"] = list(secondary_actions)
+                row.secondary_actions_json = secondary
+                session.flush()
+                serialized = _serialize(row)
+                serialized[_LEGACY_WORKFLOW_STATE_KEY] = secondary[_LEGACY_WORKFLOW_STATE_KEY]
+            else:
+                updated = session.execute(
+                    update(OrderWorkflowState)
+                    .where(OrderWorkflowState.order_id == normalized_order_id)
+                    .values(**update_payload, last_transition_at=last_transition_at)
+                ).rowcount
+                if not updated:
+                    session.add(
+                        OrderWorkflowState(
+                            order_id=normalized_order_id,
+                            last_transition_at=last_transition_at,
+                            **update_payload,
+                        )
+                    )
+                session.flush()
+                row = session.get(OrderWorkflowState, normalized_order_id)
+                serialized = _serialize(row) if isinstance(row, OrderWorkflowState) else {
+                    "order_id": normalized_order_id,
+                    "evidence_run_id": evidence_run_id,
+                    "draft_id": draft_id,
+                    "confirmed_snapshot_id": confirmed_snapshot_id,
+                    "state": state,
+                    "headline": headline,
+                    "primary_action": primary_action,
+                    "secondary_actions_json": list(secondary_actions),
+                    "blockers_json": list(blockers),
+                    "warnings_json": list(warnings),
+                    "confidence_band": confidence_band,
+                    "last_transition_at": last_transition_at.isoformat(),
+                }
     else:
         persisted_state = get_workflow_state(normalized_order_id)
         serialized = {
