@@ -104,6 +104,72 @@ Temporary evidence files from the fetch:
 | 夕 | 春雨サラダ | 軟菜 | 28 | 22 | 25 | -3 | +3 |  |
 | 夕 | 春雨サラダ | ミキサー | 20 | 13 | 20 | 0 | +7 |  |
 
+## Updated Comparison: Ignore Parentheses
+
+User clarified that the parenthesized numbers should be ignored for the current investigation because the email was written about two weeks before the current stg state. This section compares only:
+
+- `email_actual`: number without parentheses in the email.
+- `current_stg`: current stg `日別出力 -> 当日袋分け一覧` API value.
+- `diff`: `current_stg - email_actual`.
+
+### Diet-Level Comparison
+
+| daypart | menu | diet | email_actual | current_stg | diff | note |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| 朝 | 野菜の卵とじ | 常食 | 300 | 306 | +6 | current stg raw lines are regular=304 + staff=2 |
+| 朝 | 野菜の卵とじ | 軟菜 | 24 | 21 | -3 | saved line total is already 21 |
+| 朝 | 野菜の卵とじ | ミキサー | 20 | 16 | -4 | saved line total is already 16 |
+| 朝 | ブロッコリーの和え物 | 常食 | 300 | 306 | +6 | current stg raw lines are regular=304 + staff=2 |
+| 朝 | ブロッコリーの和え物 | 軟菜 | 24 | 21 | -3 | saved line total is already 21 |
+| 朝 | ブロッコリーの和え物 | ミキサー | 20 | 16 | -4 | saved line total is already 16 |
+| 昼 | 豆腐ハンバーグ | 常食 | 382 | 386 | +4 | current stg raw lines are regular=346 + daycare=38 + staff=2 |
+| 昼 | 豆腐ハンバーグ | 軟菜 | 28 | 25 | -3 | saved line total is already 25 |
+| 昼 | 豆腐ハンバーグ | ミキサー | 20 | 20 | 0 |  |
+| 昼 | ピーマンしりしり | 常食 | 373 | 377 | +4 | current stg raw lines are regular=340 + daycare=35 + staff=2 |
+| 昼 | ピーマンしりしり | 禁食 | 9 | 9 | 0 | no_fish=9 is bucketed to forbidden |
+| 昼 | ピーマンしりしり | 軟菜 | 28 | 25 | -3 | saved line total is already 25 |
+| 昼 | ピーマンしりしり | ミキサー | 20 | 20 | 0 |  |
+| 昼 | オーロラサラダ | 常食 | 379 | 383 | +4 | current stg raw lines are regular=344 + daycare=37 + staff=2 |
+| 昼 | オーロラサラダ | 禁食 | 3 | 3 | 0 | no_meat=3 is bucketed to forbidden |
+| 昼 | オーロラサラダ | 軟菜 | 28 | 25 | -3 | saved line total is already 25 |
+| 昼 | オーロラサラダ | ミキサー | 20 | 20 | 0 |  |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 常食 | 371 | 385 | +14 | current stg raw lines are regular=369 + staff=16 |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 禁食 | 6 | 3 | -3 | current stg has no_meat=3 only |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 軟菜 | 28 | 25 | -3 | saved line total is already 25 |
+| 夕 | 豚肉とじゃが芋の醤油炒め | ミキサー | 20 | 20 | 0 |  |
+| 夕 | 冬瓜の水晶煮 | 常食 | 377 | 391 | +14 | current stg raw lines are regular=375 + staff=16 |
+| 夕 | 冬瓜の水晶煮 | 軟菜 | 28 | 24 | -4 | saved line total is already 24 |
+| 夕 | 冬瓜の水晶煮 | ミキサー | 20 | 20 | 0 |  |
+| 夕 | 春雨サラダ | 常食 | 377 | 450 | +73 | 大和なでしこ `ORD2a654d51` has saved line `92`; if this is corrected to `32`, current_stg becomes `390` and diff becomes `+13` |
+| 夕 | 春雨サラダ | 禁食 | 1 | 1 | 0 | current stg key is sesame_allergy=1 |
+| 夕 | 春雨サラダ | 軟菜 | 28 | 25 | -3 | saved line total is already 25 |
+| 夕 | 春雨サラダ | ミキサー | 20 | 20 | 0 |  |
+
+### Regular + Soft + Mixer Total, Parentheses Ignored
+
+| daypart | menu | email_actual total | current_stg total | diff | note |
+| --- | --- | ---: | ---: | ---: | --- |
+| 朝 | 野菜の卵とじ | 344 | 343 | -1 |  |
+| 朝 | ブロッコリーの和え物 | 344 | 343 | -1 |  |
+| 昼 | 豆腐ハンバーグ | 430 | 431 | +1 |  |
+| 昼 | ピーマンしりしり | 421 | 422 | +1 |  |
+| 昼 | オーロラサラダ | 427 | 428 | +1 |  |
+| 夕 | 豚肉とじゃが芋の醤油炒め | 419 | 430 | +11 | regular includes staff=16 |
+| 夕 | 冬瓜の水晶煮 | 425 | 435 | +10 | regular includes staff=16 |
+| 夕 | 春雨サラダ | 425 | 495 | +70 | if 大和なでしこ 92->32, total becomes 435 and diff becomes +10 |
+
+## Cause Investigation, Parentheses Ignored
+
+Current findings:
+
+- `日別出力 -> 当日袋分け一覧` is not creating the large values by arithmetic duplication. The daily output matches the persisted confirmed order lines after diet bucketing.
+- The largest mismatch is `春雨サラダ / 常食`. Current stg has `450`, but `ORD2a654d51` 大和なでしこ contributes `92` for this single row. Other 大和なでしこ rows around it are `31` or `32`, so this is consistent with the user's observation that `92` is likely a `32` mistake. Correcting only that saved line removes `60` from the mismatch.
+- `夕食 / 常食` residual differences are mostly explained by current bucketing: `staff` is aggregated into `regular`. For dinner rows, current raw lines have `staff=16`, while raw `regular` alone is slightly below the email actual by `2-3`.
+- Lunch `常食` rows include `daycare` and `staff` in the current `regular` bucket. This appears broadly aligned with the email actual, because the remaining diff is only `+4` for each lunch row.
+- `軟菜` is consistently low by `3-4` on current stg. Since daily output equals saved order-line totals for these rows, the missing amount is upstream in saved order values, not in daily-output summation.
+- Morning `ミキサー` is low by `4`; lunch/dinner `ミキサー` matches. This also points to saved order values for the morning rows rather than a global mixer aggregation bug.
+- Many current 4/28 confirmed orders now return `template_version_mismatch` or `selected_ocr_required` from `workflow-v2/sheet-source`. That means some current daily-output rows are persisted confirmed lines from older OCR/template states and are not safely re-derivable through the current workflow-v2 sheet-source path without reselecting/rebuilding OCR.
+
 ## Current stg Summary
 
 - The current stg values no longer match the email's parenthesized system values. This means the currently deployed stg output is not the same output that was observed when the email was written.
