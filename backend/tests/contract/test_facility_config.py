@@ -9,7 +9,7 @@ sys.path.append(str(ROOT))
 from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
-from src.services import facility_service  # noqa: E402
+from src.services import facility_service, facility_template_version_service  # noqa: E402
 
 
 def _clear_facilities():
@@ -142,6 +142,37 @@ def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
     version_placeholder = version_columns[4]
     assert version_placeholder.get("column_id") == "col_005_quantity"
     assert (version_placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
+
+
+def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
+    _clear_facilities()
+    client = TestClient(app)
+    assert client.get("/facilities").status_code == 200
+    fetched = client.get("/facilities/FAC00007")
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    resolved = payload.get("resolved_config") or {}
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+
+    assert [column.get("header") for column in columns[:10]] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "常食",
+        "-",
+        "肉禁",
+        "魚禁",
+        "変更1",
+        "変更2",
+        "備考欄",
+    ]
+    assert [column.get("source_index") for column in columns[:10]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
+    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
+    validation = facility_template_version_service.validate_template_columns(version_columns)
+    assert validation["errors"] == []
+    placeholder = version_columns[4]
+    assert placeholder.get("diet_type") == "placeholder"
+    assert (placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
 
 
 def test_fac00003_stale_override_columns_preserve_physical_source_indexes():

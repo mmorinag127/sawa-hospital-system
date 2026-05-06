@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from src.db import Base, engine, session_scope
+from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_current_state import OrderCurrentState
@@ -205,9 +206,29 @@ def _facility_config_has_resolved_fax_template(
     *,
     template_id: str | None = None,
 ) -> bool:
+    return _facility_config_template_resolution_error(facility_config, template_id=template_id) is None
+
+
+def _facility_config_template_resolution_error(
+    facility_config: dict[str, Any] | None,
+    *,
+    template_id: str | None = None,
+) -> str | None:
     if not isinstance(facility_config, dict):
-        return False
-    return bool(_normalize_id(template_id) or _normalize_id(facility_config.get("fax_template_id")))
+        return "facility_template_unresolved"
+    template = facility_config.get("fax_template") if isinstance(facility_config.get("fax_template"), dict) else {}
+    resolved_template_id = (
+        _normalize_id(template_id)
+        or _normalize_id(facility_config.get("fax_template_id"))
+        or _normalize_id(template.get("template_id"))
+    )
+    if not resolved_template_id:
+        return "facility_template_unresolved"
+    columns = facility_template_version_service.normalize_template_columns(template.get("columns"))
+    validation = facility_template_version_service.validate_template_columns(columns)
+    if validation.get("errors"):
+        return "facility_template_unresolved"
+    return None
 
 
 def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
@@ -220,8 +241,6 @@ def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
 
 def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
     template_id = _normalize_id(meta.get("template_id")) or None
-    if template_id:
-        return True
     facility_id = _normalize_id(meta.get("facility_id"))
     if not facility_id:
         return False
@@ -229,7 +248,7 @@ def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
         facility_config = config_service.get_facility_config(facility_id)
     except Exception:
         return False
-    return _facility_config_has_resolved_fax_template(facility_config)
+    return _facility_config_has_resolved_fax_template(facility_config, template_id=template_id)
 
 
 def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
@@ -459,6 +478,16 @@ def _ensure_workflow_template_version_from_context(
 ) -> tuple[str | None, str | None]:
     template_version_id = _effective_workflow_template_version_id(workflow, meta)
     if template_version_id:
+        facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
+        version = session.get(FacilityTemplateVersion, template_version_id)
+        if version is None or version.status != "active":
+            return None, "template_version_mismatch"
+        if facility_id and _normalize_id(version.facility_id) != facility_id:
+            return None, "template_version_mismatch"
+        columns = list(version.columns_json or [])
+        validation = facility_template_version_service.validate_template_columns(columns)
+        if validation.get("errors"):
+            return None, "facility_template_unresolved"
         return template_version_id, None
     if not _workflow_meta_has_confirmed_context(meta):
         return None, "context_not_confirmed"
@@ -497,9 +526,7 @@ def _resolve_evidence_template_version(
     if workflow_template_version_id and evidence_template_version_id != workflow_template_version_id:
         return None, "template_version_mismatch"
     if evidence_template_version_id and not workflow_template_version_id:
-        workflow.template_version_id = evidence_template_version_id
-        meta["template_version_id"] = evidence_template_version_id
-        workflow_template_version_id = evidence_template_version_id
+        return None, "template_version_mismatch"
     return evidence_template_version_id or workflow_template_version_id or None, None
 
 
@@ -1092,6 +1119,15 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         if context_error:
             return None, context_error
         meta = _workflow_meta(workflow)
+        _workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+            session,
+            order=order,
+            workflow=workflow,
+            meta=meta,
+            created_by="workflow-v2-ocr-select",
+        )
+        if template_error:
+            return None, template_error
         evidence_template_version_id, template_error = _resolve_evidence_template_version(ocr_result, workflow, meta)
         if template_error:
             workflow.state = "template_version_mismatch"
@@ -1256,8 +1292,6 @@ def save_sheet(
         )
         if template_error:
             return None, template_error
-        if workflow_template_version_id and not _normalize_id(evidence.template_version_id):
-            evidence.template_version_id = workflow_template_version_id
         evidence_template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, workflow_meta)
         if template_error:
             return None, template_error
@@ -1473,6 +1507,8 @@ def _build_order_payload_for_outputs(*, order: Order, lines: list[dict[str, Any]
 def _build_basic_bag_rows_for_candidate(*, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in lines:
+        if _is_excluded_aggregation_diet(line.get("diet_type")):
+            continue
         numeric = _numeric_value(line.get("quantity_corrected"))
         if numeric is None:
             numeric = _numeric_value(line.get("quantity_original"))
@@ -1525,7 +1561,7 @@ def _build_bagging_result_payload(
     lines = [
         line
         for line in (materialization_candidate.get("lines") or [])
-        if isinstance(line, dict)
+        if isinstance(line, dict) and not _is_excluded_aggregation_diet(line.get("diet_type"))
     ]
     quantity_cells = []
     total_quantity = 0.0
@@ -1567,6 +1603,26 @@ def _build_bagging_result_payload(
         "bag_rows": bag_rows,
         "created_at": _now().isoformat(),
     }
+
+
+def _is_excluded_aggregation_diet(diet_type: object) -> bool:
+    normalized = str(diet_type or "").strip().lower()
+    return normalized in {"placeholder", "unknown"}
+
+
+def _materialization_candidate_has_excluded_lines(candidate: object) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    for line in candidate.get("lines") or []:
+        if isinstance(line, dict) and _is_excluded_aggregation_diet(line.get("diet_type")):
+            return True
+    return False
+
+
+def _bagging_result_has_excluded_materialization_lines(bagging_result: object) -> bool:
+    if not isinstance(bagging_result, dict):
+        return False
+    return _materialization_candidate_has_excluded_lines(bagging_result.get("materialization_candidate"))
 
 
 def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]) -> dict[str, Any]:
@@ -1621,6 +1677,15 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
             return None, context_error
+        _workflow_template_version_id, template_error = _ensure_workflow_template_version_from_context(
+            session,
+            order=order,
+            workflow=workflow,
+            meta=meta,
+            created_by="workflow-v2-sheet-build",
+        )
+        if template_error:
+            return None, template_error
         template_version_id, template_error = _resolve_evidence_template_version(evidence, workflow, meta)
         if template_error:
             return None, template_error
@@ -1738,6 +1803,8 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
+        if _bagging_result_has_excluded_materialization_lines(bagging_result):
+            return None, "bagging_result_stale_template_columns"
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
@@ -1769,6 +1836,8 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         bagging_result = _current_bagging_result(workflow)
         if not bagging_result:
             return None, "bagging_result_required"
+        if _bagging_result_has_excluded_materialization_lines(bagging_result):
+            return None, "bagging_result_stale_template_columns"
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
@@ -1802,6 +1871,8 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
         if not output_bundle:
             return None, "output_review_required"
+        if _bagging_result_has_excluded_materialization_lines(bagging_result):
+            return None, "bagging_result_stale_template_columns"
         if not workflow.draft_id:
             return None, "saved_sheet_required"
         draft = session.get(OrderSheetDraft, workflow.draft_id)

@@ -47,6 +47,31 @@ def _registered_config(facility_id: str) -> dict:
     }
 
 
+def test_template_columns_missing_source_index_is_blocker() -> None:
+    columns = facility_template_version_service.normalize_template_columns(
+        [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+        ]
+    )
+
+    validation = facility_template_version_service.validate_template_columns(columns)
+
+    assert "template_source_index_missing" in validation["errors"]
+    assert all(column.get("source_index") is None for column in columns)
+
+    validation_after_placeholder = facility_template_version_service.validate_template_columns(
+        facility_template_version_service.normalize_template_columns(
+            [
+                {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+                {"index": 1, "role": "quantity", "header": "-", "diet_type": "placeholder", "area_id": "X", "source_index": 1},
+                {"index": 2, "role": "note", "header": "備考欄"},
+            ]
+        )
+    )
+    assert "template_source_index_missing" in validation_after_placeholder["errors"]
+
+
 def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
     facility_id = _id("FAC")
     order_id = _id("ORD")

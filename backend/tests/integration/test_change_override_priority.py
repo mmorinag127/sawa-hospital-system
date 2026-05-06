@@ -85,6 +85,21 @@ def test_materialization_lines_keep_forbidden_columns_separate():
     ]
 
 
+def test_materialization_lines_exclude_placeholder_quantity_columns():
+    lines = order_service._build_materialization_lines_from_sheet_rows(
+        fields=_fac00001_fields(),
+        rows_payload=[
+            ["04/19", "昼", "Menu A", "31", "12", "2", "", "", "", ""],
+        ],
+        received_at=datetime(2026, 4, 19, 9, 0, 0),
+    )
+
+    assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
+        ("regular", 31),
+        ("no_meat", 2),
+    ]
+
+
 def test_apply_latest_draft_materializes_effective_regular_from_change_columns():
     order_service.clear_all()
     seeded = _seed_order("msg-change-override-apply-001")

@@ -5208,6 +5208,23 @@ class ConfirmMaterializationError(Exception):
         self.message = str(message or "").strip() or self.code
 
 
+_EXCLUDED_AGGREGATION_DIETS = {"placeholder", "unknown"}
+
+
+def _is_excluded_aggregation_diet(diet_type: object) -> bool:
+    return _normalize_sheet_diet(diet_type) in _EXCLUDED_AGGREGATION_DIETS
+
+
+def _is_aggregating_materialization_line(line: dict[str, Any] | None) -> bool:
+    if not isinstance(line, dict):
+        return False
+    return not _is_excluded_aggregation_diet(line.get("diet_type"))
+
+
+def _filter_aggregating_materialization_lines(lines: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [line for line in (lines or []) if _is_aggregating_materialization_line(line)]
+
+
 def _build_materialization_candidate_from_draft_record(
     order_id: str,
     *,
@@ -5310,7 +5327,17 @@ def _build_materialization_candidate_from_draft_record(
             "line_count": 0,
             "lines": [],
         }
-    candidate_lines = _apply_change_override_priority_to_lines(candidate_lines)
+    candidate_lines = _filter_aggregating_materialization_lines(
+        _apply_change_override_priority_to_lines(candidate_lines)
+    )
+    if not candidate_lines:
+        return {
+            "source": "draft_sheet",
+            "draft_id": draft_record.get("id"),
+            "error": "draft_lines_empty",
+            "line_count": 0,
+            "lines": [],
+        }
 
     facility_week_hint = None
     global_week_hint = None
@@ -5521,7 +5548,7 @@ def _apply_expanded_cell_copy_to_materialization_rows_payload(
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return rows_payload
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
     if not quantity_index:
         return rows_payload
 
@@ -5554,7 +5581,7 @@ def _build_materialization_lines_from_sheet_rows(
         return []
 
     date_idx, daypart_idx, menu_idx, _ = _resolve_structural_row_field_indexes(normalized_fields)
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
     if menu_idx is None or not quantity_index:
         return []
 
@@ -5748,7 +5775,7 @@ def _draft_sheet_supports_direct_materialization(
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return False
     _, _, menu_idx, _ = _resolve_structural_row_field_indexes(normalized_fields)
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
     return menu_idx is not None and bool(quantity_index)
 
 
@@ -5762,7 +5789,7 @@ def _build_sheet_source_row_quantity_summary(
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return {}
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
     if not quantity_index:
         return {}
 
@@ -5799,6 +5826,8 @@ def _build_materialized_source_row_quantity_summary(
         diet_key = _normalize_sheet_diet(line.get("diet_type"))
         area_key = _normalize_sheet_area(line.get("area_id"))
         if not diet_key or not area_key:
+            continue
+        if _is_excluded_aggregation_diet(diet_key):
             continue
         qty = line.get("quantity_corrected")
         if qty is None:
@@ -5979,6 +6008,8 @@ def _materialize_confirmed_lines_from_candidate(
     materialized_lines: list[dict[str, Any]] = []
     for line in serialized_lines:
         if not isinstance(line, dict):
+            continue
+        if _is_excluded_aggregation_diet(line.get("diet_type")):
             continue
         materialized_lines.append(
             {
@@ -19751,11 +19782,17 @@ def _build_sheet_fields_and_indexes(template: dict[str, Any]) -> tuple[list[str]
     return fields, index_map
 
 
-def _build_sheet_quantity_index(fields: list[str]) -> dict[tuple[str, str], int]:
+def _build_sheet_quantity_index(
+    fields: list[str],
+    *,
+    include_excluded: bool = True,
+) -> dict[tuple[str, str], int]:
     quantity_index: dict[tuple[str, str], int] = {}
     for idx, field in enumerate(fields):
         diet, area = _quantity_meta_from_field(field)
         if not diet or not area:
+            continue
+        if not include_excluded and _is_excluded_aggregation_diet(diet):
             continue
         quantity_index[(diet, area)] = idx
     return quantity_index

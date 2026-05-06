@@ -257,8 +257,8 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
             "fax_template_id": "fax_layout_regular_forbidden_v1",
             "fax_template": {
                 "columns": [
-                    {"index": 0, "role": "date", "header": "日付"},
-                    {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                    {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+                    {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 3},
                 ],
             },
         },
@@ -276,6 +276,34 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
     assert workflow["state"] == "context_confirmed"
     assert workflow["template_id"] == "fax_layout_regular_forbidden_v1"
     assert workflow["template_version_id"]
+
+
+def test_context_confirm_blocks_template_id_only_without_source_indexes(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "fax_template_id": "fax_layout_regular_forbidden_v1",
+            "fax_template": {
+                "columns": [
+                    {"index": 0, "role": "date", "header": "日付"},
+                    {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                ],
+            },
+        },
+    )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+    )
+
+    assert workflow is None
+    assert error == "facility_template_unresolved"
 
 
 def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monkeypatch) -> None:
@@ -343,7 +371,7 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
         assert snapshot.template_version_id == template_version_id
 
 
-def test_save_sheet_recovers_template_version_for_legacy_selected_evidence(monkeypatch) -> None:
+def test_save_sheet_blocks_legacy_selected_evidence_without_template_version(monkeypatch) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
@@ -381,19 +409,15 @@ def test_save_sheet_recovers_template_version_for_legacy_selected_evidence(monke
         edited_by="test",
     )
 
-    assert error is None
-    assert saved["workflow"]["state"] == "sheet_saved"
-    assert saved["workflow"]["template_version_id"] == template_version_id
-    saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
+    assert saved is None
+    assert error == "template_version_mismatch"
     with session_scope() as session:
         order = session.get(Order, order_id)
         row = session.get(OrderWorkflowState, order_id)
         evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
-        draft = session.get(OrderSheetDraft, saved_sheet_id)
         assert order.template_version_id == template_version_id
         assert row.template_version_id == template_version_id
-        assert evidence.template_version_id == template_version_id
-        assert draft.template_version_id == template_version_id
+        assert evidence.template_version_id is None
 
 
 def test_select_ocr_result_blocks_template_version_mismatch(monkeypatch) -> None:
@@ -807,12 +831,16 @@ def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
 
 def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypatch) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        _registered_template_config,
+    )
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
-        facility_id="FAC00016",
+        facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
-        template_id="template-fac00016",
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
     order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
@@ -850,7 +878,7 @@ def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypa
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
         "get_facility_config",
-        lambda _facility_id: {"expanded_cell_same_daypart_copy_enabled": False},
+        lambda facility_id: {**_registered_template_config(facility_id), "expanded_cell_same_daypart_copy_enabled": False},
     )
 
     source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
@@ -880,11 +908,11 @@ def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypa
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
 
     columns = [
-        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-        {"index": 1, "role": "daypart", "header": "区分"},
-        {"index": 2, "role": "menu_name", "header": "メニュー"},
-        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-        {"index": 4, "role": "note", "header": "備考欄"},
+        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD", "source_index": 0},
+        {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+        {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 3},
+        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 4},
+        {"index": 4, "role": "note", "header": "備考欄", "source_index": 5},
     ]
 
     fake_order_service = SimpleNamespace(
@@ -909,7 +937,7 @@ def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypa
     resolved_columns = ((result["resolved_config"] or {}).get("fax_template") or {}).get("columns") or []
     regular_column = next(item for item in resolved_columns if item.get("header") == "常食")
     assert regular_column["column_id"]
-    assert regular_column["source_index"] == 3
+    assert regular_column["source_index"] == 4
     assert regular_column["semantic"]["diet_type"] == "regular"
     assert regular_column["semantic"]["aggregation_role"] == "include"
     with session_scope() as session:
@@ -944,12 +972,12 @@ def test_facility_template_columns_save_on_confirmed_order_clears_snapshot_refer
     snapshot_id = confirmed["confirmed_snapshot_id"]
 
     columns = [
-        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-        {"index": 1, "role": "daypart", "header": "区分"},
-        {"index": 2, "role": "menu_name", "header": "メニュー"},
-        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-        {"index": 4, "role": "quantity", "header": "不明(-)", "diet_type": "placeholder", "area_id": "X"},
-        {"index": 5, "role": "note", "header": "備考欄"},
+        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD", "source_index": 0},
+        {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+        {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 3},
+        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 4},
+        {"index": 4, "role": "quantity", "header": "不明(-)", "diet_type": "placeholder", "area_id": "X", "source_index": 5},
+        {"index": 5, "role": "note", "header": "備考欄", "source_index": 6},
     ]
 
     result, error = order_workflow_v2_service.save_facility_template_columns(order_id, columns)

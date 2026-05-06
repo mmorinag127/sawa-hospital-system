@@ -82,21 +82,30 @@ def _normalize_token(value: object) -> str:
     return str(value or "").strip().lower()
 
 
-def _safe_source_index(column: dict[str, Any], fallback: int) -> int:
+_SOURCE_INDEX_REQUIRED_ROLES = {"date", "daypart", "menu_name", "quantity", "note", "remarks"}
+
+
+def _parse_source_index(column: dict[str, Any]) -> int | None:
     raw = column.get("source_index")
     try:
-        parsed = int(raw) if raw is not None else fallback
+        parsed = int(raw) if raw is not None else None
     except Exception:
-        parsed = fallback
-    return parsed if parsed >= 0 else fallback
+        return None
+    return parsed if parsed is not None and parsed >= 0 else None
 
 
-def _column_id_for(column: dict[str, Any], source_index: int) -> str:
+def _column_id_for(column: dict[str, Any], source_index: int | None, fallback_index: int) -> str:
     existing = str(column.get("column_id") or "").strip()
     if existing:
         return existing
     role = _normalize_token(column.get("role")) or "col"
+    if source_index is None:
+        return f"col_unresolved_{fallback_index:03d}_{role}"
     return f"col_{source_index:03d}_{role}"
+
+
+def _source_index_required(column: dict[str, Any]) -> bool:
+    return _normalize_token(column.get("role")) in _SOURCE_INDEX_REQUIRED_ROLES
 
 
 def _semantic_for_column(column: dict[str, Any]) -> dict[str, Any]:
@@ -124,9 +133,12 @@ def normalize_template_columns(columns: Any) -> list[dict[str, Any]]:
     for idx, raw_column in enumerate(normalized):
         column = deepcopy(raw_column)
         column["index"] = idx
-        source_index = _safe_source_index(column, idx)
-        column["source_index"] = source_index
-        column["column_id"] = _column_id_for(column, source_index)
+        source_index = _parse_source_index(column)
+        if source_index is None:
+            column.pop("source_index", None)
+        else:
+            column["source_index"] = source_index
+        column["column_id"] = _column_id_for(column, source_index, idx)
         semantic = _semantic_for_column(column)
         column["semantic"] = semantic
         column["read_target"] = bool(_normalize_token(column.get("role")) in {"quantity", "note", "remarks"})
@@ -145,10 +157,33 @@ def validate_template_columns(columns: list[dict[str, Any]]) -> dict[str, list[s
         errors.append("template_column_id_duplicate")
     if not any(_normalize_token(column.get("role")) == "quantity" for column in columns):
         errors.append("template_quantity_columns_missing")
+    source_indexes: list[int] = []
+    source_index_missing = False
+    source_index_invalid = False
+    excluded_quantity_warning_added = False
     for column in columns:
-        if _normalize_token(column.get("role")) == "quantity" and (column.get("semantic") or {}).get("aggregation_role") == "exclude":
+        raw_source_index = column.get("source_index")
+        parsed_source_index = _parse_source_index(column)
+        if raw_source_index is not None and parsed_source_index is None:
+            source_index_invalid = True
+        if parsed_source_index is not None:
+            source_indexes.append(parsed_source_index)
+        elif _source_index_required(column):
+            source_index_missing = True
+        if (
+            not excluded_quantity_warning_added
+            and _normalize_token(column.get("role")) == "quantity"
+            and (column.get("semantic") or {}).get("aggregation_role") == "exclude"
+        ):
             warnings.append("template_quantity_column_excluded_from_aggregation")
-            break
+            excluded_quantity_warning_added = True
+    if source_index_invalid:
+        errors.append("template_source_index_invalid")
+    if source_index_missing:
+        errors.append("template_source_index_missing")
+    duplicate_source_indexes = sorted({value for value in source_indexes if source_indexes.count(value) > 1})
+    if duplicate_source_indexes:
+        errors.append("template_source_index_duplicate")
     return {"errors": errors, "warnings": warnings}
 
 
