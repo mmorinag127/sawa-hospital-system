@@ -409,26 +409,13 @@ def _attach_order_workflow_context(
     order: dict,
     *,
     refresh: bool = False,
-    allow_refresh_fallback: bool = False,
 ) -> None:
     order_id = str(order.get("id") or "").strip()
     if not order_id:
         return
     workflow = order_service.get_order_workflow_state(order_id, refresh=refresh)
     if not isinstance(workflow, dict):
-        if refresh or not allow_refresh_fallback:
-            return
-        workflow = order_service.get_order_workflow_state(order_id, refresh=True)
-        if not isinstance(workflow, dict):
-            return
-    elif not refresh and (
-        not isinstance(workflow.get("candidate_resolution"), dict)
-        or not isinstance(workflow.get("apply_gate"), dict)
-        or not isinstance(workflow.get("critical_decisions"), list)
-    ) and list(workflow.get("blockers_json") or []) and allow_refresh_fallback:
-        refreshed = order_service.get_order_workflow_state(order_id, refresh=True)
-        if isinstance(refreshed, dict):
-            workflow = refreshed
+        return
     order["workflow_state"] = workflow
     if isinstance(workflow.get("candidate_resolution"), dict):
         order["candidate_resolution"] = workflow["candidate_resolution"]
@@ -1263,7 +1250,7 @@ def get_order(order_id: str):
     # Order detail is the first request that gates the page-level Loading state.
     # Keep it read-only/fast; explicit workflow endpoints and mutating actions
     # are responsible for refreshing persisted workflow/current-sheet state.
-    _attach_order_workflow_context(order, refresh=False, allow_refresh_fallback=False)
+    _attach_order_workflow_context(order, refresh=False)
     if job:
         refreshed_job = get_ocr_job(str(job.get("id") or "")) or job
         if refreshed_job is not job:
