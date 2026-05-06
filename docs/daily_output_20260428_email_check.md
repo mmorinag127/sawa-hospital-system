@@ -234,7 +234,7 @@ Parenthesized email numbers are intentionally ignored in this section.
 - The daily output is following confirmed order lines and bagging rows. The large remaining differences are not created by a daily-output arithmetic duplication path in this scan.
 - The remaining differences are upstream saved-sheet values produced from OCR evidence or later sheet edits.
 - Examples: `ORDe608fed7` and `ORDa1e2e963` have no 4/28 quantity cells in the saved sheet, so they contribute 0 to 4/28 daily output. `ORD372603e7` has OCR-derived 0 values for 4/28. `ORD04cc4e57` has OCR-derived `34` in several 軟菜 cells.
-- Therefore, after the current lineage/blocker fixes, the remaining 4/28 mismatch should be treated as OCR quantity reading / operator sheet-correction debt unless a later scan finds a saved-sheet-to-confirmed-lines mismatch on the same 4/28 rows.
+- Therefore, after the current lineage/blocker fixes, the remaining 4/28 mismatch should be treated as OCR quantity reading failure unless a later scan finds a saved-sheet-to-confirmed-lines mismatch on the same 4/28 rows.
 
 ### 2026-05-07 Full Order Reconciliation
 
@@ -272,7 +272,7 @@ Interpretation:
 - `ORDe608fed7` and `ORDa1e2e963` are not daily-output omissions. Their saved sheets contain no 4/28 quantity cells, so the system has no quantity to carry forward.
 - `ORD372603e7` is not a daily-output omission. Its 4/28 cells are OCR-derived `0`, so the system carries zero forward.
 - `ORD04cc4e57` explains several overages because the saved sheet contains OCR-derived `34` in 軟菜 cells for 4/28.
-- If these sheet values are visually wrong against the original PDFs, the correction point is OCR/sheet review, not daily-output aggregation.
+- If these sheet values are visually wrong against the original PDFs, the correction point is OCR quantity reading, not daily-output aggregation.
 
 ## Regular + Soft + Mixer Total Check
 
@@ -390,14 +390,14 @@ Current conclusion:
 
 - The previous workflow blockers such as `template_version_mismatch` and `template_version_required` were not reproduced in the full scan.
 - The menu/daypart shift failure class was not reproduced in this scan. Every saved sheet has 40 rows and starts with `大豆のトマト煮`; daily output matches persisted bagging rows exactly.
-- The current 2026-04-28 daily totals are not diverging after bagging. The remaining email-vs-stg quantity differences are already present in saved sheets / OCR evidence / operator correction state.
+- The current 2026-04-28 daily totals are not diverging after bagging. The remaining email-vs-stg quantity differences are already present in saved sheets / OCR evidence state.
 - Examples:
   - `ORDa1e2e963` has 4/28 OCR candidates, but they are `deterministic_candidate` or `weak_candidate`; none are accepted into the saved sheet, so the saved sheet contributes 0 for 4/28.
   - `ORD372603e7` has strict OCR-derived `0` values in several 4/28 cells, so zero is carried forward.
   - `ORD04cc4e57` has strict OCR-derived values such as `32` and `34` in soft-related cells, explaining several soft overages.
   - `ORD2a654d51` selected OCR source still contains the earlier `92` candidate, but the saved sheet has been corrected to `32`; the daily output follows the saved sheet, not the stale OCR source.
 
-This means the currently proven system issue is not daily-output aggregation. The remaining reconciliation work is upstream OCR/sheet-review accuracy: compare each saved sheet value against the original PDF/overlay and correct or improve OCR acceptance where the saved sheet is wrong.
+This means the currently proven system issue is not daily-output aggregation. The remaining reconciliation work is upstream OCR quantity reading accuracy: compare each saved sheet value against the original PDF/overlay and improve OCR reading where the saved sheet is wrong.
 
 ### OCR source vs saved sheet comparison
 
@@ -437,10 +437,10 @@ The 4/28 overlay contact sheet was visually checked against the saved-vs-source 
 | ORDe608fed7 | FAC00007 | 4/28 target cells are visually blank/blue in the overlay and saved sheet has no 4/28 quantities. | No downstream bug found; contributes 0 because no accepted/saved quantity exists. |
 | ORDccff9ed3 | FAC00002 | Saved 4/28 values are the same 3 accepted OCR values shown in the overlay. | OCR/saved sheet is the source of truth used downstream. |
 | ORDbd3425d7 | FAC00004 | Saved 4/28 values match selected OCR source values; overlay shows accepted values in the target cells. | Any mismatch against the email actual is already in the OCR/saved-sheet layer. |
-| ORDb6f4d715 | FAC00014 | Saved 4/28 values match selected OCR source values, including large accepted values such as `111`. | OCR numeric reading / acceptance result is the source of the saved quantity. |
+| ORDb6f4d715 | FAC00014 | Saved 4/28 values match selected OCR source values, including large accepted values such as `111`. | OCR quantity reading result is the source of the saved quantity. |
 | ORDb6702c19 | FAC00006 | Saved 4/28 values match selected OCR source accepted values; additional weak/deterministic candidates are not saved. | Downstream follows saved accepted values. |
 | ORDab6c77ff | FAC00008 | Saved 4/28 values match selected OCR source accepted values; weak/deterministic candidates are not saved. | Downstream follows saved accepted values. |
-| ORDa1e2e963 | FAC00016 | Overlay shows multiple low/medium confidence candidates on 4/28, but none are accepted into the saved sheet. | Quantity loss happens at OCR confidence/acceptance or sheet-review stage, before bagging/daily output. |
+| ORDa1e2e963 | FAC00016 | Overlay shows multiple low/medium confidence candidates on 4/28, but none are accepted into the saved sheet. | Quantity loss happens because OCR did not produce an accepted quantity reading, before bagging/daily output. |
 | ORD8e7e41ad | FAC00003 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
 | ORD386cf1de | FAC00015 | Saved 4/28 values match selected OCR source accepted values. | Downstream follows saved accepted values. |
 | ORD372603e7 | FAC00005 | Saved 4/28 values are accepted OCR `0` values shown in the overlay. | If these cells should be non-zero, the cause is OCR numeric reading, not aggregation. |
