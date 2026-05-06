@@ -67,3 +67,37 @@ def test_workflow_v2_ocr_run_blocks_unresolved_template_before_job_enqueue(monke
     res = client.post("/orders/ORDcontract/workflow-v2/ocr-runs", json={"mode": "hakodate"})
     assert res.status_code == 400
     assert res.json()["detail"] == "facility_template_unresolved"
+
+
+def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
+    client = TestClient(app)
+
+    def fail_legacy_helper(*_args, **_kwargs):
+        raise AssertionError("legacy current workflow helper must not run")
+
+    monkeypatch.setattr(orders_api.order_service, "ensure_hakodate_evidence_draft_current", fail_legacy_helper)
+    monkeypatch.setattr(orders_api.order_service, "get_order_workflow_state", fail_legacy_helper)
+    monkeypatch.setattr(orders_api.order_service, "list_order_critical_decisions", fail_legacy_helper)
+    monkeypatch.setattr(orders_api.order_service, "get_ocr_pages", fail_legacy_helper)
+    monkeypatch.setattr(orders_api.order_service, "get_ocr_sheet", fail_legacy_helper)
+    monkeypatch.setattr(orders_api.order_service, "get_candidate_draft_preview", fail_legacy_helper)
+
+    endpoints = [
+        ("get", "/orders/ORDcontract/draft-sheet"),
+        ("get", "/orders/ORDcontract/workflow-state"),
+        ("get", "/orders/ORDcontract/critical-decisions"),
+        ("get", "/orders/ORDcontract/ocr-pages"),
+        ("get", "/orders/ORDcontract/ocr-sheet"),
+        ("get", "/orders/ORDcontract/draft-sheet/candidate-preview"),
+        ("post", "/orders/ORDcontract/draft-sheet"),
+        ("post", "/orders/ORDcontract/draft-sheet/switch-evidence"),
+        ("post", "/orders/ORDcontract/draft-sheet/keep-current"),
+        ("post", "/orders/ORDcontract/confirm"),
+    ]
+
+    for method, path in endpoints:
+        response = client.post(path, json={}) if method == "post" else client.get(path)
+        assert response.status_code == 410
+        detail = response.json()["detail"]
+        assert detail["error"] == "legacy_order_workflow_disabled"
+        assert detail["replacement"] == "workflow-v2"

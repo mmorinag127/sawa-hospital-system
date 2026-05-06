@@ -1,5 +1,4 @@
 import json
-import os
 from datetime import datetime, timedelta, date as dt_date
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -11,7 +10,6 @@ from pydantic import BaseModel
 from src.services import order_service, config_service, candidate_resolution_service, workflow_state_service, uploaded_pdf_service
 from src.services import order_workflow_v2_service
 from src.services import shipping_status_store
-from src.services.output_builder import rebuild_bags
 from src.services.ocr_job_service import (
     create_job as create_ocr_job,
     describe_job_state as describe_ocr_job_state,
@@ -24,40 +22,10 @@ from src.services.ocr_job_service import (
     is_job_stale as is_ocr_job_stale,
     update_job as update_ocr_job,
 )
-from src.workers.output_worker import enqueue_outputs, OutputBuildError
 from src.api.auth import require_role
 from src.services.storage_service import load_bytes_from_uri
 
 router = APIRouter()
-
-
-async def _json_body_dict(request: Request) -> dict | None:
-    try:
-        body = await request.json()
-    except Exception:
-        return None
-    return body if isinstance(body, dict) else None
-
-
-RECOVERABLE_OCR_SHEET_ERRORS = {
-    "week_unresolved",
-    "menu_entries_missing",
-    "monthly_menu_object_missing",
-    "monthly_menu_facility_scope_missing",
-    "monthly_menu_lookup_failed",
-    "sheet_fields_not_found",
-    "sheet_fields_duplicate",
-    "sheet_template_field_invalid",
-    "sheet_quantity_columns_missing",
-    "sheet_quantity_column_unmapped",
-    "sheet_week_dates_incomplete",
-    "week_menu_date_mismatch",
-    "sheet_date_mismatch",
-    "sheet_canonical_mismatch",
-    "sheet_suspicious_blank_row",
-    "ocr_evidence_recovery_required",
-    "template_resolution_blocked",
-}
 
 
 class DailyOutputOverrideUpsertBody(BaseModel):
@@ -122,10 +90,6 @@ class WorkflowV2FacilityTemplateColumnsBody(BaseModel):
 
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
-
-
-def _flatten_draft_sheet_payload(order_id: str, draft_payload: dict) -> dict:
-    return order_service.flatten_current_sheet_payload(order_id, draft_payload)
 
 
 def _is_read_timeout_error(value: object) -> bool:
@@ -739,7 +703,6 @@ def _enqueue_order_reparse_job(
         )
 
     input_reference = str(order.get("document") or "")
-    run_requested_at = datetime.utcnow().isoformat()
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
@@ -965,7 +928,6 @@ def _enqueue_order_evidence_rerun(
         )
 
     input_reference = str(order.get("document") or "")
-    run_requested_at = datetime.utcnow().isoformat()
     _, created = create_ocr_job(ocr_job_id, input_reference=input_reference, status="running")
     if not created:
         existing_job = _heal_active_order_reparse_job_from_workflow(order_id, get_ocr_job(ocr_job_id))
@@ -1451,11 +1413,8 @@ def get_bags(order_id: str):
 
 @router.post("/{order_id}/bags/rebuild", dependencies=[Depends(require_role("operator"))])
 def rebuild_bag_summary(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("bags/rebuild")
-    try:
-        return rebuild_bags(order_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="order not found")
 
 
 @router.get("/{order_id}/evidence", dependencies=[Depends(require_role("operator"))])
@@ -1467,98 +1426,6 @@ def get_ocr_evidence(order_id: str):
     if not isinstance(evidence, dict):
         raise HTTPException(status_code=404, detail="ocr evidence not found")
     return evidence
-
-
-def _attach_reparse_sheet_state(order_id: str, payload: dict) -> dict:
-    if not (
-        str(payload.get("source") or "").strip() == "hakodate_ocr_evidence_sheet"
-        and isinstance(payload.get("hakodate_evidence_projection"), dict)
-    ):
-        payload["reparse_recovery_required"] = True
-    reparse_job = get_ocr_job(f"OCR-{order_id}")
-    reparse_state = describe_ocr_job_state(
-        reparse_job if isinstance(reparse_job, dict) and _is_order_reparse_job(reparse_job, order_id) else None
-    )
-    reparse_status = str(reparse_state.get("status") or "").strip().lower()
-    payload["reparse_health"] = reparse_state.get("status")
-    payload["reparse_stale_at"] = reparse_state.get("stale_at")
-    payload["reparse_stale_threshold_seconds"] = reparse_state.get("stale_threshold_seconds")
-    if isinstance(reparse_job, dict):
-        metrics = reparse_job.get("metrics")
-        metrics = metrics if isinstance(metrics, dict) else {}
-        live_error = (
-            str(metrics.get("error") or "").strip()
-            or str(reparse_job.get("error_message") or "").strip()
-            or None
-        )
-        live_processing_stage = str(metrics.get("processing_stage") or "").strip() or None
-        live_result_state = str(metrics.get("result_state") or "").strip() or None
-        live_request_mode = get_job_request_mode(reparse_job) or None
-        if reparse_status:
-            payload["reparse_status"] = reparse_status
-        if live_error:
-            payload["reparse_error"] = live_error
-            payload["reparse_last_error_code"] = live_error
-        if live_processing_stage:
-            payload["reparse_processing_stage"] = live_processing_stage
-        if live_result_state:
-            payload["reparse_result_state"] = live_result_state
-        if live_request_mode:
-            payload["reparse_request_mode"] = live_request_mode
-    if reparse_status != "stalled":
-        return payload
-    if str(payload.get("review_state") or "").strip().lower() == "processing":
-        payload["review_state"] = "processing_stalled"
-    apply_blockers = list(payload.get("apply_blockers") or [])
-    confirm_blockers = list(payload.get("confirm_blockers") or [])
-    if "reparse_stale" not in apply_blockers:
-        apply_blockers.append("reparse_stale")
-    if "reparse_stale" not in confirm_blockers:
-        confirm_blockers.append("reparse_stale")
-    payload["apply_blockers"] = apply_blockers
-    payload["confirm_blockers"] = confirm_blockers
-    apply_details = list(payload.get("apply_blocker_details") or [])
-    confirm_details = list(payload.get("confirm_blocker_details") or [])
-    stale_detail = {
-        "code": "reparse_stale",
-        "message": "再解析ジョブが停止しているため、再実行が必要です。",
-        "severity": "blocker",
-    }
-    if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in apply_details if isinstance(item, dict)):
-        apply_details.append(stale_detail)
-    if not any(str(item.get("code") or "").strip() == "reparse_stale" for item in confirm_details if isinstance(item, dict)):
-        confirm_details.append(stale_detail)
-    payload["apply_blocker_details"] = apply_details
-    payload["confirm_blocker_details"] = confirm_details
-    payload["can_apply"] = False
-    payload["can_confirm"] = False
-    return payload
-
-
-def _hakodate_blocked_draft_sheet_payload(order_id: str, error: str, data: dict | None = None) -> dict:
-    assignment = data.get("assignment") if isinstance(data, dict) and isinstance(data.get("assignment"), dict) else {}
-    blockers = ["monthly_menu_object_missing", "rows_empty"] if error == "menu_entries_missing" else [error, "rows_empty"]
-    blockers = list(dict.fromkeys(str(item) for item in blockers if str(item).strip()))
-    return {
-        "order_id": order_id,
-        "fields": [],
-        "header": [],
-        "rows": [],
-        "row_ids": [],
-        "cell_confidence_rows": [],
-        "cell_provenance_rows": [],
-        "source": "review_blocked",
-        "quantity_assignment_strategy": "hakodate",
-        "review_state": "blocked",
-        "can_apply": False,
-        "can_confirm": False,
-        "blockers": blockers,
-        "apply_blockers": blockers,
-        "confirm_blockers": blockers,
-        "warnings": blockers,
-        "hakodate_assignment": assignment,
-        "hakodate_projection_metrics": {},
-    }
 
 
 def _workflow_v2_or_404(result: tuple[dict | None, str | None]) -> dict:
@@ -1846,110 +1713,26 @@ def get_draft_sheet(
     quantity_assignment_strategy: str | None = Query(default=None),
     sheet_mode: str | None = Query(default=None),
 ):
+    _ = order_id, compact, quantity_assignment_strategy, sheet_mode
     _raise_legacy_order_workflow_gone("draft-sheet")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    _ = (quantity_assignment_strategy, sheet_mode)
-    draft, draft_error = order_service.ensure_hakodate_evidence_draft_current(
-        order_id,
-        edited_by="auto-hakodate-evidence-draft-sheet",
-    )
-    if draft_error and draft_error != "already_current":
-        payload = _hakodate_blocked_draft_sheet_payload(order_id, draft_error, None)
-        return payload if compact else _attach_reparse_sheet_state(order_id, payload)
-    if not isinstance(draft, dict) or not isinstance(draft.get("draft_sheet_json"), dict):
-        payload = _hakodate_blocked_draft_sheet_payload(order_id, "hakodate_sheet_artifact_missing", None)
-        return payload if compact else _attach_reparse_sheet_state(order_id, payload)
-    projected = dict(draft.get("draft_sheet_json") or {})
-    assignment = order_service.get_cached_hakodate_assignment_preview(order_id) or {}
-    metrics = (
-        assignment.get("metrics")
-        if isinstance(assignment, dict) and isinstance(assignment.get("metrics"), dict)
-        else {}
-    )
-    draft_blockers = [str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()]
-    draft_warnings = [str(item).strip() for item in (draft.get("warnings_json") or []) if str(item).strip()]
-    projected_blockers = [str(item).strip() for item in (projected.get("blockers") or []) if str(item).strip()]
-    projected_warnings = [str(item).strip() for item in (projected.get("warnings") or []) if str(item).strip()]
-    blockers = list(dict.fromkeys([*projected_blockers, *draft_blockers]))
-    warnings = list(dict.fromkeys([*projected_warnings, *draft_warnings]))
-    payload = dict(projected)
-    payload.update(
-        {
-            "order_id": order_id,
-            "source": str(projected.get("source") or "saved_hakodate_draft_sheet"),
-            "quantity_assignment_strategy": "hakodate",
-            "review_state": str(draft.get("draft_state") or projected.get("review_state") or "draft_ready"),
-            "can_apply": False,
-            "can_confirm": False,
-            "apply_blockers": blockers,
-            "confirm_blockers": blockers,
-            "hakodate_assignment": (
-                order_service._compact_hakodate_assignment_for_client(assignment)  # noqa: SLF001
-                if compact
-                else assignment
-            ),
-            "hakodate_projection_metrics": metrics,
-            "warnings": warnings,
-            "draft_id": draft.get("id"),
-            "base_evidence_run_id": draft.get("base_evidence_run_id"),
-        }
-    )
-    return payload if compact else _attach_reparse_sheet_state(order_id, payload)
 
 
 @router.get("/{order_id}/workflow-state", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_state(order_id: str, refresh: bool = Query(default=True)):
+    _ = order_id, refresh
     _raise_legacy_order_workflow_gone("workflow-state")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    workflow = order_service.get_order_workflow_state(order_id, refresh=refresh)
-    if not isinstance(workflow, dict):
-        raise HTTPException(status_code=404, detail="workflow state not found")
-    return workflow
 
 
 @router.get("/{order_id}/critical-decisions", dependencies=[Depends(require_role("operator"))])
 def get_order_critical_decisions(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("critical-decisions")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    return {"decisions": order_service.list_order_critical_decisions(order_id, refresh_workflow=True)}
 
 
 @router.post("/{order_id}/critical-decisions/{decision_type}", dependencies=[Depends(require_role("operator"))])
 def choose_order_critical_decision(order_id: str, decision_type: str, body: dict | None = None):
+    _ = order_id, decision_type, body
     _raise_legacy_order_workflow_gone("critical-decisions")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    selected_value = str((body or {}).get("selected_value") or (body or {}).get("value") or "").strip()
-    if not selected_value:
-        raise HTTPException(status_code=400, detail="selected_value missing")
-    result, error = order_service.choose_critical_decision(
-        order_id,
-        decision_type,
-        selected_value,
-        selected_by="operator",
-    )
-    if error == "decision_not_found":
-        raise HTTPException(status_code=404, detail="critical decision not found")
-    if error == "decision_stale":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "decision_stale",
-                "message": "新しいOCR候補があるため、候補選択をやり直してください。",
-            },
-        )
-    if error in {"facility_update_failed", "week_update_failed", "week_invalid"}:
-        raise HTTPException(status_code=400, detail=error)
-    if error:
-        raise HTTPException(status_code=500, detail="critical decision update failed")
-    return result
 
 
 @router.get("/{order_id}/ocr-pages", dependencies=[Depends(require_role("operator"))])
@@ -1958,46 +1741,14 @@ def get_ocr_pages(
     preview_only: bool = Query(default=False),
     quantity_assignment_strategy: str | None = Query(default=None),
 ):
+    _ = order_id, preview_only, quantity_assignment_strategy
     _raise_legacy_order_workflow_gone("ocr-pages")
-    data, error = order_service.get_ocr_pages(
-        order_id,
-        preview_only=preview_only,
-        quantity_assignment_strategy=quantity_assignment_strategy,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error in {"ocr_job_not_found", "ocr_output_not_found", "ocr_pages_not_found"}:
-        raise HTTPException(status_code=404, detail="ocr pages not found")
-    if error == "ocr_output_pending":
-        return JSONResponse(status_code=202, content={"pending": True})
-    if error == "ocr_evidence_recovery_required":
-        return JSONResponse(
-            status_code=409,
-            content={"recovery_required": True, "detail": "ocr evidence recovery required"},
-        )
-    if error == "ocr_output_invalid":
-        raise HTTPException(status_code=500, detail="ocr output invalid")
-    return data
 
 
 @router.get("/{order_id}/ocr-sheet", dependencies=[Depends(require_role("operator"))])
 def get_ocr_sheet(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("ocr-sheet")
-    data, error = order_service.get_ocr_sheet(order_id)
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error in {"facility_missing", "facility_not_found"}:
-        raise HTTPException(status_code=400, detail=error)
-    if error in RECOVERABLE_OCR_SHEET_ERRORS:
-        recovered, recover_error = order_service.build_recoverable_ocr_sheet_payload(order_id, error)
-        if recover_error is None and isinstance(recovered, dict):
-            return _attach_reparse_sheet_state(order_id, recovered)
-        raise HTTPException(status_code=400, detail=error)
-    if error:
-        raise HTTPException(status_code=500, detail="ocr sheet load failed")
-    if isinstance(data, dict):
-        return _attach_reparse_sheet_state(order_id, data)
-    return data
 
 
 @router.get("/{order_id}/ocr-history", dependencies=[Depends(require_role("operator"))])
@@ -2148,22 +1899,8 @@ def get_hakodate_template_candidate(order_id: str):
 
 @router.post("/{order_id}/hakodate-template-candidate/approve", dependencies=[Depends(require_role("operator"))])
 def approve_hakodate_template_candidate(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("hakodate-template-candidate/approve")
-    data, error = order_service.approve_order_hakodate_template_candidate(order_id)
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error in {"facility_missing", "template_unresolved", "candidate_unavailable", "candidate_signature_missing"}:
-        raise HTTPException(status_code=400, detail=error)
-    if error == "facility_not_found":
-        raise HTTPException(status_code=404, detail="facility not found")
-    if error == "validation_error":
-        raise HTTPException(
-            status_code=400,
-            detail=(data or {}).get("validation", {}).get("errors") or ["facility template invalid"],
-        )
-    if error:
-        raise HTTPException(status_code=500, detail=error)
-    return data
 
 
 @router.post("/{order_id}/hakodate-canonical-manifest-item", dependencies=[Depends(require_role("operator"))])
@@ -2228,362 +1965,62 @@ def build_hakodate_projected_sheet(order_id: str, body: dict | None = None):
 
 @router.post("/{order_id}/ocr-apply", dependencies=[Depends(require_role("operator"))])
 def apply_ocr_markdown(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("ocr-apply")
-    markdown = body.get("markdown") if isinstance(body, dict) else None
-    header = body.get("header") if isinstance(body, dict) else None
-    rows = body.get("rows") if isinstance(body, dict) else None
-    ui_mode = body.get("ui_mode") if isinstance(body, dict) else None
-    fields = body.get("fields") if isinstance(body, dict) else None
-    row_ids = body.get("row_ids") if isinstance(body, dict) else None
-    expected_revision_id = body.get("expected_revision_id") if isinstance(body, dict) else None
-    expected_lines_updated_at = body.get("expected_lines_updated_at") if isinstance(body, dict) else None
-    has_expected_revision = isinstance(body, dict) and "expected_revision_id" in body
-    has_expected_lines_updated_at = isinstance(body, dict) and "expected_lines_updated_at" in body
-    has_markdown = isinstance(markdown, str) and bool(markdown.strip())
-    has_rows = isinstance(rows, list) and len(rows) > 0
-    if not has_markdown and not has_rows:
-        raise HTTPException(status_code=400, detail="markdown or rows is required")
-    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
-    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
-    enforce_choice_gate = bool(
-        isinstance(workflow, dict)
-        and (
-            str(workflow.get("evidence_run_id") or "").strip()
-            or str(workflow.get("draft_id") or "").strip()
-        )
-    )
-    raw_gate_blockers = (
-        [
-            str(item or "").strip()
-            for item in (apply_gate.get("apply_blockers") or apply_gate.get("blockers") or [])
-            if str(item or "").strip()
-        ]
-        if isinstance(apply_gate, dict)
-        else []
-    )
-    apply_gate_blockers = [
-        item
-        for item in raw_gate_blockers
-        if item
-        in {
-            "facility_missing",
-            "week_missing",
-            "facility_choice_required",
-            "week_choice_required",
-            "template_choice_required",
-            "column_mapping_choice_required",
-            "quantity_choice_required",
-            "facility_unresolved",
-            "week_unresolved",
-        }
-    ]
-    if enforce_choice_gate and apply_gate_blockers:
-        primary = apply_gate_blockers[0]
-        messages = {
-            "facility_missing": "facility is missing",
-            "week_missing": "week is missing",
-            "facility_choice_required": "facility choice is required",
-            "week_choice_required": "week choice is required",
-            "template_choice_required": "template choice is required",
-            "column_mapping_choice_required": "column mapping choice is required",
-            "quantity_choice_required": "quantity choice is required",
-            "facility_unresolved": "facility is unresolved",
-            "week_unresolved": "week is unresolved",
-        }
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": primary,
-                "message": messages.get(primary, primary),
-                "blockers": apply_gate_blockers,
-                "workflow_state": workflow,
-            },
-        )
-    order, error = order_service.apply_submitted_ocr_sheet(
-        order_id,
-        markdown=markdown if has_markdown else None,
-        header=header,
-        rows=rows if has_rows else None,
-        ui_mode=ui_mode if isinstance(ui_mode, str) else None,
-        fields=fields,
-        row_ids=row_ids,
-        expected_revision_id=str(expected_revision_id or "").strip() or None,
-        expected_lines_updated_at=str(expected_lines_updated_at or "").strip() or None,
-        enforce_revision_guard=has_expected_revision,
-        enforce_lines_guard=has_expected_lines_updated_at,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error in {"facility_missing", "facility_not_found"}:
-        raise HTTPException(status_code=400, detail="facility missing")
-    if error in {
-        "markdown_empty",
-        "rows_empty",
-        "lines_empty",
-        "draft_missing",
-        "draft_rows_empty",
-        "draft_rows_unparseable",
-        "draft_lines_empty",
-    }:
-        raise HTTPException(status_code=400, detail=error)
-    if error in {"draft_semantic_materialization_failed", "draft_materialization_mismatch"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": error,
-                "message": "下書きの数量と明細化結果が一致しません。再解析または確認が必要です。",
-            },
-        )
-    if error in {"stale_revision_conflict", "stale_lines_conflict"}:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": error, "message": "最新の注文状態に更新してから再度実行してください。"},
-        )
-    if error:
-        raise HTTPException(status_code=500, detail="ocr apply failed")
-    return order
 
 
 @router.post("/{order_id}/ocr-sheet-save", dependencies=[Depends(require_role("operator"))])
 def save_ocr_sheet(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("ocr-sheet-save")
-    header = body.get("header") if isinstance(body, dict) else None
-    rows = body.get("rows") if isinstance(body, dict) else None
-    fields = body.get("fields") if isinstance(body, dict) else None
-    row_ids = body.get("row_ids") if isinstance(body, dict) else None
-    ui_mode = body.get("ui_mode") if isinstance(body, dict) else None
-    expected_revision_id = body.get("expected_revision_id") if isinstance(body, dict) else None
-    expected_lines_updated_at = body.get("expected_lines_updated_at") if isinstance(body, dict) else None
-    has_expected_revision = isinstance(body, dict) and "expected_revision_id" in body
-    has_expected_lines_updated_at = isinstance(body, dict) and "expected_lines_updated_at" in body
-    has_rows = isinstance(rows, list) and len(rows) > 0
-    if not has_rows:
-        raise HTTPException(status_code=400, detail="rows is required")
-    data, error = order_service.save_ocr_sheet_exact(
-        order_id,
-        header=header,
-        rows=rows,
-        fields=fields,
-        row_ids=row_ids,
-        ui_mode=ui_mode if isinstance(ui_mode, str) else None,
-        expected_revision_id=str(expected_revision_id or "").strip() or None,
-        expected_lines_updated_at=str(expected_lines_updated_at or "").strip() or None,
-        enforce_revision_guard=has_expected_revision,
-        enforce_lines_guard=has_expected_lines_updated_at,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error == "rows_empty":
-        raise HTTPException(status_code=400, detail="rows_empty")
-    if error in {"stale_revision_conflict", "stale_lines_conflict"}:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": error, "message": "最新の注文状態に更新してから保存してください。"},
-        )
-    if error:
-        raise HTTPException(status_code=500, detail="ocr sheet save failed")
-    return data
 
 
 @router.post("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])
 def save_draft_sheet(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("draft-sheet")
-    return save_ocr_sheet(order_id, body)
 
 
 @router.post("/{order_id}/draft-sheet/switch-evidence", dependencies=[Depends(require_role("operator"))])
 def switch_draft_sheet_evidence(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("draft-sheet/switch-evidence")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    draft, error = order_service.switch_draft_to_latest_evidence(
-        order_id,
-        edited_by="switch-evidence",
-    )
-    if error == "evidence_not_found":
-        raise HTTPException(status_code=404, detail="latest evidence not found")
-    if error in {"already_current", "switch_draft_unavailable"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": error,
-                "message": "新しいOCR候補へはまだ切り替えられません。",
-            },
-        )
-    if error == "switch_draft_failed":
-        raise HTTPException(status_code=500, detail="failed to switch draft evidence")
-    if not isinstance(draft, dict):
-        raise HTTPException(status_code=500, detail="failed to switch draft evidence")
-    return _flatten_draft_sheet_payload(order_id, draft)
 
 
 @router.post("/{order_id}/draft-sheet/keep-current", dependencies=[Depends(require_role("operator"))])
 def keep_current_draft_sheet(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("draft-sheet/keep-current")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    workflow_state, error = order_service.acknowledge_current_candidate_evidence(
-        order_id,
-        selected_by="operator",
-    )
-    if error == "candidate_not_found":
-        raise HTTPException(status_code=404, detail="candidate evidence not found")
-    if error in {"candidate_ack_failed", "workflow_refresh_failed"}:
-        raise HTTPException(status_code=500, detail="failed to keep current draft")
-    if not isinstance(workflow_state, dict):
-        raise HTTPException(status_code=500, detail="failed to keep current draft")
-    return workflow_state
 
 
 @router.get("/{order_id}/draft-sheet/candidate-preview", dependencies=[Depends(require_role("operator"))])
 def get_candidate_draft_sheet_preview(order_id: str):
+    _ = order_id
     _raise_legacy_order_workflow_gone("draft-sheet/candidate-preview")
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    preview, error = order_service.get_candidate_draft_preview(order_id)
-    if error == "candidate_not_found":
-        raise HTTPException(status_code=404, detail="candidate evidence not found")
-    if error:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": error,
-                "message": "候補シートのプレビューをまだ表示できません。",
-            },
-        )
-    if not isinstance(preview, dict):
-        raise HTTPException(status_code=500, detail="failed to load candidate preview")
-    return preview
 
 
 @router.post("/{order_id}/draft-sheet/force-weekly-menu", dependencies=[Depends(require_role("operator"))])
 def force_draft_sheet_weekly_menu(order_id: str, body: dict | None = None):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("draft-sheet/force-weekly-menu")
-    blank_quantities = False
-    if isinstance(body, dict) and "blank_quantities" in body:
-        blank_quantities = bool(body.get("blank_quantities"))
-    draft, error = order_service.force_overwrite_current_sheet_with_weekly_menu(
-        order_id,
-        blank_quantities=blank_quantities,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error == "facility_missing":
-        raise HTTPException(status_code=400, detail="facility missing")
-    if error == "week_missing":
-        raise HTTPException(status_code=400, detail="week missing")
-    if error == "weekly_menu_missing":
-        raise HTTPException(status_code=400, detail="weekly_menu_missing")
-    if error:
-        raise HTTPException(status_code=500, detail="failed to force weekly menu overwrite")
-    if not isinstance(draft, dict):
-        raise HTTPException(status_code=500, detail="failed to force weekly menu overwrite")
-    return {
-        "updated": True,
-        "draft_payload": _flatten_draft_sheet_payload(order_id, draft),
-    }
 
 
 @router.post("/{order_id}/draft-sheet/force-facility-schema", dependencies=[Depends(require_role("operator"))])
 def force_draft_sheet_facility_schema(order_id: str, body: dict | None = None):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("draft-sheet/force-facility-schema")
-    blank_quantities = True
-    if isinstance(body, dict) and "blank_quantities" in body:
-        blank_quantities = bool(body.get("blank_quantities"))
-    draft, error = order_service.force_overwrite_current_sheet_with_facility_schema(
-        order_id,
-        blank_quantities=blank_quantities,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error == "facility_missing":
-        raise HTTPException(status_code=400, detail="facility missing")
-    if error == "facility_not_found":
-        raise HTTPException(status_code=404, detail="facility not found")
-    if error:
-        raise HTTPException(status_code=500, detail="failed to force facility schema overwrite")
-    if not isinstance(draft, dict):
-        raise HTTPException(status_code=500, detail="failed to force facility schema overwrite")
-    return {
-        "updated": True,
-        "draft_payload": _flatten_draft_sheet_payload(order_id, draft),
-    }
 
 
 @router.post("/{order_id}/draft-sheet/apply-patch-candidate", dependencies=[Depends(require_role("operator"))])
 def apply_patch_candidate(order_id: str, body: dict | None = None):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("draft-sheet/apply-patch-candidate")
-    candidate_id = str((body or {}).get("candidate_id") or "").strip() or None
-    result, error = order_service.apply_patch_candidate_to_draft(
-        order_id,
-        candidate_id=candidate_id,
-        applied_by="operator",
-    )
-    if error == "patch_candidate_not_found":
-        raise HTTPException(status_code=404, detail="patch candidate not found")
-    if error in {"stale_draft_conflict", "stale_patch_candidate"}:
-        raise HTTPException(status_code=409, detail=error)
-    if error == "patch_candidate_not_applicable":
-        raise HTTPException(status_code=400, detail=error)
-    if error:
-        raise HTTPException(status_code=500, detail=error)
-    return result
 
 
 @router.post("/{order_id}/ocr-review", dependencies=[Depends(require_role("operator"))])
 def review_ocr_sheet(order_id: str, body: dict | None = None):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("ocr-review")
-    ocr_prompt = None
-    ocr_provider = None
-    pdf_variant = None
-    if isinstance(body, dict):
-        raw_prompt = body.get("ocr_prompt")
-        if not isinstance(raw_prompt, str):
-            raw_prompt = body.get("prompt")
-        if isinstance(raw_prompt, str) and raw_prompt.strip():
-            ocr_prompt = raw_prompt.strip()
-        raw_provider = body.get("ocr_provider")
-        if not isinstance(raw_provider, str):
-            raw_provider = body.get("provider")
-        if isinstance(raw_provider, str) and raw_provider.strip():
-            normalized_provider = raw_provider.strip().lower()
-            if normalized_provider not in {"openai", "gemini"}:
-                raise HTTPException(status_code=400, detail="ocr_provider must be one of openai|gemini")
-            ocr_provider = normalized_provider
-        raw_pdf_variant = body.get("pdf_variant")
-        if not isinstance(raw_pdf_variant, str):
-            raw_pdf_variant = body.get("pdfVariant")
-        if isinstance(raw_pdf_variant, str) and raw_pdf_variant.strip():
-            normalized_pdf_variant = raw_pdf_variant.strip().lower()
-            if normalized_pdf_variant not in {"raw", "corrected"}:
-                raise HTTPException(status_code=400, detail="pdf_variant must be one of raw|corrected")
-            pdf_variant = normalized_pdf_variant
-    order, error = order_service.review_ocr_table_with_llm(
-        order_id,
-        provider=ocr_provider,
-        prompt=ocr_prompt,
-        pdf_variant=pdf_variant,
-    )
-    if error == "order_not_found":
-        raise HTTPException(status_code=404, detail="order not found")
-    if error == "facility_not_found":
-        raise HTTPException(status_code=404, detail="facility not found")
-    if error in {
-        "facility_missing",
-        "document_missing",
-        "ocr_payload_missing",
-        "rows_empty",
-        "fields_empty",
-    }:
-        raise HTTPException(status_code=400, detail=error)
-    if error == "llm_patch_candidate_persist_failed":
-        raise HTTPException(status_code=500, detail="llm patch candidate persist failed")
-    if error:
-        raise HTTPException(status_code=500, detail="ocr review failed")
-    return order
 
 
 @router.delete(
@@ -2597,31 +2034,8 @@ def delete_orders_by_message_prefix(prefix: str):
 
 @router.post("/{order_id}/facility", status_code=status.HTTP_200_OK, dependencies=[Depends(require_role("operator"))])
 def set_facility(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("facility")
-    fac = body.get("facility")
-    if not fac:
-        raise HTTPException(status_code=400, detail="facility missing")
-    result = order_service.set_facility(
-        order_id,
-        fac,
-        expected_current_facility=str(body.get("expected_current_facility") or "").strip() or None,
-        enforce_conflict_guard="expected_current_facility" in body,
-        refresh_current_sheet=bool(body.get("refresh_current_sheet")),
-    )
-    if isinstance(result, tuple):
-        updated, error = result
-    else:
-        updated, error = result, None
-    if not updated:
-        if error == "order_not_found":
-            raise HTTPException(status_code=404, detail="order not found")
-        if error == "stale_facility_conflict":
-            raise HTTPException(
-                status_code=409,
-                detail={"error": error, "message": "施設設定が他の画面で更新されました。再読込してください。"},
-            )
-        raise HTTPException(status_code=500, detail="facility update failed")
-    return {"updated": True}
 
 
 @router.get("/{order_id}/week-options", dependencies=[Depends(require_role("operator"))])
@@ -2634,34 +2048,8 @@ def get_week_options(order_id: str):
 
 @router.post("/{order_id}/week", status_code=status.HTTP_200_OK, dependencies=[Depends(require_role("operator"))])
 def set_week(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("week")
-    week = body.get("week")
-    if not week:
-        raise HTTPException(status_code=400, detail="week missing")
-    try:
-        result = order_service.set_week(
-            order_id,
-            str(week),
-            expected_current_week=str(body.get("expected_current_week") or "").strip() or None,
-            enforce_conflict_guard="expected_current_week" in body,
-            allow_non_calendar_exception=True,
-        )
-        if isinstance(result, tuple):
-            updated, error = result
-        else:
-            updated, error = result, None
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="week invalid") from exc
-    if not updated:
-        if error == "order_not_found":
-            raise HTTPException(status_code=404, detail="order not found")
-        if error == "stale_week_conflict":
-            raise HTTPException(
-                status_code=409,
-                detail={"error": error, "message": "週設定が他の画面で更新されました。再読込してください。"},
-            )
-        raise HTTPException(status_code=500, detail="week update failed")
-    return {"updated": True}
 
 
 @router.put("/{order_id}/facility-template-columns", dependencies=[Depends(require_role("operator"))])
@@ -2672,143 +2060,14 @@ def save_facility_template_columns(order_id: str, body: dict):
 
 @router.put("/{order_id}/lines", dependencies=[Depends(require_role("operator"))])
 def update_lines(order_id: str, body: dict):
+    _ = order_id, body
     _raise_legacy_order_workflow_gone("lines")
-    if "lines" not in body:
-        raise HTTPException(status_code=400, detail="lines missing")
-    result = order_service.update_lines(
-        order_id,
-        body["lines"],
-        expected_lines_updated_at=str(body.get("expected_lines_updated_at") or "").strip() or None,
-        enforce_conflict_guard="expected_lines_updated_at" in body,
-    )
-    if isinstance(result, tuple):
-        updated, error = result
-    else:
-        updated, error = result, None
-    if not updated:
-        if error == "order_not_found":
-            raise HTTPException(status_code=404, detail="order not found")
-        if error == "stale_lines_conflict":
-            raise HTTPException(
-                status_code=409,
-                detail={"error": error, "message": "明細が他の画面で更新されました。再読込してください。"},
-            )
-        raise HTTPException(status_code=500, detail="line update failed")
-    return {"updated": True}
-
-
-def _enqueue_outputs_after_confirm(order_id: str) -> None:
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return
-    try:
-        enqueue_outputs(order_id)
-    except OutputBuildError as exc:
-        order_service.set_status(order_id, "エラー")
-        logger.exception("Output enqueue failed after confirm", order_id=order_id, error=str(exc))
 
 
 @router.post("/{order_id}/confirm", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
 def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict | None = None):
+    _ = order_id, background_tasks, body
     _raise_legacy_order_workflow_gone("confirm")
-    expected_revision_id = str((body or {}).get("expected_revision_id") or "").strip() or None
-    expected_lines_updated_at = str((body or {}).get("expected_lines_updated_at") or "").strip() or None
-    has_expected_revision = isinstance(body, dict) and "expected_revision_id" in body
-    has_expected_lines_updated_at = isinstance(body, dict) and "expected_lines_updated_at" in body
-    order_snapshot = order_service.get_order_by_id(order_id)
-    if not order_snapshot:
-        raise HTTPException(status_code=404, detail="order not found")
-    if has_expected_revision:
-        revision_conflict = order_service._sheet_revision_conflict_detail(
-            order_id=order_id,
-            expected_revision_id=expected_revision_id,
-        )
-        if revision_conflict is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "stale_revision_conflict", "message": "別の画面で下書きが更新されました。再読込してください。"},
-            )
-    if has_expected_lines_updated_at:
-        lines_conflict = order_service._lines_timestamp_conflict_detail(
-            current_lines_updated_at=order_snapshot.get("lines_updated_at"),
-            expected_lines_updated_at=expected_lines_updated_at,
-        )
-        if lines_conflict is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "stale_lines_conflict", "message": "明細が他の画面で更新されました。再読込してください。"},
-            )
-    workflow = order_service.get_order_workflow_state(order_id, refresh=True)
-    apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else {}
-    gate_blockers = (
-        [
-            str(item or "").strip()
-            for item in (apply_gate.get("confirm_blockers") or apply_gate.get("blockers") or [])
-            if str(item or "").strip()
-        ]
-        if isinstance(apply_gate, dict)
-        else []
-    )
-    gate_warnings = (
-        [
-            str(item or "").strip()
-            for item in (apply_gate.get("confirm_warnings") or apply_gate.get("warnings") or [])
-            if str(item or "").strip()
-        ]
-        if isinstance(apply_gate, dict)
-        else []
-    )
-    if gate_blockers or (isinstance(apply_gate, dict) and not apply_gate.get("can_confirm", False)):
-        primary = str((gate_blockers or gate_warnings or ["confirm_blocked"])[0] or "").strip() or "confirm_blocked"
-        messages = {
-            "facility_missing": "facility is missing",
-            "week_missing": "week is missing",
-            "weekly_menu_missing": "weekly menu is missing",
-            "monthly_menu_object_missing": "monthly menu object is missing",
-            "menu_entries_missing": "weekly menu entries are missing",
-            "monthly_menu_facility_scope_missing": "facility-specific weekly menu entries are missing",
-            "monthly_menu_lookup_failed": "monthly menu lookup failed",
-            "facility_choice_required": "facility choice is required",
-            "week_choice_required": "week choice is required",
-            "template_choice_required": "template choice is required",
-            "column_mapping_choice_required": "column mapping choice is required",
-            "quantity_choice_required": "quantity choice is required",
-            "facility_unresolved": "facility is unresolved",
-            "week_unresolved": "week is unresolved",
-            "template_unresolved": "template is unresolved",
-            "evidence_view_unavailable": "ocr evidence view is unavailable",
-            "evidence_edit_unavailable": "ocr evidence edit is unavailable",
-            "draft_rows_empty": "draft rows are empty",
-            "recovery_recommended": "ocr evidence recovery is required before confirm",
-            "ocr_evidence_recovery_required": "ocr evidence recovery is required",
-            "template_resolution_blocked": "template resolution is blocked",
-            "reparse_stale": "reparse is stale",
-            "auto_apply_blocked": "auto apply is blocked",
-        }
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": primary,
-                "message": messages.get(primary, primary),
-                "blockers": gate_blockers,
-                "warnings": gate_warnings,
-                "workflow_state": workflow,
-            },
-        )
-    try:
-        order, postprocess_payload = order_service.confirm_order_authoritatively(order_id)
-    except order_service.ConfirmMaterializationError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": exc.code,
-                "message": exc.message,
-            },
-        ) from exc
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    background_tasks.add_task(order_service.finalize_confirmed_order, postprocess_payload)
-    background_tasks.add_task(_enqueue_outputs_after_confirm, order_id)
-    return {"accepted": True}
 
 
 @router.post(
@@ -2817,81 +2076,8 @@ def confirm_order(order_id: str, background_tasks: BackgroundTasks, body: dict |
     dependencies=[Depends(require_role("operator"))],
 )
 async def reparse_order(order_id: str, background_tasks: BackgroundTasks, request: Request):
+    _ = order_id, background_tasks, request
     _raise_legacy_order_workflow_gone("reparse")
-    body = await _json_body_dict(request)
-    ocr_prompt = None
-    prompt_preset = None
-    ocr_provider = None
-    ocr_model = None
-    # Explicit user-triggered reparse should follow the OCR reparse directive:
-    # keep yomitoku as default baseline, then run evaluator-guided LLM inference.
-    llm_assist = True
-    force = False
-    stale_action = "retry"
-    if isinstance(body, dict):
-        raw_prompt = body.get("ocr_prompt")
-        if isinstance(raw_prompt, str) and raw_prompt.strip():
-            ocr_prompt = raw_prompt.strip()
-        raw_prompt_preset = body.get("prompt_preset")
-        if not isinstance(raw_prompt_preset, str):
-            raw_prompt_preset = body.get("ocr_prompt_preset")
-        if not isinstance(raw_prompt_preset, str):
-            raw_prompt_preset = body.get("promptPreset")
-        if isinstance(raw_prompt_preset, str) and raw_prompt_preset.strip():
-            normalized_prompt_preset = raw_prompt_preset.strip().lower()
-            if normalized_prompt_preset not in {
-                "numeric_verification",
-                "column_missing",
-                "row_alignment",
-                "special_diet_semantics",
-                "merged_cell_quantity_spans",
-                "freeform",
-            }:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "prompt_preset must be one of "
-                        "numeric_verification|column_missing|row_alignment|special_diet_semantics|merged_cell_quantity_spans|freeform"
-                    ),
-                )
-            prompt_preset = normalized_prompt_preset
-        raw_provider = body.get("ocr_provider")
-        if isinstance(raw_provider, str) and raw_provider.strip():
-            normalized_provider = raw_provider.strip().lower()
-            if normalized_provider == "tesseract":
-                raise HTTPException(status_code=400, detail="ocr_provider=tesseract has been removed")
-            if normalized_provider not in {"pipeline", "openai", "gemini"}:
-                raise HTTPException(status_code=400, detail="ocr_provider must be one of pipeline|openai|gemini")
-            ocr_provider = normalized_provider
-        raw_model = body.get("ocr_model")
-        if not (isinstance(raw_model, str) and raw_model.strip()):
-            raw_model = body.get("llm_model")
-        if isinstance(raw_model, str) and raw_model.strip():
-            ocr_model = raw_model.strip()
-        raw_llm_assist = body.get("llm_assist")
-        if isinstance(raw_llm_assist, bool):
-            llm_assist = raw_llm_assist
-        raw_force = body.get("force")
-        if isinstance(raw_force, bool):
-            force = raw_force
-        raw_stale_action = body.get("stale_action")
-        if isinstance(raw_stale_action, str) and raw_stale_action.strip():
-            normalized_stale_action = raw_stale_action.strip().lower()
-            if normalized_stale_action not in {"retry", "wait"}:
-                raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
-            stale_action = normalized_stale_action
-    return _enqueue_order_reparse_job(
-        order_id,
-        background_tasks,
-        ocr_prompt=ocr_prompt,
-        prompt_preset=prompt_preset,
-        ocr_provider=ocr_provider,
-        ocr_model=ocr_model,
-        llm_assist=llm_assist,
-        force=force,
-        stale_action=stale_action,
-        request_mode="llm_reparse" if llm_assist else "ocr_reparse",
-    )
 
 
 @router.post(
@@ -2900,34 +2086,8 @@ async def reparse_order(order_id: str, background_tasks: BackgroundTasks, reques
     dependencies=[Depends(require_role("operator"))],
 )
 async def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, request: Request):
+    _ = order_id, background_tasks, request
     _raise_legacy_order_workflow_gone("ocr-rerun")
-    body = await _json_body_dict(request)
-    stale_action = "retry"
-    force = False
-    if isinstance(body, dict):
-        raw_provider = body.get("ocr_provider")
-        if not isinstance(raw_provider, str):
-            raw_provider = body.get("provider")
-        if isinstance(raw_provider, str) and raw_provider.strip():
-            normalized_provider = raw_provider.strip().lower()
-            if normalized_provider == "tesseract":
-                raise HTTPException(status_code=400, detail="ocr_provider=tesseract has been removed")
-            raise HTTPException(status_code=400, detail="ocr_provider is not supported for Hakodate OCR rerun")
-        raw_stale_action = body.get("stale_action")
-        if isinstance(raw_stale_action, str) and raw_stale_action.strip():
-            normalized_stale_action = raw_stale_action.strip().lower()
-            if normalized_stale_action not in {"retry", "wait"}:
-                raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
-            stale_action = normalized_stale_action
-        force = body.get("force") is True
-    result = _enqueue_order_evidence_rerun(
-        order_id,
-        background_tasks,
-        stale_action=stale_action,
-        force=force,
-    )
-    result["mode"] = "pipeline_rerun"
-    return result
 
 
 @router.post(
@@ -2936,11 +2096,5 @@ async def rerun_ocr_pipeline(order_id: str, background_tasks: BackgroundTasks, r
     dependencies=[Depends(require_role("operator"))],
 )
 def recover_ocr(order_id: str, background_tasks: BackgroundTasks):
+    _ = order_id, background_tasks
     _raise_legacy_order_workflow_gone("ocr-recover")
-    result = _enqueue_order_evidence_rerun(
-        order_id,
-        background_tasks,
-        stale_action="retry",
-    )
-    result["mode"] = "pipeline_recovery"
-    return result
