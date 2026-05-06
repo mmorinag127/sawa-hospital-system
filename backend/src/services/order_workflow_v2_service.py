@@ -38,6 +38,12 @@ _WORKFLOW_V2_CANONICAL_STATES = {
     "facility_template_ambiguous",
     "template_version_required",
     "template_version_mismatch",
+    "saved_sheet_template_mismatch",
+    "bagging_result_template_mismatch",
+    "bagging_result_source_mismatch",
+    "output_bundle_template_mismatch",
+    "output_bundle_source_mismatch",
+    "confirmed_snapshot_template_mismatch",
     "ocr_job_not_found",
     "ocr_job_order_mismatch",
     "legacy_ocr_evidence_not_selectable",
@@ -732,6 +738,30 @@ def _workflow_blocker_projection(serialized: dict[str, Any], error: str) -> dict
         projected["state"] = "template_version_mismatch"
         projected["headline"] = "施設テンプレートが変更されています。OCRを再実行してください"
         projected["primary_action"] = "run_ocr"
+    elif normalized_error == "saved_sheet_template_mismatch":
+        projected["state"] = "saved_sheet_template_mismatch"
+        projected["headline"] = "保存済みシートが現在の施設テンプレートと一致しません。選択OCRからシートを再生成してください"
+        projected["primary_action"] = "edit_sheet"
+    elif normalized_error == "bagging_result_template_mismatch":
+        projected["state"] = "bagging_result_template_mismatch"
+        projected["headline"] = "袋分け結果が現在の施設テンプレートと一致しません。袋分けを再作成してください"
+        projected["primary_action"] = "run_bagging"
+    elif normalized_error == "bagging_result_source_mismatch":
+        projected["state"] = "bagging_result_source_mismatch"
+        projected["headline"] = "袋分け結果が現在の保存済みシートから作られていません。袋分けを再作成してください"
+        projected["primary_action"] = "run_bagging"
+    elif normalized_error == "output_bundle_template_mismatch":
+        projected["state"] = "output_bundle_template_mismatch"
+        projected["headline"] = "出力確認が現在の施設テンプレートと一致しません。出力確認を再作成してください"
+        projected["primary_action"] = "final_confirm"
+    elif normalized_error == "output_bundle_source_mismatch":
+        projected["state"] = "output_bundle_source_mismatch"
+        projected["headline"] = "出力確認が現在の袋分け結果から作られていません。出力確認を再作成してください"
+        projected["primary_action"] = "final_confirm"
+    elif normalized_error == "confirmed_snapshot_template_mismatch":
+        projected["state"] = "confirmed_snapshot_template_mismatch"
+        projected["headline"] = "確定snapshotが現在の施設テンプレートと一致しません。出力確認から確定し直してください"
+        projected["primary_action"] = "final_confirm"
     elif normalized_error == "facility_template_unresolved":
         projected["state"] = "facility_template_unresolved"
         projected["headline"] = "施設テンプレートが未解決です。施設区分列を確認してください"
@@ -849,14 +879,14 @@ def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkfl
         if draft is None or draft.order_id != order.id:
             return "saved_sheet_missing"
         if template_version_id and _normalize_id(draft.template_version_id) != template_version_id:
-            return "template_version_mismatch"
+            return "saved_sheet_template_mismatch"
 
     bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
     if _workflow_state_requires_bagging(state):
         if not bagging_result:
             return "bagging_result_required"
         if template_version_id and _normalize_id(bagging_result.get("template_version_id")) != template_version_id:
-            return "template_version_mismatch"
+            return "bagging_result_template_mismatch"
         if workflow.draft_id and _normalize_id(bagging_result.get("source_saved_sheet_id")) != _normalize_id(workflow.draft_id):
             return "bagging_result_source_mismatch"
 
@@ -865,7 +895,7 @@ def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkfl
         if not output_bundle:
             return "output_review_required"
         if template_version_id and _normalize_id(output_bundle.get("template_version_id")) != template_version_id:
-            return "template_version_mismatch"
+            return "output_bundle_template_mismatch"
         if workflow.draft_id and _normalize_id(output_bundle.get("source_saved_sheet_id")) != _normalize_id(workflow.draft_id):
             return "output_bundle_source_mismatch"
         bagging_result_id = _normalize_id(bagging_result.get("bagging_result_id")) if isinstance(bagging_result, dict) else None
@@ -881,7 +911,7 @@ def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkfl
         if workflow.draft_id and _normalize_id(snapshot.draft_id) != _normalize_id(workflow.draft_id):
             return "confirmed_snapshot_required"
         if template_version_id and _normalize_id(snapshot.template_version_id) != template_version_id:
-            return "template_version_mismatch"
+            return "confirmed_snapshot_template_mismatch"
     return None
 
 
@@ -2190,7 +2220,7 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         )
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "saved_sheet_template_mismatch"
         return _serialize_saved_sheet(draft), None
 
 
@@ -2303,7 +2333,7 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "saved_sheet_template_mismatch"
         materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
         if not isinstance(materialization_candidate, dict):
             return None, "saved_sheet_materialization_failed"
@@ -2347,7 +2377,7 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "bagging_result_template_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
@@ -2380,7 +2410,7 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "bagging_result_template_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
@@ -2420,7 +2450,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "saved_sheet_template_mismatch"
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id")) if isinstance(bagging_result, dict) else None
         output_template_version_id = _normalize_id(output_bundle.get("template_version_id")) if isinstance(output_bundle, dict) else None
         output_source_bagging_result_id = _normalize_id(output_bundle.get("source_bagging_result_id")) if isinstance(output_bundle, dict) else None
@@ -2428,9 +2458,9 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         output_source_saved_sheet_id = _normalize_id(output_bundle.get("source_saved_sheet_id")) if isinstance(output_bundle, dict) else None
         bagging_source_saved_sheet_id = _normalize_id(bagging_result.get("source_saved_sheet_id")) if isinstance(bagging_result, dict) else None
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "bagging_result_template_mismatch"
         if workflow_template_version_id and output_template_version_id != workflow_template_version_id:
-            return None, "template_version_mismatch"
+            return None, "output_bundle_template_mismatch"
         if not bagging_result_id or output_source_bagging_result_id != bagging_result_id:
             return None, "output_bundle_source_mismatch"
         if output_source_saved_sheet_id and output_source_saved_sheet_id != draft.id:

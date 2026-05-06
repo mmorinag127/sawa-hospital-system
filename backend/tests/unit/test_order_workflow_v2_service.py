@@ -1154,6 +1154,78 @@ def test_sheet_source_requires_fixed_workflow_template_version(monkeypatch) -> N
         assert row.blockers_json == []
 
 
+def test_stale_saved_sheet_template_mismatch_keeps_selected_ocr_rebuild_path(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    template_version_id = _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"fields": ["date", "menu_name", "qty.regular_x"], "rows": [["04/26", "A", "1"]]},
+        edited_by="test",
+    )
+    assert error is None
+    assert template_version_id
+
+    with session_scope() as session:
+        draft = session.get(OrderSheetDraft, saved["saved_sheet"]["saved_sheet_id"])
+        assert draft is not None
+        draft.template_version_id = _id("FTVstale")
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        row.state = "sheet_saved"
+        row.primary_action = "run_bagging"
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+    assert error is None
+    assert workflow["state"] == "saved_sheet_template_mismatch"
+    assert workflow["primary_action"] == "edit_sheet"
+    assert workflow["selected_ocr_result_id"] == evidence_id_1
+    assert workflow["saved_sheet_id"] == saved["saved_sheet"]["saved_sheet_id"]
+
+    def fake_assignment(**_kwargs):
+        return {"metrics": {}, "blockers": [], "warnings": [], "sheet_output": {"cells": {}}}
+
+    def fake_base_sheet(_order_id):
+        return {
+            "fields": ["date", "menu_name", "qty.regular_x"],
+            "header": ["日付", "メニュー", "常食"],
+            "rows": [["04/26", "大豆のトマト煮", ""]],
+            "row_ids": ["row-1"],
+        }, None
+
+    def fake_apply(*, base_sheet, assignment, facility_config, **_kwargs):
+        _ = assignment, facility_config
+        projected = dict(base_sheet)
+        projected["blockers"] = []
+        projected["warnings"] = []
+        return projected
+
+    fake_order_service = SimpleNamespace(
+        _build_hakodate_evidence_assignment_from_payload=fake_assignment,
+        _build_hakodate_weekly_menu_base_sheet=fake_base_sheet,
+        _apply_hakodate_sheet_output_to_sheet_payload=fake_apply,
+    )
+    monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
+    monkeypatch.setattr(
+        order_workflow_v2_service.config_service,
+        "get_facility_config",
+        _registered_template_config,
+    )
+
+    source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+
+    assert error is None
+    assert source["selected_ocr_result_id"] == evidence_id_1
+    assert source["sheet"]["template_version_id"] == template_version_id
+
+
 def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     with session_scope() as session:
@@ -1644,6 +1716,43 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert isinstance(lines[0].line_digest, str) and len(lines[0].line_digest) == 64
         assert snapshot.snapshot_json["order_lines"][0]["line_digest"] == lines[0].line_digest
         assert session.get(Order, order_id).status == "確定"
+
+
+def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    order_workflow_v2_service.run_bagging(order_id)
+    order_workflow_v2_service.confirm_bagging(order_id)
+
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        meta = order_workflow_v2_service._workflow_meta(row)
+        output_bundle = dict(meta["output_bundle"])
+        output_bundle["source_saved_sheet_id"] = _id("ODSstale")
+        meta["output_bundle"] = output_bundle
+        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "output_bundle_source_mismatch"
+    assert workflow["primary_action"] == "final_confirm"
+    assert workflow["blockers"] == ["output_bundle_source_mismatch"]
 
 
 def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeypatch) -> None:
