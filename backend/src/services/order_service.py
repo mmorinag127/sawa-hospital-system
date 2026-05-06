@@ -32555,6 +32555,16 @@ def reparse_order(
                 template=template_to_use,
                 user_prompt=ocr_prompt,
             )
+        policy = config_service.load_ingest_policy()
+        strict_llm_quantity = bool(
+            llm_assist
+            or inference_provider in {"openai", "gemini"}
+            or main_provider in {"openai", "gemini"}
+        )
+        reparse_quantity_rules = _build_reparse_quantity_rules(
+            policy.get("quantity_rules", {}),
+            strict_llm_quantity=strict_llm_quantity,
+        )
         date_strings = extracted.date_strings or []
         rows = extracted.table_rows or []
         tokens = extracted.tokens or []
