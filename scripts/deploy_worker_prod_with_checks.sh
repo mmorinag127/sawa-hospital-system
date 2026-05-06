@@ -291,176 +291,17 @@ if [[ "${HTTP_CODE}" != "200" ]]; then
 fi
 
 echo "[5/9] verify worker ocr-sheet quality gate"
-python3 - "${WORKER_JSON}" "${STRICT_OCR_SHEET_GATE}" "${OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO}" "${OCR_SHEET_GATE_ABS_MAX_QTY}" <<'PY'
-import json
-import statistics
-import re
-import sys
-path = sys.argv[1]
-strict = sys.argv[2] == "1"
-min_ratio = float(sys.argv[3])
-abs_max_qty = float(sys.argv[4])
-with open(path, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
-fields = data.get("fields") or []
-rows = data.get("rows") or []
-apply_blockers = data.get("apply_blockers") or []
-warnings = data.get("warnings") or []
-if not fields:
-    raise SystemExit("invalid response: fields is empty")
-if "menu" not in fields:
-    raise SystemExit("invalid response: menu field missing")
-qty_indexes = [idx for idx, field in enumerate(fields) if str(field).startswith("qty.")]
-if not qty_indexes:
-    raise SystemExit("invalid response: qty.* fields missing")
-blocked_empty = not rows
-if blocked_empty:
-    allowed_blockers = {"rows_empty", "draft_rows_empty", "menu_entries_missing", "monthly_menu_object_missing"}
-    blocker_codes = {str(code) for code in apply_blockers}
-    warning_codes = {str(code) for code in warnings}
-    if "rows_empty" not in blocker_codes:
-        raise SystemExit("invalid response: rows is empty without rows_empty blocker")
-    if not (blocker_codes | warning_codes) & allowed_blockers:
-        raise SystemExit(
-            "invalid response: rows is empty without an explicit blocked-sheet reason "
-            f"blockers={apply_blockers} warnings={warnings}"
-        )
-
-def parse_num(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
-        return None
-    return float(text)
-
-row_numeric_counts = []
-values = []
-for row in rows:
-    if not isinstance(row, list):
-        row = []
-    count = 0
-    for col in qty_indexes:
-        if col >= len(row):
-            continue
-        val = parse_num(row[col])
-        if val is None:
-            continue
-        values.append(val)
-        count += 1
-    row_numeric_counts.append(count)
-
-filled_rows = sum(1 for count in row_numeric_counts if count > 0)
-filled_ratio = (filled_rows / len(rows)) if rows else 0.0
-warnings = data.get("warnings") or []
-source = str(data.get("source") or "")
-
-if strict:
-    if warnings and not blocked_empty:
-        raise SystemExit(f"ocr-sheet gate failed: warnings present: {warnings}")
-    if not values and not blocked_empty:
-        raise SystemExit("ocr-sheet gate failed: no numeric quantity cell")
-    if source.startswith("weekly_menu") and not blocked_empty and filled_ratio < min_ratio:
-        raise SystemExit(
-            f"ocr-sheet gate failed: filled_row_ratio={filled_ratio:.3f} < {min_ratio:.3f}"
-        )
-    max_qty = max(values) if values else 0
-    if max_qty > abs_max_qty:
-        raise SystemExit(f"ocr-sheet gate failed: max_qty={max_qty:g} > {abs_max_qty:g}")
-    positives = [v for v in values if v > 0]
-    if positives:
-        median = statistics.median(positives)
-        spike_threshold = max(median * 3.5, 15.0)
-        if max_qty > spike_threshold:
-            raise SystemExit(
-                f"ocr-sheet gate failed: spike max_qty={max_qty:g} median={median:g} threshold={spike_threshold:g}"
-            )
-
-print(
-    f"ok: fields={len(fields)} rows={len(rows)} source={source} "
-    f"qty_cells={len(values)} filled_row_ratio={filled_ratio:.3f} "
-    f"max_qty={(max(values) if values else 0):g}"
-)
-PY
+python3 "${SCRIPT_DIR}/check_ocr_sheet_quality_gate.py" \
+  "${WORKER_JSON}" \
+  "${STRICT_OCR_SHEET_GATE}" \
+  "${OCR_SHEET_GATE_MIN_ROW_FILLED_RATIO}" \
+  "${OCR_SHEET_GATE_ABS_MAX_QTY}"
 
 echo "[6/9] verify current-order surface parity"
-python3 - "${WORKER_DRAFT_JSON}" "${WORKER_JSON}" "${WORKER_WORKFLOW_JSON}" <<'PY'
-import json
-import re
-import sys
-
-draft_path, ocr_path, workflow_path = sys.argv[1:4]
-with open(draft_path, "r", encoding="utf-8") as fh:
-    draft = json.load(fh)
-with open(ocr_path, "r", encoding="utf-8") as fh:
-    ocr = json.load(fh)
-with open(workflow_path, "r", encoding="utf-8") as fh:
-    workflow = json.load(fh)
-
-draft_fields = draft.get("fields") or []
-draft_rows = draft.get("rows") or []
-ocr_fields = ocr.get("fields") or []
-ocr_rows = ocr.get("rows") or []
-ocr_can_apply = bool(ocr.get("can_apply"))
-ocr_apply_blockers = ocr.get("apply_blockers") or []
-apply_gate = workflow.get("apply_gate") or {}
-workflow_can_apply = bool(apply_gate.get("can_apply"))
-workflow_ocr_can_apply = bool(workflow.get("ocr_can_apply_draft", workflow_can_apply))
-workflow_blockers = apply_gate.get("blockers") or []
-
-if not draft_fields or not draft_rows:
-    draft_apply_blockers = draft.get("apply_blockers") or []
-    if not draft_fields:
-        raise SystemExit("surface parity failed: draft-sheet fields are empty")
-    if not draft_rows:
-        if "rows_empty" not in draft_apply_blockers:
-            raise SystemExit("surface parity failed: draft-sheet rows are empty without rows_empty blocker")
-        if workflow_can_apply or ocr_can_apply:
-            raise SystemExit(
-                "surface parity failed: blocked empty draft-sheet disagrees with apply gate "
-                f"workflow_can_apply={workflow_can_apply} ocr_can_apply={ocr_can_apply}"
-            )
-
-generic_pattern = re.compile(r"col\d+$")
-draft_is_generic = all(generic_pattern.fullmatch(str(field or "")) for field in draft_fields)
-if draft_is_generic:
-    raise SystemExit(
-        "surface parity failed: draft-sheet is generic raw columns "
-        f"fields={draft_fields}"
-    )
-
-draft_has_menu = "menu" in draft_fields
-draft_has_qty = any(str(field).startswith("qty.") for field in draft_fields)
-ocr_has_menu = "menu" in ocr_fields
-ocr_has_qty = any(str(field).startswith("qty.") for field in ocr_fields)
-
-if ocr_has_menu and ocr_has_qty and not (draft_has_menu and draft_has_qty):
-    raise SystemExit(
-        "surface parity failed: ocr-sheet is semantic but draft-sheet is not "
-        f"draft_fields={draft_fields} ocr_fields={ocr_fields}"
-    )
-
-if ocr_can_apply and not workflow_ocr_can_apply:
-    raise SystemExit(
-        "surface parity failed: ocr-sheet can_apply=true but workflow-state blocks apply "
-        f"workflow_blockers={workflow_blockers}"
-    )
-
-if workflow_can_apply and ocr_apply_blockers:
-    raise SystemExit(
-        "surface parity failed: workflow-state can_apply=true but ocr-sheet still has blockers "
-        f"ocr_apply_blockers={ocr_apply_blockers}"
-    )
-
-print(
-    "ok: draft/ocr/workflow parity "
-    f"draft_rows={len(draft_rows)} ocr_rows={len(ocr_rows)} "
-    f"workflow_can_apply={workflow_can_apply} workflow_ocr_can_apply={workflow_ocr_can_apply} "
-    f"ocr_can_apply={ocr_can_apply}"
-)
-PY
+python3 "${SCRIPT_DIR}/check_worker_surface_parity.py" \
+  "${WORKER_DRAFT_JSON}" \
+  "${WORKER_JSON}" \
+  "${WORKER_WORKFLOW_JSON}"
 
 WEB_JSON=""
 WEB_DRAFT_JSON=""
@@ -507,54 +348,13 @@ if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
   fi
 
   echo "[8/9] verify worker/web current-order consistency"
-  python3 - "${WORKER_JSON}" "${WEB_JSON}" "${WORKER_DRAFT_JSON}" "${WEB_DRAFT_JSON}" "${WORKER_WORKFLOW_JSON}" "${WEB_WORKFLOW_JSON}" <<'PY'
-import json
-import sys
-ocr_worker_path, ocr_web_path, draft_worker_path, draft_web_path, workflow_worker_path, workflow_web_path = sys.argv[1:7]
-
-def load(path):
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-ocr_worker = load(ocr_worker_path)
-ocr_web = load(ocr_web_path)
-draft_worker = load(draft_worker_path)
-draft_web = load(draft_web_path)
-workflow_worker = load(workflow_worker_path)
-workflow_web = load(workflow_web_path)
-
-for label, worker, web in (
-    ("ocr-sheet", ocr_worker, ocr_web),
-    ("draft-sheet", draft_worker, draft_web),
-):
-    if (worker.get("fields") or []) != (web.get("fields") or []):
-        raise SystemExit(f"worker/web mismatch: {label} fields differ")
-    if (worker.get("rows") or []) != (web.get("rows") or []):
-        raise SystemExit(
-            f"worker/web mismatch: {label} rows differ "
-            f"worker={len(worker.get('rows') or [])} web={len(web.get('rows') or [])}"
-        )
-
-def normalize_workflow(data):
-    apply_gate = data.get("apply_gate") or {}
-    return {
-        "state": data.get("state"),
-        "warnings": data.get("warnings") or [],
-        "candidate_evidence_run_id": data.get("candidate_evidence_run_id"),
-        "active_evidence_run_id": data.get("active_evidence_run_id"),
-        "can_apply": bool(apply_gate.get("can_apply")),
-        "blockers": apply_gate.get("blockers") or [],
-    }
-
-if normalize_workflow(workflow_worker) != normalize_workflow(workflow_web):
-    raise SystemExit("worker/web mismatch: workflow-state differs")
-
-print(
-    "ok: worker/web current-order match "
-    f"ocr_rows={len(ocr_worker.get('rows') or [])} "
-    f"draft_rows={len(draft_worker.get('rows') or [])}"
-)
-PY
+  python3 "${SCRIPT_DIR}/check_worker_web_surface_consistency.py" \
+    "${WORKER_JSON}" \
+    "${WEB_JSON}" \
+    "${WORKER_DRAFT_JSON}" \
+    "${WEB_DRAFT_JSON}" \
+    "${WORKER_WORKFLOW_JSON}" \
+    "${WEB_WORKFLOW_JSON}"
 fi
 
 echo "[9/9] run mandatory system predeploy checks (strict ocr quality)"

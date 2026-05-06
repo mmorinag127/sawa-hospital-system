@@ -279,61 +279,14 @@ if [[ -n "${ORDER_ID}" ]]; then
     -o "${WORKFLOW_WEB_JSON}" \
     "${WEB_URL}/api/orders/${ORDER_ID}/workflow-state"
 
-  python3 - "${OCR_WORKER_JSON}" "${OCR_WEB_JSON}" "${DRAFT_WORKER_JSON}" "${DRAFT_WEB_JSON}" "${WORKFLOW_WORKER_JSON}" "${WORKFLOW_WEB_JSON}" <<'PY'
-import json
-import re
-import sys
-
-ocr_worker_path, ocr_web_path, draft_worker_path, draft_web_path, workflow_worker_path, workflow_web_path = sys.argv[1:7]
-
-def load(path):
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-ocr_worker = load(ocr_worker_path)
-ocr_web = load(ocr_web_path)
-draft_worker = load(draft_worker_path)
-draft_web = load(draft_web_path)
-workflow_worker = load(workflow_worker_path)
-workflow_web = load(workflow_web_path)
-
-for label, worker, web in (
-    ("ocr-sheet", ocr_worker, ocr_web),
-    ("draft-sheet", draft_worker, draft_web),
-):
-    if (worker.get("fields") or []) != (web.get("fields") or []):
-        raise SystemExit(f"worker/web mismatch: {label} fields differ")
-    if (worker.get("rows") or []) != (web.get("rows") or []):
-        raise SystemExit(
-            f"worker/web mismatch: {label} rows differ "
-            f"worker={len(worker.get('rows') or [])} web={len(web.get('rows') or [])}"
-        )
-
-draft_fields = draft_worker.get("fields") or []
-if draft_fields and all(re.fullmatch(r"col\d+", str(field or "")) for field in draft_fields):
-    raise SystemExit("web deploy parity failed: current draft-sheet is generic raw columns")
-
-def normalize_workflow(data):
-    apply_gate = data.get("apply_gate") or {}
-    return {
-        "state": data.get("state"),
-        "warnings": data.get("warnings") or [],
-        "candidate_evidence_run_id": data.get("candidate_evidence_run_id"),
-        "active_evidence_run_id": data.get("active_evidence_run_id"),
-        "can_apply": bool(apply_gate.get("can_apply")),
-        "blockers": apply_gate.get("blockers") or [],
-    }
-
-if normalize_workflow(workflow_worker) != normalize_workflow(workflow_web):
-    raise SystemExit("worker/web mismatch: workflow-state differs")
-
-print(
-    "ok: exact-order current-state parity "
-    f"ocr_rows={len(ocr_worker.get('rows') or [])} "
-    f"draft_rows={len(draft_worker.get('rows') or [])} "
-    f"state={workflow_worker.get('state')}"
-)
-PY
+  python3 "${SCRIPT_DIR}/check_worker_web_surface_consistency.py" \
+    --reject-generic-draft \
+    "${OCR_WORKER_JSON}" \
+    "${OCR_WEB_JSON}" \
+    "${DRAFT_WORKER_JSON}" \
+    "${DRAFT_WEB_JSON}" \
+    "${WORKFLOW_WORKER_JSON}" \
+    "${WORKFLOW_WEB_JSON}"
 
   rm -f "${OCR_WORKER_JSON}" "${OCR_WEB_JSON}" "${DRAFT_WORKER_JSON}" "${DRAFT_WEB_JSON}" "${WORKFLOW_WORKER_JSON}" "${WORKFLOW_WEB_JSON}"
 fi
