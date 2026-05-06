@@ -12,11 +12,11 @@ from PIL import Image, ImageDraw
 from src.services import hakodate_assignment_service
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
-    extract_template_axes_from_image,
     rectify_fax_to_template_grid,
     render_pdf_page_to_bgr,
     render_template_pdf_to_canvas,
     resolve_fixed_quad_px_for_manifest_item,
+    resolve_template_axes_from_manifest_or_image,
 )
 from src.services.hakodate_step_review_pipeline_service import (
     WEEK_SHEET_NAME,
@@ -259,8 +259,9 @@ def build_hakodate_preprocessing_for_manifest_item(
         raise ValueError(f"step2 canvas not found: {item['step2_png']}")
     canvas_height, canvas_width = existing_step2.shape[:2]
     template = render_template_pdf_to_canvas(item["template_pdf"], width=canvas_width, height=canvas_height)
-    template_xs, template_ys, _all_xs, _all_ys = extract_template_axes_from_image(
-        template,
+    template_xs, template_ys, _all_xs, _all_ys = resolve_template_axes_from_manifest_or_image(
+        item=item,
+        template_image=template,
         manifest_template_bbox=item["template_bbox"],
     )
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
@@ -280,6 +281,8 @@ def build_hakodate_preprocessing_for_manifest_item(
         render_width=render_width,
         quad_source=quad_source,
         output_dir=None,
+        template_axes_x=template_xs,
+        template_axes_y=template_ys,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
     table_bbox = registration.template_outer_grid_bbox_used

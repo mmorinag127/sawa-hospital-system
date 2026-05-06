@@ -1,9 +1,12 @@
 import cv2
 import numpy as np
+from openpyxl import Workbook
 import pytest
 
 from src.services.hakodate_fixed_quad_registration_service import (
+    canonical_template_axes_from_workbook,
     extract_template_axes_from_image,
+    resolve_template_axes_from_manifest_or_image,
     rectify_fax_to_template_grid,
 )
 
@@ -52,6 +55,48 @@ def test_extract_template_axes_blocks_incomplete_table_instead_of_using_external
             image,
             manifest_template_bbox=[10, 120, 390, 860],
         )
+
+
+def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "2026-04"
+    worksheet.print_area = "A1:H69"
+    for row in range(1, 70):
+        worksheet.row_dimensions[row].height = 10 + (row % 3)
+    for col in range(1, 9):
+        worksheet.column_dimensions[chr(64 + col)].width = 8 + col
+    workbook_path = tmp_path / "template.xlsx"
+    workbook.save(workbook_path)
+
+    xs, ys = canonical_template_axes_from_workbook(
+        workbook_path,
+        sheet_name="2026-04",
+        canvas_width=1200,
+        canvas_height=2400,
+    )
+
+    assert len(xs) == 9
+    assert len(ys) == 59
+    assert ys == sorted(ys)
+    assert all(ys[index] < ys[index + 1] for index in range(len(ys) - 1))
+
+
+def test_manifest_explicit_template_axes_are_used_without_image_line_detection() -> None:
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    xs = [10, 30, 60, 90]
+    ys = [10 + index for index in range(59)]
+
+    resolved_xs, resolved_ys, all_xs, all_ys = resolve_template_axes_from_manifest_or_image(
+        item={"template_axes_x": xs, "template_axes_y": ys},
+        template_image=image,
+        manifest_template_bbox=[0, 0, 99, 99],
+    )
+
+    assert resolved_xs == xs
+    assert resolved_ys == ys
+    assert all_xs == xs
+    assert all_ys == ys
 
 
 def test_rectify_fax_to_template_grid_uses_quad_and_template_outer_grid() -> None:

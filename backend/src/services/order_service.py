@@ -7719,27 +7719,20 @@ def _build_live_hakodate_manifest_item(
         materialized_fax_pdf = structure_dir / f"{order_id}_fax.pdf"
         materialized_fax_pdf.write_bytes(load_bytes_from_uri(document_uri))
         fax_pdf_for_registration = str(materialized_fax_pdf)
-    packaged_template_pdf = (
-        Path(__file__).resolve().parents[2]
-        / "tmp/outer_quad_eval_correct_20260426/preprocess_v10_template_snap_real_orders_20260425_0430/templates"
-        / f"{facility_id}_{week_sheet_name}.pdf"
+    structure_xlsx = order_form_service.build_fax_structure_only_excel(
+        facility_id=facility_id,
+        week_sheet_name=week_sheet_name,
+        output_dir=structure_dir,
     )
-    if packaged_template_pdf.exists():
-        structure_pdf = packaged_template_pdf
-    else:
-        structure_xlsx = order_form_service.build_fax_structure_only_excel(
-            facility_id=facility_id,
-            week_sheet_name=week_sheet_name,
-            output_dir=structure_dir,
-        )
-        structure_pdf = structure_dir / f"{structure_xlsx.stem}.pdf"
-        render_workbook_path_to_pdf(
-            structure_xlsx,
-            output_path=structure_pdf,
-            sheet_name=week_sheet_name,
-        )
+    structure_pdf = structure_dir / f"{structure_xlsx.stem}.pdf"
+    render_workbook_path_to_pdf(
+        structure_xlsx,
+        output_path=structure_pdf,
+        sheet_name=week_sheet_name,
+    )
     from src.services.hakodate_fixed_quad_registration_service import (
         build_fixed_quad_template_registration,
+        canonical_template_axes_from_workbook,
         render_pdf_page_to_bgr,
     )
 
@@ -7750,6 +7743,13 @@ def _build_live_hakodate_manifest_item(
     accepted_canvas_height = 4273
     template_image = render_pdf_page_to_bgr(str(structure_pdf), width=accepted_canvas_width)
     template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
+    template_axes_x, template_axes_y = canonical_template_axes_from_workbook(
+        structure_xlsx,
+        sheet_name=week_sheet_name,
+        canvas_width=accepted_canvas_width,
+        canvas_height=accepted_canvas_height,
+        table_bbox=template_bbox,
+    )
     registration_dir = structure_dir / f"{facility_id}_{order_id}_fixed_quad"
     registration, _images = build_fixed_quad_template_registration(
         facility_code=facility_id,
@@ -7763,6 +7763,8 @@ def _build_live_hakodate_manifest_item(
         render_width=render_width,
         quad_source=None,
         output_dir=registration_dir,
+        template_axes_x=template_axes_x,
+        template_axes_y=template_axes_y,
     )
     step2_png = Path(registration.outputs["step2"])
     return {
@@ -7775,6 +7777,8 @@ def _build_live_hakodate_manifest_item(
         "template_id": selected_template_id,
         "step2_png": str(step2_png),
         "template_bbox": template_bbox,
+        "template_axes_x": template_axes_x,
+        "template_axes_y": template_axes_y,
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
         "week_sheet_name": week_sheet_name,

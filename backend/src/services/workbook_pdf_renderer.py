@@ -300,12 +300,12 @@ def _merged_rectangles(
     return merged
 
 
-def render_worksheet_to_image(
+def worksheet_render_geometry(
     worksheet,
     *,
     dpi: int = _DEFAULT_DPI,
     margin_px: int = _DEFAULT_MARGIN_PX,
-) -> Image.Image:
+) -> dict:
     min_col, min_row, max_col, max_row = _sheet_print_range(worksheet)
     col_widths = {}
     row_heights = {}
@@ -328,8 +328,27 @@ def render_worksheet_to_image(
         current_y += row_heights[row]
         y_positions[row + 1] = current_y
 
-    image_width = current_x + margin_px
-    image_height = current_y + margin_px
+    return {
+        "print_range": [min_col, min_row, max_col, max_row],
+        "x_positions": x_positions,
+        "y_positions": y_positions,
+        "image_width": current_x + margin_px,
+        "image_height": current_y + margin_px,
+    }
+
+
+def render_worksheet_to_image(
+    worksheet,
+    *,
+    dpi: int = _DEFAULT_DPI,
+    margin_px: int = _DEFAULT_MARGIN_PX,
+) -> Image.Image:
+    geometry = worksheet_render_geometry(worksheet, dpi=dpi, margin_px=margin_px)
+    min_col, min_row, max_col, max_row = [int(value) for value in geometry["print_range"]]
+    x_positions = geometry["x_positions"]
+    y_positions = geometry["y_positions"]
+    image_width = int(geometry["image_width"])
+    image_height = int(geometry["image_height"])
     canvas = Image.new("RGB", (image_width, image_height), "white")
     draw = ImageDraw.Draw(canvas)
 

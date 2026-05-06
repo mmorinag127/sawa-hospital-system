@@ -8,7 +8,10 @@ from typing import Any
 import cv2
 import fitz
 import numpy as np
+from openpyxl import load_workbook
 from PIL import Image
+
+from src.services import workbook_pdf_renderer
 
 
 FORBIDDEN_DOWNSTREAM_METHODS = [
@@ -18,6 +21,8 @@ FORBIDDEN_DOWNSTREAM_METHODS = [
 ]
 ORDER_FORM_TEMPLATE_Y_EDGE_COUNT = 59
 TWO_STAGE_HEADER_BOUNDARY_MIN_WIDTH_RATIO = 0.12
+ORDER_FORM_TEMPLATE_HEADER_EDGE_ROWS = (7, 9)
+ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS = tuple(range(11, 68))
 
 
 @dataclass(frozen=True)
@@ -523,6 +528,83 @@ def extract_template_axes_from_image(
     return xs, ys, [int(v) for v in xs], [int(v) for v in ys_all]
 
 
+def _normalize_explicit_template_axes(
+    template_axes_x: list[Any] | None,
+    template_axes_y: list[Any] | None,
+) -> tuple[list[int], list[int]]:
+    if template_axes_x is None or template_axes_y is None:
+        raise ValueError("canonical template axes require both x and y")
+    try:
+        xs = sorted({int(round(float(value))) for value in template_axes_x})
+        ys = [int(round(float(value))) for value in template_axes_y]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"canonical template axes invalid:{exc}") from exc
+    if len(xs) < 2:
+        raise ValueError("canonical template x axes incomplete")
+    if len(ys) != ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
+        raise ValueError(
+            "canonical template y axes incomplete: "
+            f"expected={ORDER_FORM_TEMPLATE_Y_EDGE_COUNT} actual={len(ys)}"
+        )
+    if any(ys[index] >= ys[index + 1] for index in range(len(ys) - 1)):
+        raise ValueError("canonical template y axes are not strictly increasing")
+    return xs, ys
+
+
+def resolve_template_axes_from_manifest_or_image(
+    *,
+    item: dict[str, Any],
+    template_image: np.ndarray,
+    manifest_template_bbox: list[float],
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    has_x = "template_axes_x" in item
+    has_y = "template_axes_y" in item
+    if has_x or has_y:
+        xs, ys = _normalize_explicit_template_axes(
+            item.get("template_axes_x") if isinstance(item, dict) else None,
+            item.get("template_axes_y") if isinstance(item, dict) else None,
+        )
+        return xs, ys, list(xs), list(ys)
+    return extract_template_axes_from_image(
+        template_image,
+        manifest_template_bbox=manifest_template_bbox,
+    )
+
+
+def canonical_template_axes_from_workbook(
+    workbook_path: Path | str,
+    *,
+    sheet_name: str,
+    canvas_width: int,
+    canvas_height: int,
+    table_bbox: list[float] | None = None,
+) -> tuple[list[int], list[int]]:
+    workbook = load_workbook(Path(workbook_path))
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"template axes sheet not found: {sheet_name}")
+    geometry = workbook_pdf_renderer.worksheet_render_geometry(workbook[sheet_name])
+    image_width = float(geometry["image_width"])
+    image_height = float(geometry["image_height"])
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("template axes geometry invalid")
+    x_scale = float(canvas_width) / image_width
+    y_scale = float(canvas_height) / image_height
+    raw_x_positions = sorted(int(value) for value in geometry["x_positions"].values())
+    xs = sorted({int(round(float(value) * x_scale)) for value in raw_x_positions})
+    if table_bbox is not None and len(table_bbox) == 4:
+        x0 = float(table_bbox[0])
+        x1 = float(table_bbox[2])
+        tolerance = max(8.0, float(canvas_width) * 0.01)
+        xs = [x for x in xs if x0 - tolerance <= float(x) <= x1 + tolerance]
+    y_positions = geometry["y_positions"]
+    edge_rows = list(ORDER_FORM_TEMPLATE_HEADER_EDGE_ROWS) + list(ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS)
+    missing_rows = [row for row in edge_rows if row not in y_positions]
+    if missing_rows:
+        raise ValueError(f"canonical template y edge rows missing:{missing_rows}")
+    ys = [int(round(float(y_positions[row]) * y_scale)) for row in edge_rows]
+    return _normalize_explicit_template_axes(xs, ys)
+
+
 def draw_fixed_quad_overlay(original: np.ndarray, quad: np.ndarray) -> np.ndarray:
     image = original.copy()
     cv2.polylines(image, [quad.astype(np.int32)], True, (0, 0, 255), 6, cv2.LINE_AA)
@@ -677,6 +759,8 @@ def build_fixed_quad_template_registration(
     render_width: int,
     quad_source: str | None = None,
     output_dir: Path | None = None,
+    template_axes_x: list[int] | None = None,
+    template_axes_y: list[int] | None = None,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
     if quad_px is None:
         estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220)
@@ -691,10 +775,14 @@ def build_fixed_quad_template_registration(
         width=canvas_width,
         height=canvas_height,
     )
-    xs, ys, _xs_all, ys_all = extract_template_axes_from_image(
-        template,
-        manifest_template_bbox=manifest_template_bbox,
-    )
+    if template_axes_x is not None or template_axes_y is not None:
+        xs, ys = _normalize_explicit_template_axes(template_axes_x, template_axes_y)
+        ys_all = list(ys)
+    else:
+        xs, ys, _xs_all, ys_all = extract_template_axes_from_image(
+            template,
+            manifest_template_bbox=manifest_template_bbox,
+        )
     table_bbox = [xs[0], ys[0], xs[-1], ys[-1]]
     rectified = rectify_fax_to_template_grid(
         original,
