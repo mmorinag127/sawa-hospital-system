@@ -2,6 +2,7 @@ import pathlib
 import sys
 from datetime import date as dt_date
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -19,6 +20,7 @@ def _make_context(order_id: str, facility_code: str, facility_name: str, menu_na
         "label_profile": {},
         "facility_config": {"facility_name": facility_name},
         "order_for_outputs": {"id": order_id, "facility": facility_code, "lines": []},
+        "delivery_source_for_outputs": {"id": order_id, "facility": facility_code, "lines": []},
         "invoice_template": {
             "columns": [
                 {"name": "日付", "source": "date"},
@@ -31,8 +33,18 @@ def _make_context(order_id: str, facility_code: str, facility_name: str, menu_na
             "sheet_name": None,
         },
         "quantity_rules": {"zero_as_empty": True},
-        "ocr_menu_meta": None,
     }
+
+
+def test_write_delivery_note_blocks_when_template_uri_missing(tmp_path):
+    with pytest.raises(ValueError, match="delivery_template_uri_required"):
+        output_builder._write_delivery_note(
+            tmp_path / "delivery.xlsx",
+            [{"date": TARGET_DATE, "menu_name": "献立A"}],
+            [{"name": "メニュー", "source": "menu_name"}],
+            None,
+            True,
+        )
 
 
 def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, monkeypatch):

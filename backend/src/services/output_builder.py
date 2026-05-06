@@ -1412,475 +1412,6 @@ def _normalize_menu_key(value: Any) -> str:
     return _normalize_ocr_text(value)
 
 
-def _normalize_ocr_daypart(value: Any) -> str:
-    text = _normalize_ocr_text(value)
-    if not text:
-        return ""
-    if "朝" in text or "明" in text:
-        return "朝"
-    if "昼" in text or "星" in text or "a" in text or "中" in text:
-        return "昼"
-    if "夕" in text or "タ" in text or "夜" in text:
-        return "夕"
-    return text
-
-
-def _normalize_ocr_category(value: Any) -> str:
-    text = _normalize_ocr_text(value)
-    if not text:
-        return ""
-    if "主" in text:
-        if "A" in text or "Ａ" in text:
-            return "主Ａ"
-        if "B" in text or "Ｂ" in text:
-            return "主Ｂ"
-        return "主"
-    if "副" in text:
-        if "2" in text or "②" in text:
-            return "副②"
-        return "副①"
-    if text.isdigit():
-        if "2" in text:
-            return "副②"
-        if "1" in text:
-            return "副①"
-    return ""
-
-
-def _parse_ocr_date(value: str, year_hint: int | None, fallback: dt_date | None) -> dt_date | None:
-    text = _normalize_ocr_text(value)
-    if not text:
-        return fallback
-    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
-    if match:
-        try:
-            return dt_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            return fallback
-    match = re.search(r"(\d{1,2})[月/](\d{1,2})", text)
-    if match:
-        month = int(match.group(1))
-        day = int(match.group(2))
-        year = year_hint or (fallback.year if fallback else None)
-        if not year:
-            return fallback
-        try:
-            return dt_date(year, month, day)
-        except ValueError:
-            return fallback
-    if text.isdigit():
-        try:
-            serial = int(text)
-        except ValueError:
-            return fallback
-        if serial > 10000:
-            base = dt_date(1899, 12, 30)
-            return base + timedelta(days=serial)
-    return fallback
-
-
-def _parse_ocr_quantity(value: Any) -> float | None:
-    text = _normalize_ocr_text(value)
-    if not text:
-        return None
-    match = re.search(r"[-+]?[0-9]*\.?[0-9]+", text)
-    if not match:
-        return None
-    try:
-        return float(match.group())
-    except ValueError:
-        return None
-
-
-def _parse_ocr_table_rows(table_raw: str, year_hint: int | None) -> list[dict]:
-    rows: list[dict] = []
-    current_date: dt_date | None = None
-    current_daypart = ""
-    in_table = False
-    header_seen = False
-    for line in table_raw.splitlines():
-        raw_line = line.lstrip()
-        if not in_table and raw_line.startswith("|") and "日付" in raw_line and "献立" in raw_line:
-            in_table = True
-            header_seen = True
-            continue
-        if not in_table:
-            continue
-        if raw_line.startswith("|-"):
-            continue
-        if not raw_line.startswith("|"):
-            if header_seen:
-                break
-            continue
-        cells = [cell.strip() for cell in raw_line.split("|")[1:-1]]
-        if len(cells) < 4:
-            continue
-        date_cell = _normalize_ocr_text(cells[0])
-        if date_cell:
-            parsed_date = _parse_ocr_date(date_cell, year_hint, current_date)
-            if parsed_date:
-                current_date = parsed_date
-        daypart_cell = _normalize_ocr_text(cells[1])
-        if daypart_cell:
-            current_daypart = _normalize_ocr_daypart(daypart_cell)
-        category_cell = _normalize_ocr_category(cells[2])
-        menu_name = _normalize_ocr_text(cells[3])
-        if not menu_name:
-            continue
-        qty_values = [None] * 6
-        note_value = _normalize_ocr_text(cells[10]) if len(cells) >= 11 else ""
-        if len(cells) >= 10:
-            qty_cells = cells[4:10]
-            if len(cells) >= 11 and not cells[4] and sum(1 for c in qty_cells if _normalize_ocr_text(c)) == 5:
-                qty_cells = cells[5:10] + [None]
-            qty_values = [
-                _parse_ocr_quantity(qty_cells[0]),
-                _parse_ocr_quantity(qty_cells[1]),
-                _parse_ocr_quantity(qty_cells[2]),
-                _parse_ocr_quantity(qty_cells[3]),
-                _parse_ocr_quantity(qty_cells[4]),
-                _parse_ocr_quantity(qty_cells[5]),
-            ]
-        rows.append(
-            {
-                "date": current_date,
-                "daypart": current_daypart,
-                "category": category_cell,
-                "menu_name": menu_name,
-                "qty_regular_2f": qty_values[0],
-                "qty_regular_3f": qty_values[1],
-                "qty_soft_2f": qty_values[2],
-                "qty_soft_3f": qty_values[3],
-                "qty_mixer_2f": qty_values[4],
-                "qty_mixer_3f": qty_values[5],
-                "note": note_value,
-            }
-        )
-    return rows
-
-
-def _resolve_ocr_year_hint(order: dict) -> int | None:
-    year_hint = None
-    for line in order.get("lines", []):
-        date_val = _ensure_date(line.get("date"))
-        if date_val:
-            year_hint = date_val.year
-            break
-    if not year_hint:
-        week_value = order.get("week") or order.get("week_code")
-        week_text = str(week_value) if week_value is not None else ""
-        match = re.search(r"(\d{4})", week_text)
-        if match:
-            year_hint = int(match.group(1))
-    if not year_hint:
-        received_at = order.get("received_at")
-        if isinstance(received_at, dt_date):
-            year_hint = received_at.year
-        elif isinstance(received_at, str):
-            match = re.search(r"(\d{4})", received_at)
-            if match:
-                year_hint = int(match.group(1))
-    return year_hint
-
-
-def _load_order_ocr_payload(order_id: str) -> dict[str, Any] | None:
-    parsed, _ = order_service.get_ocr_output(order_id)
-    if isinstance(parsed, dict):
-        return parsed
-    raw_text, _ = order_service.get_ocr_raw_text(order_id)
-    if not isinstance(raw_text, str) or not raw_text.strip():
-        return None
-    raw_text = raw_text.strip()
-    if raw_text.startswith("{"):
-        try:
-            parsed_raw = json.loads(raw_text)
-        except Exception:  # noqa: BLE001
-            parsed_raw = None
-        if isinstance(parsed_raw, dict):
-            return parsed_raw
-    return {"table_raw": raw_text}
-
-
-def _entry_quantity_key(diet: str | None, area: str | None) -> str | None:
-    diet_key = _normalize_diet_key(diet)
-    area_key = str(area or "").strip().lower()
-    if not diet_key or not area_key:
-        return None
-    return f"{diet_key}_{area_key}"
-
-
-def _legacy_entry_quantity_field(diet: str | None, area: str | None) -> str | None:
-    diet_key = _normalize_diet_key(diet)
-    area_key = str(area or "").strip().upper()
-    if diet_key not in {"regular", "soft", "mixer"}:
-        return None
-    if area_key not in {"2F", "3F"}:
-        return None
-    return f"qty_{diet_key}_{area_key.lower()}"
-
-
-def _sum_quantity_map(quantity_map: dict[str, Any], keys: tuple[str, ...]) -> float | None:
-    total = 0.0
-    matched = False
-    for key in keys:
-        qty = _parse_ocr_quantity(quantity_map.get(key))
-        if qty is None:
-            continue
-        total += qty
-        matched = True
-    if not matched:
-        return None
-    return total if total > 0 else None
-
-
-def _generic_quantity_total(quantity_map: dict[str, Any], diet_key: str | None) -> float | None:
-    normalized_diet = _normalize_diet_key(diet_key)
-    if normalized_diet == "regular":
-        override_qty = (
-            _parse_ocr_quantity(quantity_map.get("change_2_x"))
-            if "change_2_x" in quantity_map
-            else None
-        )
-        if override_qty is None and "change_1_x" in quantity_map:
-            override_qty = _parse_ocr_quantity(quantity_map.get("change_1_x"))
-        if override_qty is not None:
-            return override_qty
-        return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x", "staff_x", "daycare_x"))
-    if normalized_diet == "regular_bag":
-        return _sum_quantity_map(quantity_map, ("regular_bag_x",))
-    if normalized_diet == "no_fried":
-        return _sum_quantity_map(quantity_map, ("no_fried_x",))
-    if normalized_diet == "soft":
-        return _sum_quantity_map(quantity_map, ("soft_x",))
-    if normalized_diet == "mixer":
-        return _sum_quantity_map(quantity_map, ("mixer_x",))
-    if normalized_diet in {"禁食", "forbidden"}:
-        return _sum_quantity_map(quantity_map, ("forbidden_x", "no_meat_x", "no_fish_x", "forbidden_other_x"))
-    return None
-
-
-def _resolve_payload_template(payload: dict[str, Any], template: dict[str, Any] | None) -> dict[str, Any] | None:
-    resolved = template if isinstance(template, dict) else None
-    if not isinstance(payload, dict):
-        return resolved
-    template_id = payload.get("template_id")
-    if not isinstance(template_id, str):
-        classification = payload.get("classification")
-        if isinstance(classification, dict):
-            template_id = classification.get("matched_template_id")
-    if not isinstance(template_id, str):
-        return resolved
-    template_id = template_id.strip()
-    if not template_id:
-        return resolved
-    if isinstance(resolved, dict) and resolved.get("template_id") == template_id:
-        return resolved
-    registry = config_service.load_fax_template_registry()
-    matched = registry.get(template_id)
-    if isinstance(matched, dict) and matched:
-        return matched
-    return resolved
-
-
-def _extract_ocr_entries_from_structured_payload(
-    payload: dict[str, Any],
-    template: dict[str, Any] | None,
-    year_hint: int | None,
-) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    template = _resolve_payload_template(payload, template)
-    if not isinstance(template, dict):
-        return []
-    rows = order_service._extract_sheet_rows_from_payload(payload, template)
-    if not rows:
-        return []
-    cell_issues = order_service._extract_payload_cell_issues(payload, template)
-    issues_by_row: dict[int, list[dict[str, Any]]] = {}
-    for issue in cell_issues:
-        if not isinstance(issue, dict):
-            continue
-        row_index = issue.get("source_row_index")
-        if not isinstance(row_index, int) or row_index < 0:
-            continue
-        issues_by_row.setdefault(row_index, []).append(dict(issue))
-    fields, field_index = order_service._build_sheet_fields_and_indexes(template)
-    if not fields:
-        return []
-    date_idx = field_index.get("date_mmdd")
-    if date_idx is None:
-        date_idx = field_index.get("date")
-    daypart_idx = field_index.get("daypart")
-    menu_idx = field_index.get("menu")
-    if menu_idx is None:
-        menu_idx = field_index.get("menu_name")
-    note_idx = field_index.get("remarks")
-    if note_idx is None:
-        note_idx = field_index.get("note")
-
-    quantity_fields: list[tuple[int, str, str]] = []
-    for idx, field in enumerate(fields):
-        diet, area = order_service._quantity_meta_from_field(field)
-        if not diet or not area:
-            continue
-        quantity_fields.append((idx, diet, area))
-
-    current_date: dt_date | None = None
-    current_daypart = ""
-    entries: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows):
-        if not isinstance(row, list):
-            continue
-        if date_idx is not None and date_idx < len(row):
-            parsed_date = _parse_ocr_date(str(row[date_idx] or ""), year_hint, current_date)
-            if parsed_date:
-                current_date = parsed_date
-        if daypart_idx is not None and daypart_idx < len(row):
-            daypart_value = _normalize_ocr_daypart(row[daypart_idx])
-            if daypart_value:
-                current_daypart = daypart_value
-        menu_name = ""
-        if menu_idx is not None and menu_idx < len(row):
-            menu_name = _normalize_ocr_text(row[menu_idx])
-        if not menu_name:
-            continue
-        note = ""
-        if note_idx is not None and note_idx < len(row):
-            note = _normalize_ocr_text(row[note_idx])
-        quantity_map: dict[str, float] = {}
-        payload_entry: dict[str, Any] = {
-            "date": current_date,
-            "daypart": current_daypart,
-            "category": "",
-            "menu_name": menu_name,
-            "note": note,
-            "index": idx,
-            "quantity_map": quantity_map,
-            "source": "structured_rows",
-        }
-        if idx in issues_by_row:
-            payload_entry["ocr_issues"] = issues_by_row[idx]
-            payload_entry["needs_review"] = True
-        for col_idx, diet, area in quantity_fields:
-            if col_idx >= len(row):
-                continue
-            qty = _parse_ocr_quantity(row[col_idx])
-            if qty is None:
-                continue
-            key = _entry_quantity_key(diet, area)
-            if key:
-                quantity_map[key] = qty
-            legacy_field = _legacy_entry_quantity_field(diet, area)
-            if legacy_field:
-                payload_entry[legacy_field] = qty
-        entries.append(payload_entry)
-    return entries
-
-
-def _lookup_ocr_entry_quantity(entry: dict[str, Any], diet_key: str | None, area_key: str | None) -> float | None:
-    if not isinstance(entry, dict):
-        return None
-    quantity_map = entry.get("quantity_map")
-    normalized_diet = _normalize_diet_key(diet_key)
-    normalized_area = str(area_key or "").strip().upper()
-    if isinstance(quantity_map, dict):
-        key = _entry_quantity_key(normalized_diet, area_key)
-        if key and key in quantity_map:
-            exact_qty = _parse_ocr_quantity(quantity_map.get(key))
-            if normalized_area not in {"", "X"} or normalized_diet not in {"regular", "禁食", "forbidden"}:
-                return exact_qty
-        if normalized_area in {"", "X"}:
-            generic_total = _generic_quantity_total(quantity_map, normalized_diet)
-            if generic_total is not None:
-                return generic_total
-    if normalized_diet == "regular":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_regular_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_regular_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_regular_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_regular_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    if normalized_diet == "soft":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_soft_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_soft_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_soft_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_soft_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    if normalized_diet == "mixer":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_mixer_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_mixer_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_mixer_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_mixer_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    return None
-
-
-def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None) -> dict[str, object]:
-    order_id = order.get("id")
-    if not order_id:
-        return {}
-    parsed = _load_order_ocr_payload(str(order_id))
-    if not isinstance(parsed, dict):
-        return {}
-    year_hint = _resolve_ocr_year_hint(order)
-    template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
-    entries = _extract_ocr_entries_from_structured_payload(parsed, template, year_hint)
-    if not entries:
-        table_raw = parsed.get("table_raw")
-        if not isinstance(table_raw, str) or not table_raw.strip():
-            return {}
-        entries = _parse_ocr_table_rows(table_raw, year_hint)
-    meta: dict[tuple[dt_date, str], dict] = {}
-    normalized_entries: list[dict] = []
-    for idx, entry in enumerate(entries):
-        date_val = entry.get("date")
-        menu_name = _normalize_menu_key(entry.get("menu_name"))
-        if not date_val or not menu_name:
-            continue
-        key = (date_val, menu_name)
-        payload = {
-            "date": date_val,
-            "menu_name": entry.get("menu_name"),
-            "daypart": entry.get("daypart"),
-            "category": entry.get("category"),
-            "index": idx,
-            "qty_regular_2f": entry.get("qty_regular_2f"),
-            "qty_regular_3f": entry.get("qty_regular_3f"),
-            "qty_soft_2f": entry.get("qty_soft_2f"),
-            "qty_soft_3f": entry.get("qty_soft_3f"),
-            "qty_mixer_2f": entry.get("qty_mixer_2f"),
-            "qty_mixer_3f": entry.get("qty_mixer_3f"),
-            "quantity_map": dict(entry.get("quantity_map") or {}),
-            "note": entry.get("note"),
-            "source": entry.get("source") or "table_raw",
-            "ocr_issues": list(entry.get("ocr_issues") or []),
-            "needs_review": bool(entry.get("needs_review")),
-        }
-        normalized_entries.append(payload)
-        if key in meta:
-            continue
-        meta[key] = payload
-    return {
-        "by_menu": meta,
-        "entries": normalized_entries,
-        "issues": [
-            issue
-            for entry in normalized_entries
-            for issue in (entry.get("ocr_issues") or [])
-            if isinstance(issue, dict)
-        ],
-        "review_required_count": sum(1 for entry in normalized_entries if entry.get("needs_review")),
-    }
-
-
 def _resolve_delivery_cell(row: dict, column: dict) -> Any:
     source = column.get("source") or column.get("name")
     value = None
@@ -2165,23 +1696,12 @@ def _write_delivery_note(
     facility_name: str | None = None,
 ) -> None:
     if not template_uri:
-        if not rows:
-            df = pd.DataFrame(columns=[col["name"] for col in columns])
-        else:
-            df = pd.DataFrame(rows)
-        df.to_excel(path, index=False)
-        return
+        raise ValueError("delivery_template_uri_required")
 
     try:
         template_bytes = load_bytes_from_uri(template_uri)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Delivery template load failed", template_uri=template_uri, error=str(exc))
-        if not rows:
-            df = pd.DataFrame(columns=[col["name"] for col in columns])
-        else:
-            df = pd.DataFrame(rows)
-        df.to_excel(path, index=False)
-        return
+        raise ValueError(f"delivery_template_load_failed:{template_uri}") from exc
     workbook = load_workbook(BytesIO(template_bytes))
     if sheet_name and sheet_name in workbook.sheetnames:
         ws = workbook[sheet_name]
@@ -2306,7 +1826,7 @@ def _build_delivery_rows(
     template: dict,
     quantity_rules: dict,
     facility_config: dict | None = None,
-    menu_meta: dict[str, object] | None = None,
+    _unused_menu_meta: dict[str, object] | None = None,
 ) -> list[dict]:
     columns = template.get("columns", [])
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
@@ -2332,73 +1852,28 @@ def _build_delivery_rows(
                 "area_key": _resolve_area_key(area_id, area_aliases),
             }
         )
-    prefer_ocr_rows = bool(template.get("prefer_ocr_raw_rows", False))
-    if not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
-        menu_meta = _build_ocr_menu_meta(order, facility_config)
-    entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
-    if entries and prefer_ocr_rows:
-        menu_names = [entry.get("menu_name") for entry in entries if entry.get("menu_name")]
-        condiment_map = _build_condiment_map(menu_names, facility_id)
-        ocr_rows: list[dict] = []
-        for entry in entries:
-            date_val = entry.get("date")
-            menu_name = entry.get("menu_name")
-            if not date_val or not menu_name:
-                continue
-            row = {
-                "date": date_val,
-                "daypart": entry.get("daypart"),
-                "menu_category": entry.get("category"),
-                "menu_name": menu_name,
-                "menu_display": "",
-                "_order_index": entry.get("index"),
-                "note": entry.get("note"),
-            }
-            for col in quantity_columns:
-                name = col.get("name")
-                if not name:
-                    continue
-                diet_key = col.get("diet_key")
-                area_key = col.get("area_key")
-                qty = _lookup_ocr_entry_quantity(entry, diet_key, area_key)
-                if qty is None:
-                    continue
-                if _safe_qty({"quantity_original": qty, "quantity_corrected": None}, zero_as_empty) is None:
-                    continue
-                row[name] = qty
-            condiments = condiment_map.get(menu_name, [])
-            _apply_condiment_note(row, condiments)
-            if row.get("menu_category"):
-                row["menu_display"] = f"{row.get('menu_category')} {row.get('menu_name')}".strip()
-            else:
-                row["menu_display"] = row.get("menu_name") or ""
-            ocr_rows.append(row)
-        ocr_rows.sort(
-            key=lambda row: (
-                row.get("date") or "",
-                row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
-            )
-        )
-        return ocr_rows
-
     rows: dict[tuple, dict] = {}
     menu_names = []
-    for line in order.get("lines", []):
+    for line_position, line in enumerate(order.get("lines", [])):
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
+        if qty is None and line.get("quantity") is not None:
+            qty = _safe_qty(
+                {"quantity_original": line.get("quantity"), "quantity_corrected": None},
+                zero_as_empty,
+            )
         if qty is None:
             continue
         menu_name = line.get("menu_name")
         if menu_name:
             menu_names.append(menu_name)
-        menu_key = _normalize_menu_key(menu_name)
-        meta_map = menu_meta.get("by_menu") if isinstance(menu_meta, dict) else None
-        meta = meta_map.get((line_date, menu_key)) if meta_map else None
         daypart_value = line.get("daypart") or line.get("menu_category")
-        if meta and not daypart_value:
-            daypart_value = meta.get("daypart") or daypart_value
-        menu_category = line.get("menu_category") or (meta.get("category") if meta else None)
-        order_index = meta.get("index") if meta else None
+        menu_category = line.get("menu_category") or line.get("category")
+        source_row_index = line.get("source_row_index")
+        try:
+            order_index = int(source_row_index)
+        except Exception:
+            order_index = line_position
         key = (line_date, daypart_value, menu_name)
         row = rows.setdefault(
             key,
@@ -2728,7 +2203,6 @@ def build_daily_output_bundle(
                     "invoice_template": ctx["invoice_template"],
                     "quantity_rules": ctx["quantity_rules"],
                     "facility_config": facility_config,
-                    "ocr_menu_meta": ctx.get("ocr_menu_meta"),
                     "bags": [],
                     "delivery_rows": [],
                 }
@@ -2742,11 +2216,11 @@ def build_daily_output_bundle(
                 group["bags"].extend(filtered_bags)
             if normalized_type in {"delivery", "both"}:
                 delivery_rows = _build_delivery_rows(
-                    ctx["order_for_outputs"],
+                    ctx["delivery_source_for_outputs"],
                     ctx["invoice_template"],
                     ctx["quantity_rules"],
                     facility_config,
-                    ctx.get("ocr_menu_meta"),
+                    None,
                 )
                 filtered_delivery_rows = [
                     row for row in delivery_rows if _ensure_date(row.get("date")) == target_date
@@ -2877,11 +2351,11 @@ def _prepare_output_context(order_id: str) -> dict:
 
     order_lines = build_order_lines_for_outputs(order)
     order_for_outputs = {**order, "lines": order_lines}
-    ocr_menu_meta = _build_ocr_menu_meta(order, facility_config)
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
     bag_types = _resolve_bag_types(facility_config)
     bags = _assign_bag_type_for_bags(bags, bag_types)
+    delivery_source_for_outputs = {**order, "lines": bags}
     return {
         "order": order,
         "facility_config": facility_config,
@@ -2890,7 +2364,7 @@ def _prepare_output_context(order_id: str) -> dict:
         "quantity_rules": quantity_rules,
         "order_lines": order_lines,
         "order_for_outputs": order_for_outputs,
-        "ocr_menu_meta": ocr_menu_meta,
+        "delivery_source_for_outputs": delivery_source_for_outputs,
         "bags": bags,
     }
 
@@ -2913,11 +2387,11 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
         return {"labels": str(label_path)}
     if output_type == "delivery":
         delivery_rows = _build_delivery_rows(
-            ctx["order_for_outputs"],
+            ctx["delivery_source_for_outputs"],
             invoice_template,
             quantity_rules,
             ctx["facility_config"],
-            ctx.get("ocr_menu_meta"),
+            None,
         )
         include_menu_name = bool(invoice_template.get("include_menu_name", False))
         _write_delivery_note(
@@ -2952,11 +2426,11 @@ def build_delivery_preview(order_id: str) -> dict:
             continue
         display_headers.append(col.get("header") or name)
     rows = _build_delivery_rows(
-        ctx["order_for_outputs"],
+        ctx["delivery_source_for_outputs"],
         invoice_template,
         quantity_rules,
         ctx["facility_config"],
-        ctx.get("ocr_menu_meta"),
+        None,
     )
     preview_rows = []
     for row in rows:
@@ -2969,14 +2443,13 @@ def build_delivery_preview(order_id: str) -> dict:
                 continue
             rendered.append(_resolve_delivery_cell(row, col))
         preview_rows.append(rendered)
-    ocr_entries = ctx.get("ocr_menu_meta", {}).get("entries", []) if isinstance(ctx.get("ocr_menu_meta"), dict) else []
     parsed, _ = order_service.get_ocr_output(order_id)
     table_raw = parsed.get("table_raw") if isinstance(parsed, dict) else None
     table_raw_len = len(table_raw) if isinstance(table_raw, str) else None
     return {
         "headers": display_headers,
         "rows": preview_rows,
-        "ocr_entry_count": len(ocr_entries),
+        "ocr_entry_count": 0,
         "ocr_table_raw_len": table_raw_len,
     }
 
@@ -3001,11 +2474,11 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     _write_label_csv(label_path, labels, label_fields)
 
     delivery_rows = _build_delivery_rows(
-        order_for_outputs,
+        ctx["delivery_source_for_outputs"],
         invoice_template,
         quantity_rules,
         ctx["facility_config"],
-        ctx.get("ocr_menu_meta"),
+        None,
     )
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
     _write_delivery_note(
