@@ -1450,6 +1450,25 @@ def _source_worksheet_for_structure_template(*, facility_id: str, week_sheet_nam
     return workbook[week_sheet_name]
 
 
+def _worksheet_for_manifest_structure_template(
+    *,
+    item: dict[str, Any],
+    facility_id: str,
+    week_sheet_name: str,
+) -> Any:
+    template_xlsx = str(item.get("template_xlsx") or item.get("structure_xlsx") or "").strip()
+    if template_xlsx:
+        sheet_name = str(item.get("template_sheet_name") or week_sheet_name or "").strip()
+        workbook = load_workbook(template_xlsx, data_only=True)
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"template sheet not found in structure workbook: {sheet_name}")
+        return workbook[sheet_name]
+    return _source_worksheet_for_structure_template(
+        facility_id=facility_id,
+        week_sheet_name=week_sheet_name,
+    )
+
+
 def _structure_grid_for_facility_template(
     *,
     facility_id: str,

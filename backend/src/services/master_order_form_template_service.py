@@ -20,6 +20,7 @@ from src.services import config_service
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 MASTER_TEMPLATE_PATH = DATA_DIR / "order_form_master_templates" / "master_layout_template.xlsx"
 MASTER_SHEET_NAME = "master_layout"
+FACILITY_TEMPLATE_SHEET_NAME = "facility_template"
 GENERATED_START_COL = 5  # E
 MASTER_GENERATED_END_COL = 12  # L in the canonical common source workbook
 HEADER_TOP_ROW = 7
@@ -28,6 +29,7 @@ HEADER_LEAF_TOP_ROW = 9
 HEADER_BOTTOM_ROW = 10
 BODY_START_ROW = 11
 BODY_END_ROW = 66
+PRINT_END_ROW = 69
 FACILITY_NAME_RANGE = "A4:E5"
 SOURCE_GENERATED_PIXEL_PROFILE = (172, 144, 224, 144, 172, 144, 141, 144)
 SOURCE_GENERATED_PIXEL_WIDTH = sum(SOURCE_GENERATED_PIXEL_PROFILE)
@@ -429,7 +431,7 @@ def build_facility_template_workbook(
     if MASTER_SHEET_NAME not in wb.sheetnames:
         raise FacilityTemplateBuildError(f"master_sheet_not_found:{MASTER_SHEET_NAME}")
     ws = wb[MASTER_SHEET_NAME]
-    ws.title = "facility_template"
+    ws.title = FACILITY_TEMPLATE_SHEET_NAME
     _freeze_images_to_master_render_size(ws)
 
     facility_name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
@@ -443,7 +445,7 @@ def build_facility_template_workbook(
     _write_header(ws, generated_columns, end_col)
     _write_body_grid(ws, end_col)
     _set_generated_widths(ws, generated_columns, end_col)
-    ws.print_area = f"A1:{get_column_letter(end_col)}{BODY_END_ROW}"
+    ws.print_area = f"A1:{get_column_letter(end_col)}{PRINT_END_ROW}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
     return wb
 

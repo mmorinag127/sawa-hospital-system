@@ -70,7 +70,7 @@ def test_build_facility_template_from_master_writes_quantity_columns(tmp_path: P
     assert worksheet["I7"].value == "変更2"
     assert worksheet["J7"].value == "備考欄"
     assert _generated_render_width(worksheet, 6) == service.SOURCE_GENERATED_PIXEL_WIDTH
-    assert str(worksheet.print_area) == "'facility_template'!$A$1:$J$66"
+    assert str(worksheet.print_area) == "'facility_template'!$A$1:$J$69"
     assert schema.sheet_state == "hidden"
     assert schema["B8"].value == 6
     assert schema["B9"].value == service.SOURCE_GENERATED_PIXEL_WIDTH
@@ -188,14 +188,14 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert "G7:H8" in merged_ranges
     assert "I7:J8" in merged_ranges
     assert worksheet["E7"].value == "常食"
-    assert worksheet["E9"].value == "2F"
-    assert worksheet["F9"].value == "3F"
+    assert worksheet["E9"].value == "花"
+    assert worksheet["F9"].value == "月"
     assert worksheet["G7"].value == "軟菜"
-    assert worksheet["G9"].value == "2F"
-    assert worksheet["H9"].value == "3F"
+    assert worksheet["G9"].value == "花"
+    assert worksheet["H9"].value == "月"
     assert worksheet["I7"].value == "ミキサー"
-    assert worksheet["I9"].value == "2F"
-    assert worksheet["J9"].value == "3F"
+    assert worksheet["I9"].value == "花"
+    assert worksheet["J9"].value == "月"
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 

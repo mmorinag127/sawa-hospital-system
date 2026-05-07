@@ -71,6 +71,7 @@ from src.services import (
     ocr_patch_candidate_service as patch_candidate_service,
 )
 from src.services import workflow_state_service, candidate_resolution_service, critical_decision_service
+from src.services import master_order_form_template_service
 from src.services.fax_extractor import (
     extract_fax_data,
     filter_tokens_by_box,
@@ -7719,16 +7720,22 @@ def _build_live_hakodate_manifest_item(
         materialized_fax_pdf = structure_dir / f"{order_id}_fax.pdf"
         materialized_fax_pdf.write_bytes(load_bytes_from_uri(document_uri))
         fax_pdf_for_registration = str(materialized_fax_pdf)
-    structure_xlsx = order_form_service.build_fax_structure_only_excel(
-        facility_id=facility_id,
-        week_sheet_name=week_sheet_name,
-        output_dir=structure_dir,
+    if selected_template_id:
+        facility_config = config_service.get_facility_config_for_template(facility_id, selected_template_id)
+    else:
+        facility_config = config_service.get_facility_config(facility_id)
+    if not isinstance(facility_config, dict):
+        raise ValueError("facility_config_missing")
+    structure_xlsx = master_order_form_template_service.build_facility_template_xlsx(
+        facility_config=facility_config,
+        output_path=structure_dir / f"{facility_id}_{order_id}_master_facility_template.xlsx",
     )
     structure_pdf = structure_dir / f"{structure_xlsx.stem}.pdf"
+    template_sheet_name = master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME
     render_workbook_path_to_pdf(
         structure_xlsx,
         output_path=structure_pdf,
-        sheet_name=week_sheet_name,
+        sheet_name=template_sheet_name,
     )
     from src.services.hakodate_fixed_quad_registration_service import (
         build_fixed_quad_template_registration,
@@ -7745,7 +7752,7 @@ def _build_live_hakodate_manifest_item(
     template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
     template_axes_x, template_axes_y = canonical_template_axes_from_workbook(
         structure_xlsx,
-        sheet_name=week_sheet_name,
+        sheet_name=template_sheet_name,
         canvas_width=accepted_canvas_width,
         canvas_height=accepted_canvas_height,
         table_bbox=template_bbox,
@@ -7772,7 +7779,9 @@ def _build_live_hakodate_manifest_item(
         "facility_code": facility_id,
         "facility_id": facility_id,
         "fax_pdf": fax_pdf_for_registration,
+        "template_xlsx": str(structure_xlsx),
         "template_pdf": str(structure_pdf),
+        "template_sheet_name": template_sheet_name,
         "fax_template_id": selected_template_id,
         "template_id": selected_template_id,
         "step2_png": str(step2_png),
@@ -7782,7 +7791,7 @@ def _build_live_hakodate_manifest_item(
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
         "week_sheet_name": week_sheet_name,
-        "source": "live_order_facility_source_workbook",
+        "source": "live_order_master_facility_template",
     }
 
 

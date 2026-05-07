@@ -264,9 +264,11 @@ def build_hakodate_preprocessing_for_manifest_item(
         template_image=template,
         manifest_template_bbox=item["template_bbox"],
     )
-    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
+    week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
+    worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
+        item=item,
         facility_id=facility_code,
-        week_sheet_name=WEEK_SHEET_NAME,
+        week_sheet_name=week_sheet_name,
     )
     quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
     registration, _step_images_np = build_fixed_quad_template_registration(

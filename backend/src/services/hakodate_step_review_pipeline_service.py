@@ -900,7 +900,8 @@ def build_hakodate_step_review_for_manifest_item(
         if isinstance(facility_config, dict) and isinstance(facility_config.get("fax_template"), dict)
         else None
     )
-    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
+    worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
+        item=item,
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
