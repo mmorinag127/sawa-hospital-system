@@ -489,6 +489,12 @@ def _write_preview_contact_sheet(thumbnails: list[Image.Image], path: Path) -> N
     sheet.save(path)
 
 
+def _select_template_owned_eval_regions(target_regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Geometry comes from the facility template. Weekly draft rows must not
+    # truncate target cells because blank body rows can carry exception values.
+    return list(target_regions)
+
+
 def build_best_method_for_manifest_item(
     *,
     item: dict[str, Any],
@@ -501,13 +507,7 @@ def build_best_method_for_manifest_item(
     facility_code = str(item.get("facility_code") or "")
     order_id = str(item.get("order_id") or "")
     pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width)
-    draft_rows = draft_sheet.get("rows") if isinstance(draft_sheet.get("rows"), list) else []
-    max_worksheet_row = ROWS_START + len(draft_rows)
-    eval_regions = [
-        region
-        for region in pre["target_regions"]
-        if ROWS_START <= int(region.get("worksheet_row") or 0) < max_worksheet_row
-    ]
+    eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
     snapped_regions, snap_debug = _snap_regions_x_to_fax_lines_all_targets(pre["raw_rectified"], eval_regions)
     facility_dir = output_dir / f"{page_index:02d}_{facility_code}_{order_id}"
