@@ -47,6 +47,7 @@ normalize_workflow_v2_json() {
         (if has("overlay_url") then .overlay_url = "<signed-url>" else . end)
         | (if has("preview_url") then .preview_url = "<signed-url>" else . end)
         | (if has("pdf_url") then .pdf_url = "<signed-url>" else . end)
+        | (if has("context_suggestion") and (.context_suggestion | type) == "object" and (.context_suggestion | has("created_at")) then .context_suggestion.created_at = "<timestamp>" else . end)
       else
         .
       end
