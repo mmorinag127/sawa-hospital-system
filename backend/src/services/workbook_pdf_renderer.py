@@ -456,6 +456,10 @@ def render_worksheet_to_image(
         y = y_positions.get(start_row, margin_px) + offset_y
         target_w = max(1, int(round(float(getattr(image, "width", pasted.width)) * float(dpi) / 96.0)))
         target_h = max(1, int(round(float(getattr(image, "height", pasted.height)) * float(dpi) / 96.0)))
+        ext = getattr(anchor, "ext", None)
+        if ext is not None:
+            target_w = max(1, int(round(float(getattr(ext, "cx", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0)))
+            target_h = max(1, int(round(float(getattr(ext, "cy", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0)))
         end = getattr(anchor, "to", None)
         if end is not None:
             end_col = int(getattr(end, "col", 0)) + 1

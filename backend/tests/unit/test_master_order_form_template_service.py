@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
+from openpyxl.utils import get_column_letter, range_boundaries
 
 from src.services import config_service
 from src.services import master_order_form_template_service as service
@@ -16,6 +18,22 @@ def _facility_config(columns: list[dict]) -> dict:
             "columns": columns,
         },
     }
+
+
+def _generated_render_width(worksheet, count: int) -> int:
+    return sum(
+        service._column_width_to_render_pixels(
+            worksheet.column_dimensions[get_column_letter(col)].width
+        )
+        for col in range(service.GENERATED_START_COL, service.GENERATED_START_COL + count)
+    )
+
+
+def _assert_no_top_static_merge_extends_past_generated_end(worksheet, end_col: int) -> None:
+    for merged_range in worksheet.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        if min_col == 7 and 2 <= min_row <= 6 and max_row <= 6:
+            assert max_col <= end_col
 
 
 def test_build_facility_template_from_master_writes_quantity_columns(tmp_path: Path) -> None:
@@ -51,15 +69,11 @@ def test_build_facility_template_from_master_writes_quantity_columns(tmp_path: P
     assert worksheet["H7"].value == "変更1"
     assert worksheet["I7"].value == "変更2"
     assert worksheet["J7"].value == "備考欄"
-    assert worksheet.column_dimensions["E"].width == 15.75
-    assert worksheet.column_dimensions["F"].width == 13.0
-    assert worksheet.column_dimensions["G"].width == 20.625
-    assert worksheet.column_dimensions["H"].width == 13.0
-    assert worksheet.column_dimensions["I"].width == 15.75
-    assert worksheet.column_dimensions["J"].width == 25.625
-    assert str(worksheet.print_area) == "'facility_template'!$A$1:$J$64"
+    assert _generated_render_width(worksheet, 6) == service.SOURCE_GENERATED_PIXEL_WIDTH
+    assert str(worksheet.print_area) == "'facility_template'!$A$1:$J$66"
     assert schema.sheet_state == "hidden"
     assert schema["B8"].value == 6
+    assert schema["B9"].value == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
 def test_build_facility_template_from_master_merges_consecutive_header_groups(tmp_path: Path) -> None:
@@ -94,12 +108,16 @@ def test_build_facility_template_from_master_merges_consecutive_header_groups(tm
     worksheet = workbook["facility_template"]
     merged_ranges = {str(item) for item in worksheet.merged_cells.ranges}
 
-    assert "F7:G7" in merged_ranges
+    assert "F7:G8" in merged_ranges
+    assert "F9:F10" in merged_ranges
+    assert "G9:G10" in merged_ranges
     assert worksheet["F7"].value == "禁食"
-    assert worksheet["F8"].value == "肉禁"
-    assert worksheet["G8"].value == "魚禁"
+    assert worksheet["F9"].value == "肉禁"
+    assert worksheet["G9"].value == "魚禁"
     assert worksheet["E7"].value == "常食"
+    assert "H7:H10" in merged_ranges
     assert worksheet["H7"].value == "備考欄"
+    assert _generated_render_width(worksheet, 4) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
 def test_build_facility_template_from_master_supports_all_master_facilities(tmp_path: Path) -> None:
@@ -116,12 +134,15 @@ def test_build_facility_template_from_master_supports_all_master_facilities(tmp_
             facility_config=resolved,
             output_path=tmp_path / f"{facility_id}_facility_template.xlsx",
         )
-        workbook = load_workbook(output, read_only=True)
+        workbook = load_workbook(output)
         worksheet = workbook["facility_template"]
         schema = workbook["generated_template_schema"]
 
         assert worksheet["E7"].value
         assert schema["B8"].value >= 1
+        assert _generated_render_width(worksheet, schema["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
+        end_col = service.GENERATED_START_COL + int(schema["B8"].value) - 1
+        _assert_no_top_static_merge_extends_past_generated_end(worksheet, end_col)
 
 
 def test_build_facility_template_from_master_uses_explicit_header_groups_only(tmp_path: Path) -> None:
@@ -146,6 +167,7 @@ def test_build_facility_template_from_master_uses_explicit_header_groups_only(tm
     assert "E7:F7" not in merged_ranges
     assert worksheet["E7"].value == "常食2F"
     assert worksheet["F7"].value == "常食3F"
+    assert _generated_render_width(worksheet, 3) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
 def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path) -> None:
@@ -162,15 +184,48 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     worksheet = workbook["facility_template"]
     merged_ranges = {str(item) for item in worksheet.merged_cells.ranges}
 
-    assert "E7:F7" in merged_ranges
-    assert "G7:H7" in merged_ranges
-    assert "I7:J7" in merged_ranges
+    assert "E7:F8" in merged_ranges
+    assert "G7:H8" in merged_ranges
+    assert "I7:J8" in merged_ranges
     assert worksheet["E7"].value == "常食"
-    assert worksheet["E8"].value == "2F"
-    assert worksheet["F8"].value == "3F"
+    assert worksheet["E9"].value == "2F"
+    assert worksheet["F9"].value == "3F"
     assert worksheet["G7"].value == "軟菜"
-    assert worksheet["G8"].value == "2F"
-    assert worksheet["H8"].value == "3F"
+    assert worksheet["G9"].value == "2F"
+    assert worksheet["H9"].value == "3F"
     assert worksheet["I7"].value == "ミキサー"
-    assert worksheet["I8"].value == "2F"
-    assert worksheet["J8"].value == "3F"
+    assert worksheet["I9"].value == "2F"
+    assert worksheet["J9"].value == "3F"
+    assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
+
+
+def test_build_facility_template_from_master_freezes_logo_size_across_column_counts(tmp_path: Path) -> None:
+    outputs = []
+    for facility_id in ("FAC00001", "FAC00011"):
+        outputs.append(
+            service.build_facility_template_xlsx_for_facility(
+                facility_id=facility_id,
+                output_path=tmp_path / f"{facility_id}_facility_template.xlsx",
+            )
+        )
+
+    image_payloads = []
+    for output in outputs:
+        workbook = load_workbook(output)
+        worksheet = workbook["facility_template"]
+        images = list(getattr(worksheet, "_images", []))
+        assert len(images) == 1
+        image = images[0]
+        assert isinstance(image.anchor, OneCellAnchor)
+        image_payloads.append(
+            (
+                image.anchor.ext.cx,
+                image.anchor.ext.cy,
+                image.anchor._from.col,
+                image.anchor._from.row,
+                image.anchor._from.colOff,
+                image.anchor._from.rowOff,
+            )
+        )
+
+    assert image_payloads[0] == image_payloads[1]

@@ -2,7 +2,12 @@ import pathlib
 import sys
 
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as WorkbookImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Border, Side
+from openpyxl.utils.units import pixels_to_EMU
+from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -99,3 +104,31 @@ def test_render_worksheet_to_image_does_not_draw_internal_merged_borders() -> No
     ]
 
     assert internal_black_pixels == []
+
+
+def test_render_worksheet_to_image_uses_one_cell_anchor_extent(tmp_path) -> None:
+    source = tmp_path / "red.png"
+    Image.new("RGBA", (100, 50), (255, 0, 0, 255)).save(source)
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.print_area = "A1:D4"
+    workbook_image = WorkbookImage(str(source))
+    workbook_image.anchor = OneCellAnchor(
+        _from=AnchorMarker(col=1, row=1),
+        ext=XDRPositiveSize2D(cx=pixels_to_EMU(20), cy=pixels_to_EMU(10)),
+    )
+    worksheet.add_image(workbook_image)
+
+    image = render_worksheet_to_image(worksheet, dpi=96)
+
+    red_pixels = [
+        (x, y)
+        for y in range(image.height)
+        for x in range(image.width)
+        if image.getpixel((x, y)) == (255, 0, 0)
+    ]
+    xs = [x for x, _y in red_pixels]
+    ys = [y for _x, y in red_pixels]
+    assert max(xs) - min(xs) + 1 == 20
+    assert max(ys) - min(ys) + 1 == 10
