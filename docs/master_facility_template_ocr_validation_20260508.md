@@ -107,12 +107,35 @@ Step PDFs produced:
 
 Parent visual contact sheets:
 
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step1_all_facilities_contact_chunk_1.png` through `step1_all_facilities_contact_chunk_4.png`
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step2_all_facilities_contact_chunk_1.png` through `step2_all_facilities_contact_chunk_4.png`
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step3_all_facilities_contact_chunk_1.png` through `step3_all_facilities_contact_chunk_4.png`
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step4_all_facilities_contact_chunk_1.png` through `step4_all_facilities_contact_chunk_4.png`
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step5_all_facilities_contact_chunk_1.png` through `step5_all_facilities_contact_chunk_4.png`
-- `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step6_all_facilities_contact_chunk_1.png` through `step6_all_facilities_contact_chunk_4.png`
+The parent agent opened and visually checked every row below with the local
+image viewer in this thread before requesting final monitor judgment.
+
+| Step | Chunk | Artifact | Parent visual result |
+| --- | --- | --- | --- |
+| step1 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step1_all_facilities_contact_chunk_1.png` | OK: accepted four-point quads contain the FAX table |
+| step1 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step1_all_facilities_contact_chunk_2.png` | OK: accepted four-point quads contain the FAX table |
+| step1 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step1_all_facilities_contact_chunk_3.png` | OK: accepted four-point quads contain the FAX table |
+| step1 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step1_all_facilities_contact_chunk_4.png` | OK: accepted four-point quads contain the FAX table |
+| step2 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step2_all_facilities_contact_chunk_1.png` | OK: rectified FAX pages keep the table inside the expected outer grid |
+| step2 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step2_all_facilities_contact_chunk_2.png` | OK: rectified FAX pages keep the table inside the expected outer grid |
+| step2 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step2_all_facilities_contact_chunk_3.png` | OK: rectified FAX pages keep the table inside the expected outer grid |
+| step2 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step2_all_facilities_contact_chunk_4.png` | OK: rectified FAX pages keep the table inside the expected outer grid |
+| step3 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step3_all_facilities_contact_chunk_1.png` | OK: extracted line overlays cover the table body without visible one-row header drift |
+| step3 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step3_all_facilities_contact_chunk_2.png` | OK: extracted line overlays cover the table body without visible one-row header drift |
+| step3 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step3_all_facilities_contact_chunk_3.png` | OK: extracted line overlays cover the table body without visible one-row header drift |
+| step3 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step3_all_facilities_contact_chunk_4.png` | OK: extracted line overlays cover the table body without visible one-row header drift |
+| step4 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step4_all_facilities_contact_chunk_1.png` | OK: selected axis match lines are aligned to the FAX table |
+| step4 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step4_all_facilities_contact_chunk_2.png` | OK: selected axis match lines are aligned to the FAX table |
+| step4 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step4_all_facilities_contact_chunk_3.png` | OK: selected axis match lines are aligned to the FAX table |
+| step4 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step4_all_facilities_contact_chunk_4.png` | OK: selected axis match lines are aligned to the FAX table |
+| step5 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step5_all_facilities_contact_chunk_1.png` | OK: merge-aware grid remains on the table and does not visibly escape into table-external areas |
+| step5 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step5_all_facilities_contact_chunk_2.png` | OK: merge-aware grid remains on the table and does not visibly escape into table-external areas |
+| step5 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step5_all_facilities_contact_chunk_3.png` | OK: merge-aware grid remains on the table and does not visibly escape into table-external areas |
+| step5 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step5_all_facilities_contact_chunk_4.png` | OK: merge-aware grid remains on the table and does not visibly escape into table-external areas |
+| step6 | 1 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step6_all_facilities_contact_chunk_1.png` | OK: red target points are present through expected quantity columns and lower blank rows |
+| step6 | 2 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step6_all_facilities_contact_chunk_2.png` | OK: red target points are present through expected quantity columns and lower blank rows |
+| step6 | 3 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step6_all_facilities_contact_chunk_3.png` | OK: red target points are present through expected quantity columns and lower blank rows |
+| step6 | 4 | `tmp/all_facility_master_template_ocr_validation_all16_supplemental_after_helper/step_contact_sheets/step6_all_facilities_contact_chunk_4.png` | OK: red target points are present through expected quantity columns and lower blank rows |
 
 Parent visual conclusion:
 
@@ -215,4 +238,3 @@ Known non-source caveat:
 - old dirty sibling worktrees exist on disk, but they were not used as deploy
   source and did not contain unmerged current master-template or Hakodate OCR
   path fixes for this deployment
-
