@@ -23,6 +23,7 @@ HEADER_TOP_ROW = 7
 HEADER_BOTTOM_ROW = 8
 BODY_START_ROW = 9
 BODY_END_ROW = 64
+FACILITY_NAME_RANGE = "A4:E5"
 
 
 class FacilityTemplateBuildError(ValueError):
@@ -159,7 +160,9 @@ def _write_header(ws: Worksheet, generated_columns: list[dict[str, Any]], end_co
             ws.merge_cells(start_row=HEADER_TOP_ROW, start_column=start_col, end_row=HEADER_TOP_ROW, end_column=stop_col)
             ws.cell(HEADER_TOP_ROW, start_col).value = group
             for inner_offset in range(offset, group_end + 1):
-                ws.cell(HEADER_BOTTOM_ROW, col_by_offset[inner_offset]).value = _column_label(generated_columns[inner_offset])
+                ws.cell(HEADER_BOTTOM_ROW, col_by_offset[inner_offset]).value = _column_label(
+                    generated_columns[inner_offset]
+                )
         else:
             col = col_by_offset[offset]
             ws.merge_cells(start_row=HEADER_TOP_ROW, start_column=col, end_row=HEADER_BOTTOM_ROW, end_column=col)
@@ -208,6 +211,21 @@ def _set_generated_widths(ws: Worksheet, generated_columns: list[dict[str, Any]]
         base_width = 8.8
     for col in range(GENERATED_START_COL, end_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 14.0 if col == note_col else base_width
+
+
+def _write_facility_name(ws: Worksheet, facility_name: str) -> None:
+    text = str(facility_name or "").strip()
+    if not text:
+        return
+    for merged_range in list(ws.merged_cells.ranges):
+        if str(merged_range) == FACILITY_NAME_RANGE:
+            break
+    else:
+        ws.merge_cells(FACILITY_NAME_RANGE)
+    cell = ws["A4"]
+    cell.value = text
+    cell.font = Font(name="Yu Gothic", bold=True, size=18)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False, shrink_to_fit=True)
 
 
 def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_columns: list[dict[str, Any]], end_col: int) -> None:
@@ -264,8 +282,7 @@ def build_facility_template_workbook(
     ws.title = "facility_template"
 
     facility_name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
-    if facility_name:
-        ws["A4"].value = facility_name
+    _write_facility_name(ws, facility_name)
 
     end_col = _ensure_generated_capacity(ws, len(generated_columns))
     _unmerge_generated_header(ws, end_col)

@@ -72,6 +72,41 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
     assert "template_source_index_missing" in validation_after_placeholder["errors"]
 
 
+def test_template_column_normalization_preserves_explicit_header_group() -> None:
+    columns = facility_template_version_service.normalize_template_columns(
+        [
+            {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+            {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+            {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 3},
+            {
+                "index": 3,
+                "role": "quantity",
+                "header": "2F",
+                "header_group": "常食",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "source_index": 4,
+            },
+            {
+                "index": 4,
+                "role": "quantity",
+                "header": "3F",
+                "header_group": "常食",
+                "diet_type": "regular",
+                "area_id": "3F",
+                "source_index": 5,
+            },
+        ]
+    )
+
+    assert columns[3]["header"] == "2F"
+    assert columns[3]["header_group"] == "常食"
+    assert columns[3]["diet_type"] == "regular"
+    assert columns[3]["area_id"] == "2F"
+    assert columns[4]["header"] == "3F"
+    assert columns[4]["header_group"] == "常食"
+
+
 def test_multiple_active_template_versions_are_blocker() -> None:
     facility_id = _id("FAC")
     columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])

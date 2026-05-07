@@ -192,6 +192,7 @@ type FacilityTemplateColumn = {
   source_index?: number;
   role: string;
   header?: string;
+  header_group?: string;
   name?: string;
   diet_type?: string;
   area_id?: string;
@@ -388,6 +389,7 @@ const createEmptyFacilityTemplateColumn = (index: number): FacilityTemplateColum
   index,
   role: "quantity",
   header: defaultHeaderForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
+  header_group: "",
   name: defaultNameForFacilityTemplateColumn({ role: "quantity", diet_type: "unknown", area_id: "X" }),
   diet_type: "unknown",
   area_id: "X",
@@ -400,6 +402,7 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
     .map((item, idx) => {
       const role = String(item.role || "").trim().toLowerCase() || "quantity";
       const header = String(item.header || "").trim();
+      const headerGroup = String(item.header_group || "").trim();
       const name = String(item.name || "").trim();
       const dietType = role === "quantity"
         ? normalizeDietTypeToken(String(item.diet_type || header || name || "")) || "unknown"
@@ -412,6 +415,7 @@ const normalizeFacilityTemplateColumns = (columns: unknown): FacilityTemplateCol
         source_index: typeof item.source_index === "number" && Number.isFinite(item.source_index) ? Number(item.source_index) : undefined,
         role,
         header: header || defaultHeaderForFacilityTemplateColumn({ role, name, diet_type: dietType, area_id: areaId }),
+        header_group: headerGroup,
         name: name || defaultNameForFacilityTemplateColumn({ role, diet_type: dietType, area_id: areaId }),
         diet_type: dietType,
         area_id: areaId,
@@ -442,9 +446,11 @@ const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) 
   columns.map((column, idx) => {
     const role = String(column.role || "").trim().toLowerCase() || "quantity";
     const header = String(column.header || "").trim();
+    const headerGroup = String(column.header_group || "").trim();
     const payload: Record<string, unknown> = { index: idx, role };
     if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) payload.source_index = Number(column.source_index);
     if (header) payload.header = header;
+    if (role === "quantity" && headerGroup) payload.header_group = headerGroup;
     return payload;
   });
 
@@ -1605,6 +1611,7 @@ export default function OrderWorkflowV2Page() {
           } else {
             next.diet_type = "";
             next.area_id = "";
+            next.header_group = "";
           }
           next.header = defaultHeaderForFacilityTemplateColumn(next);
           next.name = defaultNameForFacilityTemplateColumn(next);
@@ -2409,7 +2416,7 @@ export default function OrderWorkflowV2Page() {
                   <div className="facility-template-editor-body">
                     <div className="facility-template-callout">
                       <p>
-                        表示名・役割・並びだけを設定します。内部名・区分・エリアは保存時に表示名から自動生成します。
+                        表示名・役割・上段ヘッダー・並びだけを設定します。内部名・区分・エリアは保存時に表示名から自動生成します。
                         保存するとこの施設全体のテンプレート列定義を更新します。既存OCR結果・保存シート・袋分け・出力は破棄され、Step1からOCR再実行になります。
                       </p>
                     </div>
@@ -2452,6 +2459,7 @@ export default function OrderWorkflowV2Page() {
                             <th>#</th>
                             <th>役割</th>
                             <th>表示名</th>
+                            <th>上段ヘッダー</th>
                             <th>操作</th>
                           </tr>
                         </thead>
@@ -2477,6 +2485,15 @@ export default function OrderWorkflowV2Page() {
                                     value={column.header || ""}
                                     onChange={(event) => updateFacilityTemplateColumn(idx, "header", event.target.value)}
                                     placeholder="表示名"
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="input"
+                                    value={column.header_group || ""}
+                                    onChange={(event) => updateFacilityTemplateColumn(idx, "header_group", event.target.value)}
+                                    placeholder="空欄なら1段"
+                                    disabled={!isQuantityRole(column.role)}
                                   />
                                 </td>
                                 <td>

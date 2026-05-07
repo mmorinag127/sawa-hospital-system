@@ -897,7 +897,10 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
             col.pop("source_index", None)
         col["role"] = role
         if role == "quantity":
+            header_group = str(col.get("header_group") or "").strip()
             label_token = header or name
+            diet_label_token = f"{header_group}{header}" if header_group and header else (header_group or label_token)
+            has_header_group = bool(header_group)
             explicit_diet = _normalize_field_diet_token(explicit_diet_raw)
             diet_locked = bool(col.get("diet_type_locked", False) or col.get("diet_type_explicit", False))
             name_locked = bool(col.get("name_locked", False) or col.get("name_explicit", False))
@@ -905,8 +908,10 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
                 diet = explicit_diet or explicit_diet_raw
             elif parsed_name:
                 diet = parsed_name["diet"] or "unknown"
+            elif has_header_group and explicit_diet not in {"", "unknown"}:
+                diet = explicit_diet
             else:
-                inferred_diet = _normalize_field_diet_token(label_token or col.get("diet_type"))
+                inferred_diet = _normalize_field_diet_token(diet_label_token or col.get("diet_type"))
                 diet = inferred_diet if (header or name) else explicit_diet
                 if (
                     explicit_diet not in {"", "unknown"}
@@ -957,7 +962,10 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
             if (
                 not header
                 or legacy_unknown_spacer
-                or _quantity_header_is_internal_token(header, diet=diet, area=area, name=name)
+                or (
+                    not has_header_group
+                    and _quantity_header_is_internal_token(header, diet=diet, area=area, name=name)
+                )
             ):
                 col["header"] = _default_header_for_quantity(diet, area)
             if name_locked and parsed_name:
