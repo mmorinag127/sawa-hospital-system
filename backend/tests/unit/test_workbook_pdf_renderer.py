@@ -7,7 +7,11 @@ from openpyxl.styles import Border, Side
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services.workbook_pdf_renderer import render_workbook_to_pdf_bytes, render_worksheet_to_image  # noqa: E402
+from src.services.workbook_pdf_renderer import (  # noqa: E402
+    render_workbook_to_pdf_bytes,
+    render_worksheet_to_image,
+    worksheet_render_geometry,
+)
 
 
 def test_render_workbook_to_pdf_bytes_returns_pdf_payload() -> None:
@@ -74,3 +78,24 @@ def test_render_worksheet_to_image_draws_shared_border_once() -> None:
     black_columns = [x for x in range(image.width) if image.getpixel((x, y)) == (0, 0, 0)]
 
     assert len(black_columns) == 2
+
+
+def test_render_worksheet_to_image_does_not_draw_internal_merged_borders() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.print_area = "A1:A2"
+    side = Side(style="thin", color="000000")
+    worksheet["A1"].border = Border(left=side, right=side, top=side, bottom=side)
+    worksheet["A2"].border = Border(left=side, right=side, top=side, bottom=side)
+    worksheet.merge_cells("A1:A2")
+
+    geometry = worksheet_render_geometry(worksheet, dpi=96)
+    image = render_worksheet_to_image(worksheet, dpi=96)
+    y_internal = geometry["y_positions"][2]
+    x0 = geometry["x_positions"][1] + 3
+    x1 = geometry["x_positions"][2] - 3
+    internal_black_pixels = [
+        x for x in range(x0, x1) if image.getpixel((x, y_internal)) == (0, 0, 0)
+    ]
+
+    assert internal_black_pixels == []

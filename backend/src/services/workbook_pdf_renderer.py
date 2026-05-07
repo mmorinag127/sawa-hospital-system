@@ -125,6 +125,13 @@ def _collect_border_segments(
     y_positions: dict[int, int],
 ) -> dict[tuple[str, int, int, int], dict]:
     segments: dict[tuple[str, int, int, int], dict] = {}
+    merged = _merged_rectangles(
+        worksheet,
+        min_col=min_col,
+        min_row=min_row,
+        max_col=max_col,
+        max_row=max_row,
+    )
     for row in range(min_row, max_row + 1):
         for col in range(min_col, max_col + 1):
             cell = worksheet.cell(row=row, column=col)
@@ -133,26 +140,31 @@ def _collect_border_segments(
             x1 = x_positions[col + 1]
             y0 = y_positions[row]
             y1 = y_positions[row + 1]
-            _upsert_border_segment(
-                segments,
-                key=("v", x0, y0, y1),
-                side=border.left,
-            )
-            _upsert_border_segment(
-                segments,
-                key=("v", x1, y0, y1),
-                side=border.right,
-            )
-            _upsert_border_segment(
-                segments,
-                key=("h", y0, x0, x1),
-                side=border.top,
-            )
-            _upsert_border_segment(
-                segments,
-                key=("h", y1, x0, x1),
-                side=border.bottom,
-            )
+            merge_rect = merged.get((row, col))
+            if not merge_rect or col == merge_rect["start_col"]:
+                _upsert_border_segment(
+                    segments,
+                    key=("v", x0, y0, y1),
+                    side=border.left,
+                )
+            if not merge_rect or col == merge_rect["end_col"]:
+                _upsert_border_segment(
+                    segments,
+                    key=("v", x1, y0, y1),
+                    side=border.right,
+                )
+            if not merge_rect or row == merge_rect["start_row"]:
+                _upsert_border_segment(
+                    segments,
+                    key=("h", y0, x0, x1),
+                    side=border.top,
+                )
+            if not merge_rect or row == merge_rect["end_row"]:
+                _upsert_border_segment(
+                    segments,
+                    key=("h", y1, x0, x1),
+                    side=border.bottom,
+                )
     return segments
 
 
@@ -440,12 +452,21 @@ def render_worksheet_to_image(
             continue
         offset_x = int(round(float(getattr(start, "colOff", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0))
         offset_y = int(round(float(getattr(start, "rowOff", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0))
-        target_w = max(1, int(round(float(getattr(image, "width", pasted.width)) * float(dpi) / 96.0)))
-        target_h = max(1, int(round(float(getattr(image, "height", pasted.height)) * float(dpi) / 96.0)))
-        if (target_w, target_h) != pasted.size:
-            pasted = pasted.resize((target_w, target_h))
         x = x_positions.get(start_col, margin_px) + offset_x
         y = y_positions.get(start_row, margin_px) + offset_y
+        target_w = max(1, int(round(float(getattr(image, "width", pasted.width)) * float(dpi) / 96.0)))
+        target_h = max(1, int(round(float(getattr(image, "height", pasted.height)) * float(dpi) / 96.0)))
+        end = getattr(anchor, "to", None)
+        if end is not None:
+            end_col = int(getattr(end, "col", 0)) + 1
+            end_row = int(getattr(end, "row", 0)) + 1
+            if end_col in x_positions and end_row in y_positions:
+                end_offset_x = int(round(float(getattr(end, "colOff", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0))
+                end_offset_y = int(round(float(getattr(end, "rowOff", 0) or 0) / float(_EMU_PER_PIXEL) * float(dpi) / 96.0))
+                target_w = max(1, x_positions[end_col] + end_offset_x - x)
+                target_h = max(1, y_positions[end_row] + end_offset_y - y)
+        if (target_w, target_h) != pasted.size:
+            pasted = pasted.resize((target_w, target_h))
         canvas.paste(pasted, (x, y), pasted)
 
     return canvas
