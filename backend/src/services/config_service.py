@@ -267,19 +267,34 @@ def _enrich_missing_source_indexes_from_source_workbook(
     slots = list(_source_workbook_column_slots_for_template(str(template_id or template.get("template_id") or "")))
     if not slots:
         return template
+    def _slot_source_index(slot: dict[str, Any]) -> int:
+        try:
+            return int(slot.get("source_index"))
+        except Exception:
+            return -1
+
     source_menu_col = next((int(slot["worksheet_col"]) for slot in slots if slot.get("role") == "menu_name"), None)
     if source_menu_col is None:
         return template
 
     enriched_columns = [deepcopy(column) if isinstance(column, dict) else column for column in columns]
     used_source_indexes: set[int] = set()
+    for column in enriched_columns:
+        if not isinstance(column, dict):
+            continue
+        try:
+            existing_source_index = int(column.get("source_index"))
+        except Exception:
+            continue
+        if existing_source_index >= 0:
+            used_source_indexes.add(existing_source_index)
     structural_roles = ("date", "daypart", "menu_name")
     for role in structural_roles:
         source_slot = next(
             (
                 slot
                 for slot in slots
-                if slot.get("role") == role and int(slot.get("source_index") or -1) not in used_source_indexes
+                if slot.get("role") == role and _slot_source_index(slot) not in used_source_indexes
             ),
             None,
         )
@@ -296,6 +311,36 @@ def _enrich_missing_source_indexes_from_source_workbook(
                 used_source_indexes.add(source_index)
             break
 
+    operator_menu_column_index = next(
+        (
+            int(column.get("index") or 0)
+            for column in enriched_columns
+            if isinstance(column, dict)
+            and str(column.get("role") or "").strip().lower() == "menu_name"
+        ),
+        None,
+    )
+    if operator_menu_column_index is None:
+        operator_menu_column_index = source_menu_col - 1
+    pre_menu_slots = [
+        slot
+        for slot in slots
+        if int(slot.get("worksheet_col") or 0) < source_menu_col
+        and _slot_source_index(slot) not in used_source_indexes
+    ]
+    pre_menu_aux_columns = [
+        column
+        for column in enriched_columns
+        if isinstance(column, dict)
+        and str(column.get("role") or "").strip().lower() == "aux"
+        and column.get("source_index") is None
+        and int(column.get("index") or 0) < operator_menu_column_index
+    ]
+    for column, slot in zip(pre_menu_aux_columns, pre_menu_slots):
+        source_index = int(slot["source_index"])
+        column["source_index"] = source_index
+        used_source_indexes.add(source_index)
+
     post_menu_slots = [
         slot
         for slot in slots
@@ -306,7 +351,8 @@ def _enrich_missing_source_indexes_from_source_workbook(
         column
         for column in enriched_columns
         if isinstance(column, dict)
-        and str(column.get("role") or "").strip().lower() in {"quantity", "note", "remarks"}
+        and str(column.get("role") or "").strip().lower() in {"aux", "quantity", "note", "remarks"}
+        and int(column.get("index") or 0) > operator_menu_column_index
     ]
     for column, slot in zip(post_menu_columns, post_menu_slots):
         if column.get("source_index") is not None:

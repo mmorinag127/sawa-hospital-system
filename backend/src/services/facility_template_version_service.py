@@ -38,7 +38,7 @@ def _normalize_token(value: object) -> str:
     return str(value or "").strip().lower()
 
 
-_SOURCE_INDEX_REQUIRED_ROLES = {"date", "daypart", "menu_name", "quantity", "note", "remarks"}
+_SOURCE_INDEX_REQUIRED_ROLES = {"date", "daypart", "menu_name", "aux", "quantity", "note", "remarks"}
 
 
 def _parse_source_index(column: dict[str, Any]) -> int | None:

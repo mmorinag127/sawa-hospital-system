@@ -51,7 +51,8 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
     columns = facility_template_version_service.normalize_template_columns(
         [
             {"index": 0, "role": "date", "header": "日付"},
-            {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 1, "role": "aux", "header": "合計"},
+            {"index": 2, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
         ]
     )
 

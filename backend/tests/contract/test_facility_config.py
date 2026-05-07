@@ -262,7 +262,43 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
     assert (placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
 
 
-def test_fac00003_stale_override_columns_preserve_physical_source_indexes():
+def test_fac00004_aux_columns_preserve_physical_source_indexes():
+    _clear_facilities()
+    _seed_facilities_from_master()
+    _ensure_active_template_version_for_facility("FAC00004")
+    client = TestClient(app)
+    assert client.get("/facilities").status_code == 200
+    fetched = client.get("/facilities/FAC00004")
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    resolved = payload.get("resolved_config") or {}
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+
+    assert [column.get("header") for column in columns[:13]] == [
+        "日付",
+        "区分",
+        "副区分",
+        "メニュー",
+        "合計",
+        "常食",
+        "通所",
+        "職員",
+        "肉禁",
+        "魚禁",
+        "揚げ物禁",
+        "変更1",
+        "備考欄",
+    ]
+    assert [column.get("source_index") for column in columns[:13]] == list(range(13))
+    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
+    validation = facility_template_version_service.validate_template_columns(version_columns)
+    assert validation["errors"] == []
+    assert version_columns[2].get("column_id") == "col_002_aux"
+    assert version_columns[4].get("column_id") == "col_004_aux"
+    assert version_columns[5].get("column_id") == "col_005_quantity"
+
+
+def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns():
     _clear_facilities()
     _seed_facilities_from_master()
     client = TestClient(app)
@@ -293,4 +329,16 @@ def test_fac00003_stale_override_columns_preserve_physical_source_indexes():
 
     assert fetched.status_code == 200
     columns = ((fetched.json().get("resolved_config") or {}).get("fax_template") or {}).get("columns") or []
-    assert [column.get("source_index") for column in columns[:11]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [column.get("header") for column in columns[:10]] == [
+        "日付",
+        "区分",
+        "メニュー",
+        "花",
+        "月",
+        "花",
+        "月",
+        "花",
+        "月",
+        "備考",
+    ]
+    assert [column.get("source_index") for column in columns[:10]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
