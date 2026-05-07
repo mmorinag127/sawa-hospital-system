@@ -51,6 +51,12 @@ def test_build_facility_template_from_master_writes_quantity_columns(tmp_path: P
     assert worksheet["H7"].value == "変更1"
     assert worksheet["I7"].value == "変更2"
     assert worksheet["J7"].value == "備考欄"
+    assert worksheet.column_dimensions["E"].width == 15.75
+    assert worksheet.column_dimensions["F"].width == 13.0
+    assert worksheet.column_dimensions["G"].width == 20.625
+    assert worksheet.column_dimensions["H"].width == 13.0
+    assert worksheet.column_dimensions["I"].width == 15.75
+    assert worksheet.column_dimensions["J"].width == 25.625
     assert str(worksheet.print_area) == "'facility_template'!$A$1:$J$64"
     assert schema.sheet_state == "hidden"
     assert schema["B8"].value == 6

@@ -24,6 +24,18 @@ HEADER_BOTTOM_ROW = 8
 BODY_START_ROW = 9
 BODY_END_ROW = 64
 FACILITY_NAME_RANGE = "A4:E5"
+GENERATED_WIDTH_PROFILE = [
+    15.75,
+    13.0,
+    20.625,
+    13.0,
+    15.75,
+    13.0,
+    12.625,
+    13.0,
+    9.0,
+    13.0,
+]
 
 
 class FacilityTemplateBuildError(ValueError):
@@ -206,11 +218,11 @@ def _set_generated_widths(ws: Worksheet, generated_columns: list[dict[str, Any]]
             note_col = GENERATED_START_COL + offset
             break
 
-    base_width = 10.0
-    if note_col is not None and len(generated_columns) > 1:
-        base_width = 8.8
-    for col in range(GENERATED_START_COL, end_col + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 14.0 if col == note_col else base_width
+    for offset, col in enumerate(range(GENERATED_START_COL, end_col + 1)):
+        width = GENERATED_WIDTH_PROFILE[offset] if offset < len(GENERATED_WIDTH_PROFILE) else 13.0
+        if col == note_col and offset + 1 < len(GENERATED_WIDTH_PROFILE):
+            width += GENERATED_WIDTH_PROFILE[offset + 1]
+        ws.column_dimensions[get_column_letter(col)].width = width
 
 
 def _write_facility_name(ws: Worksheet, facility_name: str) -> None:
