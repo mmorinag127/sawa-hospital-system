@@ -330,6 +330,8 @@ type OcrSheetPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string;
   quantity_assignment_strategy?: string | null;
   quantity_column_count?: number;
@@ -360,6 +362,8 @@ type DraftSheetJsonPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string | null;
   warnings?: string[] | null;
   quantity_assignment_strategy?: string | null;
@@ -387,6 +391,8 @@ type DraftSheetPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string | null;
   warnings?: string[] | null;
   review_state?: string | null;
@@ -411,6 +417,8 @@ type NormalizedEditorSheetPayload = {
   cellProvenanceRows: string[][];
   ocrNumericCellItems: OcrNumericCellItem[];
   ocrNumericCellSummary: OcrNumericCellSummary;
+  ocrNumericReviewItems: OcrNumericReviewItem[];
+  ocrNumericReviewSummary: OcrNumericReviewSummary;
   source: string;
   warnings: string[];
 };
@@ -439,6 +447,45 @@ type OcrNumericCellSummary = {
   deterministic_candidate_count?: number | null;
   weak_candidate_count?: number | null;
   unresolved_count?: number | null;
+};
+type OcrNumericReviewCandidate = {
+  value?: string | null;
+  classification?: OcrNumericCellClassification | string | null;
+  confidence_tier?: OcrCellConfidenceTier | string | null;
+  placement_basis?: string | null;
+  sources?: string[] | null;
+  reasons?: string[] | null;
+  raw_texts?: string[] | null;
+};
+type OcrNumericReviewFinding = {
+  code?: string | null;
+  severity?: string | null;
+  summary?: string | null;
+  reference_label?: string | null;
+  reference_values?: string[] | null;
+  same_day_menu_total?: string | null;
+};
+type OcrNumericReviewItem = {
+  row_index?: number | null;
+  col_index?: number | null;
+  field?: string | null;
+  field_label?: string | null;
+  date_key?: string | null;
+  daypart_key?: string | null;
+  menu_key?: string | null;
+  menu_label?: string | null;
+  current_value?: string | null;
+  fax_values?: string[] | null;
+  same_day_values?: string[] | null;
+  other_day_values?: string[] | null;
+  same_day_menu_total?: string | null;
+  suggested_values?: OcrNumericReviewCandidate[] | null;
+  findings?: OcrNumericReviewFinding[] | null;
+};
+type OcrNumericReviewSummary = {
+  review_item_count?: number | null;
+  suggestion_count?: number | null;
+  finding_count?: number | null;
 };
 type OcrSheetTouchedCell = {
   rowIndex: number;
@@ -3534,6 +3581,12 @@ export default function OrderDetailPage() {
     unresolved_count: 0,
   });
 
+  const blankOcrNumericReviewSummary = (): OcrNumericReviewSummary => ({
+    review_item_count: 0,
+    suggestion_count: 0,
+    finding_count: 0,
+  });
+
   const normalizeOcrNumericCellSummary = (value: unknown): OcrNumericCellSummary => {
     const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
     const readCount = (key: string) => {
@@ -3551,6 +3604,24 @@ export default function OrderDetailPage() {
       deterministic_candidate_count: readCount("deterministic_candidate_count"),
       weak_candidate_count: readCount("weak_candidate_count"),
       unresolved_count: readCount("unresolved_count"),
+    };
+  };
+
+  const normalizeOcrNumericReviewSummary = (value: unknown): OcrNumericReviewSummary => {
+    const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const readCount = (key: string) => {
+      const raw = source[key];
+      if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+      if (typeof raw === "string") {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+    return {
+      review_item_count: readCount("review_item_count"),
+      suggestion_count: readCount("suggestion_count"),
+      finding_count: readCount("finding_count"),
     };
   };
 
@@ -3588,6 +3659,81 @@ export default function OrderDetailPage() {
         };
       })
       .filter((item): item is OcrNumericCellItem => Boolean(item));
+  };
+
+  const normalizeOcrNumericReviewItems = (value: unknown): OcrNumericReviewItem[] => {
+    if (!Array.isArray(value)) return [];
+    const parseIndex = (candidate: unknown) => {
+      if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate;
+      if (typeof candidate === "string" && candidate.trim()) {
+        const parsed = Number(candidate);
+        if (Number.isInteger(parsed)) return parsed;
+      }
+      return null;
+    };
+    const readStrings = (candidate: unknown): string[] =>
+      Array.isArray(candidate) ? candidate.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+    return value
+      .map((raw): OcrNumericReviewItem | null => {
+        if (!raw || typeof raw !== "object") return null;
+        const item = raw as Record<string, unknown>;
+        const suggestedValues = Array.isArray(item.suggested_values)
+          ? item.suggested_values
+              .map((candidate): OcrNumericReviewCandidate | null => {
+                if (!candidate || typeof candidate !== "object") return null;
+                const source = candidate as Record<string, unknown>;
+                const valueText = String(source.value ?? "").trim();
+                if (!valueText) return null;
+                return {
+                  value: valueText,
+                  classification: normalizeOcrNumericCellClassification(source.classification),
+                  confidence_tier: normalizeOcrCellConfidenceTier(source.confidence_tier),
+                  placement_basis: String(source.placement_basis ?? "").trim(),
+                  sources: readStrings(source.sources),
+                  reasons: readStrings(source.reasons),
+                  raw_texts: readStrings(source.raw_texts),
+                };
+              })
+              .filter((candidate): candidate is OcrNumericReviewCandidate => Boolean(candidate))
+          : [];
+        const findings = Array.isArray(item.findings)
+          ? item.findings
+              .map((candidate): OcrNumericReviewFinding | null => {
+                if (!candidate || typeof candidate !== "object") return null;
+                const source = candidate as Record<string, unknown>;
+                const summary = String(source.summary ?? "").trim();
+                const code = String(source.code ?? "").trim();
+                if (!summary && !code) return null;
+                return {
+                  code,
+                  severity: String(source.severity ?? "").trim(),
+                  summary,
+                  reference_label: String(source.reference_label ?? "").trim(),
+                  reference_values: readStrings(source.reference_values),
+                  same_day_menu_total: String(source.same_day_menu_total ?? "").trim(),
+                };
+              })
+              .filter((candidate): candidate is OcrNumericReviewFinding => Boolean(candidate))
+          : [];
+        return {
+          row_index: parseIndex(item.row_index),
+          col_index: parseIndex(item.col_index),
+          field: String(item.field ?? "").trim(),
+          field_label: String(item.field_label ?? "").trim(),
+          date_key: String(item.date_key ?? "").trim(),
+          daypart_key: String(item.daypart_key ?? "").trim(),
+          menu_key: String(item.menu_key ?? "").trim(),
+          menu_label: String(item.menu_label ?? "").trim(),
+          current_value: String(item.current_value ?? "").trim(),
+          fax_values: readStrings(item.fax_values),
+          same_day_values: readStrings(item.same_day_values),
+          other_day_values: readStrings(item.other_day_values),
+          same_day_menu_total: String(item.same_day_menu_total ?? "").trim(),
+          suggested_values: suggestedValues,
+          findings,
+        };
+      })
+      .filter((item): item is OcrNumericReviewItem => Boolean(item));
   };
 
   const dedupeOcrSheetTouchedCells = (cells: OcrSheetTouchedCell[]): OcrSheetTouchedCell[] => {
@@ -3718,6 +3864,8 @@ export default function OrderDetailPage() {
       cellProvenanceRows,
       ocrNumericCellItems: [],
       ocrNumericCellSummary: blankOcrNumericCellSummary(),
+      ocrNumericReviewItems: [],
+      ocrNumericReviewSummary: blankOcrNumericReviewSummary(),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
     };
@@ -3789,6 +3937,10 @@ export default function OrderDetailPage() {
       cellProvenanceRows,
       ocrNumericCellItems: normalizeOcrNumericCellItems((payload as Record<string, unknown>).ocrNumericCellItems),
       ocrNumericCellSummary: normalizeOcrNumericCellSummary((payload as Record<string, unknown>).ocrNumericCellSummary),
+      ocrNumericReviewItems: normalizeOcrNumericReviewItems((payload as Record<string, unknown>).ocrNumericReviewItems),
+      ocrNumericReviewSummary: normalizeOcrNumericReviewSummary(
+        (payload as Record<string, unknown>).ocrNumericReviewSummary,
+      ),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
     };

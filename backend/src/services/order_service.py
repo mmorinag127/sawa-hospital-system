@@ -23436,6 +23436,614 @@ def _build_weekly_menu_numeric_cell_items(
     return items, summary
 
 
+def _format_numeric_review_value(value: object) -> str:
+    parsed = _parse_sheet_quantity_cell(value)
+    if parsed is None:
+        return ""
+    if float(parsed).is_integer():
+        return str(int(parsed))
+    text = f"{float(parsed):.3f}".rstrip("0").rstrip(".")
+    return text
+
+
+def _extract_numeric_review_values_from_text(value: object) -> list[str]:
+    text = _field_value_to_str(value).strip()
+    if not text:
+        return []
+    normalized = (
+        text.replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .translate(_SHEET_TRANSLATION)
+    )
+    matches = re.findall(r"-?\d+(?:\.\d+)?", normalized)
+    candidates = matches or [hakodate_ocr_evidence_service.normalize_ocr_value(text)]
+    values: list[str] = []
+    for candidate in candidates:
+        formatted = _format_numeric_review_value(candidate)
+        if formatted and formatted not in values:
+            values.append(formatted)
+    return values
+
+
+def _numeric_review_median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _numeric_review_outlier_kind(current: float | None, peers: list[float]) -> str:
+    if current is None or not peers:
+        return ""
+    median = _numeric_review_median(peers)
+    if median is None:
+        return ""
+    gap = abs(float(current) - float(median))
+    if median <= 0:
+        return "high" if current >= 8 and gap >= 8 else ""
+    if current >= max(median * 3.0, median + 8.0):
+        return "high"
+    if median >= 3.0 and current <= min(median * 0.34, max(median - 6.0, 0.0)) and gap >= 4.0:
+        return "low"
+    return ""
+
+
+def _ocr_numeric_review_candidate_priority(
+    *,
+    classification: str,
+    source: str,
+) -> int:
+    normalized = str(classification or "").strip().lower()
+    if normalized == "accepted":
+        return 4
+    if normalized == "deterministic_candidate":
+        return 3
+    if normalized == "weak_candidate":
+        return 2
+    if normalized == "unresolved":
+        return 1
+    return 2 if source in {"hakodate_raw_text", "cell_issue_raw_text"} else 1
+
+
+def _build_sheet_quantity_column_metadata(
+    *,
+    fields: list[str],
+    header: list[str],
+) -> dict[int, dict[str, Any]]:
+    metadata: dict[int, dict[str, Any]] = {}
+    common_diets = {"regular", "regular_bag", "soft", "mixer", "daycare", "staff", "placeholder"}
+    for col_index, field in enumerate(fields):
+        field_name = str(field or "").strip()
+        if not field_name.startswith("qty."):
+            continue
+        diet, area = _quantity_meta_from_field(field_name)
+        label = header[col_index] if col_index < len(header) and str(header[col_index] or "").strip() else _field_label(field_name)
+        metadata[col_index] = {
+            "field": field_name,
+            "label": str(label or "").strip() or field_name,
+            "diet": diet or "",
+            "area": area or "",
+            "is_special_diet": bool(diet and diet not in common_diets),
+        }
+    return metadata
+
+
+def _build_sheet_row_review_contexts(
+    *,
+    fields: list[str],
+    rows: list[list[str]],
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str, str], int], dict[tuple[str, str], list[int]]]:
+    contexts: list[dict[str, Any]] = []
+    lookup_exact: dict[tuple[str, str, str], int] = {}
+    lookup_date_menu: dict[tuple[str, str], list[int]] = {}
+    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
+    previous_date_key = ""
+    previous_daypart_key = ""
+    for row_index, row in enumerate(rows):
+        values = list(row) if isinstance(row, list) else []
+        raw_date_key = _normalize_sheet_date_key(_safe_row_get(values, date_idx))
+        raw_daypart_key = _normalize_daypart_key(_safe_row_get(values, daypart_idx))
+        effective_date_key = raw_date_key or previous_date_key
+        effective_daypart_key = raw_daypart_key or previous_daypart_key
+        menu_label = _safe_row_get(values, menu_idx)
+        menu_key = _normalize_menu_text(menu_label)
+        if raw_date_key:
+            previous_date_key = raw_date_key
+        if raw_daypart_key:
+            previous_daypart_key = raw_daypart_key
+        identity = (effective_date_key, effective_daypart_key, menu_key)
+        contexts.append(
+            {
+                "row_index": row_index,
+                "values": values,
+                "date_key": effective_date_key,
+                "daypart_key": effective_daypart_key,
+                "menu_key": menu_key,
+                "menu_label": menu_label,
+                "identity": identity,
+            }
+        )
+        if effective_date_key and menu_key and identity not in lookup_exact:
+            lookup_exact[identity] = row_index
+        if effective_date_key and menu_key:
+            lookup_date_menu.setdefault((effective_date_key, menu_key), []).append(row_index)
+    return contexts, lookup_exact, lookup_date_menu
+
+
+def _resolve_review_candidate_target_indexes(
+    *,
+    item: dict[str, Any],
+    row_count: int,
+    quantity_columns: set[int],
+    lookup_exact: dict[tuple[str, str, str], int],
+    lookup_date_menu: dict[tuple[str, str], list[int]],
+) -> tuple[int | None, int | None]:
+    row_index = item.get("target_row_index")
+    col_index = item.get("target_col_index")
+    try:
+        resolved_row_index = int(row_index) if row_index is not None else None
+    except Exception:
+        resolved_row_index = None
+    try:
+        resolved_col_index = int(col_index) if col_index is not None else None
+    except Exception:
+        resolved_col_index = None
+    if (
+        resolved_row_index is not None
+        and resolved_col_index is not None
+        and 0 <= resolved_row_index < row_count
+        and resolved_col_index in quantity_columns
+    ):
+        return resolved_row_index, resolved_col_index
+    source_col_index = item.get("source_col_index")
+    try:
+        inferred_col_index = int(source_col_index) if source_col_index is not None else None
+    except Exception:
+        inferred_col_index = None
+    if inferred_col_index not in quantity_columns:
+        return None, None
+    date_key = _normalize_sheet_date_key(item.get("date_key"))
+    daypart_key = _normalize_daypart_key(item.get("daypart_key"))
+    menu_key = _normalize_menu_text(item.get("menu_key"))
+    if not date_key or not menu_key:
+        return None, None
+    inferred_row_index = lookup_exact.get((date_key, daypart_key, menu_key))
+    if inferred_row_index is None:
+        date_menu_matches = lookup_date_menu.get((date_key, menu_key)) or []
+        if len(date_menu_matches) == 1:
+            inferred_row_index = int(date_menu_matches[0])
+    if inferred_row_index is None or not (0 <= inferred_row_index < row_count):
+        return None, None
+    return inferred_row_index, inferred_col_index
+
+
+def _merge_ocr_numeric_review_candidate(
+    *,
+    cell_candidates: dict[tuple[int, int], dict[str, dict[str, Any]]],
+    row_index: int,
+    col_index: int,
+    value: str,
+    classification: str = "",
+    confidence_tier: str = "",
+    placement_basis: str = "",
+    reason: str = "",
+    source: str = "",
+    raw_texts: list[str] | None = None,
+) -> None:
+    normalized_value = _format_numeric_review_value(value)
+    if not normalized_value:
+        return
+    bucket = cell_candidates.setdefault((int(row_index), int(col_index)), {})
+    current = bucket.get(normalized_value)
+    source_token = str(source or "").strip()
+    reason_token = str(reason or "").strip()
+    placement_token = str(placement_basis or "").strip()
+    confidence_token = str(confidence_tier or "").strip()
+    priority = _ocr_numeric_review_candidate_priority(
+        classification=str(classification or ""),
+        source=source_token,
+    )
+    raw_text_values = [str(text) for text in (raw_texts or []) if str(text).strip()]
+    if current is None:
+        bucket[normalized_value] = {
+            "value": normalized_value,
+            "classification": str(classification or "").strip(),
+            "confidence_tier": confidence_token,
+            "placement_basis": placement_token,
+            "sources": [source_token] if source_token else [],
+            "reasons": [reason_token] if reason_token else [],
+            "raw_texts": raw_text_values[:5],
+            "priority": priority,
+        }
+        return
+    if priority > int(current.get("priority") or 0):
+        current["classification"] = str(classification or "").strip()
+        current["confidence_tier"] = confidence_token
+        current["placement_basis"] = placement_token
+        current["priority"] = priority
+    for token, key in (
+        (source_token, "sources"),
+        (reason_token, "reasons"),
+    ):
+        if token and token not in current[key]:
+            current[key].append(token)
+    for text in raw_text_values:
+        if text and text not in current["raw_texts"]:
+            current["raw_texts"].append(text)
+    current["raw_texts"] = current["raw_texts"][:5]
+
+
+def _build_ocr_numeric_review_items(
+    *,
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    fields = [str(field or "").strip() for field in (payload.get("fields") or []) if str(field or "").strip()]
+    rows = [list(row) for row in (payload.get("rows") or []) if isinstance(row, list)]
+    header = [str(cell or "") for cell in (payload.get("header") or [])]
+    if not fields or not rows:
+        return [], {
+            "review_item_count": 0,
+            "suggestion_count": 0,
+            "finding_count": 0,
+        }
+
+    column_metadata = _build_sheet_quantity_column_metadata(fields=fields, header=header)
+    if not column_metadata:
+        return [], {
+            "review_item_count": 0,
+            "suggestion_count": 0,
+            "finding_count": 0,
+        }
+
+    row_contexts, lookup_exact, lookup_date_menu = _build_sheet_row_review_contexts(fields=fields, rows=rows)
+    quantity_columns = set(column_metadata.keys())
+    cell_candidates: dict[tuple[int, int], dict[str, dict[str, Any]]] = {}
+
+    for raw_item in payload.get("ocr_numeric_cell_items") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        row_index, col_index = _resolve_review_candidate_target_indexes(
+            item=raw_item,
+            row_count=len(rows),
+            quantity_columns=quantity_columns,
+            lookup_exact=lookup_exact,
+            lookup_date_menu=lookup_date_menu,
+        )
+        if row_index is None or col_index is None:
+            continue
+        _merge_ocr_numeric_review_candidate(
+            cell_candidates=cell_candidates,
+            row_index=row_index,
+            col_index=col_index,
+            value=str(raw_item.get("value") or ""),
+            classification=str(raw_item.get("classification") or ""),
+            confidence_tier=str(raw_item.get("confidence_tier") or ""),
+            placement_basis=str(raw_item.get("placement_basis") or ""),
+            reason=str(raw_item.get("reason") or ""),
+            source="ocr_numeric_item",
+        )
+
+    for issue in payload.get("cell_issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        row_index = issue.get("row_index")
+        col_index = issue.get("column_index")
+        try:
+            resolved_row_index = int(row_index) if row_index is not None else None
+            resolved_col_index = int(col_index) if col_index is not None else None
+        except Exception:
+            resolved_row_index = None
+            resolved_col_index = None
+        if (
+            resolved_row_index is None
+            or resolved_col_index is None
+            or not (0 <= resolved_row_index < len(rows))
+            or resolved_col_index not in quantity_columns
+        ):
+            continue
+        raw_texts = issue.get("raw_texts") if isinstance(issue.get("raw_texts"), list) else []
+        extracted_values: list[str] = []
+        for raw_text in raw_texts:
+            for candidate_value in _extract_numeric_review_values_from_text(raw_text):
+                if candidate_value not in extracted_values:
+                    extracted_values.append(candidate_value)
+        if not extracted_values:
+            for candidate_value in _extract_numeric_review_values_from_text(issue.get("text")):
+                if candidate_value not in extracted_values:
+                    extracted_values.append(candidate_value)
+        for candidate_value in extracted_values:
+            _merge_ocr_numeric_review_candidate(
+                cell_candidates=cell_candidates,
+                row_index=resolved_row_index,
+                col_index=resolved_col_index,
+                value=candidate_value,
+                confidence_tier="low",
+                placement_basis=str(issue.get("source") or ""),
+                reason=str(issue.get("issue_code") or issue.get("reason") or ""),
+                source="cell_issue_raw_text",
+                raw_texts=[str(text) for text in raw_texts if str(text).strip()] or None,
+            )
+
+    projection = payload.get("hakodate_evidence_projection") if isinstance(payload.get("hakodate_evidence_projection"), dict) else {}
+    for bucket_name in ("applied", "deferred", "skipped"):
+        for entry in projection.get(bucket_name) or []:
+            if not isinstance(entry, dict):
+                continue
+            assignment_cell = entry.get("assignment_cell") if isinstance(entry.get("assignment_cell"), dict) else entry
+            field = str(entry.get("field") or assignment_cell.get("semantic_field") or "").strip()
+            if not field or field not in fields:
+                continue
+            col_index = fields.index(field)
+            if col_index not in quantity_columns:
+                continue
+            row_index = entry.get("row_index")
+            try:
+                resolved_row_index = int(row_index) if row_index is not None else None
+            except Exception:
+                resolved_row_index = None
+            if resolved_row_index is None or not (0 <= resolved_row_index < len(rows)):
+                continue
+            raw_texts = assignment_cell.get("raw_texts") if isinstance(assignment_cell.get("raw_texts"), list) else []
+            for candidate_value in _extract_numeric_review_values_from_text(assignment_cell.get("value_text")):
+                _merge_ocr_numeric_review_candidate(
+                    cell_candidates=cell_candidates,
+                    row_index=resolved_row_index,
+                    col_index=col_index,
+                    value=candidate_value,
+                    classification=str(entry.get("classification") or ""),
+                    confidence_tier=str(entry.get("confidence_tier") or ""),
+                    placement_basis=str(entry.get("placement_basis") or ""),
+                    reason=str(entry.get("defer_reason") or entry.get("skip_reason") or ""),
+                    source="hakodate_projection_value",
+                    raw_texts=[str(text) for text in raw_texts if str(text).strip()] or None,
+                )
+            for raw_text in raw_texts:
+                for candidate_value in _extract_numeric_review_values_from_text(raw_text):
+                    _merge_ocr_numeric_review_candidate(
+                        cell_candidates=cell_candidates,
+                        row_index=resolved_row_index,
+                        col_index=col_index,
+                        value=candidate_value,
+                        classification=str(entry.get("classification") or ""),
+                        confidence_tier=str(entry.get("confidence_tier") or ""),
+                        placement_basis=str(entry.get("placement_basis") or ""),
+                        reason=str(entry.get("defer_reason") or entry.get("skip_reason") or ""),
+                        source="hakodate_raw_text",
+                        raw_texts=[str(text) for text in raw_texts if str(text).strip()] or None,
+                    )
+
+    same_day_peer_values: dict[tuple[str, int], list[float]] = {}
+    other_day_menu_values: dict[tuple[str, int], list[tuple[str, float]]] = {}
+    other_day_special_shares: dict[tuple[str, int], list[tuple[str, float]]] = {}
+    row_totals: dict[int, float] = {}
+    row_value_cache: dict[tuple[int, int], float] = {}
+    for context in row_contexts:
+        row_index = int(context.get("row_index") or 0)
+        values = context.get("values") if isinstance(context.get("values"), list) else []
+        total = 0.0
+        has_total = False
+        for col_index in quantity_columns:
+            qty_value = _parse_sheet_quantity_cell(_safe_row_get(values, col_index))
+            if qty_value is None:
+                continue
+            row_value_cache[(row_index, col_index)] = float(qty_value)
+            total += float(qty_value)
+            has_total = True
+            date_key = str(context.get("date_key") or "")
+            menu_key = str(context.get("menu_key") or "")
+            if date_key:
+                same_day_peer_values.setdefault((date_key, col_index), []).append(float(qty_value))
+            if menu_key and date_key:
+                other_day_menu_values.setdefault((menu_key, col_index), []).append((date_key, float(qty_value)))
+        if has_total:
+            row_totals[row_index] = total
+    for context in row_contexts:
+        row_index = int(context.get("row_index") or 0)
+        date_key = str(context.get("date_key") or "")
+        menu_key = str(context.get("menu_key") or "")
+        total = row_totals.get(row_index)
+        if not menu_key or not date_key or total is None or total <= 0:
+            continue
+        for col_index in quantity_columns:
+            current_qty = row_value_cache.get((row_index, col_index))
+            if current_qty is None:
+                continue
+            share = current_qty / total if total > 0 else 0.0
+            other_day_special_shares.setdefault((menu_key, col_index), []).append((date_key, share))
+
+    items: list[dict[str, Any]] = []
+    suggestion_count = 0
+    finding_count = 0
+    for context in row_contexts:
+        row_index = int(context.get("row_index") or 0)
+        values = context.get("values") if isinstance(context.get("values"), list) else []
+        date_key = str(context.get("date_key") or "")
+        menu_key = str(context.get("menu_key") or "")
+        menu_label = str(context.get("menu_label") or "")
+        daypart_key = str(context.get("daypart_key") or "")
+        same_day_menu_total_value = row_totals.get(row_index)
+        same_day_menu_total = (
+            str(int(same_day_menu_total_value))
+            if same_day_menu_total_value is not None and float(same_day_menu_total_value).is_integer()
+            else f"{float(same_day_menu_total_value):.3f}".rstrip("0").rstrip(".")
+            if same_day_menu_total_value is not None
+            else ""
+        )
+        for col_index, meta in column_metadata.items():
+            current_value = _field_value_to_str(_safe_row_get(values, col_index)).strip()
+            current_qty = _parse_sheet_quantity_cell(current_value)
+            candidate_bucket = cell_candidates.get((row_index, col_index)) or {}
+            sorted_candidates = sorted(
+                candidate_bucket.values(),
+                key=lambda item: (
+                    -int(item.get("priority") or 0),
+                    -len(item.get("sources") or []),
+                    str(item.get("value") or ""),
+                ),
+            )
+            fax_values = [str(item.get("value") or "") for item in sorted_candidates if str(item.get("value") or "").strip()]
+            findings: list[dict[str, Any]] = []
+            if len(fax_values) >= 2:
+                findings.append(
+                    {
+                        "code": "corrected_digit_candidate",
+                        "severity": "warning",
+                        "summary": "OCR/FAX に複数の数字候補があります",
+                        "reference_label": "OCR/FAX候補",
+                        "reference_values": fax_values[:4],
+                    }
+                )
+            if current_value and fax_values and current_value not in fax_values:
+                findings.append(
+                    {
+                        "code": "fax_value_mismatch",
+                        "severity": "critical" if len(fax_values) == 1 else "warning",
+                        "summary": "現在値がOCR/FAX候補と一致しません",
+                        "reference_label": "OCR/FAX候補",
+                        "reference_values": fax_values[:4],
+                        "same_day_menu_total": same_day_menu_total or None,
+                    }
+                )
+            same_day_values = [
+                value
+                for value in same_day_peer_values.get((date_key, col_index), [])
+                if current_qty is None or not math.isclose(float(value), float(current_qty))
+            ]
+            if _numeric_review_outlier_kind(current_qty, same_day_values):
+                findings.append(
+                    {
+                        "code": "same_day_outlier",
+                        "severity": "warning",
+                        "summary": "同日の同列値から大きく外れています",
+                        "reference_label": "同日比較",
+                        "reference_values": [
+                            str(int(value)) if float(value).is_integer() else f"{float(value):.3f}".rstrip("0").rstrip(".")
+                            for value in same_day_values[:6]
+                        ],
+                        "same_day_menu_total": same_day_menu_total or None,
+                    }
+                )
+            historical_values = [
+                value
+                for candidate_date, value in other_day_menu_values.get((menu_key, col_index), [])
+                if candidate_date and candidate_date != date_key
+            ]
+            if _numeric_review_outlier_kind(current_qty, historical_values):
+                findings.append(
+                    {
+                        "code": "other_day_menu_outlier",
+                        "severity": "warning",
+                        "summary": "別日の同メニュー値から大きく外れています",
+                        "reference_label": "別日比較",
+                        "reference_values": [
+                            str(int(value)) if float(value).is_integer() else f"{float(value):.3f}".rstrip("0").rstrip(".")
+                            for value in historical_values[:6]
+                        ],
+                        "same_day_menu_total": same_day_menu_total or None,
+                    }
+                )
+            if meta.get("is_special_diet") and current_qty is not None and same_day_menu_total_value and same_day_menu_total_value > 0:
+                current_share = float(current_qty) / float(same_day_menu_total_value)
+                historical_shares = [
+                    share
+                    for candidate_date, share in other_day_special_shares.get((menu_key, col_index), [])
+                    if candidate_date and candidate_date != date_key
+                ]
+                historical_share_median = _numeric_review_median(historical_shares)
+                if (
+                    historical_share_median is not None
+                    and current_share >= 0.85
+                    and current_share >= historical_share_median + 0.35
+                    and same_day_menu_total_value >= 4
+                ):
+                    findings.append(
+                        {
+                            "code": "special_diet_total_share_high",
+                            "severity": "warning",
+                            "summary": "禁食系の比率が同日メニュー合計に対して高すぎます",
+                            "reference_label": "同日メニュー合計",
+                            "reference_values": [same_day_menu_total or ""],
+                        }
+                    )
+            suggested_values = [
+                {
+                    "value": str(candidate.get("value") or ""),
+                    "classification": str(candidate.get("classification") or ""),
+                    "confidence_tier": str(candidate.get("confidence_tier") or ""),
+                    "placement_basis": str(candidate.get("placement_basis") or ""),
+                    "sources": list(candidate.get("sources") or []),
+                    "reasons": list(candidate.get("reasons") or []),
+                    "raw_texts": list(candidate.get("raw_texts") or []),
+                }
+                for candidate in sorted_candidates
+                if str(candidate.get("value") or "").strip() and str(candidate.get("value") or "").strip() != current_value
+            ][:3]
+            if not findings and not suggested_values:
+                continue
+            suggestion_count += len(suggested_values)
+            finding_count += len(findings)
+            items.append(
+                {
+                    "row_index": row_index,
+                    "col_index": col_index,
+                    "field": str(meta.get("field") or ""),
+                    "field_label": str(meta.get("label") or ""),
+                    "date_key": date_key,
+                    "daypart_key": daypart_key,
+                    "menu_key": menu_key,
+                    "menu_label": menu_label,
+                    "current_value": current_value,
+                    "fax_values": fax_values[:4],
+                    "same_day_values": [
+                        str(int(value)) if float(value).is_integer() else f"{float(value):.3f}".rstrip("0").rstrip(".")
+                        for value in same_day_values[:6]
+                    ],
+                    "other_day_values": [
+                        str(int(value)) if float(value).is_integer() else f"{float(value):.3f}".rstrip("0").rstrip(".")
+                        for value in historical_values[:6]
+                    ],
+                    "same_day_menu_total": same_day_menu_total or None,
+                    "suggested_values": suggested_values,
+                    "findings": findings,
+                }
+            )
+    items.sort(
+        key=lambda item: (
+            -max(
+                (
+                    2
+                    if str(finding.get("severity") or "").strip().lower() == "critical"
+                    else 1
+                    for finding in item.get("findings") or []
+                ),
+                default=0,
+            ),
+            -len(item.get("suggested_values") or []),
+            int(item.get("row_index") or 0),
+            int(item.get("col_index") or 0),
+        )
+    )
+    return items[:48], {
+        "review_item_count": len(items[:48]),
+        "suggestion_count": suggestion_count,
+        "finding_count": finding_count,
+    }
+
+
+def _augment_ocr_numeric_review_payload(
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    review_items, review_summary = _build_ocr_numeric_review_items(payload=payload)
+    payload["ocr_numeric_review_items"] = review_items
+    payload["ocr_numeric_review_summary"] = review_summary
+    return payload
+
+
 def _collect_sheet_row_dates_from_identity(rows: list[dict[str, Any]]) -> set[date]:
     dates: set[date] = set()
     for row in rows:
@@ -27287,6 +27895,7 @@ def get_ocr_sheet(
         payload_mapping_block_reason=payload_mapping_block_reason,
         payload_rows_present=bool(payload_rows),
     )
+    payload = _augment_ocr_numeric_review_payload(payload=payload)
     return (
         _augment_sheet_review_payload(
             order_id=order_id,
@@ -28334,6 +28943,7 @@ def build_order_hakodate_projected_sheet(
         base_sheet=sheet,
         assignment=assignment,
     )
+    projected = _augment_ocr_numeric_review_payload(payload=projected)
     projection = projected.get("hakodate_evidence_projection")
     metrics = projection.get("metrics") if isinstance(projection, dict) else {}
     return {
