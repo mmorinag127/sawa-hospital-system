@@ -339,6 +339,11 @@ def _round_bbox(value: Any) -> list[float]:
 
 
 def _region_key(region: dict[str, Any]) -> tuple[Any, ...]:
+    key = _region_identity_key(region)
+    return (*key, tuple(_round_bbox(region.get("bbox"))))
+
+
+def _region_identity_key(region: dict[str, Any]) -> tuple[Any, ...]:
     metadata = region.get("metadata") if isinstance(region.get("metadata"), dict) else {}
     return (
         str(region.get("sheet_cell") or "").strip(),
@@ -346,7 +351,6 @@ def _region_key(region: dict[str, Any]) -> tuple[Any, ...]:
         int(region.get("worksheet_col") or 0),
         str(region.get("semantic_field") or region.get("field") or "").strip(),
         str(metadata.get("field_label") or region.get("field_label") or "").strip(),
-        tuple(_round_bbox(region.get("bbox"))),
     )
 
 
@@ -371,13 +375,19 @@ def _region_signature(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _diff_region_signatures(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> dict[str, Any]:
-    left_by_key = {_region_key(item): item for item in left}
-    right_by_key = {_region_key(item): item for item in right}
+    left_by_key = {_region_identity_key(item): item for item in left}
+    right_by_key = {_region_identity_key(item): item for item in right}
     left_keys = set(left_by_key)
     right_keys = set(right_by_key)
     common_keys = left_keys & right_keys
     red_left = {key for key, item in left_by_key.items() if bool(_region_signature([item])[0]["ocr_candidate"])}
     red_right = {key for key, item in right_by_key.items() if bool(_region_signature([item])[0]["ocr_candidate"])}
+    bbox_deltas: list[float] = []
+    for key in sorted(common_keys):
+        left_bbox = _round_bbox(left_by_key[key].get("bbox"))
+        right_bbox = _round_bbox(right_by_key[key].get("bbox"))
+        if len(left_bbox) == 4 and len(right_bbox) == 4:
+            bbox_deltas.append(max(abs(left_value - right_value) for left_value, right_value in zip(left_bbox, right_bbox, strict=True)))
     return {
         "target_local_count": len(left_keys),
         "target_stg_count": len(right_keys),
@@ -393,6 +403,7 @@ def _diff_region_signatures(left: list[dict[str, Any]], right: list[dict[str, An
         "target_stg_only": [_serialize_key(key) for key in sorted(right_keys - left_keys)[:30]],
         "red_local_only": [_serialize_key(key) for key in sorted(red_left - red_right)[:30]],
         "red_stg_only": [_serialize_key(key) for key in sorted(red_right - red_left)[:30]],
+        "max_common_bbox_delta_px": round(max(bbox_deltas), 6) if bbox_deltas else 0.0,
     }
 
 
@@ -457,7 +468,7 @@ def _serialize_key(key: tuple[Any, ...]) -> dict[str, Any]:
         "worksheet_col": key[2],
         "field": key[3],
         "field_label": key[4],
-        "bbox": list(key[5]),
+        "bbox": list(key[5]) if len(key) > 5 else None,
     }
 
 
