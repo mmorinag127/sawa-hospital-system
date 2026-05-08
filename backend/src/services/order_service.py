@@ -7729,6 +7729,7 @@ def _build_live_hakodate_manifest_item(
     structure_xlsx = master_order_form_template_service.build_facility_template_xlsx(
         facility_config=facility_config,
         output_path=structure_dir / f"{facility_id}_{order_id}_master_facility_template.xlsx",
+        week_value=week_code,
     )
     structure_pdf = structure_dir / f"{structure_xlsx.stem}.pdf"
     template_sheet_name = master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import copy, deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.services import config_service
+from src.services import config_service, menu_service, sheet_week_service
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -35,6 +37,7 @@ SOURCE_GENERATED_PIXEL_PROFILE = (172, 144, 224, 144, 172, 144, 141, 144)
 SOURCE_GENERATED_PIXEL_WIDTH = sum(SOURCE_GENERATED_PIXEL_PROFILE)
 DEFAULT_DPI = 144
 EMU_PER_PIXEL = 9525
+DAYPART_ORDER = {"朝": 0, "昼": 1, "夕": 2}
 
 
 class FacilityTemplateBuildError(ValueError):
@@ -379,6 +382,309 @@ def _write_facility_name(ws: Worksheet, facility_name: str) -> None:
     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False, shrink_to_fit=True)
 
 
+def _cell_value_for_digest(value: object) -> object:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _side_for_digest(side: Any) -> dict[str, Any]:
+    return {
+        "style": getattr(side, "style", None),
+        "color": getattr(getattr(side, "color", None), "rgb", None),
+    }
+
+
+def _cell_style_for_digest(cell: Any) -> dict[str, Any]:
+    alignment = cell.alignment
+    font = cell.font
+    fill = cell.fill
+    border = cell.border
+    return {
+        "alignment": {
+            "horizontal": alignment.horizontal,
+            "vertical": alignment.vertical,
+            "wrap_text": alignment.wrap_text,
+            "shrink_to_fit": alignment.shrink_to_fit,
+            "text_rotation": alignment.textRotation,
+        },
+        "font": {
+            "name": font.name,
+            "size": font.sz,
+            "bold": font.bold,
+            "italic": font.italic,
+            "color": getattr(getattr(font, "color", None), "rgb", None),
+        },
+        "fill": {
+            "fill_type": fill.fill_type,
+            "fgColor": getattr(fill.fgColor, "rgb", None),
+            "bgColor": getattr(fill.bgColor, "rgb", None),
+        },
+        "border": {
+            "left": _side_for_digest(border.left),
+            "right": _side_for_digest(border.right),
+            "top": _side_for_digest(border.top),
+            "bottom": _side_for_digest(border.bottom),
+        },
+        "number_format": cell.number_format,
+    }
+
+
+def _worksheet_digest_payload(ws: Worksheet, *, max_row: int, max_col: int) -> dict[str, Any]:
+    cells: list[dict[str, Any]] = []
+    for row in range(1, max_row + 1):
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell, MergedCell):
+                continue
+            cells.append(
+                {
+                    "row": row,
+                    "col": col,
+                    "value": _cell_value_for_digest(cell.value),
+                    "style": _cell_style_for_digest(cell),
+                }
+            )
+    images: list[dict[str, Any]] = []
+    for image in getattr(ws, "_images", []) or []:
+        anchor = getattr(image, "anchor", None)
+        marker = getattr(anchor, "_from", None)
+        images.append(
+            {
+                "row": getattr(marker, "row", None),
+                "col": getattr(marker, "col", None),
+                "rowOff": getattr(marker, "rowOff", None),
+                "colOff": getattr(marker, "colOff", None),
+                "width": getattr(image, "width", None),
+                "height": getattr(image, "height", None),
+            }
+        )
+    return {
+        "title": ws.title,
+        "print_area": str(ws.print_area or ""),
+        "max_row": max_row,
+        "max_col": max_col,
+        "merged_ranges": sorted(str(item) for item in ws.merged_cells.ranges),
+        "rows": [
+            {
+                "row": row,
+                "height": ws.row_dimensions[row].height,
+                "hidden": ws.row_dimensions[row].hidden,
+            }
+            for row in range(1, max_row + 1)
+        ],
+        "columns": [
+            {
+                "col": col,
+                "letter": get_column_letter(col),
+                "width": ws.column_dimensions[get_column_letter(col)].width,
+                "hidden": ws.column_dimensions[get_column_letter(col)].hidden,
+            }
+            for col in range(1, max_col + 1)
+        ],
+        "images": sorted(images, key=lambda item: (item.get("row") or 0, item.get("col") or 0)),
+        "cells": cells,
+    }
+
+
+def _stable_digest(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_facility_template_diagnostics(
+    *,
+    facility_config: dict[str, Any],
+    week_value: object | None = None,
+    week_menu_entries: Any | None = None,
+    master_template_path: Path | str = MASTER_TEMPLATE_PATH,
+) -> dict[str, Any]:
+    master_path = Path(master_template_path)
+    workbook = build_facility_template_workbook(
+        facility_config=facility_config,
+        week_value=week_value,
+        week_menu_entries=week_menu_entries,
+        master_template_path=master_path,
+    )
+    worksheet = workbook[FACILITY_TEMPLATE_SHEET_NAME]
+    schema = workbook["generated_template_schema"]
+    end_col = worksheet.max_column
+    schema_rows = [
+        [_cell_value_for_digest(value) for value in row]
+        for row in schema.iter_rows(values_only=True)
+    ]
+    schema_rows_for_digest = [
+        ([row[0], "<generated_at_utc>", *row[2:]] if row and row[0] == "generated_at_utc" else row)
+        for row in schema_rows
+    ]
+    facility_payload = _worksheet_digest_payload(
+        worksheet,
+        max_row=PRINT_END_ROW,
+        max_col=end_col,
+    )
+    canonical_payload = {
+        "facility_template": facility_payload,
+        "generated_template_schema": schema_rows_for_digest,
+    }
+    return {
+        "master_template_sha256": _file_sha256(master_path),
+        "master_template_name": master_path.name,
+        "facility_id": str(facility_config.get("facility_id") or facility_config.get("id") or "").strip(),
+        "week_value": str(week_value or ""),
+        "facility_template_canonical_digest": _stable_digest(canonical_payload),
+        "facility_template_payload_digest": _stable_digest(facility_payload),
+        "schema_digest": _stable_digest(schema_rows_for_digest),
+        "generated_end_col": end_col,
+        "generated_end_letter": get_column_letter(end_col),
+        "schema": schema_rows,
+    }
+
+
+def _parse_menu_date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
+def _normalize_week_menu_entries(*, entries: Any, week_value: object) -> list[dict[str, Any]]:
+    month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_value)
+    if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
+        return []
+    if not isinstance(entries, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        menu_date = _parse_menu_date(entry.get("menu_date"))
+        daypart = str(entry.get("daypart") or "").strip()
+        menu_name = str(entry.get("name") or "").strip()
+        if not isinstance(menu_date, date) or not daypart or not menu_name:
+            continue
+        if not (start_date <= menu_date <= end_date):
+            continue
+        normalized.append(
+            {
+                **entry,
+                "_menu_date_obj": menu_date,
+                "_source_index": index,
+            }
+        )
+    return sorted(
+        normalized,
+        key=lambda item: (
+            item["_menu_date_obj"],
+            DAYPART_ORDER.get(str(item.get("daypart") or "").strip(), 99),
+            int(item.get("sort_order") or item.get("display_order") or item.get("order") or item["_source_index"]),
+            int(item["_source_index"]),
+        ),
+    )
+
+
+def _collect_week_menu_entries(*, facility_id: str, week_value: object) -> list[dict[str, Any]]:
+    month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_value)
+    if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
+        return []
+    payload = menu_service.get_menu_for_facility(month_id, facility_id)
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    return _normalize_week_menu_entries(entries=entries, week_value=week_value)
+
+
+def _weekday_label(menu_date: date) -> str:
+    labels = ["月", "火", "水", "木", "金", "土", "日"]
+    return labels[menu_date.weekday()]
+
+
+def _clear_body_identity_values(ws: Worksheet) -> None:
+    for row in range(BODY_START_ROW, BODY_END_ROW + 1):
+        for col in range(1, 5):
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.value = None
+
+
+def _write_cell_if_writable(ws: Worksheet, *, row: int, column: int, value: object) -> None:
+    cell = ws.cell(row=row, column=column)
+    if isinstance(cell, MergedCell):
+        return
+    cell.value = value
+
+
+def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> int:
+    _clear_body_identity_values(ws)
+    row_idx = BODY_START_ROW
+    current_date: date | None = None
+    date_start_row = BODY_START_ROW
+    current_daypart = ""
+    written = 0
+    for entry in entries:
+        menu_date = entry.get("_menu_date_obj")
+        if not isinstance(menu_date, date):
+            continue
+        if row_idx > BODY_END_ROW:
+            raise FacilityTemplateBuildError("facility_template_week_menu_exceeds_supported_rows")
+        daypart = str(entry.get("daypart") or "").strip()
+        category = str(entry.get("category") or "").strip()
+        name = str(entry.get("name") or "").strip()
+        if current_date != menu_date:
+            if current_date is not None and row_idx - 1 > date_start_row:
+                _write_cell_if_writable(ws, row=row_idx - 1, column=1, value=_weekday_label(current_date))
+            current_date = menu_date
+            date_start_row = row_idx
+            current_daypart = ""
+            _write_cell_if_writable(ws, row=row_idx, column=1, value=menu_date)
+        _write_cell_if_writable(ws, row=row_idx, column=2, value=daypart if current_daypart != daypart else None)
+        _write_cell_if_writable(ws, row=row_idx, column=3, value=category)
+        _write_cell_if_writable(ws, row=row_idx, column=4, value=name)
+        current_daypart = daypart
+        row_idx += 1
+        written += 1
+    if current_date is not None and row_idx - 1 > date_start_row:
+        _write_cell_if_writable(ws, row=row_idx - 1, column=1, value=_weekday_label(current_date))
+    return written
+
+
+def _apply_week_menu_identity(
+    ws: Worksheet,
+    *,
+    facility_config: dict[str, Any],
+    week_value: object | None,
+    week_menu_entries: Any | None = None,
+) -> int:
+    if not week_value:
+        return 0
+    facility_id = str(facility_config.get("facility_id") or facility_config.get("id") or "").strip()
+    if not facility_id:
+        return 0
+    entries = (
+        _normalize_week_menu_entries(entries=week_menu_entries, week_value=week_value)
+        if week_menu_entries is not None
+        else _collect_week_menu_entries(facility_id=facility_id, week_value=week_value)
+    )
+    if not entries:
+        return 0
+    return _write_week_menu_identity(ws, entries)
+
+
 def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_columns: list[dict[str, Any]], end_col: int) -> None:
     if "generated_template_schema" in wb.sheetnames:
         del wb["generated_template_schema"]
@@ -418,6 +724,8 @@ def build_facility_template_workbook(
     *,
     facility_config: dict[str, Any],
     master_template_path: Path | str = MASTER_TEMPLATE_PATH,
+    week_value: object | None = None,
+    week_menu_entries: Any | None = None,
 ):
     master_path = Path(master_template_path)
     if not master_path.exists():
@@ -436,6 +744,12 @@ def build_facility_template_workbook(
 
     facility_name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
     _write_facility_name(ws, facility_name)
+    written_menu_rows = _apply_week_menu_identity(
+        ws,
+        facility_config=facility_config,
+        week_value=week_value,
+        week_menu_entries=week_menu_entries,
+    )
 
     end_col = _ensure_generated_capacity(ws, len(generated_columns))
     _normalize_static_right_merges(ws, end_col)
@@ -447,6 +761,8 @@ def build_facility_template_workbook(
     _set_generated_widths(ws, generated_columns, end_col)
     ws.print_area = f"A1:{get_column_letter(end_col)}{PRINT_END_ROW}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
+    wb["generated_template_schema"].append(["week_value", str(week_value or "")])
+    wb["generated_template_schema"].append(["week_menu_rows", written_menu_rows])
     return wb
 
 
@@ -455,12 +771,16 @@ def build_facility_template_xlsx(
     facility_config: dict[str, Any],
     output_path: Path | str,
     master_template_path: Path | str = MASTER_TEMPLATE_PATH,
+    week_value: object | None = None,
+    week_menu_entries: Any | None = None,
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     wb = build_facility_template_workbook(
         facility_config=facility_config,
         master_template_path=master_template_path,
+        week_value=week_value,
+        week_menu_entries=week_menu_entries,
     )
     wb.save(output)
     return output
@@ -471,6 +791,8 @@ def build_facility_template_xlsx_for_facility(
     facility_id: str,
     output_path: Path | str,
     master_template_path: Path | str = MASTER_TEMPLATE_PATH,
+    week_value: object | None = None,
+    week_menu_entries: Any | None = None,
 ) -> Path:
     facility_config = config_service.get_facility_config(facility_id)
     if not facility_config:
@@ -479,4 +801,6 @@ def build_facility_template_xlsx_for_facility(
         facility_config=facility_config,
         output_path=output_path,
         master_template_path=master_template_path,
+        week_value=week_value,
+        week_menu_entries=week_menu_entries,
     )

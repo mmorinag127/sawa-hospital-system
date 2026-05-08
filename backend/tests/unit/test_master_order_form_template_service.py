@@ -229,3 +229,86 @@ def test_build_facility_template_from_master_freezes_logo_size_across_column_cou
         )
 
     assert image_payloads[0] == image_payloads[1]
+
+
+def test_build_facility_template_from_master_can_embed_week_menu_identity(tmp_path: Path, monkeypatch) -> None:
+    def fake_get_menu_for_facility(month_id: str, facility_id: str) -> dict:
+        assert month_id == "2026-04"
+        assert facility_id == "FACTEST"
+        return {
+            "entries": [
+                {"menu_date": "2026-04-26", "daypart": "朝", "category": "朝①", "name": "大豆のトマト煮"},
+                {"menu_date": "2026-04-26", "daypart": "朝", "category": "朝②", "name": "胡瓜のサラダ"},
+                {"menu_date": "2026-04-26", "daypart": "昼", "category": "主A", "name": "サワラの揚げ浸し"},
+                {"menu_date": "2026-04-27", "daypart": "朝", "category": "朝①", "name": "じゃが芋の煮物"},
+                {"menu_date": "2026-05-01", "daypart": "朝", "category": "朝①", "name": "範囲外"},
+            ]
+        }
+
+    monkeypatch.setattr(service.menu_service, "get_menu_for_facility", fake_get_menu_for_facility)
+
+    output = service.build_facility_template_xlsx(
+        facility_config=_facility_config(
+            [
+                {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+                {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+                {"index": 2, "role": "menu_name", "header": "献立", "name": "menu"},
+                {"index": 3, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+                {"index": 4, "role": "quantity", "header": "肉禁", "name": "qty.no_meat_x"},
+                {"index": 5, "role": "note", "header": "備考欄", "name": "remarks"},
+            ]
+        ),
+        output_path=tmp_path / "facility_template_with_week_menu.xlsx",
+        week_value="2026-04@2026-04-26~2026-04-30",
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["facility_template"]
+    schema = workbook["generated_template_schema"]
+
+    assert worksheet["D11"].value == "大豆のトマト煮"
+    assert worksheet["D12"].value == "胡瓜のサラダ"
+    assert worksheet["D13"].value == "サワラの揚げ浸し"
+    assert worksheet["D14"].value == "じゃが芋の煮物"
+    assert worksheet["D15"].value is None
+    schema_values = {row[0]: row[1] for row in schema.iter_rows(values_only=True) if row and row[0]}
+    assert schema_values["week_value"] == "2026-04@2026-04-26~2026-04-30"
+    assert schema_values["week_menu_rows"] == 4
+
+
+def test_build_facility_template_diagnostics_is_stable_for_same_inputs(monkeypatch) -> None:
+    def fake_get_menu_for_facility(month_id: str, facility_id: str) -> dict:
+        assert month_id == "2026-04"
+        assert facility_id == "FACTEST"
+        return {
+            "entries": [
+                {"menu_date": "2026-04-26", "daypart": "朝", "category": "朝①", "name": "大豆のトマト煮"},
+                {"menu_date": "2026-04-26", "daypart": "昼", "category": "主A", "name": "サワラの揚げ浸し"},
+            ]
+        }
+
+    monkeypatch.setattr(service.menu_service, "get_menu_for_facility", fake_get_menu_for_facility)
+    facility_config = _facility_config(
+        [
+            {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "header": "献立", "name": "menu"},
+            {"index": 3, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+            {"index": 4, "role": "quantity", "header": "肉禁", "name": "qty.no_meat_x"},
+            {"index": 5, "role": "note", "header": "備考欄", "name": "remarks"},
+        ]
+    )
+
+    first = service.build_facility_template_diagnostics(
+        facility_config=facility_config,
+        week_value="2026-04@2026-04-26~2026-04-30",
+    )
+    second = service.build_facility_template_diagnostics(
+        facility_config=facility_config,
+        week_value="2026-04@2026-04-26~2026-04-30",
+    )
+
+    assert first["master_template_sha256"] == second["master_template_sha256"]
+    assert first["facility_template_canonical_digest"] == second["facility_template_canonical_digest"]
+    assert first["schema_digest"] == second["schema_digest"]
+    assert first["generated_end_letter"] == "G"

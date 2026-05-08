@@ -4,7 +4,13 @@ from fastapi import APIRouter, HTTPException, Depends, File, Form, UploadFile, s
 from pydantic import BaseModel
 
 from src.db import session_scope
-from src.services import facility_service, config_service, facility_template_version_service, order_form_service
+from src.services import (
+    config_service,
+    facility_service,
+    facility_template_version_service,
+    master_order_form_template_service,
+    order_form_service,
+)
 from src.services.config_validator import validate_facility_config
 from src.api.auth import require_role
 
@@ -102,6 +108,23 @@ def get_facility(facility_id: str):
         "config": config,
         "resolved_config": resolved,
     }
+
+
+@router.get("/{facility_id}/generated-fax-template-diagnostics", dependencies=[Depends(require_role("operator"))])
+def get_generated_fax_template_diagnostics(facility_id: str, week_value: str | None = None):
+    facility = facility_service.get_facility(facility_id)
+    if not facility:
+        raise HTTPException(status_code=404, detail="not found")
+    resolved = config_service.get_facility_config(facility_id)
+    if not isinstance(resolved, dict):
+        raise HTTPException(status_code=400, detail="facility_template_unresolved")
+    try:
+        return master_order_form_template_service.build_facility_template_diagnostics(
+            facility_config=resolved,
+            week_value=week_value,
+        )
+    except master_order_form_template_service.FacilityTemplateBuildError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/{facility_id}/fax-template", dependencies=[Depends(require_role("operator"))])
