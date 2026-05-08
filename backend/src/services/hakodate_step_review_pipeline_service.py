@@ -618,11 +618,103 @@ def _gap_order_match(template_xs: list[int], candidates: list[float]) -> tuple[l
     }
 
 
+def _dedupe_close_line_candidates(candidates: list[float], *, min_gap_px: float = 58.0) -> list[float]:
+    sorted_candidates = sorted(float(value) for value in candidates)
+    if not sorted_candidates:
+        return []
+    groups: list[list[float]] = [[sorted_candidates[0]]]
+    for value in sorted_candidates[1:]:
+        if value - groups[-1][-1] < min_gap_px:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return [float(group[0]) for group in groups]
+
+
+def _post_menu_boundary_preserving_xs(
+    *,
+    worksheet: Any | None,
+    matched_xs: list[float],
+    fax_x_candidates: list[float],
+    fax_template: dict[str, Any] | None = None,
+) -> tuple[list[float], dict[str, Any]]:
+    if worksheet is None or len(matched_xs) < 3:
+        return matched_xs, {"used": False, "reason": "worksheet_unavailable"}
+    col_count = min(int(getattr(worksheet, "max_column", 0) or 0), len(matched_xs) - 1)
+    if col_count < 2:
+        return matched_xs, {"used": False, "reason": "not_enough_columns"}
+    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
+        worksheet,
+        col_count=col_count,
+        template=fax_template,
+    )
+    menu_col = _menu_column_from_slots(slots, worksheet)
+    post_start_edge_index = int(menu_col)
+    if post_start_edge_index <= 0 or post_start_edge_index >= len(matched_xs) - 1:
+        return matched_xs, {
+            "used": False,
+            "reason": "post_menu_edge_out_of_range",
+            "menu_worksheet_col": menu_col,
+            "edge_count": len(matched_xs),
+        }
+
+    previous_edge = float(matched_xs[post_start_edge_index - 1])
+    right_edge = float(matched_xs[-1])
+    post_candidates = [
+        float(value)
+        for value in fax_x_candidates
+        if previous_edge + 40.0 <= float(value) <= right_edge + 45.0
+    ]
+    deduped = _dedupe_close_line_candidates(post_candidates)
+    required_count = len(matched_xs) - post_start_edge_index
+    if len(deduped) < required_count:
+        return matched_xs, {
+            "used": False,
+            "reason": "post_menu_candidate_count_shortfall",
+            "menu_worksheet_col": menu_col,
+            "required_count": required_count,
+            "candidate_count": len(deduped),
+            "candidates": [round(float(value), 3) for value in deduped],
+        }
+
+    if len(deduped) == required_count:
+        selected_post_edges = deduped
+    else:
+        # Preserve the first physical quantity boundary after the menu.  If the
+        # detected FAX has more post-menu lines than the canonical target grid,
+        # the surplus belongs to a trailing absorbed column such as remarks,
+        # not to the first quantity column.
+        selected_post_edges = [*deduped[: required_count - 1], deduped[-1]]
+    adjusted = [float(value) for value in matched_xs]
+    adjusted[post_start_edge_index:] = [float(value) for value in selected_post_edges]
+    if len(adjusted) != len(matched_xs) or not np.all(np.diff(np.array(adjusted, dtype=np.float32)) > 0):
+        return matched_xs, {
+            "used": False,
+            "reason": "post_menu_adjustment_not_monotonic",
+            "menu_worksheet_col": menu_col,
+            "selected_post_edges": [round(float(value), 3) for value in selected_post_edges],
+        }
+    return adjusted, {
+        "used": True,
+        "menu_worksheet_col": menu_col,
+        "post_start_edge_index": post_start_edge_index,
+        "required_count": required_count,
+        "candidate_count": len(deduped),
+        "raw_candidates": [round(float(value), 3) for value in post_candidates],
+        "deduped_candidates": [round(float(value), 3) for value in deduped],
+        "selected_post_edges": [round(float(value), 3) for value in selected_post_edges],
+        "previous_first_post_edge": round(float(matched_xs[post_start_edge_index]), 3),
+        "adjusted_first_post_edge": round(float(adjusted[post_start_edge_index]), 3),
+    }
+
+
 def _align_axes(
     *,
     rectified_fax: np.ndarray,
     template_xs: list[int],
     template_ys: list[int],
+    worksheet: Any | None = None,
+    fax_template: dict[str, Any] | None = None,
 ) -> tuple[list[float], list[float], dict[str, Any], Image.Image]:
     table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
     source_x, source_y, grid_evidence = _nearest_line_positions_in_rectified(rectified_fax, template_xs, template_ys)
@@ -630,6 +722,12 @@ def _align_axes(
     matched_xs, x_match = _gap_order_match(template_xs, fax_x_candidates)
     if not x_match.get("used"):
         matched_xs = np.maximum.accumulate(np.median(source_x, axis=0)).astype(np.float32).tolist()
+    matched_xs, post_menu_x_match = _post_menu_boundary_preserving_xs(
+        worksheet=worksheet,
+        matched_xs=[float(value) for value in matched_xs],
+        fax_x_candidates=fax_x_candidates,
+        fax_template=fax_template,
+    )
     adjusted_ys = np.maximum.accumulate(np.median(source_y, axis=1)).astype(np.float32).tolist()
     axis_image = _draw_axis_match(
         rectified_fax,
@@ -641,6 +739,7 @@ def _align_axes(
     )
     evidence = {
         "x_match": x_match,
+        "post_menu_x_match": post_menu_x_match,
         "grid": grid_evidence,
         "x_gaps": [round(float(b - a), 3) for a, b in zip(matched_xs, matched_xs[1:])],
         "counts": {
@@ -950,6 +1049,8 @@ def build_hakodate_step_review_for_manifest_item(
         rectified_fax=raw_rectified,
         template_xs=template_xs,
         template_ys=template_ys,
+        worksheet=worksheet,
+        fax_template=fax_template,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,

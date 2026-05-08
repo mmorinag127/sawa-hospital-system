@@ -120,6 +120,31 @@ def test_build_facility_template_from_master_merges_consecutive_header_groups(tm
     assert _generated_render_width(worksheet, 4) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
+def test_build_facility_template_from_master_keeps_post_menu_aux_columns(tmp_path: Path) -> None:
+    output = service.build_facility_template_xlsx(
+        facility_config=_facility_config(
+            [
+                {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+                {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+                {"index": 2, "role": "aux", "header": "副区分", "name": "aux.col_2"},
+                {"index": 3, "role": "menu_name", "header": "献立", "name": "menu"},
+                {"index": 4, "role": "aux", "header": "合計", "name": "aux.col_4"},
+                {"index": 5, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+                {"index": 6, "role": "note", "header": "備考欄", "name": "remarks"},
+            ]
+        ),
+        output_path=tmp_path / "facility_template_with_total.xlsx",
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["facility_template"]
+
+    assert worksheet["E7"].value == "合計"
+    assert worksheet["F7"].value == "常食"
+    assert worksheet["G7"].value == "備考欄"
+    assert str(worksheet.print_area) == "'facility_template'!$A$1:$G$69"
+
+
 def test_build_facility_template_from_master_supports_all_master_facilities(tmp_path: Path) -> None:
     master = config_service.load_facility_master()
     facility_ids = [facility["facility_id"] for facility in master.get("facilities", []) if facility.get("facility_id")]
@@ -274,6 +299,35 @@ def test_build_facility_template_from_master_can_embed_week_menu_identity(tmp_pa
     schema_values = {row[0]: row[1] for row in schema.iter_rows(values_only=True) if row and row[0]}
     assert schema_values["week_value"] == "2026-04@2026-04-26~2026-04-30"
     assert schema_values["week_menu_rows"] == 4
+
+
+def test_build_facility_template_from_master_copies_source_body_merges(tmp_path: Path) -> None:
+    master = config_service.load_facility_master()
+    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00007")
+    resolved = config_service._build_facility_config(facility_id="FAC00007", facility=facility)  # noqa: SLF001
+
+    output = service.build_facility_template_xlsx(
+        facility_config=resolved,
+        output_path=tmp_path / "FAC00007_facility_template.xlsx",
+        week_value="2026-04@2026-04-26~2026-04-30",
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["facility_template"]
+    merged_ranges = {str(item) for item in worksheet.merged_cells.ranges}
+    schema_values = {row[0]: row[1] for row in workbook["generated_template_schema"].iter_rows(values_only=True) if row and row[0]}
+
+    assert "E43:E44" in merged_ranges
+    assert "E45:E47" in merged_ranges
+    assert schema_values["source_body_merged_ranges"] == len(
+        [
+            item
+            for item in merged_ranges
+            if range_boundaries(item)[0] >= service.GENERATED_START_COL
+            and range_boundaries(item)[1] >= service.BODY_START_ROW
+            and range_boundaries(item)[3] <= service.BODY_END_ROW
+        ]
+    )
 
 
 def test_build_facility_template_diagnostics_is_stable_for_same_inputs(monkeypatch) -> None:

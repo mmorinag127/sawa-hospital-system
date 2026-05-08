@@ -945,6 +945,8 @@ def _build_preprocess_for_ocr(
         rectified_fax=raw_rectified,
         template_xs=template_xs,
         template_ys=template_ys,
+        worksheet=worksheet,
+        fax_template=fax_template,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,

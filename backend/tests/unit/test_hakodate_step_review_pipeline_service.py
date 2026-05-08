@@ -4,6 +4,7 @@ from openpyxl import Workbook
 from src.services.hakodate_step_review_pipeline_service import (
     _draw_merge_aware_grid,
     _physical_internal_horizontal_lines,
+    _post_menu_boundary_preserving_xs,
     _post_menu_target_regions,
     _step_review_merge_regions_for_grid,
     _step_review_physical_row_map,
@@ -257,3 +258,31 @@ def test_step_review_target_regions_skip_blank_menu_rows() -> None:
     assert 12 not in worksheet_rows
     assert 13 in worksheet_rows
     assert evidence["blank_menu_row_count"] > 0
+
+
+def test_post_menu_boundary_preserving_xs_keeps_first_quantity_line() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["F7"] = "月"
+    worksheet["G7"] = "軟菜"
+    worksheet["H7"] = "月"
+    worksheet["I7"] = "ミキサー"
+    worksheet["J7"] = "月"
+    worksheet["K7"] = "備考"
+    matched_xs = [15.0, 102.0, 139.0, 212.0, 1071.0, 1251.0, 1435.0, 1617.0, 1800.0, 1982.0, 2167.0, 2347.0]
+    fax_candidates = [15.0, 102.0, 139.0, 212.0, 887.0, 1071.0, 1087.0, 1105.0, 1251.0, 1435.0, 1617.0, 1800.0, 1982.0, 2167.0, 2347.0]
+
+    adjusted, evidence = _post_menu_boundary_preserving_xs(
+        worksheet=worksheet,
+        matched_xs=matched_xs,
+        fax_x_candidates=fax_candidates,
+    )
+
+    assert evidence["used"] is True
+    assert adjusted[4] == 887.0
+    assert adjusted[-1] == 2347.0
+    assert 1087.0 not in adjusted
+    assert 1105.0 not in adjusted
+    assert 2167.0 not in adjusted

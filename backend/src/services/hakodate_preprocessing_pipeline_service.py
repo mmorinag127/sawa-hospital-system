@@ -300,6 +300,7 @@ def build_hakodate_preprocessing_for_manifest_item(
         rectified_fax=raw_rectified,
         template_xs=template_xs,
         template_ys=template_ys,
+        worksheet=worksheet,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,

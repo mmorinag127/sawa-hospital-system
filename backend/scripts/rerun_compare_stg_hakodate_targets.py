@@ -501,9 +501,11 @@ def _compare_one(
         week_value=week_value,
         local_diagnostics=dict(manifest_item.get("local_template_diagnostics") or {}),
     )
+    # Each order document is a single FAX PDF.  Keep the comparison ordering
+    # page separate from the production-compatible single-order runtime page.
     local_summary, _review_page = build_hakodate_best_method_for_manifest_item(
         item=manifest_item,
-        page=page,
+        page=1,
         draft_sheet={"fields": [], "rows": []},
         output_dir=case_dir / "local_best_method",
         render_width=render_width,

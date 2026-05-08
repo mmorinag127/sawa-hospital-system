@@ -16,7 +16,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.services import config_service, menu_service, sheet_week_service
+from src.services import config_service, menu_service, order_form_service, sheet_week_service
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -108,10 +108,27 @@ def _columns_from_facility_config(facility_config: dict[str, Any]) -> list[dict[
 
 
 def _generated_columns(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    menu_index = next(
+        (
+            int(column.get("index") or 0)
+            for column in columns
+            if str(column.get("role") or "").strip() in {"menu_name", "menu"}
+        ),
+        2,
+    )
     result: list[dict[str, Any]] = []
     for column in columns:
         role = str(column.get("role") or "").strip()
-        if role in {"date", "daypart", "menu_name", "menu", "aux"}:
+        try:
+            column_index = int(column.get("index") or 0)
+        except Exception:
+            column_index = 0
+        if role in {"date", "daypart", "menu_name", "menu"}:
+            continue
+        if role == "aux" and column_index <= menu_index:
+            continue
+        if role == "aux" and column_index > menu_index:
+            result.append(column)
             continue
         if role in {"quantity", "note", "remarks"} or str(column.get("name") or "").strip() == "remarks":
             result.append(column)
@@ -256,6 +273,72 @@ def _write_body_grid(ws: Worksheet, end_col: int) -> None:
         _set_border(ws.cell(row, end_col), right=thick)
     for col in range(GENERATED_START_COL, end_col + 1):
         _set_border(ws.cell(BODY_END_ROW, col), bottom=thick)
+
+
+def _week_sheet_name_from_week_value(week_value: object | None) -> str | None:
+    _month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_value)
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return None
+    return f"{start_date.month}月{start_date.day}日～{end_date.month}月{end_date.day}日"
+
+
+def _source_index_for_generated_column(column: dict[str, Any], *, generated_offset: int) -> int:
+    try:
+        return int(column.get("source_index"))
+    except Exception:
+        return GENERATED_START_COL - 1 + int(generated_offset)
+
+
+def _apply_source_body_merges(
+    ws: Worksheet,
+    *,
+    facility_config: dict[str, Any],
+    generated_columns: list[dict[str, Any]],
+    week_value: object | None,
+    end_col: int,
+) -> int:
+    week_sheet_name = _week_sheet_name_from_week_value(week_value)
+    if not week_sheet_name:
+        return 0
+    try:
+        source_workbook_name = order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
+            facility_config,
+            week_sheet_name,
+        )
+        source_path = order_form_service._resolve_source_workbook_path(source_workbook_name)  # noqa: SLF001
+        source_workbook = load_workbook(source_path, data_only=True)
+    except Exception:
+        return 0
+    try:
+        if week_sheet_name not in source_workbook.sheetnames:
+            return 0
+        source_ws = source_workbook[week_sheet_name]
+        source_to_generated_col = {
+            _source_index_for_generated_column(column, generated_offset=offset) + 1: GENERATED_START_COL + offset
+            for offset, column in enumerate(generated_columns)
+        }
+        applied = 0
+        for merged_range in list(source_ws.merged_cells.ranges):
+            min_col, min_row, max_col, max_row = merged_range.bounds
+            if min_col != max_col:
+                continue
+            if max_row <= min_row:
+                continue
+            if min_row < BODY_START_ROW or max_row > BODY_END_ROW:
+                continue
+            target_col = source_to_generated_col.get(int(min_col))
+            if target_col is None or target_col < GENERATED_START_COL or target_col > end_col:
+                continue
+            ws.merge_cells(
+                start_row=int(min_row),
+                start_column=int(target_col),
+                end_row=int(max_row),
+                end_column=int(target_col),
+            )
+            applied += 1
+        return applied
+    finally:
+        source_workbook.close()
 
 
 def _generated_widths(generated_columns: list[dict[str, Any]]) -> list[float]:
@@ -758,11 +841,19 @@ def build_facility_template_workbook(
     _clear_generated_area(ws, end_col)
     _write_header(ws, generated_columns, end_col)
     _write_body_grid(ws, end_col)
+    applied_body_merges = _apply_source_body_merges(
+        ws,
+        facility_config=facility_config,
+        generated_columns=generated_columns,
+        week_value=week_value,
+        end_col=end_col,
+    )
     _set_generated_widths(ws, generated_columns, end_col)
     ws.print_area = f"A1:{get_column_letter(end_col)}{PRINT_END_ROW}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
     wb["generated_template_schema"].append(["week_value", str(week_value or "")])
     wb["generated_template_schema"].append(["week_menu_rows", written_menu_rows])
+    wb["generated_template_schema"].append(["source_body_merged_ranges", applied_body_merges])
     return wb
 
 
