@@ -1690,6 +1690,89 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
     assert bagging["bagging_result"]["summary"]["bag_row_count"] >= 1
     assert bagging["bagging_result"]["bag_rows"]
+    assert bagging["bagging_result"]["anomaly_review"]["status"] == "ok"
+
+
+def test_workflow_v2_sheet_auto_edit_uses_selected_ocr_and_current_sheet() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    result, error = order_workflow_v2_service.propose_sheet_auto_edit(
+        order_id=order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "qty.regular"],
+            "header": ["日付", "区分", "献立", "常食"],
+            "rows": [["04/26", "朝", "大豆のトマト煮", "110"]],
+            "ocr_numeric_cell_items": [
+                {
+                    "target_row_index": 0,
+                    "target_col_index": 3,
+                    "value": "10",
+                    "classification": "accepted",
+                    "confidence_tier": "high",
+                }
+            ],
+        },
+        use_llm=False,
+    )
+
+    assert error is None
+    assert result["status"] == "ok"
+    assert result["patches"][0]["suggested_value"] == "10"
+    assert result["patches"][0]["reason"] == "sheet_value_differs_from_ocr"
+
+
+def test_workflow_v2_bagging_embeds_sheet_anomaly_review(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "regular", "soft"],
+            "header": ["日付", "区分", "献立", "常食", "軟菜"],
+            "rows": [
+                ["04/28", "朝", "A", "110", "5"],
+                ["04/28", "朝", "B", "12", "5"],
+                ["04/29", "朝", "C", "10", "5"],
+                ["04/30", "朝", "D", "11", "5"],
+            ],
+            "ocr_numeric_cell_items": [
+                {
+                    "target_row_index": 0,
+                    "target_col_index": 3,
+                    "value": "10",
+                    "classification": "accepted",
+                    "confidence_tier": "high",
+                }
+            ],
+        },
+        edited_by="test",
+    )
+
+    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+
+    assert error is None
+    review = bagging["bagging_result"]["anomaly_review"]
+    assert review["status"] == "ok"
+    assert any(item["type"] == "high_outlier" for item in review["warnings"])
+    assert any(item["type"] == "sheet_differs_from_ocr" for item in review["warnings"])
 
 
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:

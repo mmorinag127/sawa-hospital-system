@@ -82,6 +82,12 @@ class WorkflowV2SheetSaveBody(BaseModel):
     edited_by: str | None = None
 
 
+class WorkflowV2SheetAutoEditBody(BaseModel):
+    sheet: dict | None = None
+    model: str | None = None
+    use_llm: bool = True
+
+
 class WorkflowV2ExpandedCellCopyModeBody(BaseModel):
     mode: str
 
@@ -1739,6 +1745,18 @@ def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
             order_id=order_id,
             sheet=body.sheet,
             edited_by=body.edited_by,
+        )
+    )
+
+
+@router.post("/{order_id}/workflow-v2/sheet/auto-edit", dependencies=[Depends(require_role("operator"))])
+def propose_order_workflow_v2_sheet_auto_edit(order_id: str, body: WorkflowV2SheetAutoEditBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.propose_sheet_auto_edit(
+            order_id=order_id,
+            sheet=body.sheet,
+            model=body.model,
+            use_llm=body.use_llm,
         )
     )
 

@@ -18,7 +18,7 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
-from src.services import config_service, facility_template_version_service, sheet_week_service
+from src.services import config_service, facility_template_version_service, sheet_week_service, workflow_v2_sheet_review_service
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
@@ -1880,6 +1880,40 @@ def save_sheet(
         }, None
 
 
+def propose_sheet_auto_edit(
+    *,
+    order_id: str,
+    sheet: dict[str, Any] | None = None,
+    model: str | None = None,
+    use_llm: bool = True,
+) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow(session, order.id)
+        if workflow is None or not workflow.evidence_run_id:
+            return None, "selected_ocr_required"
+        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        if evidence is None or evidence.order_id != order.id:
+            return None, "selected_ocr_missing"
+        evidence_payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else None
+        review_sheet = sheet if isinstance(sheet, dict) else None
+        if review_sheet is None and workflow.draft_id:
+            draft = session.get(OrderSheetDraft, workflow.draft_id)
+            if draft is not None and draft.order_id == order.id and isinstance(draft.draft_sheet_json, dict):
+                review_sheet = dict(draft.draft_sheet_json)
+        if review_sheet is None:
+            return None, "sheet_required"
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=review_sheet,
+        evidence_payload=evidence_payload,
+        model=model,
+        use_llm=use_llm,
+    )
+    return result, None
+
+
 def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
     _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=False)
@@ -2349,6 +2383,12 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
+        evidence_payload = None
+        evidence_id = _normalize_id(draft.base_evidence_run_id or workflow.evidence_run_id)
+        if evidence_id:
+            evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+            if evidence is not None and evidence.order_id == order.id and isinstance(evidence.payload_json, dict):
+                evidence_payload = evidence.payload_json
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
@@ -2364,6 +2404,13 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             saved_sheet=draft,
             materialization_candidate=materialization_candidate,
         )
+        anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
+            sheet=draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
+            evidence_payload=evidence_payload,
+            materialization_candidate=materialization_candidate,
+            bagging_result=bagging_result,
+        )
+        bagging_result["anomaly_review"] = anomaly_review
         meta = _workflow_meta(workflow)
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
         meta["bagging_result"] = bagging_result

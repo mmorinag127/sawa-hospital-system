@@ -119,6 +119,53 @@ type OcrNumericCellItem = {
   placement_basis?: string | null;
 };
 
+type SheetAutoEditPatch = {
+  row_index: number;
+  col_index: number;
+  field?: string | null;
+  label?: string | null;
+  current_value?: string | null;
+  suggested_value?: string | null;
+  confidence?: string | null;
+  reason?: string | null;
+  evidence?: string | null;
+  alternatives?: string[];
+  source?: string | null;
+};
+
+type SheetAutoEditResult = {
+  status?: string | null;
+  patches?: SheetAutoEditPatch[];
+  rule_patches?: SheetAutoEditPatch[];
+  llm_patches?: SheetAutoEditPatch[];
+  llm?: Record<string, unknown> | null;
+};
+
+type SheetAnomalyWarning = {
+  type?: string | null;
+  severity?: string | null;
+  row_index?: number | null;
+  col_index?: number | null;
+  field?: string | null;
+  label?: string | null;
+  value?: string | null;
+  message?: string | null;
+  evidence?: Record<string, unknown> | null;
+};
+
+type OcrSheetComparisonItem = {
+  row_index?: number | null;
+  col_index?: number | null;
+  field?: string | null;
+  label?: string | null;
+  date?: string | null;
+  daypart?: string | null;
+  menu?: string | null;
+  sheet_value?: string | null;
+  ocr_values?: string[];
+  status?: string | null;
+};
+
 type TargetCellMapItem = {
   target_row_index: number;
   target_col_index: number;
@@ -891,6 +938,7 @@ export default function OrderWorkflowV2Page() {
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
+  const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
   const [columnFillTarget, setColumnFillTarget] = useState<string>("");
   const [columnFillValue, setColumnFillValue] = useState<string>("");
   const [swapLeftColumn, setSwapLeftColumn] = useState<string>("");
@@ -1016,6 +1064,30 @@ export default function OrderWorkflowV2Page() {
     () => groupWorkflowBagRowsByDate(bagSummaryRows),
     [bagSummaryRows],
   );
+
+  const anomalyReview = useMemo(() => {
+    const review = inspection?.bagging_result?.anomaly_review;
+    return review && typeof review === "object" && !Array.isArray(review)
+      ? review as Record<string, unknown>
+      : null;
+  }, [inspection?.bagging_result]);
+
+  const anomalyWarnings = useMemo(() => {
+    const warnings = anomalyReview?.warnings;
+    return Array.isArray(warnings)
+      ? warnings.filter((item): item is SheetAnomalyWarning => Boolean(item && typeof item === "object"))
+      : [];
+  }, [anomalyReview]);
+
+  const ocrSheetComparisonItems = useMemo(() => {
+    const comparison = anomalyReview?.ocr_sheet_comparison;
+    const items = comparison && typeof comparison === "object" && !Array.isArray(comparison)
+      ? (comparison as Record<string, unknown>).items
+      : null;
+    return Array.isArray(items)
+      ? items.filter((item): item is OcrSheetComparisonItem => Boolean(item && typeof item === "object"))
+      : [];
+  }, [anomalyReview]);
 
   const ocrOverlayItemMap = useMemo(() => {
     const map = new Map<string, OcrNumericCellItem>();
@@ -1774,6 +1846,7 @@ export default function OrderWorkflowV2Page() {
       }
       setSheetPayload(normalized);
       setSheetJson(formatJson(normalized));
+      setSheetAutoEditResult(null);
     }, {
       successMessage: "選択OCRからシートを生成しました",
       refreshAfter: false,
@@ -1851,6 +1924,42 @@ export default function OrderWorkflowV2Page() {
           return value || cell;
         }),
       );
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+  };
+
+  const proposeSheetAutoEdit = () =>
+    runAction("Step3 LLM auto edit", async () => {
+      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      if (!parsed) {
+        throw new Error("LLM自動編集に渡せるシートがありません");
+      }
+      const response = await apiClient.post<SheetAutoEditResult>(`/orders/${orderId}/workflow-v2/sheet/auto-edit`, {
+        sheet: parsed,
+        use_llm: true,
+      });
+      setSheetAutoEditResult(response.data);
+    }, {
+      successMessage: "LLM自動編集の候補を作成しました",
+      refreshAfter: false,
+    });
+
+  const applySheetAutoEditPatches = () => {
+    const patches = (sheetAutoEditResult?.patches || []).filter((patch) => (
+      typeof patch.row_index === "number"
+      && typeof patch.col_index === "number"
+      && String(patch.suggested_value || "").trim()
+    ));
+    if (!sheetPayload || !patches.length) return;
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => [...row]);
+      for (const patch of patches) {
+        if (!rows[patch.row_index] || patch.col_index < 0 || patch.col_index >= rows[patch.row_index].length) continue;
+        rows[patch.row_index][patch.col_index] = String(patch.suggested_value || "").trim();
+      }
       const nextSheet = { ...current, rows };
       setSheetJson(formatJson(nextSheet));
       return nextSheet;
@@ -2721,6 +2830,12 @@ export default function OrderWorkflowV2Page() {
                     <button className="btn ghost" type="button" onClick={applyVisibleOcrSuggestions} disabled={!ocrOverlayItemMap.size || Boolean(busy)}>
                       表示中提案を採用
                     </button>
+                    <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
+                      LLM自動補正を提案
+                    </button>
+                    <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
+                      LLM提案を反映
+                    </button>
                     <label className="toolbar-field">
                       <span>OCR信頼度表示</span>
                       <select value={ocrConfidenceDisplayMode} onChange={(event) => setOcrConfidenceDisplayMode(event.target.value as ConfidenceDisplayMode)}>
@@ -2769,6 +2884,26 @@ export default function OrderWorkflowV2Page() {
                   <p className="subtle">
                     raw {Number(sheetPayload.ocr_numeric_cell_summary?.raw_ocr_numeric_count || 0)} / accepted {Number(sheetPayload.ocr_numeric_cell_summary?.accepted_count || 0)} / deterministic {Number(sheetPayload.ocr_numeric_cell_summary?.deterministic_candidate_count || 0)} / weak {Number(sheetPayload.ocr_numeric_cell_summary?.weak_candidate_count || 0)}
                   </p>
+                  {sheetAutoEditResult ? (
+                    <div className="llm-review-panel">
+                      <div className="llm-review-header">
+                        <strong>LLM自動編集候補</strong>
+                        <span>{sheetAutoEditResult.patches?.length || 0}件 / {String(sheetAutoEditResult.llm?.status || "unknown")}</span>
+                      </div>
+                      {sheetAutoEditResult.patches?.length ? (
+                        <ul className="llm-review-list">
+                          {sheetAutoEditResult.patches.slice(0, 12).map((patch, idx) => (
+                            <li key={`auto-edit-${idx}`}>
+                              R{patch.row_index + 1} C{patch.col_index + 1} {patch.label || patch.field || ""}: {patch.current_value || "空"} → <strong>{patch.suggested_value}</strong>
+                              <span className="subtle"> {patch.reason || patch.evidence || ""}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="subtle">修正候補はありません。</p>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="sheet-table-wrap">
                   <table className="sheet-table compact-sheet-table">
@@ -2891,6 +3026,73 @@ export default function OrderWorkflowV2Page() {
                   <p className="summary-value">{bagRows.length}袋</p>
                 </div>
               </div>
+              {!anomalyReview ? (
+                <div className="anomaly-review-panel pending">
+                  <strong>数量異常チェック</strong>
+                  <span className="subtle">この袋分け結果には異常チェック結果がありません。袋分けを再計算してください。</span>
+                </div>
+              ) : anomalyWarnings.length ? (
+                <div className="anomaly-review-panel">
+                  <div className="llm-review-header">
+                    <strong>数量異常チェック</strong>
+                    <span>{anomalyWarnings.length}件</span>
+                  </div>
+                  <ul className="llm-review-list">
+                    {anomalyWarnings.slice(0, 20).map((warning, idx) => (
+                      <li key={`anomaly-${idx}`} className={`anomaly-${warning.severity || "medium"}`}>
+                        R{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"} C{typeof warning.col_index === "number" ? warning.col_index + 1 : "-"} {warning.label || warning.field || ""}: {warning.value || "-"} / {warning.message || warning.type || "確認対象"}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="anomaly-review-panel ok">
+                  <strong>数量異常チェック</strong>
+                  <span className="subtle">袋分け計算時点で明確な異常候補はありません。</span>
+                </div>
+              )}
+              {anomalyReview ? (
+                <div className="ocr-sheet-compare-panel">
+                  <div className="llm-review-header">
+                    <strong>OCR結果とシート比較</strong>
+                    <span>{ocrSheetComparisonItems.length}セル</span>
+                  </div>
+                  {ocrSheetComparisonItems.length ? (
+                    <div className="table-wrap">
+                      <table className="ocr-sheet-compare-table">
+                        <thead>
+                          <tr>
+                            <th>行</th>
+                            <th>日付</th>
+                            <th>区分</th>
+                            <th>メニュー</th>
+                            <th>列</th>
+                            <th>シート</th>
+                            <th>OCR</th>
+                            <th>状態</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ocrSheetComparisonItems.slice(0, 80).map((item, idx) => (
+                            <tr key={`ocr-sheet-compare-${idx}`} className={`compare-${item.status || "unknown"}`}>
+                              <td>R{typeof item.row_index === "number" ? item.row_index + 1 : "-"}</td>
+                              <td>{item.date || "-"}</td>
+                              <td>{item.daypart || "-"}</td>
+                              <td>{item.menu || "-"}</td>
+                              <td>{item.label || item.field || (typeof item.col_index === "number" ? `C${item.col_index + 1}` : "-")}</td>
+                              <td>{item.sheet_value || ""}</td>
+                              <td>{Array.isArray(item.ocr_values) && item.ocr_values.length ? item.ocr_values.join(" / ") : ""}</td>
+                              <td>{item.status || "-"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="subtle">OCR結果とシートを比較できる数量セルがありません。</p>
+                  )}
+                </div>
+              ) : null}
               {bagSummaryGroups.length ? (
                 <div className="wrap-grid workflow-bag-groups">
                   <p className="bag-summary-note subtle">
@@ -4066,6 +4268,71 @@ export default function OrderWorkflowV2Page() {
           right: 2px;
           top: -8px;
           z-index: 2;
+        }
+        .llm-review-panel,
+        .anomaly-review-panel,
+        .ocr-sheet-compare-panel {
+          background: #fff8e8;
+          border: 1px solid #e8d6af;
+          border-radius: 14px;
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+          padding: 12px;
+        }
+        .ocr-sheet-compare-panel {
+          background: #fffdf7;
+          border-color: #ded6c3;
+        }
+        .ocr-sheet-compare-table {
+          border-collapse: collapse;
+          font-size: 12px;
+          min-width: 900px;
+          width: 100%;
+        }
+        .ocr-sheet-compare-table th,
+        .ocr-sheet-compare-table td {
+          border-bottom: 1px solid #ece4d3;
+          padding: 6px 8px;
+          text-align: left;
+        }
+        .ocr-sheet-compare-table tr.compare-mismatch td {
+          background: #fff0e8;
+        }
+        .ocr-sheet-compare-table tr.compare-ocr_only td {
+          background: #eef7ff;
+        }
+        .anomaly-review-panel.ok {
+          background: #edf7ef;
+          border-color: #c8e1cc;
+        }
+        .anomaly-review-panel.pending {
+          background: #f5f1e7;
+          border-color: #ddd5c2;
+        }
+        .llm-review-header {
+          align-items: center;
+          display: flex;
+          gap: 12px;
+          justify-content: space-between;
+        }
+        .llm-review-list {
+          display: grid;
+          gap: 6px;
+          list-style: none;
+          margin: 0;
+          padding: 0;
+        }
+        .llm-review-list li {
+          background: rgba(255, 253, 247, 0.82);
+          border-radius: 10px;
+          padding: 8px 10px;
+        }
+        .llm-review-list li.anomaly-high {
+          box-shadow: inset 4px 0 0 #d7351d;
+        }
+        .llm-review-list li.anomaly-medium {
+          box-shadow: inset 4px 0 0 #d58b2c;
         }
         .json-details {
           margin-top: 16px;
