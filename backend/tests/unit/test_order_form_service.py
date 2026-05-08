@@ -196,22 +196,7 @@ def test_clear_week_sheet_body_preserves_quantity_body_merges_for_diabetes_templ
     assert worksheet["F11"].value is None
 
 
-def test_template_scan_detects_vertical_merged_quantity_cells_for_sibling_templates() -> None:
-    assert order_form_service.source_workbook_has_vertical_merged_quantity_cells(
-        "いこいの森プラス　2604.xlsx",
-        week_sheet_name="4月26日～4月30日",
-    )
-    assert order_form_service.source_workbook_has_vertical_merged_quantity_cells(
-        "百々家 2604.xlsx",
-        week_sheet_name="4月26日～4月30日",
-    )
-    assert not order_form_service.source_workbook_has_vertical_merged_quantity_cells(
-        "共通　2604.xlsx",
-        week_sheet_name="4月26日～4月30日",
-    )
-
-
-def test_facility_template_scan_does_not_use_facility_name_as_source_workbook() -> None:
+def test_facility_template_merge_detection_uses_facility_settings_only() -> None:
     name_only_facility = {
         "facility_id": "FAC00007",
         "facility_name": "ゆうゆう（株）百々家",
@@ -224,21 +209,19 @@ def test_facility_template_scan_does_not_use_facility_name_as_source_workbook() 
     )
 
 
-def test_facility_template_scan_uses_explicit_facility_source_workbook() -> None:
+def test_facility_template_merge_detection_uses_body_merge_policy() -> None:
     facility = {
         "facility_id": "FAC00007",
         "facility_name": "ゆうゆう（株）百々家",
         "fax_template_id": "fax_layout_regular_forbidden_v1",
-        "order_form_month_sources": {
-            "2026-03": "百々家 2603.xlsx",
-            "2026-04": "百々家 2604.xlsx",
+        "fax_template_override": {
+            "body_merge_policy": {
+                "mode": "daypart",
+                "columns": ["qty.regular_x"],
+            },
         },
     }
 
-    assert order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
-        facility,
-        "4月26日～4月30日",
-    ) == "百々家 2604.xlsx"
     assert order_form_service.facility_template_has_vertical_merged_quantity_cells(
         facility,
         week_sheet_name="4月26日～4月30日",
@@ -568,26 +551,6 @@ def test_build_fax_order_form_excel_uses_month_specific_source_for_week_sheet(tm
 
 
 def test_build_fax_structure_only_excel_clears_body_values(tmp_path, monkeypatch):
-    source_name = "source.xlsx"
-    _build_source_workbook(tmp_path / source_name, "4月5日～4月11日")
-    workbook = load_workbook(tmp_path / source_name)
-    worksheet = workbook["4月5日～4月11日"]
-    worksheet["A11"] = datetime(2026, 4, 5)
-    worksheet["B11"] = "朝"
-    worksheet["C11"] = "副①"
-    worksheet["D11"] = "Menu A"
-    worksheet["G11"] = "12"
-    workbook.save(tmp_path / source_name)
-
-    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
-    monkeypatch.setitem(
-        order_form_service._FAX_FAMILY_SOURCE_MAP,
-        "fax_layout_regular_forbidden_v1",
-        {
-            "source_workbook": source_name,
-            "family_label": "共通・禁食2種",
-        },
-    )
     monkeypatch.setattr(
         order_form_service.config_service,
         "get_facility_config",
@@ -595,6 +558,15 @@ def test_build_fax_structure_only_excel_clears_body_values(tmp_path, monkeypatch
             "facility_id": facility_id,
             "facility_name": "構造比較施設",
             "fax_template_id": "fax_layout_regular_forbidden_v1",
+            "fax_template_override": {
+                "columns": [
+                    {"role": "date", "header": "日付", "name": "date_mmdd", "source_index": 0},
+                    {"role": "daypart", "header": "区分", "name": "daypart", "source_index": 1},
+                    {"role": "menu", "header": "献立", "name": "menu", "source_index": 2},
+                    {"role": "quantity", "header": "常食", "name": "qty.regular_x", "source_index": 3},
+                    {"role": "quantity", "header": "肉禁", "name": "qty.no_meat_x", "source_index": 4},
+                ],
+            },
         },
     )
 
@@ -605,17 +577,15 @@ def test_build_fax_structure_only_excel_clears_body_values(tmp_path, monkeypatch
     )
 
     generated = load_workbook(output)
-    generated_sheet = generated["4月5日～4月11日"]
-    rows = _metadata_rows(generated)
+    generated_sheet = generated["facility_template"]
+    schema = generated["generated_template_schema"]
+    schema_rows = {str(row[0].value): row[1].value for row in schema.iter_rows(min_row=1, max_col=2) if row[0].value}
 
-    assert generated_sheet["A3"].value == "構造比較施設"
-    assert generated_sheet["A11"].value is None
-    assert generated_sheet["B11"].value is None
-    assert generated_sheet["C11"].value is None
-    assert generated_sheet["D11"].value is None
-    assert generated_sheet["G11"].value is None
-    assert rows["facility_id"] == "FACSTRUCT01"
-    assert rows["fax_template_id"] == "fax_layout_regular_forbidden_v1"
+    assert generated_sheet["A4"].value == "構造比較施設"
+    assert generated_sheet["B11"].value == "朝"
+    assert generated_sheet["E11"].value is None
+    assert schema_rows["source"] == "master_layout_template"
+    assert schema_rows["facility_id"] == "FACSTRUCT01"
 
 
 def test_build_order_form_excel_blocks_when_month_specific_source_missing(tmp_path, monkeypatch):

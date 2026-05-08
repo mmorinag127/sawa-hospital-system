@@ -161,10 +161,13 @@ def _trim_unused_generated_columns(ws: Worksheet, end_col: int) -> None:
 
 
 def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
+    min_static_col = 7
+    if end_col < min_static_col:
+        return
     for row in range(2, 7):
         for merged_range in list(ws.merged_cells.ranges):
             min_col, min_row, max_col, max_row = merged_range.bounds
-            if min_row == row and max_row == row and min_col == 7 and max_col == MASTER_GENERATED_END_COL:
+            if min_row == row and max_row == row and min_col == min_static_col and max_col == MASTER_GENERATED_END_COL:
                 value = ws.cell(row, min_col).value
                 alignment = copy(ws.cell(row, min_col).alignment)
                 font = copy(ws.cell(row, min_col).font)

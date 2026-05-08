@@ -369,34 +369,30 @@ def facility_template_has_vertical_merged_quantity_cells(
     *,
     week_sheet_name: str | None = None,
 ) -> bool:
+    _ = week_sheet_name
     if not isinstance(facility, dict):
         return False
-    fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
-    if not fax_template_id:
-        return False
-    if week_sheet_name:
-        source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
-        return source_workbook_has_vertical_merged_quantity_cells(
-            source_workbook_name,
-            week_sheet_name=week_sheet_name,
-        )
-    spec = _resolve_fax_family_spec(fax_template_id)
-    source_names = [
-        str(name or "").strip()
-        for name in (
-            _facility_source_workbook_names(facility)
-            + list((spec.get("month_sources") or {}).values())
-            + [spec.get("source_workbook")]
-        )
-        if str(name or "").strip()
+    if isinstance(facility.get("expanded_cell_same_daypart_copy_enabled"), bool):
+        return bool(facility.get("expanded_cell_same_daypart_copy_enabled"))
+    template_candidates = [
+        facility.get("fax_template_override"),
+        facility.get("fax_template"),
     ]
-    seen: set[str] = set()
-    for source_workbook_name in source_names:
-        if source_workbook_name in seen:
+    for template in template_candidates:
+        if not isinstance(template, dict):
             continue
-        seen.add(source_workbook_name)
-        if source_workbook_has_vertical_merged_quantity_cells(source_workbook_name):
-            return True
+        policy = template.get("body_merge_policy")
+        if isinstance(policy, dict):
+            mode = str(policy.get("mode") or "").strip().lower()
+            columns = [str(item or "").strip() for item in (policy.get("columns") or []) if str(item or "").strip()]
+            if mode == "daypart" and columns:
+                return True
+        for column in template.get("columns") or []:
+            if not isinstance(column, dict):
+                continue
+            body_merge = str(column.get("body_merge") or column.get("body_merge_mode") or "").strip().lower()
+            if body_merge == "daypart":
+                return True
     return False
 
 
@@ -939,22 +935,18 @@ def build_fax_structure_only_excel(
     week_sheet_name: str = _DEFAULT_WEEK_SHEET,
     output_dir: Path | str | None = None,
 ) -> Path:
+    from src.services import master_order_form_template_service  # noqa: PLC0415
+
+    _ = week_sheet_name
     facility = config_service.get_facility_config(facility_id)
     if not facility:
         raise ValueError("facility not found")
-    fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
-    if not fax_template_id:
-        raise ValueError("facility fax_template_id not found")
-    spec = _resolve_fax_family_spec(fax_template_id)
-    facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
-    return _render_fax_structure_only_workbook(
-        source_workbook_name=resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name),
-        week_sheet_name=week_sheet_name,
-        facility_name=facility_name,
-        facility_id=facility_id,
-        fax_template_id=fax_template_id,
-        family_label=str(spec["family_label"]),
-        output_dir=output_dir,
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_facility_id = _sanitize_filename_fragment(facility_id)
+    output_path = _resolve_fax_output_dir(output_dir) / f"fax_order_form_structure_only_{safe_facility_id}_{stamp}.xlsx"
+    return master_order_form_template_service.build_facility_template_xlsx(
+        facility_config=facility,
+        output_path=output_path,
     )
 
 

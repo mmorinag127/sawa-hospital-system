@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import hakodate_assignment_service, order_form_service
+from src.services import config_service, hakodate_assignment_service
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
     render_pdf_page_to_bgr,
@@ -48,13 +48,11 @@ class HakodateStepReviewResult:
 
 
 def _source_template_name(facility_id: str) -> str:
-    facility = order_form_service.config_service.get_facility_config(facility_id)
+    facility = config_service.get_facility_config(facility_id)
     if not facility:
         return ""
-    return order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
-        facility,
-        WEEK_SHEET_NAME,
-    )
+    template = facility.get("fax_template") if isinstance(facility.get("fax_template"), dict) else {}
+    return str(facility.get("fax_template_id") or template.get("template_id") or "").strip()
 
 
 def _bgr_to_rgb_image(image: np.ndarray) -> Image.Image:
@@ -786,7 +784,7 @@ def _draw_merge_aware_grid(
     image = _bgr_to_rgb_image(rectified_fax).convert("RGBA")
     layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
+    quantity_columns = hakodate_assignment_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
     merge_regions = _step_review_merge_regions_for_grid(
         worksheet,
         row_edges=[float(value) for value in ys],
@@ -1000,7 +998,7 @@ def build_hakodate_step_review_for_manifest_item(
         or item.get("resolved_template_id")
         or ""
     ).strip() or None
-    facility_config = order_form_service.config_service.get_facility_config_for_template(
+    facility_config = config_service.get_facility_config_for_template(
         facility_code,
         selected_template_id,
     )

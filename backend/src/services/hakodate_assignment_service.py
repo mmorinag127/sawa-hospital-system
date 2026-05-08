@@ -17,7 +17,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 
 from src.services.grid_detector import GridDetectionResult, detect_table_grid
-from src.services import order_form_service
+from src.services import config_service, master_order_form_template_service
 from src.services.template_field_schema_service import (
     canonical_field_name_from_template_column,
     derive_row_fields_from_template,
@@ -36,6 +36,42 @@ _SIGNATURE_COMPONENT_KEYS = (
 _STRUCTURE_BODY_START_ROW = 11
 _STRUCTURE_BODY_END_ROW = 67
 _STRUCTURE_HEADER_ROWS = (7, 8, 9)
+_DEFAULT_WEEK_SHEET_NAME = "3月22日～3月28日"
+_ORDER_FORM_QUANTITY_HEADER_KEYWORDS = (
+    "常食",
+    "糖尿",
+    "軟菜",
+    "ミキサ",
+    "ﾐｷｻ",
+    "禁食",
+    "肉禁",
+    "魚禁",
+    "職員",
+    "通所",
+    "変更",
+    "袋分",
+    "合計",
+    "その他",
+    "2F",
+    "3F",
+    "２F",
+    "３F",
+    "２Ｆ",
+    "３Ｆ",
+    "1回",
+    "2回",
+    "3回",
+    "１回",
+    "２回",
+    "３回",
+)
+_ORDER_FORM_NON_QUANTITY_HEADER_KEYWORDS = (
+    "日付",
+    "区分",
+    "献立",
+    "メニュー",
+    "備考",
+)
 
 
 class HakodateOcrUnavailable(RuntimeError):
@@ -1429,25 +1465,56 @@ def _week_sheet_name_from_template(template: dict[str, Any]) -> str:
         value = str(template.get(key) or "").strip()
         if value:
             return value
-    return order_form_service._DEFAULT_WEEK_SHEET  # noqa: SLF001
+    return _DEFAULT_WEEK_SHEET_NAME
+
+
+def _normalize_order_form_header_text(value: object) -> str:
+    return re.sub(r"[\s　]+", "", str(value or "")).strip()
+
+
+def _worksheet_effective_merged_values(worksheet: Any) -> dict[tuple[int, int], object]:
+    values: dict[tuple[int, int], object] = {}
+    for merged_range in worksheet.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        anchor_value = worksheet.cell(row=min_row, column=min_col).value
+        for row_idx in range(min_row, max_row + 1):
+            for col_idx in range(min_col, max_col + 1):
+                values[(row_idx, col_idx)] = anchor_value
+    return values
+
+
+def _worksheet_quantity_column_indexes(worksheet: Any) -> set[int]:
+    merged_values = _worksheet_effective_merged_values(worksheet)
+    quantity_columns: set[int] = set()
+    for col_idx in range(1, worksheet.max_column + 1):
+        header_blob = "".join(
+            _normalize_order_form_header_text(
+                worksheet.cell(row=row_idx, column=col_idx).value
+                or merged_values.get((row_idx, col_idx))
+            )
+            for row_idx in _STRUCTURE_HEADER_ROWS
+        )
+        if not header_blob:
+            continue
+        if any(keyword in header_blob for keyword in _ORDER_FORM_NON_QUANTITY_HEADER_KEYWORDS):
+            continue
+        if any(keyword in header_blob for keyword in _ORDER_FORM_QUANTITY_HEADER_KEYWORDS):
+            quantity_columns.add(col_idx)
+    return quantity_columns
 
 
 def _source_worksheet_for_structure_template(*, facility_id: str, week_sheet_name: str) -> Any:
-    facility = order_form_service.config_service.get_facility_config(facility_id)
+    _ = week_sheet_name
+    facility = config_service.get_facility_config(facility_id)
     if not facility:
         raise ValueError("facility not found")
-    fax_template_id = str(order_form_service._infer_fax_template_id_from_facility(facility) or "").strip()  # noqa: SLF001
-    if not fax_template_id:
-        raise ValueError("facility fax_template_id not found")
-    source_workbook_name = order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
-        facility,
-        week_sheet_name,
+    workbook = master_order_form_template_service.build_facility_template_workbook(
+        facility_config=facility,
     )
-    source_workbook_path = order_form_service._resolve_source_workbook_path(source_workbook_name)  # noqa: SLF001
-    workbook = load_workbook(source_workbook_path, data_only=True)
-    if week_sheet_name not in workbook.sheetnames:
-        raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
-    return workbook[week_sheet_name]
+    sheet_name = master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"facility template sheet not found: {sheet_name}")
+    return workbook[sheet_name]
 
 
 def _worksheet_for_manifest_structure_template(
@@ -1480,10 +1547,13 @@ def _structure_grid_for_facility_template(
 
     with tempfile.TemporaryDirectory(prefix="hakodate_structure_") as tmp:
         output_dir = Path(tmp)
-        structure_xlsx = order_form_service.build_fax_structure_only_excel(
-            facility_id=facility_id,
-            week_sheet_name=week_sheet_name,
-            output_dir=output_dir,
+        _ = week_sheet_name
+        facility = config_service.get_facility_config(facility_id)
+        if not facility:
+            raise ValueError("facility not found")
+        structure_xlsx = master_order_form_template_service.build_facility_template_xlsx(
+            facility_config=facility,
+            output_path=output_dir / f"{facility_id}_facility_template.xlsx",
         )
         structure_pdf = output_dir / f"{structure_xlsx.stem}.pdf"
         render_workbook_path_to_pdf(
@@ -1493,12 +1563,14 @@ def _structure_grid_for_facility_template(
             dpi=dpi,
         )
         workbook = load_workbook(structure_xlsx, data_only=True)
-        worksheet = workbook[week_sheet_name]
+        worksheet_name = (
+            master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME
+            if master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME in workbook.sheetnames
+            else week_sheet_name
+        )
+        worksheet = workbook[worksheet_name]
         structure_grid = _structure_grid_from_rendered_worksheet(worksheet, dpi=dpi)
-    return structure_grid, _source_worksheet_for_structure_template(
-        facility_id=facility_id,
-        week_sheet_name=week_sheet_name,
-    )
+        return structure_grid, worksheet
 
 
 def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict[str, Any]:
@@ -1725,7 +1797,7 @@ def _save_structure_slot_overlay(
         if actual_columns and actual_rows and worksheet is not None:
             current_merge_regions = list(merge_regions or [])
             if not current_merge_regions:
-                quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
+                quantity_columns = _worksheet_quantity_column_indexes(worksheet)
                 current_merge_regions = _worksheet_merge_regions_for_grid(
                     worksheet,
                     row_edges=actual_rows,
@@ -2056,7 +2128,7 @@ def build_structure_slot_assignment_from_pdf(
     )
     physical_row_map = _workbook_physical_row_map(worksheet, row_count=len(structure_rows) - 1)
     merged_cells = _worksheet_merged_cell_map(worksheet)
-    quantity_columns = order_form_service._worksheet_quantity_column_indexes(worksheet)  # noqa: SLF001
+    quantity_columns = _worksheet_quantity_column_indexes(worksheet)
     structure_merge_regions = _worksheet_merge_regions_for_grid(
         worksheet,
         row_edges=structure_rows,
