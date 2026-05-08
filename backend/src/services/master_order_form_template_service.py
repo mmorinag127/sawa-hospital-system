@@ -16,7 +16,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.services import config_service, menu_service, order_form_service, sheet_week_service
+from src.services import config_service, menu_service, sheet_week_service
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -282,63 +282,129 @@ def _week_sheet_name_from_week_value(week_value: object | None) -> str | None:
     return f"{start_date.month}月{start_date.day}日～{end_date.month}月{end_date.day}日"
 
 
-def _source_index_for_generated_column(column: dict[str, Any], *, generated_offset: int) -> int:
-    try:
-        return int(column.get("source_index"))
-    except Exception:
-        return GENERATED_START_COL - 1 + int(generated_offset)
+def _body_merge_policy_from_config(facility_config: dict[str, Any]) -> dict[str, Any]:
+    fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+    for source in (fax_template, facility_config):
+        if not isinstance(source, dict):
+            continue
+        policy = source.get("body_merge_policy")
+        if isinstance(policy, dict):
+            return deepcopy(policy)
+    return {}
 
 
-def _apply_source_body_merges(
+def _body_merge_mode(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"daypart", "meal", "meal_period"}:
+        return "daypart"
+    if mode in {"", "none", "false", "off"}:
+        return ""
+    raise FacilityTemplateBuildError(f"unsupported_body_merge_mode:{mode}")
+
+
+def _body_merge_target_names(policy: dict[str, Any]) -> set[str]:
+    raw_columns = policy.get("columns")
+    if raw_columns is None:
+        raw_columns = policy.get("target_columns")
+    if raw_columns is None:
+        raw_columns = policy.get("target_names")
+    if raw_columns is None:
+        raw_columns = policy.get("quantity_names")
+    if isinstance(raw_columns, str):
+        raw_columns = [raw_columns]
+    if not isinstance(raw_columns, list):
+        return set()
+    return {str(item or "").strip() for item in raw_columns if str(item or "").strip()}
+
+
+def _configured_body_merge_columns(
+    *,
+    facility_config: dict[str, Any],
+    generated_columns: list[dict[str, Any]],
+) -> list[tuple[int, dict[str, Any], str]]:
+    policy = _body_merge_policy_from_config(facility_config)
+    policy_mode = _body_merge_mode(policy.get("mode"))
+    target_names = _body_merge_target_names(policy)
+    if policy_mode and not target_names:
+        raise FacilityTemplateBuildError("facility_template_body_merge_columns_missing")
+
+    selected: list[tuple[int, dict[str, Any], str]] = []
+    for offset, column in enumerate(generated_columns):
+        column_mode = _body_merge_mode(column.get("body_merge") or column.get("body_merge_mode"))
+        name_tokens = {
+            str(column.get("name") or "").strip(),
+            str(column.get("header") or "").strip(),
+            str(column.get("diet_type") or "").strip(),
+        }
+        mode = column_mode
+        if not mode and policy_mode and target_names.intersection(name_tokens):
+            mode = policy_mode
+        if not mode:
+            continue
+        if mode != "daypart":
+            raise FacilityTemplateBuildError(f"unsupported_body_merge_mode:{mode}")
+        role = str(column.get("role") or "").strip()
+        if role != "quantity":
+            raise FacilityTemplateBuildError("facility_template_body_merge_non_quantity_column")
+        selected.append((GENERATED_START_COL + offset, column, mode))
+    if bool(policy.get("required", False)) and not selected:
+        raise FacilityTemplateBuildError("facility_template_body_merge_columns_missing")
+    return selected
+
+
+def _standard_daypart_body_spans() -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    row = BODY_START_ROW
+    while row <= BODY_END_ROW:
+        for label, size in (("朝", 2), ("昼", 3), ("夕", 3)):
+            end_row = row + size - 1
+            if end_row > BODY_END_ROW:
+                return spans
+            spans.append((row, end_row, label))
+            row = end_row + 1
+    return spans
+
+
+def _apply_configured_body_merges(
     ws: Worksheet,
     *,
     facility_config: dict[str, Any],
     generated_columns: list[dict[str, Any]],
-    week_value: object | None,
     end_col: int,
-) -> int:
-    week_sheet_name = _week_sheet_name_from_week_value(week_value)
-    if not week_sheet_name:
-        return 0
-    try:
-        source_workbook_name = order_form_service.resolve_facility_source_workbook_name_for_week_sheet(
-            facility_config,
-            week_sheet_name,
-        )
-        source_path = order_form_service._resolve_source_workbook_path(source_workbook_name)  # noqa: SLF001
-        source_workbook = load_workbook(source_path, data_only=True)
-    except Exception:
-        return 0
-    try:
-        if week_sheet_name not in source_workbook.sheetnames:
-            return 0
-        source_ws = source_workbook[week_sheet_name]
-        source_to_generated_col = {
-            _source_index_for_generated_column(column, generated_offset=offset) + 1: GENERATED_START_COL + offset
-            for offset, column in enumerate(generated_columns)
-        }
-        applied = 0
-        for merged_range in list(source_ws.merged_cells.ranges):
-            min_col, min_row, max_col, max_row = merged_range.bounds
-            if min_col != max_col:
-                continue
-            if max_row <= min_row:
-                continue
-            if min_row < BODY_START_ROW or max_row > BODY_END_ROW:
-                continue
-            target_col = source_to_generated_col.get(int(min_col))
-            if target_col is None or target_col < GENERATED_START_COL or target_col > end_col:
-                continue
+) -> list[dict[str, Any]]:
+    selected_columns = _configured_body_merge_columns(
+        facility_config=facility_config,
+        generated_columns=generated_columns,
+    )
+    if not selected_columns:
+        return []
+
+    applied: list[dict[str, Any]] = []
+    spans = _standard_daypart_body_spans()
+    for target_col, column, mode in selected_columns:
+        if target_col < GENERATED_START_COL or target_col > end_col:
+            raise FacilityTemplateBuildError("facility_template_body_merge_target_out_of_range")
+        for min_row, max_row, daypart in spans:
             ws.merge_cells(
-                start_row=int(min_row),
-                start_column=int(target_col),
-                end_row=int(max_row),
-                end_column=int(target_col),
+                start_row=min_row,
+                start_column=target_col,
+                end_row=max_row,
+                end_column=target_col,
             )
-            applied += 1
-        return applied
-    finally:
-        source_workbook.close()
+            applied.append(
+                {
+                    "source": "facility_config",
+                    "mode": mode,
+                    "daypart": daypart,
+                    "target_col": int(target_col),
+                    "column_name": str(column.get("name") or ""),
+                    "column_header": str(column.get("header") or ""),
+                    "min_row": int(min_row),
+                    "max_row": int(max_row),
+                    "target_range": f"{get_column_letter(target_col)}{min_row}:{get_column_letter(target_col)}{max_row}",
+                }
+            )
+    return applied
 
 
 def _generated_widths(generated_columns: list[dict[str, Any]]) -> list[float]:
@@ -787,7 +853,7 @@ def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_colum
     for row in rows:
         schema.append(row)
     schema.append([])
-    schema.append(["index", "role", "header", "header_group", "name", "diet_type", "area_id", "source_index"])
+    schema.append(["index", "role", "header", "header_group", "name", "diet_type", "area_id", "source_index", "body_merge"])
     for offset, column in enumerate(generated_columns):
         schema.append(
             [
@@ -799,6 +865,7 @@ def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_colum
                 column.get("diet_type"),
                 column.get("area_id"),
                 column.get("source_index"),
+                column.get("body_merge") or column.get("body_merge_mode"),
             ]
         )
 
@@ -841,11 +908,10 @@ def build_facility_template_workbook(
     _clear_generated_area(ws, end_col)
     _write_header(ws, generated_columns, end_col)
     _write_body_grid(ws, end_col)
-    applied_body_merges = _apply_source_body_merges(
+    applied_body_merges = _apply_configured_body_merges(
         ws,
         facility_config=facility_config,
         generated_columns=generated_columns,
-        week_value=week_value,
         end_col=end_col,
     )
     _set_generated_widths(ws, generated_columns, end_col)
@@ -853,7 +919,10 @@ def build_facility_template_workbook(
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
     wb["generated_template_schema"].append(["week_value", str(week_value or "")])
     wb["generated_template_schema"].append(["week_menu_rows", written_menu_rows])
-    wb["generated_template_schema"].append(["source_body_merged_ranges", applied_body_merges])
+    wb["generated_template_schema"].append(["configured_body_merged_ranges", len(applied_body_merges)])
+    wb["generated_template_schema"].append(
+        ["configured_body_merged_range_details", json.dumps(applied_body_merges, ensure_ascii=False, sort_keys=True)]
+    )
     return wb
 
 

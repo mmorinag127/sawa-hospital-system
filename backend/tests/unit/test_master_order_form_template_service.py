@@ -301,7 +301,7 @@ def test_build_facility_template_from_master_can_embed_week_menu_identity(tmp_pa
     assert schema_values["week_menu_rows"] == 4
 
 
-def test_build_facility_template_from_master_copies_source_body_merges(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path) -> None:
     master = config_service.load_facility_master()
     facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00007")
     resolved = config_service._build_facility_config(facility_id="FAC00007", facility=facility)  # noqa: SLF001
@@ -319,7 +319,7 @@ def test_build_facility_template_from_master_copies_source_body_merges(tmp_path:
 
     assert "E43:E44" in merged_ranges
     assert "E45:E47" in merged_ranges
-    assert schema_values["source_body_merged_ranges"] == len(
+    assert schema_values["configured_body_merged_ranges"] == len(
         [
             item
             for item in merged_ranges
@@ -328,6 +328,54 @@ def test_build_facility_template_from_master_copies_source_body_merges(tmp_path:
             and range_boundaries(item)[3] <= service.BODY_END_ROW
         ]
     )
+    assert schema_values["configured_body_merged_range_details"]
+
+
+def test_build_facility_template_from_master_applies_body_merges_without_week_value(tmp_path: Path) -> None:
+    master = config_service.load_facility_master()
+    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00016")
+    resolved = config_service._build_facility_config(facility_id="FAC00016", facility=facility)  # noqa: SLF001
+
+    output = service.build_facility_template_xlsx(
+        facility_config=resolved,
+        output_path=tmp_path / "FAC00016_facility_template.xlsx",
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["facility_template"]
+    merged_ranges = {str(item) for item in worksheet.merged_cells.ranges}
+    schema_values = {row[0]: row[1] for row in workbook["generated_template_schema"].iter_rows(values_only=True) if row and row[0]}
+
+    assert "E11:E12" in merged_ranges
+    assert "F11:F12" in merged_ranges
+    assert "E13:E15" in merged_ranges
+    assert "F13:F15" in merged_ranges
+    assert "G11:G12" not in merged_ranges
+    assert schema_values["configured_body_merged_ranges"] > 0
+
+
+def test_build_facility_template_from_master_rejects_large_cell_without_targets(tmp_path: Path) -> None:
+    facility_config = _facility_config(
+        [
+            {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "header": "献立", "name": "menu"},
+            {"index": 3, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+            {"index": 4, "role": "quantity", "header": "肉禁", "name": "qty.no_meat_x"},
+            {"index": 5, "role": "note", "header": "備考欄", "name": "remarks"},
+        ]
+    )
+    facility_config["fax_template"]["body_merge_policy"] = {"mode": "daypart", "required": True}
+
+    try:
+        service.build_facility_template_xlsx(
+            facility_config=facility_config,
+            output_path=tmp_path / "invalid_body_merge.xlsx",
+        )
+    except service.FacilityTemplateBuildError as exc:
+        assert str(exc) == "facility_template_body_merge_columns_missing"
+    else:
+        raise AssertionError("expected body merge target validation failure")
 
 
 def test_build_facility_template_diagnostics_is_stable_for_same_inputs(monkeypatch) -> None:

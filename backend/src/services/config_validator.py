@@ -401,6 +401,23 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     large_cell_mode = config.get("large_cell_mode")
     if large_cell_mode is not None and not isinstance(large_cell_mode, bool):
         errors.append(f"{path}.large_cell_mode must be a boolean")
+    body_merge_policy = config.get("body_merge_policy")
+    if body_merge_policy is not None:
+        if not isinstance(body_merge_policy, dict):
+            errors.append(f"{path}.body_merge_policy must be an object")
+        else:
+            mode = body_merge_policy.get("mode")
+            if mode is not None and str(mode).strip().lower() not in {"daypart", "none", ""}:
+                errors.append(f"{path}.body_merge_policy.mode must be daypart or none")
+            columns = body_merge_policy.get("columns")
+            if columns is not None and not (
+                isinstance(columns, list)
+                and all(isinstance(item, str) and item.strip() for item in columns)
+            ):
+                errors.append(f"{path}.body_merge_policy.columns must be a non-empty string list")
+            required = body_merge_policy.get("required")
+            if required is not None and not isinstance(required, bool):
+                errors.append(f"{path}.body_merge_policy.required must be a boolean")
     quantity_assignment_strategy = config.get("quantity_assignment_strategy")
     if quantity_assignment_strategy is not None:
         if not isinstance(quantity_assignment_strategy, str):

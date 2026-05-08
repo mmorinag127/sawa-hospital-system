@@ -399,17 +399,12 @@ def _draw_overlay(
     draw = ImageDraw.Draw(layer)
     font = _font(30)
     small_font = _font(13)
-    x_edges = sorted({int(round(float(v))) for region in regions for v in (region["bbox"][0], region["bbox"][2])})
-    y_edges = sorted({int(round(float(v))) for region in regions for v in (region["bbox"][1], region["bbox"][3])})
-    x0 = min(x_edges)
-    x1 = max(x_edges)
-    y0 = min(y_edges)
-    y1 = max(y_edges)
-
-    for x in x_edges:
-        draw.line((x, y0, x, y1), fill=(0, 190, 0, 230), width=3)
-    for y in y_edges:
-        draw.line((x0, y, x1, y), fill=(0, 190, 0, 210), width=2)
+    for region in regions:
+        box = region.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
+        draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 190, 0, 220), width=3)
 
     by_cell = {str(record.get("sheet_cell")): record for record in records}
     for region in regions:

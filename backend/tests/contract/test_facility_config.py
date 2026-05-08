@@ -298,6 +298,55 @@ def test_fac00004_aux_columns_preserve_physical_source_indexes():
     assert version_columns[5].get("column_id") == "col_005_quantity"
 
 
+def test_facility_master_columns_define_source_indexes_without_runtime_enrichment():
+    master = config_service.load_facility_master()
+    missing = []
+    for facility in master.get("facilities", []):
+        facility_id = facility.get("facility_id")
+        columns = ((facility.get("fax_template_override") or {}).get("columns")) or []
+        for column in columns:
+            if column.get("source_index") is None:
+                missing.append((facility_id, column.get("index"), column.get("header")))
+    assert missing == []
+
+
+def test_facility_config_does_not_enrich_missing_source_indexes_from_source_workbook():
+    _clear_facilities()
+    facility_id = "FAC_SOURCE_INDEX_BLOCK"
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Source Index Block Facility"))
+        session.add(
+            FacilityConfig(
+                facility_id=facility_id,
+                config_json={
+                    "facility_template_source": "operator_override",
+                    "fax_template_id": "fax_layout_regular_forbidden_v1",
+                    "fax_template_override": {
+                        "columns_authoritative": True,
+                        "columns": [
+                            {"index": 0, "role": "date", "header": "日付"},
+                            {"index": 1, "role": "daypart", "header": "区分"},
+                            {"index": 2, "role": "menu_name", "header": "メニュー"},
+                            {
+                                "index": 3,
+                                "role": "quantity",
+                                "header": "常食",
+                                "diet_type": "regular",
+                                "area_id": "X",
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+
+    resolved = config_service.get_facility_config(facility_id)
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    assert [column.get("source_index") for column in columns[:4]] == [None, None, None, None]
+    validation = facility_template_version_service.validate_template_columns(columns)
+    assert "template_source_index_missing" in validation["errors"]
+
+
 def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns():
     _clear_facilities()
     _seed_facilities_from_master()
