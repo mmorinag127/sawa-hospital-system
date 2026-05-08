@@ -490,8 +490,8 @@ def _write_preview_contact_sheet(thumbnails: list[Image.Image], path: Path) -> N
 
 
 def _select_template_owned_eval_regions(target_regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Geometry comes from the facility template. Weekly draft rows must not
-    # truncate target cells because blank body rows can carry exception values.
+    # Geometry comes from the facility template. Blank-menu rows are filtered
+    # upstream when target regions are built.
     return list(target_regions)
 
 

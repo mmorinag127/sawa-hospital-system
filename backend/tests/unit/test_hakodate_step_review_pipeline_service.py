@@ -176,25 +176,25 @@ def test_step_review_target_regions_keep_template_merge_center() -> None:
     assert evidence["physical_split_excel_merge_ranges"] == []
 
 
-def test_step_review_target_regions_restrict_to_resolved_template_columns() -> None:
+def test_step_review_target_regions_include_all_post_menu_columns() -> None:
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet["C7"] = "献立"
-    worksheet["D7"] = "常食"
-    worksheet["E7"] = "糖尿"
-    worksheet["F7"] = "備考欄"
-    worksheet["G7"] = "肉禁"
-    worksheet["H7"] = "魚禁"
-    worksheet["C11"] = "先頭メニュー"
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["F7"] = "糖尿"
+    worksheet["G7"] = "備考欄"
+    worksheet["H7"] = "肉禁"
+    worksheet["I7"] = "魚禁"
+    worksheet["D11"] = "先頭メニュー"
     row_edges = [float(index * 10) for index in range(59)]
-    column_edges = [float(index * 10) for index in range(9)]
+    column_edges = [float(index * 10) for index in range(10)]
     fax_template = {
         "columns": [
             {"index": 0, "role": "date", "field": "date_mmdd", "header": "日付"},
             {"index": 1, "role": "daypart", "field": "daypart", "header": "区分"},
-            {"index": 2, "role": "menu_name", "field": "menu", "header": "献立"},
+            {"index": 3, "role": "menu_name", "field": "menu", "header": "献立"},
             {
-                "index": 3,
+                "index": 4,
                 "role": "quantity",
                 "name": "qty.regular_x",
                 "diet_type": "regular",
@@ -202,14 +202,14 @@ def test_step_review_target_regions_restrict_to_resolved_template_columns() -> N
                 "header": "常食",
             },
             {
-                "index": 4,
+                "index": 5,
                 "role": "quantity",
                 "name": "qty.diabetes_x",
                 "diet_type": "diabetes",
                 "area_id": "X",
                 "header": "糖尿",
             },
-            {"index": 5, "role": "note", "field": "remarks", "header": "備考欄"},
+            {"index": 6, "role": "note", "field": "remarks", "header": "備考欄"},
         ],
     }
 
@@ -221,9 +221,39 @@ def test_step_review_target_regions_restrict_to_resolved_template_columns() -> N
     )
 
     first_row_regions = [region for region in regions if int(region["worksheet_row"]) == 11]
-    assert [region["sheet_cell"] for region in first_row_regions] == ["D11", "E11", "F11"]
-    assert [region["field"] for region in first_row_regions] == ["qty.regular_x", "qty.diabetes_x", "note"]
-    assert "G11" not in {str(region["sheet_cell"]) for region in regions}
-    assert "H11" not in {str(region["sheet_cell"]) for region in regions}
-    assert evidence["template_column_restricted"] is True
-    assert evidence["target_worksheet_cols"] == [4, 5, 6]
+    assert [region["sheet_cell"] for region in first_row_regions] == ["E11", "F11", "G11", "H11", "I11"]
+    assert [region["field"] for region in first_row_regions] == [
+        "qty.regular_x",
+        "qty.diabetes_x",
+        "note",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+    ]
+    assert evidence["template_column_restricted"] is False
+    assert evidence["target_selection_mode"] == "all_physical_columns_right_of_menu"
+    assert evidence["target_worksheet_cols"] == [5, 6, 7, 8, 9]
+    assert evidence["canonical_target_worksheet_cols"] == [5, 6, 7]
+
+
+def test_step_review_target_regions_skip_blank_menu_rows() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["D11"] = "先頭メニュー"
+    worksheet["D12"] = ""
+    worksheet["D13"] = "次メニュー"
+    row_edges = [float(index * 10) for index in range(59)]
+    column_edges = [float(index * 10) for index in range(6)]
+
+    regions, evidence = _post_menu_target_regions(
+        worksheet=worksheet,
+        column_edges=column_edges,
+        row_edges=row_edges,
+    )
+
+    worksheet_rows = {int(region["worksheet_row"]) for region in regions}
+    assert 11 in worksheet_rows
+    assert 12 not in worksheet_rows
+    assert 13 in worksheet_rows
+    assert evidence["blank_menu_row_count"] > 0

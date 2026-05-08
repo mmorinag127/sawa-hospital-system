@@ -756,13 +756,20 @@ def _post_menu_target_regions(
             or str((slot_by_col.get(col) or {}).get("slot_name") or "").strip() in {"note", "remarks"}
         )
     ]
-    target_cols = canonical_target_cols or list(range(menu_col + 1, col_count + 1))
+    # The OCR target map is a geometric map: all physical cells to the right of
+    # the menu column must stay visible to OCR.  Downstream sheet/materialization
+    # logic decides how totals, notes, and helper columns aggregate.
+    target_cols = list(range(menu_col + 1, col_count + 1))
     physical_row_map = _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}
+    blank_menu_row_count = 0
     for row_index, row_meta in sorted(physical_row_map.items()):
         worksheet_row = int(row_meta.get("worksheet_row") or 0)
         if worksheet_row <= 0 or int(row_index) >= len(row_edges) - 1:
+            continue
+        if not str(row_meta.get("menu_key") or "").strip():
+            blank_menu_row_count += 1
             continue
         for worksheet_col in target_cols:
             col_index = worksheet_col - 1
@@ -831,7 +838,10 @@ def _post_menu_target_regions(
         "target_rule": TARGET_RULE,
         "menu_worksheet_col": menu_col,
         "target_worksheet_cols": target_cols,
-        "template_column_restricted": bool(canonical_target_cols),
+        "canonical_target_worksheet_cols": canonical_target_cols,
+        "template_column_restricted": False,
+        "target_selection_mode": "all_physical_columns_right_of_menu",
+        "blank_menu_row_count": blank_menu_row_count,
         "region_count": len(regions),
         "logical_target_count": sum(len(region.get("logical_targets") or []) for region in regions),
         "label_counts": label_counts,
