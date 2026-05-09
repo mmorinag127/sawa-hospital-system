@@ -189,3 +189,29 @@ def test_anomaly_report_uses_evidence_payload_and_day_menu_totals() -> None:
         and item["status"] == "mismatch"
         for item in comparison["items"]
     )
+
+
+def test_workflow_llm_json_payload_uses_first_json_object_with_trailing_text() -> None:
+    payload = workflow_v2_sheet_review_service._extract_workflow_llm_json_payload(  # noqa: SLF001
+        '{"patches": [{"row_index": 0}]}{"ignored": true}'
+    )
+
+    assert payload == {"patches": [{"row_index": 0}]}
+
+
+def test_workflow_llm_json_payload_wraps_top_level_array_for_auto_edit() -> None:
+    payload = workflow_v2_sheet_review_service._extract_workflow_llm_json_payload(  # noqa: SLF001
+        '```json\n[{"row_index": 0, "col_index": 3, "suggested_value": "10"}]\n```',
+        array_key="patches",
+    )
+
+    assert payload == {"patches": [{"row_index": 0, "col_index": 3, "suggested_value": "10"}]}
+
+
+def test_workflow_llm_json_payload_accepts_preface_and_trailing_note() -> None:
+    payload = workflow_v2_sheet_review_service._extract_workflow_llm_json_payload(  # noqa: SLF001
+        'result:\n{"warnings": [{"type": "high_outlier"}]}\n確認しました。',
+        array_key="warnings",
+    )
+
+    assert payload == {"warnings": [{"type": "high_outlier"}]}

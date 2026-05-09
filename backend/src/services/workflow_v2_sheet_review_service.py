@@ -646,7 +646,36 @@ def _sheet_context_for_llm(
     }
 
 
-def _gemini_json_request(*, system_prompt: str, user_payload: dict[str, Any], model: str | None = None, max_tokens: int = 8192) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def _strip_json_fence(text: str) -> str:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+    return raw.strip()
+
+
+def _extract_workflow_llm_json_payload(text: str, *, array_key: str | None = None) -> dict[str, Any]:
+    raw = _strip_json_fence(text)
+    starts = [index for index in (raw.find("{"), raw.find("[")) if index >= 0]
+    if not starts:
+        raise ValueError("Workflow LLM response does not contain JSON")
+    decoder = json.JSONDecoder()
+    parsed, _end_index = decoder.raw_decode(raw[min(starts) :])
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        return {array_key or "items": parsed}
+    raise ValueError("Workflow LLM response is not JSON object or array")
+
+
+def _gemini_json_request(
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    model: str | None = None,
+    max_tokens: int = 8192,
+    array_key: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     resolved_model = _normalize_text(model) or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro"
     try:
         api_key = gemini_ocr_service._get_api_key()  # noqa: SLF001
@@ -681,7 +710,7 @@ def _gemini_json_request(*, system_prompt: str, user_payload: dict[str, Any], mo
             timeout=float(os.getenv("WORKFLOW_V2_LLM_TIMEOUT_SECONDS", "120")),
         )
         text = gemini_ocr_service._extract_response_text(raw)  # noqa: SLF001
-        parsed = gemini_ocr_service._extract_json_payload(text)  # noqa: SLF001
+        parsed = _extract_workflow_llm_json_payload(text, array_key=array_key)
     except Exception as exc:  # noqa: BLE001
         return None, {
             "status": "failed",
@@ -763,6 +792,7 @@ def propose_auto_sheet_edits(
             system_prompt=system_prompt,
             user_payload=_sheet_context_for_llm(sheet, rule_patches, evidence_payload=evidence_payload),
             model=model,
+            array_key="patches",
         )
         llm_patches = _normalize_llm_patches(llm_payload, fields, header)
     merged: list[dict[str, Any]] = []
@@ -1201,6 +1231,7 @@ def build_sheet_anomaly_report(
                 "bagging_summary": (bagging_result or {}).get("summary") if isinstance(bagging_result, dict) else {},
             },
             model=model,
+            array_key="warnings",
         )
         llm_warnings = _normalize_llm_warnings(llm_payload, fields, header)
 
