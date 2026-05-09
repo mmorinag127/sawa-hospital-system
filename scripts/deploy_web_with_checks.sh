@@ -129,23 +129,23 @@ echo "current revision=${CURRENT_REVISION:-unknown}"
 echo "current image=${CURRENT_IMAGE:-unknown}"
 
 if [ -z "$PROVIDED_IMAGE" ]; then
-  cat > "$BUILD_CONFIG" <<YAML
-steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '--build-arg'
-      - 'NEXT_PUBLIC_API_BASE_URL=/api'
-      - '--build-arg'
-      - 'API_PROXY_TARGET=${WORKER_URL}'
-      - '--build-arg'
-      - 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}'
-      - '-t'
-      - '${IMAGE}'
-      - '.'
-images:
-  - '${IMAGE}'
-YAML
+  {
+    printf "%s\n" "steps:"
+    printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'"
+    printf "%s\n" "    args:"
+    printf "%s\n" "      - 'build'"
+    printf "%s\n" "      - '--build-arg'"
+    printf "%s\n" "      - 'NEXT_PUBLIC_API_BASE_URL=/api'"
+    printf "%s\n" "      - '--build-arg'"
+    printf "%s\n" "      - 'API_PROXY_TARGET=${WORKER_URL}'"
+    printf "%s\n" "      - '--build-arg'"
+    printf "%s\n" "      - 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}'"
+    printf "%s\n" "      - '-t'"
+    printf "%s\n" "      - '${IMAGE}'"
+    printf "%s\n" "      - '.'"
+    printf "%s\n" "images:"
+    printf "%s\n" "  - '${IMAGE}'"
+  } > "$BUILD_CONFIG"
 fi
 
 WEB_URL="$WEB_URL" \
