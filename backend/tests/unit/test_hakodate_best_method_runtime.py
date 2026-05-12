@@ -71,3 +71,21 @@ def test_accepted_header_intersection_points_uses_only_matched_header_clusters()
         {"x": 10.0, "y": 20.0},
         {"x": 70.0, "y": 80.0},
     ]
+
+
+def test_header_intersection_points_falls_back_to_detected_header_points_when_match_rejected() -> None:
+    axis_evidence = {
+        "header_intersection_x_match": {
+            "used": False,
+            "reason": "header_x_cluster_count_mismatch",
+            "header_intersection_points": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 30.0, "y": 20.0},
+            ],
+        }
+    }
+
+    assert _accepted_header_intersection_points(axis_evidence) == [
+        {"x": 10.0, "y": 20.0},
+        {"x": 30.0, "y": 20.0},
+    ]

@@ -786,13 +786,17 @@ def _accepted_header_intersection_points(axis_evidence: dict[str, Any] | None) -
     if not isinstance(axis_evidence, dict):
         return []
     match = axis_evidence.get("header_intersection_x_match")
-    if not isinstance(match, dict) or not match.get("used"):
+    if not isinstance(match, dict):
         return []
     points = match.get("header_intersection_points")
+    if not isinstance(points, list):
+        return []
+    if not match.get("used"):
+        return [point for point in points if isinstance(point, dict)]
     x_clusters = match.get("fax_x_clusters")
     y_clusters = match.get("fax_y_clusters")
-    if not isinstance(points, list) or not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
-        return []
+    if not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
+        return [point for point in points if isinstance(point, dict)]
 
     accepted_x_point_indexes: set[int] = set()
     for cluster in x_clusters:

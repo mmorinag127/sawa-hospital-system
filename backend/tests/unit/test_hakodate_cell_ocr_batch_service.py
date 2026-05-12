@@ -43,6 +43,24 @@ def test_live_cell_ocr_overlay_uses_only_accepted_header_intersections() -> None
     ]
 
 
+def test_live_cell_ocr_overlay_shows_detected_header_points_when_match_rejected() -> None:
+    axis_evidence = {
+        "header_intersection_x_match": {
+            "used": False,
+            "reason": "header_x_cluster_count_mismatch",
+            "header_intersection_points": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 30.0, "y": 20.0},
+            ],
+        }
+    }
+
+    assert _accepted_header_intersection_points(axis_evidence) == [
+        {"x": 10.0, "y": 20.0},
+        {"x": 30.0, "y": 20.0},
+    ]
+
+
 def test_assign_yomitoku_words_to_contact_regions_keeps_slot_identity() -> None:
     regions = [
         {

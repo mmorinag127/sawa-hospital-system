@@ -447,17 +447,26 @@ def _select_template_owned_eval_regions(target_regions: list[dict[str, Any]]) ->
 
 
 def _accepted_header_intersection_points(axis_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Return only header intersections used by the structural header-axis matcher."""
+    """Return header intersections for visual inspection.
+
+    Prefer the points that actually participated in the structural matcher. If
+    the matcher rejects the correction, still show the detected header-internal
+    points so the live overlay exposes why the matcher did not engage.
+    """
     if not isinstance(axis_evidence, dict):
         return []
     match = axis_evidence.get("header_intersection_x_match")
-    if not isinstance(match, dict) or not match.get("used"):
+    if not isinstance(match, dict):
         return []
     points = match.get("header_intersection_points")
+    if not isinstance(points, list):
+        return []
+    if not match.get("used"):
+        return [point for point in points if isinstance(point, dict)]
     x_clusters = match.get("fax_x_clusters")
     y_clusters = match.get("fax_y_clusters")
-    if not isinstance(points, list) or not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
-        return []
+    if not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
+        return [point for point in points if isinstance(point, dict)]
 
     accepted_x_point_indexes: set[int] = set()
     for cluster in x_clusters:
@@ -768,7 +777,7 @@ def build_best_method_for_manifest_item(
     details = [
         f"page={page_index} fields={field_by_col}",
         "green lines: snapped target-cell grid after matching template X to actual FAX vertical lines",
-        "orange circles: accepted header-internal intersections used for header-axis alignment",
+        "orange circles: detected header-internal intersections for header-axis alignment inspection",
         "red points: target cells with ink; blue points: target cells estimated blank; blue boxes: target cell boxes; Q markers: accepted outer 4 points",
         "OCR: yomitoku TextRecognizer top-k, strict>=0.45 / assisted>=0.15 / suggestion>=0.05",
         (
