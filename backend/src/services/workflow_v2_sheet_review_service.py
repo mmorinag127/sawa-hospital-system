@@ -864,6 +864,7 @@ def _warning(
     value: object,
     message: str,
     evidence: dict[str, Any] | None = None,
+    suggested_value: object | None = None,
 ) -> dict[str, Any]:
     normalized_evidence = evidence or {}
     evidence_keys = normalized_evidence.get("keys") if isinstance(normalized_evidence.get("keys"), dict) else {}
@@ -879,6 +880,7 @@ def _warning(
         "field": field,
         "label": label,
         "value": _normalize_text(value),
+        "suggested_value": _normalize_text(suggested_value) if suggested_value is not None else None,
         "message": message,
         "date": date or None,
         "daypart": daypart or None,
@@ -1118,6 +1120,7 @@ def _rule_based_anomaly_warnings(
                         value=raw_value,
                         message=f"{label} が同列中央値 {baseline:g} に対して大きすぎます。",
                         evidence={"baseline": baseline, "date": context.get("date"), "daypart": context.get("daypart"), "menu": context.get("menu")},
+                        suggested_value=_numeric_display(baseline),
                     )
                 )
             elif value > 0 and baseline >= 20 and value <= baseline * 0.25:
@@ -1132,6 +1135,7 @@ def _rule_based_anomaly_warnings(
                         value=raw_value,
                         message=f"{label} が同列中央値 {baseline:g} に対して小さすぎます。",
                         evidence={"baseline": baseline, "date": context.get("date"), "daypart": context.get("daypart"), "menu": context.get("menu")},
+                        suggested_value=_numeric_display(baseline),
                     )
                 )
 
@@ -1203,6 +1207,7 @@ def _normalize_llm_warnings(payload: dict[str, Any] | None, fields: list[str], h
                 value=item.get("value"),
                 message=_normalize_text(item.get("message")) or _normalize_text(item.get("reason")) or "AIが確認対象として検出しました。",
                 evidence=item.get("evidence") if isinstance(item.get("evidence"), dict) else {},
+                suggested_value=item.get("suggested_value"),
             )
         )
     return normalized
@@ -1235,7 +1240,8 @@ def build_sheet_anomaly_report(
             "You audit a Japanese meal-order quantity sheet before bagging. Return JSON only. "
             "Use only the confirmed sheet numbers and derived totals. Do not compare against OCR. "
             "Find suspicious quantity cells by comparing same-day totals, same-daypart totals, same-menu totals, same-column values on other days, and special diet totals. "
-            "Flag obvious high/low values such as a likely extra digit. Do not rewrite the sheet."
+            "Flag obvious high/low values such as a likely extra digit. "
+            "When a safe correction is clear for a cell, include suggested_value; otherwise omit it."
         )
         llm_payload, llm_meta = _gemini_json_request(
             system_prompt=system_prompt,

@@ -1820,7 +1820,8 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisti
     review = anomaly["anomaly_review"]
     assert review["source"] == "unsaved_sheet"
     assert review["source_saved_sheet_id"] is None
-    assert any(item["type"] == "high_outlier" for item in review["warnings"])
+    high_outlier = next(item for item in review["warnings"] if item["type"] == "high_outlier")
+    assert high_outlier["suggested_value"] == "11.5"
 
     inspection, error = order_workflow_v2_service.get_inspection(order_id)
 

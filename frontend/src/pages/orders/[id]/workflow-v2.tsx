@@ -150,6 +150,7 @@ type SheetAnomalyWarning = {
   field?: string | null;
   label?: string | null;
   value?: string | null;
+  suggested_value?: string | null;
   message?: string | null;
   date?: string | null;
   daypart?: string | null;
@@ -2047,6 +2048,29 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
+  const applyAnomalyCorrections = () => {
+    const patches = anomalyWarnings.filter((warning) => (
+      typeof warning.row_index === "number"
+      && typeof warning.col_index === "number"
+      && String(warning.suggested_value || "").trim()
+    ));
+    if (!sheetPayload || !patches.length) return;
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => [...row]);
+      for (const warning of patches) {
+        const rowIndex = Number(warning.row_index);
+        const colIndex = Number(warning.col_index);
+        if (!rows[rowIndex] || colIndex < 0 || colIndex >= rows[rowIndex].length) continue;
+        rows[rowIndex][colIndex] = String(warning.suggested_value || "").trim();
+      }
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+    setSelectedAnomalyIndex(null);
+  };
+
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
       const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
@@ -2816,36 +2840,52 @@ export default function OrderWorkflowV2Page() {
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
           <div className="row-actions step3-top-actions">
-            <button
-              className="btn"
-              type="button"
-              onClick={generateSheetFromSelectedOcr}
-              disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}
-            >
-              選択OCRからシート生成
-            </button>
-            <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
-              {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
-            </button>
-            <button
-              className="btn ghost"
-              type="button"
-              onClick={() => setStep3LayoutMode((current) => (current === "side-by-side" ? "stacked" : "side-by-side"))}
-            >
-              {step3LayoutMode === "side-by-side" ? "上下表示に切替" : "左右表示に切替"}
-            </button>
-            <label className="toolbar-field expanded-cell-toggle">
-              <span>拡大セルコピー</span>
-              <select
-                value={expandedCellCopyMode}
-                onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
-                disabled={Boolean(busy || expandedCellCopySaving)}
+            <div className="step3-top-actions-left">
+              <button
+                className="btn"
+                type="button"
+                onClick={generateSheetFromSelectedOcr}
+                disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}
               >
-                <option value="auto">自動</option>
-                <option value="enabled">ON</option>
-                <option value="disabled">OFF</option>
-              </select>
-            </label>
+                選択OCRからシート生成
+              </button>
+              <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
+                {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
+              </button>
+              <button
+                className="btn ghost"
+                type="button"
+                onClick={() => setStep3LayoutMode((current) => (current === "side-by-side" ? "stacked" : "side-by-side"))}
+              >
+                {step3LayoutMode === "side-by-side" ? "上下表示に切替" : "左右表示に切替"}
+              </button>
+              <label className="toolbar-field expanded-cell-toggle">
+                <span>拡大セルコピー</span>
+                <select
+                  value={expandedCellCopyMode}
+                  onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
+                  disabled={Boolean(busy || expandedCellCopySaving)}
+                >
+                  <option value="auto">自動</option>
+                  <option value="enabled">ON</option>
+                  <option value="disabled">OFF</option>
+                </select>
+              </label>
+            </div>
+            <div className="step3-top-actions-right">
+              <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
+                AI自動補正を提案
+              </button>
+              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
+                AI提案を反映
+              </button>
+              <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
+                異常チェック
+              </button>
+              <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
+                異常を補正
+              </button>
+            </div>
           </div>
           <p className="subtle">
             拡大セルコピーは、merged cell施設で同じ食区分内へ数量を反映する設定です。変更後は選択OCRからシートを再生成してください。
@@ -2936,15 +2976,6 @@ export default function OrderWorkflowV2Page() {
                   <div className="toolbar-row">
                     <button className="btn ghost" type="button" onClick={applyVisibleOcrSuggestions} disabled={!ocrOverlayItemMap.size || Boolean(busy)}>
                       表示中提案を採用
-                    </button>
-                    <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
-                      AI自動補正を提案
-                    </button>
-                    <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
-                      AI提案を反映
-                    </button>
-                    <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
-                      数量異常チェック
                     </button>
                     <label className="toolbar-field">
                       <span>OCR信頼度表示</span>
@@ -3041,6 +3072,7 @@ export default function OrderWorkflowV2Page() {
                                 <th>行</th>
                                 <th>列</th>
                                 <th>値</th>
+                                <th>補正案</th>
                                 <th>基準</th>
                                 <th>内容</th>
                               </tr>
@@ -3062,6 +3094,7 @@ export default function OrderWorkflowV2Page() {
                                   <td>{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"}</td>
                                   <td>{warning.label || warning.field || (typeof warning.col_index === "number" ? `C${warning.col_index + 1}` : "-")}</td>
                                   <td>{warning.value || "-"}</td>
+                                  <td>{warning.suggested_value || "-"}</td>
                                   <td>{formatAnomalyBasis(warning)}</td>
                                   <td>{warning.message || warning.type || "確認対象"}</td>
                                 </tr>
@@ -3499,6 +3532,21 @@ export default function OrderWorkflowV2Page() {
           display: flex;
           flex-wrap: wrap;
           gap: 10px;
+        }
+        .step3-top-actions {
+          align-items: flex-end;
+          justify-content: space-between;
+        }
+        .step3-top-actions-left,
+        .step3-top-actions-right {
+          align-items: flex-end;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+        .step3-top-actions-right {
+          justify-content: flex-end;
+          margin-left: auto;
         }
         .state-actions {
           justify-content: flex-end;
