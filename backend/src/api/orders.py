@@ -89,6 +89,7 @@ class WorkflowV2SheetAutoEditBody(BaseModel):
 
 
 class WorkflowV2SheetAnomalyBody(BaseModel):
+    sheet: dict | None = None
     model: str | None = None
     use_llm: bool | None = None
 
@@ -1776,6 +1777,7 @@ def run_order_workflow_v2_sheet_anomaly_review(order_id: str, body: WorkflowV2Sh
     return _workflow_v2_or_404(
         order_workflow_v2_service.run_sheet_anomaly_review(
             order_id,
+            sheet=body.sheet if body else None,
             model=body.model if body else None,
             use_llm=body.use_llm if body else None,
         )

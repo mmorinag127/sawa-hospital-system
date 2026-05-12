@@ -1788,6 +1788,47 @@ def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) 
     assert "anomaly_review" not in inspection["bagging_result"]
 
 
+def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisting(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
+        order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "regular", "soft"],
+            "header": ["日付", "区分", "献立", "常食", "軟菜"],
+            "rows": [
+                ["04/28", "朝", "A", "110", "5"],
+                ["04/28", "朝", "B", "12", "5"],
+                ["04/29", "朝", "C", "10", "5"],
+                ["04/30", "朝", "D", "11", "5"],
+            ],
+        },
+        use_llm=False,
+    )
+
+    assert error is None
+    review = anomaly["anomaly_review"]
+    assert review["source"] == "unsaved_sheet"
+    assert review["source_saved_sheet_id"] is None
+    assert any(item["type"] == "high_outlier" for item in review["warnings"])
+
+    inspection, error = order_workflow_v2_service.get_inspection(order_id)
+
+    assert error is None
+    assert inspection["anomaly_review"] is None
+    assert inspection["artifact_lineage"]["anomaly_review_id"] is None
+
+
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()

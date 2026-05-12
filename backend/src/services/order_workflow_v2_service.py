@@ -2459,6 +2459,7 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
 def run_sheet_anomaly_review(
     order_id: str,
     *,
+    sheet: dict[str, Any] | None = None,
     model: str | None = None,
     use_llm: bool | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -2467,25 +2468,31 @@ def run_sheet_anomaly_review(
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
-        if not workflow.draft_id:
+        review_sheet = sheet if isinstance(sheet, dict) else None
+        if review_sheet is None and not workflow.draft_id:
             return None, "saved_sheet_required"
-        draft = session.get(OrderSheetDraft, workflow.draft_id)
-        if draft is None or draft.order_id != order.id:
-            return None, "saved_sheet_missing"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
-        draft_template_version_id = _normalize_id(draft.template_version_id)
-        if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
-            return None, "saved_sheet_template_mismatch"
-        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        draft = session.get(OrderSheetDraft, workflow.draft_id) if workflow.draft_id else None
+        materialization_candidate: dict[str, Any] | None = None
         materialization_error = None
-        if not isinstance(materialization_candidate, dict):
-            materialization_candidate = {"error": "saved_sheet_materialization_failed"}
-            materialization_error = "saved_sheet_materialization_failed"
-        else:
-            materialization_error = _normalize_id(materialization_candidate.get("error"))
+        source_saved_sheet_id = None
+        if review_sheet is None:
+            if draft is None or draft.order_id != order.id:
+                return None, "saved_sheet_missing"
+            workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+            draft_template_version_id = _normalize_id(draft.template_version_id)
+            if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
+                return None, "saved_sheet_template_mismatch"
+            review_sheet = draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {}
+            source_saved_sheet_id = draft.id
+            materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+            if not isinstance(materialization_candidate, dict):
+                materialization_candidate = {"error": "saved_sheet_materialization_failed"}
+                materialization_error = "saved_sheet_materialization_failed"
+            else:
+                materialization_error = _normalize_id(materialization_candidate.get("error"))
         bagging_result = _current_bagging_result(workflow)
         anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
-            sheet=draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
+            sheet=review_sheet,
             evidence_payload=None,
             materialization_candidate=materialization_candidate,
             bagging_result=bagging_result,
@@ -2494,7 +2501,8 @@ def run_sheet_anomaly_review(
         )
         anomaly_review_id = _new_id("OAR")
         anomaly_review["anomaly_review_id"] = anomaly_review_id
-        anomaly_review["source_saved_sheet_id"] = draft.id
+        anomaly_review["source_saved_sheet_id"] = source_saved_sheet_id
+        anomaly_review["source"] = "unsaved_sheet" if sheet is not None else "saved_sheet"
         anomaly_review["source_bagging_result_id"] = (
             bagging_result.get("bagging_result_id") if isinstance(bagging_result, dict) else None
         )
@@ -2512,10 +2520,11 @@ def run_sheet_anomaly_review(
                     "evidence": {"error": materialization_error},
                 }
             )
-        meta = _workflow_meta(workflow)
-        meta["anomaly_review_id"] = anomaly_review_id
-        meta["anomaly_review"] = anomaly_review
-        _write_workflow_meta(workflow, meta)
+        if sheet is None:
+            meta = _workflow_meta(workflow)
+            meta["anomaly_review_id"] = anomaly_review_id
+            meta["anomaly_review"] = anomaly_review
+            _write_workflow_meta(workflow, meta)
         return {
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": anomaly_review,

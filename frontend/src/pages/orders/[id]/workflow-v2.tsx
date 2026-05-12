@@ -983,6 +983,8 @@ export default function OrderWorkflowV2Page() {
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
+  const [localAnomalyReview, setLocalAnomalyReview] = useState<Record<string, unknown> | null>(null);
+  const [selectedAnomalyIndex, setSelectedAnomalyIndex] = useState<number | null>(null);
   const [columnFillTarget, setColumnFillTarget] = useState<string>("");
   const [columnFillValue, setColumnFillValue] = useState<string>("");
   const [swapLeftColumn, setSwapLeftColumn] = useState<string>("");
@@ -1110,11 +1112,11 @@ export default function OrderWorkflowV2Page() {
   );
 
   const anomalyReview = useMemo(() => {
-    const review = inspection?.anomaly_review;
+    const review = localAnomalyReview || inspection?.anomaly_review;
     return review && typeof review === "object" && !Array.isArray(review)
       ? review as Record<string, unknown>
       : null;
-  }, [inspection?.anomaly_review]);
+  }, [inspection?.anomaly_review, localAnomalyReview]);
 
   const anomalyWarnings = useMemo(() => {
     const warnings = anomalyReview?.warnings;
@@ -1122,6 +1124,22 @@ export default function OrderWorkflowV2Page() {
       ? warnings.filter((item): item is SheetAnomalyWarning => Boolean(item && typeof item === "object"))
       : [];
   }, [anomalyReview]);
+
+  const anomalyCellMap = useMemo(() => {
+    const severityRank: Record<string, number> = { low: 1, medium: 2, high: 3 };
+    const map = new Map<string, { warning: SheetAnomalyWarning; index: number }>();
+    anomalyWarnings.forEach((warning, index) => {
+      if (typeof warning.row_index !== "number" || typeof warning.col_index !== "number") return;
+      const key = `${warning.row_index}:${warning.col_index}`;
+      const current = map.get(key);
+      const currentRank = current ? severityRank[String(current.warning.severity || "medium")] || 2 : 0;
+      const nextRank = severityRank[String(warning.severity || "medium")] || 2;
+      if (!current || nextRank >= currentRank) {
+        map.set(key, { warning, index });
+      }
+    });
+    return map;
+  }, [anomalyWarnings]);
 
   const ocrOverlayItemMap = useMemo(() => {
     const map = new Map<string, OcrNumericCellItem>();
@@ -1886,12 +1904,16 @@ export default function OrderWorkflowV2Page() {
       setSheetPayload(normalized);
       setSheetJson(formatJson(normalized));
       setSheetAutoEditResult(null);
+      setLocalAnomalyReview(null);
+      setSelectedAnomalyIndex(null);
     }, {
       successMessage: "選択OCRからシートを生成しました",
       refreshAfter: false,
     });
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
+    setLocalAnomalyReview(null);
+    setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row, idx) => (
@@ -1920,9 +1942,19 @@ export default function OrderWorkflowV2Page() {
     focusSheetInput(nextRowIndex, colIndex);
   };
 
+  const selectAnomalyWarning = (warning: SheetAnomalyWarning, index: number) => {
+    setSelectedAnomalyIndex(index);
+    if (typeof warning.row_index === "number" && typeof warning.col_index === "number") {
+      setFocusedSheetCell({ rowIndex: warning.row_index, colIndex: warning.col_index });
+      focusSheetInput(warning.row_index, warning.col_index);
+    }
+  };
+
   const fillQuantityColumn = () => {
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
+    setLocalAnomalyReview(null);
+    setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => row.map((cell, idx) => (idx === colIndex ? columnFillValue : cell)));
@@ -1936,6 +1968,8 @@ export default function OrderWorkflowV2Page() {
     const left = Number(swapLeftColumn);
     const right = Number(swapRightColumn);
     if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
+    setLocalAnomalyReview(null);
+    setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => {
@@ -1953,6 +1987,8 @@ export default function OrderWorkflowV2Page() {
 
   const applyVisibleOcrSuggestions = () => {
     if (!sheetPayload || !ocrOverlayItemMap.size) return;
+    setLocalAnomalyReview(null);
+    setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row, rowIdx) =>
@@ -1996,6 +2032,8 @@ export default function OrderWorkflowV2Page() {
       && String(patch.suggested_value || "").trim()
     ));
     if (!sheetPayload || !patches.length) return;
+    setLocalAnomalyReview(null);
+    setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => [...row]);
@@ -2019,6 +2057,7 @@ export default function OrderWorkflowV2Page() {
         sheet: parsed,
         edited_by: "operator",
       });
+      setSelectedAnomalyIndex(null);
     }, {
       successMessage: "シートを保存しました",
       nextStep: 4,
@@ -2032,14 +2071,21 @@ export default function OrderWorkflowV2Page() {
     });
 
   const runAnomalyReview = () =>
-    runAction("Step4 anomaly review", async () => {
-      await apiClient.post(
+    runAction("Step3 anomaly review", async () => {
+      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      if (!parsed) {
+        throw new Error("数量異常チェックに渡せるシートがありません");
+      }
+      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown> }>(
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review`,
-        { use_llm: true },
+        { sheet: parsed, use_llm: true },
         { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
       );
+      setLocalAnomalyReview(response.data.anomaly_review || null);
+      setSelectedAnomalyIndex(null);
     }, {
       successMessage: "数量異常チェックを実行しました",
+      refreshAfter: false,
     });
 
   const confirmBagging = () =>
@@ -2897,6 +2943,9 @@ export default function OrderWorkflowV2Page() {
                     <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
                       AI提案を反映
                     </button>
+                    <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
+                      数量異常チェック
+                    </button>
                     <label className="toolbar-field">
                       <span>OCR信頼度表示</span>
                       <select value={ocrConfidenceDisplayMode} onChange={(event) => setOcrConfidenceDisplayMode(event.target.value as ConfidenceDisplayMode)}>
@@ -2971,6 +3020,60 @@ export default function OrderWorkflowV2Page() {
                       )}
                     </div>
                   ) : null}
+                  {anomalyReview ? (
+                    <div className={["anomaly-review-panel", anomalyWarnings.length ? "" : "ok"].filter(Boolean).join(" ")}>
+                      <div className="llm-review-header">
+                        <strong>数量異常チェック</strong>
+                        <span>{anomalyWarnings.length}件 / AI: {formatAiStatus(anomalyReview?.llm && typeof anomalyReview.llm === "object" ? (anomalyReview.llm as Record<string, unknown>).status : null)}</span>
+                      </div>
+                      <p className="subtle">
+                        保存前のシート内数値だけを使って異常候補を出します。行を選ぶと、右のシートと左のOCR overlayで該当セルを表示します。
+                      </p>
+                      {anomalyWarnings.length ? (
+                        <div className="table-wrap anomaly-table-wrap step3-anomaly-table-wrap">
+                          <table className="anomaly-table">
+                            <thead>
+                              <tr>
+                                <th>重要度</th>
+                                <th>日付</th>
+                                <th>食区分</th>
+                                <th>メニュー</th>
+                                <th>行</th>
+                                <th>列</th>
+                                <th>値</th>
+                                <th>基準</th>
+                                <th>内容</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {anomalyWarnings.slice(0, 80).map((warning, idx) => (
+                                <tr
+                                  key={`step3-anomaly-${idx}`}
+                                  className={[
+                                    `anomaly-${warning.severity || "medium"}`,
+                                    selectedAnomalyIndex === idx ? "selected-anomaly-row" : "",
+                                  ].filter(Boolean).join(" ")}
+                                  onClick={() => selectAnomalyWarning(warning, idx)}
+                                >
+                                  <td>{formatAnomalySeverity(warning.severity)}</td>
+                                  <td>{anomalyContextValue(warning, "date") || "-"}</td>
+                                  <td>{anomalyContextValue(warning, "daypart") || "-"}</td>
+                                  <td className="anomaly-menu-cell">{anomalyContextValue(warning, "menu") || "-"}</td>
+                                  <td>{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"}</td>
+                                  <td>{warning.label || warning.field || (typeof warning.col_index === "number" ? `C${warning.col_index + 1}` : "-")}</td>
+                                  <td>{warning.value || "-"}</td>
+                                  <td>{formatAnomalyBasis(warning)}</td>
+                                  <td>{warning.message || warning.type || "確認対象"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p className="subtle">保存前シートで明確な異常候補はありません。</p>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="sheet-table-wrap">
                   <table className="sheet-table compact-sheet-table">
@@ -3000,6 +3103,9 @@ export default function OrderWorkflowV2Page() {
                             const belowThreshold = confidenceTier && !confidenceTierVisible(confidenceTier, ocrConfidenceDisplayMode);
                             const overlayItem = !String(row[colIdx] || "").trim() ? ocrOverlayItemMap.get(`${rowIdx}:${colIdx}`) : null;
                             const overlayValue = String(overlayItem?.value || "").trim();
+                            const anomalyCell = anomalyCellMap.get(`${rowIdx}:${colIdx}`);
+                            const anomalySeverity = anomalyCell ? String(anomalyCell.warning.severity || "medium").trim() || "medium" : "";
+                            const anomalySelected = anomalyCell && selectedAnomalyIndex === anomalyCell.index;
                             return (
                               <td
                                 key={`${field}-${colIdx}`}
@@ -3009,6 +3115,8 @@ export default function OrderWorkflowV2Page() {
                                   confidenceTier ? `confidence-${confidenceTier}` : "",
                                   belowThreshold ? "below-confidence-threshold" : "",
                                   overlayValue ? "has-overlay-suggestion" : "",
+                                  anomalySeverity ? `sheet-anomaly-${anomalySeverity}` : "",
+                                  anomalySelected ? "sheet-anomaly-selected" : "",
                                 ].filter(Boolean).join(" ")}
                                 style={isLockedSheetField(field) ? { left: `${stickyLeftForSheetField(field, colIdx)}px` } : undefined}
                               >
@@ -3068,9 +3176,6 @@ export default function OrderWorkflowV2Page() {
               <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
                 袋分けを計算
               </button>
-              <button className="btn" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
-                数量異常チェック
-              </button>
               <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
                 確定して次へ
               </button>
@@ -3096,57 +3201,6 @@ export default function OrderWorkflowV2Page() {
                   <p className="summary-value">{bagRows.length}袋</p>
                 </div>
               </div>
-              {!anomalyReview ? (
-                <div className="anomaly-review-panel pending">
-                  <strong>数量異常チェック</strong>
-                  <span className="subtle">袋分けとは別に実行します。AI処理が遅い場合でも袋分け結果は表示できます。</span>
-                </div>
-              ) : anomalyWarnings.length ? (
-                <div className="anomaly-review-panel">
-                  <div className="llm-review-header">
-                    <strong>数量異常チェック</strong>
-                    <span>{anomalyWarnings.length}件 / AI: {formatAiStatus(anomalyReview?.llm && typeof anomalyReview.llm === "object" ? (anomalyReview.llm as Record<string, unknown>).status : null)}</span>
-                  </div>
-                  <p className="subtle">確定シート内の数値だけを使い、同日・食区分・同列・同一メニュー傾向から外れた値を確認対象にします。OCR結果との一致/不一致はここでは判定しません。</p>
-                  <div className="table-wrap anomaly-table-wrap">
-                    <table className="anomaly-table">
-                      <thead>
-                        <tr>
-                          <th>重要度</th>
-                          <th>日付</th>
-                          <th>食区分</th>
-                          <th>メニュー</th>
-                          <th>行</th>
-                          <th>列</th>
-                          <th>値</th>
-                          <th>基準</th>
-                          <th>内容</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {anomalyWarnings.slice(0, 40).map((warning, idx) => (
-                          <tr key={`anomaly-${idx}`} className={`anomaly-${warning.severity || "medium"}`}>
-                            <td>{formatAnomalySeverity(warning.severity)}</td>
-                            <td>{anomalyContextValue(warning, "date") || "-"}</td>
-                            <td>{anomalyContextValue(warning, "daypart") || "-"}</td>
-                            <td className="anomaly-menu-cell">{anomalyContextValue(warning, "menu") || "-"}</td>
-                            <td>{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"}</td>
-                            <td>{warning.label || warning.field || (typeof warning.col_index === "number" ? `C${warning.col_index + 1}` : "-")}</td>
-                            <td>{warning.value || "-"}</td>
-                            <td>{formatAnomalyBasis(warning)}</td>
-                            <td>{warning.message || warning.type || "確認対象"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                <div className="anomaly-review-panel ok">
-                  <strong>数量異常チェック</strong>
-                  <span className="subtle">袋分け計算時点で明確な異常候補はありません。</span>
-                </div>
-              )}
               {bagSummaryGroups.length ? (
                 <div className="wrap-grid workflow-bag-groups">
                   <p className="bag-summary-note subtle">
@@ -4332,6 +4386,21 @@ export default function OrderWorkflowV2Page() {
           top: -8px;
           z-index: 2;
         }
+        .sheet-table td.sheet-anomaly-high,
+        .sheet-table td.sheet-anomaly-high input {
+          background: #ffd9cc !important;
+        }
+        .sheet-table td.sheet-anomaly-medium,
+        .sheet-table td.sheet-anomaly-medium input {
+          background: #fff0b8 !important;
+        }
+        .sheet-table td.sheet-anomaly-low,
+        .sheet-table td.sheet-anomaly-low input {
+          background: #e8f0ff !important;
+        }
+        .sheet-table td.sheet-anomaly-selected {
+          box-shadow: inset 0 0 0 3px #e6532e;
+        }
         .llm-review-panel,
         .anomaly-review-panel {
           background: #fff8e8;
@@ -4365,8 +4434,17 @@ export default function OrderWorkflowV2Page() {
         .anomaly-table tr.anomaly-medium td {
           background: #fff8e8;
         }
+        .anomaly-table tbody tr {
+          cursor: pointer;
+        }
+        .anomaly-table tr.selected-anomaly-row td {
+          box-shadow: inset 0 -2px 0 #e6532e, inset 0 2px 0 #e6532e;
+        }
         .anomaly-menu-cell {
           min-width: 180px;
+        }
+        .step3-anomaly-table-wrap {
+          max-height: 260px;
         }
         .anomaly-review-panel.ok {
           background: #edf7ef;
