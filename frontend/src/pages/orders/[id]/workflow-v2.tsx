@@ -197,6 +197,7 @@ const HAKODATE_REVIEW_CANVAS = {
   rectifiedCanvasWidth: 2362,
   rectifiedCanvasHeight: 4273,
 };
+const AI_REVIEW_REQUEST_TIMEOUT_MS = 180000;
 
 type FacilityOption = {
   id: string;
@@ -1937,10 +1938,14 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("AI自動編集に渡せるシートがありません");
       }
-      const response = await apiClient.post<SheetAutoEditResult>(`/orders/${orderId}/workflow-v2/sheet/auto-edit`, {
-        sheet: parsed,
-        use_llm: true,
-      });
+      const response = await apiClient.post<SheetAutoEditResult>(
+        `/orders/${orderId}/workflow-v2/sheet/auto-edit`,
+        {
+          sheet: parsed,
+          use_llm: true,
+        },
+        { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
+      );
       setSheetAutoEditResult(response.data);
     }, {
       successMessage: "AI自動編集の候補を作成しました",
@@ -1991,9 +1996,11 @@ export default function OrderWorkflowV2Page() {
 
   const runAnomalyReview = () =>
     runAction("Step4 anomaly review", async () => {
-      await apiClient.post(`/orders/${orderId}/workflow-v2/sheet/anomaly-review`, {
-        use_llm: true,
-      });
+      await apiClient.post(
+        `/orders/${orderId}/workflow-v2/sheet/anomaly-review`,
+        { use_llm: true },
+        { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
+      );
     }, {
       successMessage: "数量異常チェックを実行しました",
     });

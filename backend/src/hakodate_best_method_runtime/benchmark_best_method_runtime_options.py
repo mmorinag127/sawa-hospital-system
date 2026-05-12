@@ -383,6 +383,7 @@ def build_minimal_variant_for_manifest_item(
         regions=snapped_regions,
         records=records,
         quad_points=quad_points,
+        header_intersection_points=None,
         facility_code=facility_code,
         order_id=order_id,
         details=[

@@ -334,6 +334,7 @@ def _draw_overlay(
     regions: list[dict[str, Any]],
     records: list[dict[str, Any]],
     quad_points: list[tuple[float, float]],
+    header_intersection_points: list[dict[str, Any]] | None,
     facility_code: str,
     order_id: str,
     details: list[str],
@@ -349,6 +350,17 @@ def _draw_overlay(
             continue
         rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
         draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 190, 0, 220), width=3)
+
+    for point in header_intersection_points or []:
+        try:
+            px = int(round(float(point.get("x"))))
+            py = int(round(float(point.get("y"))))
+        except Exception:
+            continue
+        if not (0 <= px < base.width and 0 <= py < base.height):
+            continue
+        draw.ellipse((px - 7, py - 7, px + 7, py + 7), outline=(255, 145, 0, 255), width=3)
+        draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(255, 145, 0, 255))
 
     by_cell = {str(record.get("sheet_cell")): record for record in records}
     for region in regions:
@@ -432,6 +444,47 @@ def _select_template_owned_eval_regions(target_regions: list[dict[str, Any]]) ->
     # Geometry comes from the facility template. Blank-menu rows are filtered
     # upstream when target regions are built.
     return list(target_regions)
+
+
+def _accepted_header_intersection_points(axis_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return only header intersections used by the structural header-axis matcher."""
+    if not isinstance(axis_evidence, dict):
+        return []
+    match = axis_evidence.get("header_intersection_x_match")
+    if not isinstance(match, dict) or not match.get("used"):
+        return []
+    points = match.get("header_intersection_points")
+    x_clusters = match.get("fax_x_clusters")
+    y_clusters = match.get("fax_y_clusters")
+    if not isinstance(points, list) or not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
+        return []
+
+    accepted_x_point_indexes: set[int] = set()
+    for cluster in x_clusters:
+        if not isinstance(cluster, dict):
+            continue
+        for point_index in cluster.get("point_indexes") or []:
+            try:
+                accepted_x_point_indexes.add(int(point_index))
+            except Exception:
+                continue
+
+    accepted_y_point_indexes: set[int] = set()
+    for cluster in y_clusters:
+        if not isinstance(cluster, dict):
+            continue
+        for point_index in cluster.get("point_indexes") or []:
+            try:
+                accepted_y_point_indexes.add(int(point_index))
+            except Exception:
+                continue
+
+    accepted_indexes = accepted_x_point_indexes & accepted_y_point_indexes
+    accepted: list[dict[str, Any]] = []
+    for index in sorted(accepted_indexes):
+        if 0 <= index < len(points) and isinstance(points[index], dict):
+            accepted.append(points[index])
+    return accepted
 
 
 def _extract_vertical_line_peaks_for_target_frame(
@@ -715,6 +768,7 @@ def build_best_method_for_manifest_item(
     details = [
         f"page={page_index} fields={field_by_col}",
         "green lines: snapped target-cell grid after matching template X to actual FAX vertical lines",
+        "orange circles: accepted header-internal intersections used for header-axis alignment",
         "red points: target cells with ink; blue points: target cells estimated blank; blue boxes: target cell boxes; Q markers: accepted outer 4 points",
         "OCR: yomitoku TextRecognizer top-k, strict>=0.45 / assisted>=0.15 / suggestion>=0.05",
         (
@@ -729,6 +783,7 @@ def build_best_method_for_manifest_item(
         regions=snapped_regions,
         records=records,
         quad_points=quad_points,
+        header_intersection_points=_accepted_header_intersection_points(pre.get("axis_evidence")),
         facility_code=facility_code,
         order_id=order_id,
         details=details,
