@@ -782,6 +782,69 @@ def draw_ocr_results_overlay(
     return Image.alpha_composite(image, layer).convert("RGB")
 
 
+def _accepted_header_intersection_points(axis_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(axis_evidence, dict):
+        return []
+    match = axis_evidence.get("header_intersection_x_match")
+    if not isinstance(match, dict) or not match.get("used"):
+        return []
+    points = match.get("header_intersection_points")
+    x_clusters = match.get("fax_x_clusters")
+    y_clusters = match.get("fax_y_clusters")
+    if not isinstance(points, list) or not isinstance(x_clusters, list) or not isinstance(y_clusters, list):
+        return []
+
+    accepted_x_point_indexes: set[int] = set()
+    for cluster in x_clusters:
+        if not isinstance(cluster, dict):
+            continue
+        for point_index in cluster.get("point_indexes") or []:
+            try:
+                accepted_x_point_indexes.add(int(point_index))
+            except Exception:
+                continue
+
+    accepted_y_point_indexes: set[int] = set()
+    for cluster in y_clusters:
+        if not isinstance(cluster, dict):
+            continue
+        for point_index in cluster.get("point_indexes") or []:
+            try:
+                accepted_y_point_indexes.add(int(point_index))
+            except Exception:
+                continue
+
+    accepted: list[dict[str, Any]] = []
+    for index in sorted(accepted_x_point_indexes & accepted_y_point_indexes):
+        if 0 <= index < len(points) and isinstance(points[index], dict):
+            accepted.append(points[index])
+    return accepted
+
+
+def _draw_header_intersections_overlay(
+    *,
+    image: Image.Image,
+    axis_evidence: dict[str, Any] | None,
+) -> Image.Image:
+    points = _accepted_header_intersection_points(axis_evidence)
+    if not points:
+        return image
+    base = image.convert("RGBA")
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for point in points:
+        try:
+            x = int(round(float(point.get("x"))))
+            y = int(round(float(point.get("y"))))
+        except Exception:
+            continue
+        if not (0 <= x < base.width and 0 <= y < base.height):
+            continue
+        draw.ellipse((x - 7, y - 7, x + 7, y + 7), outline=(255, 145, 0, 255), width=3)
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 145, 0, 255))
+    return Image.alpha_composite(base, layer).convert("RGB")
+
+
 def _bgr_from_pil(image: Image.Image) -> np.ndarray:
     rgb = np.array(image.convert("RGB"))
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -963,6 +1026,7 @@ def _build_preprocess_for_ocr(
         horizontal_line_mask=horizontal_line_mask,
     )
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
+    target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     rectified_quad_points = _bbox_quad_points(table_bbox)
     return {
         "page": page,

@@ -6,6 +6,7 @@ import pytest
 
 from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
+    _accepted_header_intersection_points,
     _analysis_to_yomitoku_words,
     assign_yomitoku_words_to_contact_regions,
     build_cell_contact_sheet,
@@ -13,6 +14,33 @@ from src.services.hakodate_cell_ocr_batch_service import (
     sheet_value_grid_from_assignments,
     validate_cell_ocr_mapping,
 )
+
+
+def test_live_cell_ocr_overlay_uses_only_accepted_header_intersections() -> None:
+    axis_evidence = {
+        "header_intersection_x_match": {
+            "used": True,
+            "header_intersection_points": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 30.0, "y": 20.0},
+                {"x": 50.0, "y": 20.0},
+                {"x": 70.0, "y": 80.0},
+            ],
+            "fax_x_clusters": [
+                {"point_indexes": [0, 1]},
+                {"point_indexes": [3]},
+            ],
+            "fax_y_clusters": [
+                {"point_indexes": [0, 2]},
+                {"point_indexes": [3]},
+            ],
+        }
+    }
+
+    assert _accepted_header_intersection_points(axis_evidence) == [
+        {"x": 10.0, "y": 20.0},
+        {"x": 70.0, "y": 80.0},
+    ]
 
 
 def test_assign_yomitoku_words_to_contact_regions_keeps_slot_identity() -> None:
