@@ -134,7 +134,7 @@ def test_auto_edit_uses_hakodate_evidence_payload_when_sheet_has_no_embedded_ite
     )
 
 
-def test_anomaly_report_flags_outlier_and_ocr_difference() -> None:
+def test_anomaly_report_flags_sheet_only_outlier() -> None:
     sheet = _sheet(
         [
             ["04/28", "朝", "A", "110", "5"],
@@ -151,11 +151,13 @@ def test_anomaly_report_flags_outlier_and_ocr_difference() -> None:
 
     warnings = result["warnings"]
     assert any(item["type"] == "high_outlier" and item["row_index"] == 0 for item in warnings)
-    assert any(item["type"] == "sheet_differs_from_ocr" and item["row_index"] == 0 for item in warnings)
-    assert result["summary"]["warning_count"] >= 2
+    assert not any(item["type"] == "sheet_differs_from_ocr" for item in warnings)
+    assert "ocr_sheet_comparison" not in result
+    assert "ocr_sheet_comparison" not in result["summary"]
+    assert result["summary"]["warning_count"] >= 1
 
 
-def test_anomaly_report_uses_evidence_payload_and_day_menu_totals() -> None:
+def test_anomaly_report_ignores_ocr_evidence_and_uses_sheet_totals() -> None:
     sheet = _sheet(
         [
             ["04/28", "朝", "A", "110", "5"],
@@ -173,22 +175,76 @@ def test_anomaly_report_uses_evidence_payload_and_day_menu_totals() -> None:
     )
 
     warnings = result["warnings"]
-    assert any(item["type"] == "sheet_differs_from_ocr" and item["row_index"] == 0 for item in warnings)
+    assert not any(item["type"] == "sheet_differs_from_ocr" for item in warnings)
     assert any(item["type"] == "same_day_total_outlier" for item in warnings)
     assert any(item["type"] == "other_day_count_outlier" and item["row_index"] == 0 for item in warnings)
     context = result["computed_context"]
     assert context["day_totals"]
     assert context["same_menu_totals"]
-    comparison = result["ocr_sheet_comparison"]
-    assert comparison["summary"]["mismatch_count"] >= 1
-    assert any(
-        item["row_index"] == 0
-        and item["col_index"] == 3
-        and item["sheet_value"] == "110"
-        and item["ocr_values"] == ["10"]
-        and item["status"] == "mismatch"
-        for item in comparison["items"]
+    assert "ocr_sheet_comparison" not in result
+
+
+def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "patches": [
+                {
+                    "row_index": 0,
+                    "col_index": 3,
+                    "current_value": "",
+                    "suggested_value": "10",
+                    "reason": "visible_on_fax",
+                    "confidence": "high",
+                }
+            ]
+        }, {"status": "ok"}
+
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=_sheet([["04/28", "朝", "A", "", "5"]]),
+        evidence_payload=_hakodate_evidence_payload(value="10"),
+        use_llm=True,
+        fax_image_png_base64="png-base64",
+        fax_image_meta={"status": "attached"},
     )
+
+    assert captured["image_png_base64"] == "png-base64"
+    assert captured["user_payload"]["ocr_numeric_cell_items"]
+    assert captured["user_payload"]["target_cell_map"]
+    assert result["llm"]["fax_image"]["status"] == "attached"
+    assert any(patch["source"] == "llm" and patch["suggested_value"] == "10" for patch in result["patches"])
+
+
+def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {"warnings": []}, {"status": "ok"}
+
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    workflow_v2_sheet_review_service.build_sheet_anomaly_report(
+        sheet=_sheet(
+            [
+                ["04/28", "朝", "A", "110", "5"],
+                ["04/29", "朝", "B", "10", "5"],
+                ["04/30", "朝", "C", "11", "5"],
+            ]
+        ),
+        evidence_payload=_hakodate_evidence_payload(value="10"),
+        use_llm=True,
+    )
+
+    payload = captured["user_payload"]
+    assert "ocr_sheet_comparison" not in payload
+    assert payload["ocr_numeric_cell_items"] == []
+    assert payload["target_cell_map"] == []
+    assert payload["computed_context"]["quantity_cell_count"] > 0
 
 
 def test_workflow_llm_json_payload_uses_first_json_object_with_trailing_text() -> None:

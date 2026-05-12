@@ -2,6 +2,7 @@ import numpy as np
 from openpyxl import Workbook
 
 from src.services.hakodate_step_review_pipeline_service import (
+    _detect_vertical_candidates,
     _draw_merge_aware_grid,
     _physical_internal_horizontal_lines,
     _post_menu_boundary_preserving_xs,
@@ -258,6 +259,19 @@ def test_step_review_target_regions_skip_blank_menu_rows() -> None:
     assert 12 not in worksheet_rows
     assert 13 in worksheet_rows
     assert evidence["blank_menu_row_count"] > 0
+
+
+def test_detect_vertical_candidates_rejects_partial_height_correction_line() -> None:
+    rectified = np.full((260, 360, 3), 255, dtype=np.uint8)
+    for x in [40, 140, 240, 340]:
+        rectified[30:230, x - 1 : x + 2] = 0
+    rectified[95:165, 190 - 4 : 190 + 5] = 0
+
+    candidates = _detect_vertical_candidates(rectified, [30, 30, 350, 230])
+
+    rounded = [int(round(value)) for value in candidates]
+    assert 190 not in rounded
+    assert {40, 140, 240, 340}.issubset(set(rounded))
 
 
 def test_post_menu_boundary_preserving_xs_keeps_first_quantity_line() -> None:

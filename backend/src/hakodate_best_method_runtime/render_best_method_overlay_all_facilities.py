@@ -221,66 +221,10 @@ def _snap_regions_x_to_fax_lines_all_targets(
     )
     if len(original_boundaries) < 2:
         return regions, {"applied": False, "reason": "insufficient_boundaries"}
-    peaks = cmp._extract_vertical_line_peaks(rectified, target_regions)
-    if not peaks:
-        return regions, {
-            "applied": False,
-            "reason": "no_fax_line_peaks",
-            "original_boundaries": original_boundaries,
-        }
-    snapped_boundaries: list[int] = []
-    assignments: list[dict[str, Any]] = []
-    for index, boundary in enumerate(original_boundaries):
-        tolerance = 55 if 0 < index < len(original_boundaries) - 1 else 35
-        candidates = [(x, score) for x, score in peaks if abs(x - boundary) <= tolerance]
-        if candidates:
-            chosen_x, chosen_score = max(candidates, key=lambda item: item[1])
-        else:
-            chosen_x, chosen_score = boundary, 0.0
-        snapped_boundaries.append(int(chosen_x))
-        assignments.append(
-            {
-                "template_x": int(boundary),
-                "snapped_x": int(chosen_x),
-                "delta": int(chosen_x - boundary),
-                "score": round(float(chosen_score), 2),
-                "candidate_count": len(candidates),
-            }
-        )
-    for index in range(1, len(snapped_boundaries)):
-        min_gap = 35
-        if snapped_boundaries[index] <= snapped_boundaries[index - 1] + min_gap:
-            snapped_boundaries[index] = original_boundaries[index]
-            assignments[index]["snapped_x"] = int(original_boundaries[index])
-            assignments[index]["delta"] = 0
-            assignments[index]["score"] = 0.0
-            assignments[index]["fallback_reason"] = "non_monotonic_after_snap"
-    boundary_by_original = dict(zip(original_boundaries, snapped_boundaries))
-    snapped_regions: list[dict[str, Any]] = []
-    for region in regions:
-        copied = dict(region)
-        box = copied.get("bbox")
-        if isinstance(box, list) and len(box) == 4:
-            left = int(round(float(box[0])))
-            right = int(round(float(box[2])))
-            new_box = list(box)
-            new_box[0] = float(boundary_by_original.get(left, left))
-            new_box[2] = float(boundary_by_original.get(right, right))
-            if new_box[2] > new_box[0]:
-                copied["bbox"] = new_box
-                copied["x_snap"] = {
-                    "original_left": left,
-                    "original_right": right,
-                    "snapped_left": int(new_box[0]),
-                    "snapped_right": int(new_box[2]),
-                }
-        snapped_regions.append(copied)
-    return snapped_regions, {
-        "applied": True,
+    return regions, {
+        "applied": False,
+        "reason": "disabled_after_header_intersection_axis_alignment",
         "original_boundaries": original_boundaries,
-        "snapped_boundaries": snapped_boundaries,
-        "assignments": assignments,
-        "peaks": [{"x": int(x), "score": round(float(score), 2)} for x, score in peaks],
     }
 
 
@@ -488,6 +432,240 @@ def _select_template_owned_eval_regions(target_regions: list[dict[str, Any]]) ->
     # Geometry comes from the facility template. Blank-menu rows are filtered
     # upstream when target regions are built.
     return list(target_regions)
+
+
+def _extract_vertical_line_peaks_for_target_frame(
+    rectified: np.ndarray,
+    regions: list[dict[str, Any]],
+) -> list[tuple[int, float]]:
+    if not regions:
+        return []
+    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified.copy()
+    height, width = gray.shape[:2]
+    min_x = int(min(float(region["bbox"][0]) for region in regions))
+    max_x = int(max(float(region["bbox"][2]) for region in regions))
+    min_y = int(min(float(region["bbox"][1]) for region in regions))
+    max_y = int(max(float(region["bbox"][3]) for region in regions))
+
+    # Target boxes may already be shifted when the template axis is wrong.
+    # Search a wider table band, then let span evidence and profile matching
+    # decide which lines are real boundaries.
+    x0 = max(0, min_x - max(160, int(width * 0.22)))
+    x1 = min(width, max_x + max(80, int(width * 0.08)))
+    y0 = max(0, min_y - 80)
+    y1 = min(height, max_y + 80)
+    roi = gray[y0:y1, x0:x1]
+    if roi.size == 0:
+        return []
+
+    _threshold, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel_h = max(35, int((y1 - y0) * 0.035))
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_h))
+    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+    projection = vertical.sum(axis=0).astype(np.float32) / 255.0
+    if projection.size == 0:
+        return []
+    smooth = cv2.GaussianBlur(projection.reshape(1, -1), (1, 9), 0).ravel()
+    threshold = max(float(np.percentile(smooth, 82)), float(smooth.max()) * 0.16, 6.0)
+    candidates = np.where(smooth >= threshold)[0]
+    if candidates.size == 0:
+        return []
+
+    peaks: list[tuple[int, float]] = []
+    start = int(candidates[0])
+    prev = int(candidates[0])
+    for value in candidates[1:]:
+        value = int(value)
+        if value > prev + 2:
+            segment = smooth[start : prev + 1]
+            local = int(np.argmax(segment)) + start
+            peaks.append((int(x0 + local), float(smooth[local])))
+            start = value
+        prev = value
+    segment = smooth[start : prev + 1]
+    local = int(np.argmax(segment)) + start
+    peaks.append((int(x0 + local), float(smooth[local])))
+    return peaks
+
+
+def _vertical_peak_span_evidence(
+    rectified: np.ndarray,
+    regions: list[dict[str, Any]],
+    peaks: list[tuple[int, float]],
+) -> list[dict[str, Any]]:
+    if not peaks or not regions:
+        return []
+    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified.copy()
+    y0 = max(0, int(min(float(region["bbox"][1]) for region in regions)) - 40)
+    y1 = min(gray.shape[0], int(max(float(region["bbox"][3]) for region in regions)) + 40)
+    roi = gray[y0:y1, :]
+    if roi.size == 0:
+        return []
+    _threshold, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 45))
+    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+    vertical = cv2.dilate(vertical, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5)), iterations=1)
+    height = max(1, y1 - y0)
+    enriched: list[dict[str, Any]] = []
+    for peak_x, score in peaks:
+        x0 = max(0, int(peak_x) - 2)
+        x1 = min(vertical.shape[1], int(peak_x) + 3)
+        strip = vertical[:, x0:x1]
+        if strip.size == 0:
+            row_hits = np.zeros((height,), dtype=bool)
+        else:
+            row_hits = (strip.sum(axis=1) / 255.0) >= 1.0
+        coverage_ratio = float(row_hits.sum()) / float(height)
+        bands = np.array_split(row_hits, 14)
+        band_hits = [bool(band.size and band.any()) for band in bands]
+        hit_band_ratio = float(sum(1 for hit in band_hits if hit)) / float(len(band_hits))
+        body_bands = band_hits[2:]
+        body_band_ratio = float(sum(1 for hit in body_bands if hit)) / float(max(1, len(body_bands)))
+        top_band_hit = any(band_hits[:2])
+        bottom_band_hit = any(band_hits[-2:])
+        full_height_valid = bool(hit_band_ratio >= 0.72 and top_band_hit and bottom_band_hit)
+        body_height_valid = bool(body_band_ratio >= 0.84 and bottom_band_hit)
+        enriched.append(
+            {
+                "x": int(peak_x),
+                "score": float(score),
+                "coverage_ratio": round(coverage_ratio, 4),
+                "hit_band_ratio": round(hit_band_ratio, 4),
+                "body_band_ratio": round(body_band_ratio, 4),
+                "top_band_hit": top_band_hit,
+                "bottom_band_hit": bottom_band_hit,
+                "full_height_valid": full_height_valid,
+                "body_height_valid": body_height_valid,
+                "valid": bool(full_height_valid or body_height_valid),
+            }
+        )
+    return enriched
+
+
+def _snap_boundaries_by_template_profile(
+    original_boundaries: list[int],
+    peaks: list[dict[str, Any]],
+) -> tuple[list[int], list[dict[str, Any]], dict[str, Any]]:
+    if len(original_boundaries) < 2:
+        return original_boundaries, [], {"used": False, "reason": "insufficient_boundaries"}
+    valid_peaks = [peak for peak in peaks if peak.get("valid")]
+    states: list[list[dict[str, Any]]] = []
+    for index, boundary in enumerate(original_boundaries):
+        left_gap = (
+            original_boundaries[index] - original_boundaries[index - 1]
+            if index > 0
+            else original_boundaries[1] - original_boundaries[0]
+        )
+        right_gap = (
+            original_boundaries[index + 1] - original_boundaries[index]
+            if index < len(original_boundaries) - 1
+            else original_boundaries[-1] - original_boundaries[-2]
+        )
+        neighbor_gap = max(1, min(int(left_gap), int(right_gap)))
+        tolerance = max(85, min(170, int(neighbor_gap * 0.85)))
+        boundary_states: dict[int, dict[str, Any]] = {
+            int(boundary): {
+                "x": int(boundary),
+                "score": 0.0,
+                "source": "template",
+                "local_cost": 6.0,
+                "candidate_count": 0,
+            }
+        }
+        candidate_count = 0
+        for peak in valid_peaks:
+            peak_x = int(peak["x"])
+            delta = abs(peak_x - int(boundary))
+            if index == 0 and peak_x < int(boundary) - 25:
+                continue
+            if delta > tolerance:
+                continue
+            candidate_count += 1
+            score_bonus = min(float(peak.get("score") or 0.0) / 260.0, 1.0) * 0.25
+            span_penalty = 0.0 if peak.get("full_height_valid") else 1.2
+            local_cost = (delta / max(1.0, float(tolerance))) * 5.0 + span_penalty - score_bonus
+            existing = boundary_states.get(peak_x)
+            if existing is None or local_cost < float(existing["local_cost"]):
+                boundary_states[peak_x] = {
+                    "x": peak_x,
+                    "score": float(peak.get("score") or 0.0),
+                    "source": "fax",
+                    "local_cost": float(local_cost),
+                    "candidate_count": candidate_count,
+                    "coverage_ratio": peak.get("coverage_ratio"),
+                    "hit_band_ratio": peak.get("hit_band_ratio"),
+                    "body_band_ratio": peak.get("body_band_ratio"),
+                    "full_height_valid": peak.get("full_height_valid"),
+                    "body_height_valid": peak.get("body_height_valid"),
+                }
+        for state in boundary_states.values():
+            state["candidate_count"] = candidate_count
+        states.append(sorted(boundary_states.values(), key=lambda item: (float(item["local_cost"]), int(item["x"]))))
+
+    dp: list[dict[int, tuple[float, int | None]]] = []
+    prev: list[dict[int, int | None]] = []
+    for index, boundary_states in enumerate(states):
+        dp_row: dict[int, tuple[float, int | None]] = {}
+        prev_row: dict[int, int | None] = {}
+        for state in boundary_states:
+            x = int(state["x"])
+            local_cost = float(state["local_cost"])
+            if index == 0:
+                dp_row[x] = (local_cost, None)
+                prev_row[x] = None
+                continue
+            template_gap = max(1.0, float(original_boundaries[index] - original_boundaries[index - 1]))
+            best_cost = float("inf")
+            best_prev: int | None = None
+            for prev_x, (prev_cost, _prev_prev) in dp[index - 1].items():
+                gap = float(x - prev_x)
+                if gap <= 0:
+                    continue
+                gap_ratio = gap / template_gap
+                if gap < max(28.0, template_gap * 0.45) or gap_ratio > 1.80:
+                    transition_cost = 80.0
+                else:
+                    transition_cost = abs(gap_ratio - 1.0) * 5.0
+                total = float(prev_cost) + local_cost + transition_cost
+                if total < best_cost:
+                    best_cost = total
+                    best_prev = prev_x
+            if best_prev is not None:
+                dp_row[x] = (best_cost, best_prev)
+                prev_row[x] = best_prev
+        if not dp_row:
+            return original_boundaries, [], {"used": False, "reason": "no_monotonic_profile_match"}
+        dp.append(dp_row)
+        prev.append(prev_row)
+
+    last_x = min(dp[-1].items(), key=lambda item: item[1][0])[0]
+    snapped = [last_x]
+    for index in range(len(states) - 1, 0, -1):
+        previous_x = prev[index].get(snapped[-1])
+        if previous_x is None:
+            return original_boundaries, [], {"used": False, "reason": "profile_backtrack_failed"}
+        snapped.append(previous_x)
+    snapped.reverse()
+    state_by_index_x = [{int(state["x"]): state for state in state_list} for state_list in states]
+    assignments: list[dict[str, Any]] = []
+    for index, (template_x, snapped_x) in enumerate(zip(original_boundaries, snapped)):
+        state = state_by_index_x[index][int(snapped_x)]
+        assignments.append(
+            {
+                "template_x": int(template_x),
+                "snapped_x": int(snapped_x),
+                "delta": int(snapped_x - template_x),
+                "score": round(float(state.get("score") or 0.0), 2),
+                "source": state.get("source"),
+                "candidate_count": int(state.get("candidate_count") or 0),
+                "coverage_ratio": state.get("coverage_ratio"),
+                "hit_band_ratio": state.get("hit_band_ratio"),
+                "body_band_ratio": state.get("body_band_ratio"),
+                "full_height_valid": state.get("full_height_valid"),
+                "body_height_valid": state.get("body_height_valid"),
+            }
+        )
+    return [int(value) for value in snapped], assignments, {"used": True, "valid_peak_count": len(valid_peaks)}
 
 
 def build_best_method_for_manifest_item(

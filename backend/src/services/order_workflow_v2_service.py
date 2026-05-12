@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
@@ -19,6 +21,8 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, sheet_week_service, workflow_v2_sheet_review_service
+from src.services.pdf_render import render_pdf_to_png_bytes
+from src.services.storage_service import load_bytes_from_uri
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
@@ -1905,13 +1909,47 @@ def propose_sheet_auto_edit(
                 review_sheet = dict(draft.draft_sheet_json)
         if review_sheet is None:
             return None, "sheet_required"
+        document_uri = str(order.document_uri or "").strip()
+    fax_image_png_base64, fax_image_meta = _render_order_fax_page_for_ai(document_uri)
     result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
         sheet=review_sheet,
         evidence_payload=evidence_payload,
         model=model,
         use_llm=use_llm,
+        fax_image_png_base64=fax_image_png_base64,
+        fax_image_meta=fax_image_meta,
     )
     return result, None
+
+
+def _render_order_fax_page_for_ai(document_uri: str) -> tuple[str | None, dict[str, Any]]:
+    document_uri = str(document_uri or "").strip()
+    if not document_uri:
+        return None, {"status": "missing_document_uri"}
+    try:
+        dpi = max(96, min(int(os.getenv("WORKFLOW_V2_AI_FAX_DPI", "140")), 220))
+    except ValueError:
+        dpi = 140
+    try:
+        max_pixels = max(1_000_000, int(os.getenv("WORKFLOW_V2_AI_FAX_MAX_PIXELS", "4500000")))
+    except ValueError:
+        max_pixels = 4_500_000
+    try:
+        pdf_bytes = load_bytes_from_uri(document_uri)
+        png_bytes = render_pdf_to_png_bytes(pdf_bytes=pdf_bytes, dpi=dpi, page=1, max_pixels=max_pixels)
+    except Exception as exc:  # noqa: BLE001
+        return None, {
+            "status": "render_failed",
+            "document_uri": document_uri,
+            "error": str(exc),
+        }
+    return base64.b64encode(png_bytes).decode("ascii"), {
+        "status": "attached",
+        "document_uri": document_uri,
+        "dpi": dpi,
+        "max_pixels": max_pixels,
+        "bytes": len(png_bytes),
+    }
 
 
 def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
@@ -2383,12 +2421,6 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        evidence_payload = None
-        evidence_id = _normalize_id(draft.base_evidence_run_id or workflow.evidence_run_id)
-        if evidence_id:
-            evidence = session.get(OrderOcrEvidenceRun, evidence_id)
-            if evidence is not None and evidence.order_id == order.id and isinstance(evidence.payload_json, dict):
-                evidence_payload = evidence.payload_json
         workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
@@ -2404,16 +2436,11 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             saved_sheet=draft,
             materialization_candidate=materialization_candidate,
         )
-        anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
-            sheet=draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
-            evidence_payload=evidence_payload,
-            materialization_candidate=materialization_candidate,
-            bagging_result=bagging_result,
-        )
-        bagging_result["anomaly_review"] = anomaly_review
         meta = _workflow_meta(workflow)
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
         meta["bagging_result"] = bagging_result
+        meta["anomaly_review_id"] = None
+        meta["anomaly_review"] = None
         meta["output_bundle_id"] = None
         meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
@@ -2426,6 +2453,72 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
+        }, None
+
+
+def run_sheet_anomaly_review(
+    order_id: str,
+    *,
+    model: str | None = None,
+    use_llm: bool | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.draft_id:
+            return None, "saved_sheet_required"
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order.id:
+            return None, "saved_sheet_missing"
+        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        draft_template_version_id = _normalize_id(draft.template_version_id)
+        if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
+            return None, "saved_sheet_template_mismatch"
+        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        materialization_error = None
+        if not isinstance(materialization_candidate, dict):
+            materialization_candidate = {"error": "saved_sheet_materialization_failed"}
+            materialization_error = "saved_sheet_materialization_failed"
+        else:
+            materialization_error = _normalize_id(materialization_candidate.get("error"))
+        bagging_result = _current_bagging_result(workflow)
+        anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
+            sheet=draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
+            evidence_payload=None,
+            materialization_candidate=materialization_candidate,
+            bagging_result=bagging_result,
+            model=model,
+            use_llm=use_llm,
+        )
+        anomaly_review_id = _new_id("OAR")
+        anomaly_review["anomaly_review_id"] = anomaly_review_id
+        anomaly_review["source_saved_sheet_id"] = draft.id
+        anomaly_review["source_bagging_result_id"] = (
+            bagging_result.get("bagging_result_id") if isinstance(bagging_result, dict) else None
+        )
+        if materialization_error:
+            anomaly_review.setdefault("warnings", []).append(
+                {
+                    "type": "materialization_unavailable",
+                    "severity": "medium",
+                    "row_index": None,
+                    "col_index": None,
+                    "field": None,
+                    "label": None,
+                    "value": "",
+                    "message": f"袋分け用データの作成に失敗しています: {materialization_error}",
+                    "evidence": {"error": materialization_error},
+                }
+            )
+        meta = _workflow_meta(workflow)
+        meta["anomaly_review_id"] = anomaly_review_id
+        meta["anomaly_review"] = anomaly_review
+        _write_workflow_meta(workflow, meta)
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "anomaly_review": anomaly_review,
         }, None
 
 
@@ -2664,10 +2757,14 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 "bagging_result_id": (
                     _workflow_meta(workflow).get("bagging_result_id") if workflow is not None else None
                 ),
+                "anomaly_review_id": (
+                    _workflow_meta(workflow).get("anomaly_review_id") if workflow is not None else None
+                ),
                 "output_bundle_id": (
                     _workflow_meta(workflow).get("output_bundle_id") if workflow is not None else None
                 ),
             },
             "bagging_result": _workflow_meta(workflow).get("bagging_result") if workflow is not None else None,
+            "anomaly_review": _workflow_meta(workflow).get("anomaly_review") if workflow is not None else None,
             "output_bundle": _workflow_meta(workflow).get("output_bundle") if workflow is not None else None,
         }, None

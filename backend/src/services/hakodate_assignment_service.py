@@ -1181,7 +1181,11 @@ def _effective_cell_value(
 
 
 def _template_slot_label(column: dict[str, Any], field: str) -> str:
-    label = str(column.get("header") or column.get("label") or "").strip()
+    header = str(column.get("header") or column.get("label") or "").strip()
+    header_group = str(column.get("header_group") or "").strip()
+    if header_group and header and re.search(r"(?:_|)(?:\d(?:f|階))$", str(field or "").strip().lower()):
+        return f"{header_group}{header}"
+    label = header or header_group
     if label:
         return label
     role = str(column.get("role") or "").strip().lower()

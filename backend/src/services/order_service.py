@@ -9250,6 +9250,8 @@ def ensure_hakodate_evidence_draft_current(
     edited_by: str | None = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     """Keep visible sheet surfaces on the Hakodate evidence projection when it exists."""
+    if not _latest_hakodate_evidence_available(order_id):
+        return None, "hakodate_ocr_evidence_missing"
     current_draft = get_latest_sheet_draft(
         order_id,
         backfill_from_revision=False,
@@ -9257,6 +9259,15 @@ def ensure_hakodate_evidence_draft_current(
     )
     if _draft_payload_has_hakodate_evidence_projection(current_draft):
         return current_draft, None
+
+    switched_draft, switch_error = switch_draft_to_latest_evidence(
+        order_id,
+        edited_by=edited_by or "auto-hakodate-evidence-current-draft",
+    )
+    if isinstance(switched_draft, dict):
+        return switched_draft, None
+    if switch_error and switch_error not in {"order_not_found", "facility_missing", "facility_not_found", "template_unresolved"}:
+        return None, switch_error
 
     projected_bundle, projected_error = build_order_hakodate_projected_sheet(
         order_id,
@@ -10586,7 +10597,8 @@ def _draft_payload_has_hakodate_evidence_projection(draft_record: dict[str, Any]
     projection = payload.get("hakodate_evidence_projection")
     if not isinstance(projection, dict):
         return False
-    if str(projection.get("version") or payload.get("hakodate_projection_version") or "").strip() != HAKODATE_EVIDENCE_PROJECTION_VERSION:
+    version = str(projection.get("version") or payload.get("hakodate_projection_version") or "").strip()
+    if version and version != HAKODATE_EVIDENCE_PROJECTION_VERSION:
         return False
     metrics = projection.get("metrics")
     return str(payload.get("source") or "").strip() == "hakodate_ocr_evidence_sheet" and isinstance(metrics, dict)
@@ -14182,7 +14194,13 @@ def _sheet_header_from_template(
         field = fax_extractor._canonical_field_name_from_template_column(col, fallback_index=fallback_index)
         if not field or field in header_by_field:
             continue
-        header_by_field[field] = str(col.get("header") or "").strip() or _field_label(field)
+        header = str(col.get("header") or "").strip()
+        header_group = str(col.get("header_group") or "").strip()
+        _diet, area = _quantity_meta_from_field(field)
+        if header_group and header and area and area != "X":
+            header_by_field[field] = f"{header_group}{header}"
+        else:
+            header_by_field[field] = header or header_group or _field_label(field)
     return [header_by_field.get(field, _field_label(field)) for field in normalized_fields]
 
 
@@ -27685,6 +27703,10 @@ def _hakodate_projection_field_for_cell(
     for field in _hakodate_target_cell_field_candidates(cell):
         if field in field_index:
             return field
+        if _is_hakodate_spacer_sheet_field(field):
+            for placeholder_field in ("qty.unknown_x", "qty.placeholder_x"):
+                if placeholder_field in field_index:
+                    return placeholder_field
     return ""
 
 
@@ -27693,6 +27715,15 @@ def _hakodate_projection_row_for_cell(
     *,
     row_count: int | None = None,
 ) -> int | None:
+    sheet_cell = str(cell.get("sheet_cell") or cell.get("target_cell_id") or "").strip()
+    match = re.fullmatch(r"[A-Z]+([0-9]+)", sheet_cell)
+    if match:
+        row_index = int(match.group(1)) - 11
+        if row_index < 0:
+            return None
+        if row_count is None or row_index < row_count:
+            return row_index
+        return None
     metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
     truth = metadata.get("truth") if isinstance(metadata.get("truth"), dict) else {}
     try:
@@ -27704,6 +27735,23 @@ def _hakodate_projection_row_for_cell(
             return truth_row_index
         return None
     return None
+
+
+def _hakodate_projection_row_from_sheet_cell(
+    sheet_cell: object,
+    *,
+    row_count: int | None = None,
+) -> tuple[int | None, bool]:
+    value = str(sheet_cell or "").strip()
+    match = re.fullmatch(r"[A-Z]+([0-9]+)", value)
+    if not match:
+        return None, False
+    row_index = int(match.group(1)) - 11
+    if row_index < 0:
+        return None, True
+    if row_count is not None and row_index >= row_count:
+        return None, True
+    return row_index, True
 
 
 def _hakodate_target_field_label(cell: dict[str, Any], field: str) -> str:
@@ -27892,6 +27940,16 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             continue
         cell = dict(cell)
         cell.setdefault("sheet_cell", sheet_cell)
+        row_from_sheet_cell, has_canonical_sheet_cell = _hakodate_projection_row_from_sheet_cell(
+            cell.get("sheet_cell") or sheet_cell,
+            row_count=len(rows),
+        )
+        if not has_canonical_sheet_cell:
+            skipped.append({**cell, "skip_reason": "field_not_found", "value": str(cell.get("value_normalized") or cell.get("value_text") or "").strip()})
+            continue
+        if row_from_sheet_cell is None:
+            ignored.append({**cell, "ignore_reason": "outside_active_sheet_rows"})
+            continue
         source_target = target_by_sheet_cell.get(str(sheet_cell or "").strip())
         if isinstance(source_target, dict):
             merged_cell = dict(cell)

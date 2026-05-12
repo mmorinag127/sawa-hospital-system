@@ -1690,7 +1690,7 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
     assert bagging["bagging_result"]["summary"]["bag_row_count"] >= 1
     assert bagging["bagging_result"]["bag_rows"]
-    assert bagging["bagging_result"]["anomaly_review"]["status"] == "ok"
+    assert "anomaly_review" not in bagging["bagging_result"]
 
 
 def test_workflow_v2_sheet_auto_edit_uses_selected_ocr_and_current_sheet() -> None:
@@ -1730,7 +1730,7 @@ def test_workflow_v2_sheet_auto_edit_uses_selected_ocr_and_current_sheet() -> No
     assert result["patches"][0]["reason"] == "sheet_value_differs_from_ocr"
 
 
-def test_workflow_v2_bagging_embeds_sheet_anomaly_review(monkeypatch) -> None:
+def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -1769,10 +1769,23 @@ def test_workflow_v2_bagging_embeds_sheet_anomaly_review(monkeypatch) -> None:
     bagging, error = order_workflow_v2_service.run_bagging(order_id)
 
     assert error is None
-    review = bagging["bagging_result"]["anomaly_review"]
+    assert "anomaly_review" not in bagging["bagging_result"]
+
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(order_id, use_llm=False)
+
+    assert error is None
+    review = anomaly["anomaly_review"]
     assert review["status"] == "ok"
     assert any(item["type"] == "high_outlier" for item in review["warnings"])
-    assert any(item["type"] == "sheet_differs_from_ocr" for item in review["warnings"])
+    assert not any(item["type"] == "sheet_differs_from_ocr" for item in review["warnings"])
+    assert review["source_saved_sheet_id"] == bagging["bagging_result"]["source_saved_sheet_id"]
+
+    inspection, error = order_workflow_v2_service.get_inspection(order_id)
+
+    assert error is None
+    assert inspection["artifact_lineage"]["anomaly_review_id"] == review["anomaly_review_id"]
+    assert inspection["anomaly_review"]["anomaly_review_id"] == review["anomaly_review_id"]
+    assert "anomaly_review" not in inspection["bagging_result"]
 
 
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:

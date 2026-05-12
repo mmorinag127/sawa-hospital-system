@@ -88,6 +88,11 @@ class WorkflowV2SheetAutoEditBody(BaseModel):
     use_llm: bool = True
 
 
+class WorkflowV2SheetAnomalyBody(BaseModel):
+    model: str | None = None
+    use_llm: bool | None = None
+
+
 class WorkflowV2ExpandedCellCopyModeBody(BaseModel):
     mode: str
 
@@ -1764,6 +1769,17 @@ def propose_order_workflow_v2_sheet_auto_edit(order_id: str, body: WorkflowV2She
 @router.post("/{order_id}/workflow-v2/bagging", dependencies=[Depends(require_role("operator"))])
 def run_order_workflow_v2_bagging(order_id: str):
     return _workflow_v2_or_404(order_workflow_v2_service.run_bagging(order_id))
+
+
+@router.post("/{order_id}/workflow-v2/sheet/anomaly-review", dependencies=[Depends(require_role("operator"))])
+def run_order_workflow_v2_sheet_anomaly_review(order_id: str, body: WorkflowV2SheetAnomalyBody | None = None):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.run_sheet_anomaly_review(
+            order_id,
+            model=body.model if body else None,
+            use_llm=body.use_llm if body else None,
+        )
+    )
 
 
 @router.post("/{order_id}/workflow-v2/bagging/confirm", dependencies=[Depends(require_role("operator"))])

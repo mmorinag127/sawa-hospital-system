@@ -632,18 +632,39 @@ def _sheet_context_for_llm(
     warnings: list[dict[str, Any]] | None = None,
     evidence_payload: dict[str, Any] | None = None,
     computed_context: dict[str, Any] | None = None,
+    include_ocr_sheet_comparison: bool = True,
+    include_ocr_context: bool = True,
 ) -> dict[str, Any]:
     fields, header, _rows = _sheet_dimensions(sheet)
-    return {
+    payload = {
         "fields": fields,
         "header": header,
         "rows": _row_context(sheet)[:_MAX_LLM_ROWS],
-        "ocr_numeric_cell_items": _combined_ocr_items(sheet=sheet, evidence_payload=evidence_payload)[:_MAX_LLM_EVIDENCE],
+        "ocr_numeric_cell_items": (
+            _combined_ocr_items(sheet=sheet, evidence_payload=evidence_payload)[:_MAX_LLM_EVIDENCE]
+            if include_ocr_context
+            else []
+        ),
+        "target_cell_map": [
+            {
+                "target_cell_id": item.get("target_cell_id") or item.get("sheet_cell"),
+                "sheet_cell": item.get("sheet_cell"),
+                "worksheet_row": item.get("worksheet_row"),
+                "worksheet_col": item.get("worksheet_col"),
+                "bbox": item.get("bbox"),
+                "field": item.get("field") or item.get("semantic_field"),
+                "field_label": item.get("field_label") or item.get("label"),
+                "logical_targets": item.get("logical_targets"),
+            }
+            for item in (_hakodate_target_cells_from_payload(evidence_payload)[:_MAX_LLM_EVIDENCE] if include_ocr_context else [])
+        ],
         "computed_context": computed_context or {},
-        "ocr_sheet_comparison": _ocr_sheet_comparison(sheet=sheet, evidence_payload=evidence_payload),
         "rule_patches": patches[:_MAX_LLM_WARNINGS],
         "rule_warnings": (warnings or [])[:_MAX_LLM_WARNINGS],
     }
+    if include_ocr_sheet_comparison:
+        payload["ocr_sheet_comparison"] = _ocr_sheet_comparison(sheet=sheet, evidence_payload=evidence_payload)
+    return payload
 
 
 def _strip_json_fence(text: str) -> str:
@@ -675,6 +696,7 @@ def _gemini_json_request(
     model: str | None = None,
     max_tokens: int = 8192,
     array_key: str | None = None,
+    image_png_base64: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     resolved_model = _normalize_text(model) or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro"
     try:
@@ -685,15 +707,26 @@ def _gemini_json_request(
             "model": resolved_model,
             "error": str(exc),
         }
+    content_parts: list[dict[str, Any]] = []
+    if _normalize_text(image_png_base64):
+        content_parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": _normalize_text(image_png_base64),
+                }
+            }
+        )
+    content_parts.append(
+        {
+            "text": json.dumps(user_payload, ensure_ascii=False, sort_keys=True),
+        }
+    )
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [
             {
-                "parts": [
-                    {
-                        "text": json.dumps(user_payload, ensure_ascii=False, sort_keys=True),
-                    }
-                ]
+                "parts": content_parts,
             }
         ],
         "generationConfig": {
@@ -773,6 +806,8 @@ def propose_auto_sheet_edits(
     evidence_payload: dict[str, Any] | None = None,
     model: str | None = None,
     use_llm: bool = True,
+    fax_image_png_base64: str | None = None,
+    fax_image_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(sheet, dict):
         return {"status": "error", "error": "sheet_required", "patches": [], "rule_patches": [], "llm": {"status": "not_run"}}
@@ -784,8 +819,10 @@ def propose_auto_sheet_edits(
     if use_llm:
         system_prompt = (
             "You review a Japanese FAX order sheet. Return JSON only. "
-            "Propose cell edits for quantity cells when OCR evidence or correction marks suggest a different number. "
-            "Consider crossed-out/slash-corrected numbers and include alternatives. "
+            "Use the attached original FAX page image as the primary evidence. OCR evidence and the current sheet are auxiliary. "
+            "For each quantity cell, compare the visible handwritten number in the FAX image with OCR candidates and the current sheet value. "
+            "Propose cell edits when the FAX image suggests a missing number, a different number, or a crossed-out/slash-corrected number. "
+            "For corrections, include alternative digit candidates and explain the visible basis from the FAX image. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         llm_payload, llm_meta = _gemini_json_request(
@@ -793,7 +830,9 @@ def propose_auto_sheet_edits(
             user_payload=_sheet_context_for_llm(sheet, rule_patches, evidence_payload=evidence_payload),
             model=model,
             array_key="patches",
+            image_png_base64=fax_image_png_base64,
         )
+        llm_meta["fax_image"] = fax_image_meta or {"status": "not_provided"}
         llm_patches = _normalize_llm_patches(llm_payload, fields, header)
     merged: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
@@ -1031,11 +1070,9 @@ def _other_day_quantity_warnings(records: list[dict[str, Any]]) -> list[dict[str
 
 def _rule_based_anomaly_warnings(
     sheet: dict[str, Any],
-    evidence_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     fields, header, rows = _sheet_dimensions(sheet)
     contexts = _row_context(sheet)
-    evidence_by_cell = _ocr_item_map(sheet, evidence_payload)
     computed_context = _aggregate_quantity_context(sheet)
     quantity_records = _quantity_cell_records(sheet)
     warnings: list[dict[str, Any]] = []
@@ -1085,33 +1122,6 @@ def _rule_based_anomaly_warnings(
                         value=raw_value,
                         message=f"{label} が同列中央値 {baseline:g} に対して小さすぎます。",
                         evidence={"baseline": baseline, "date": context.get("date"), "daypart": context.get("daypart"), "menu": context.get("menu")},
-                    )
-                )
-
-        items = evidence_by_cell.get((row_idx, col_idx), [])
-        numeric_items = [item for item in items if item.get("numeric") is not None]
-        if numeric_items:
-            best = sorted(
-                numeric_items,
-                key=lambda item: (
-                    0 if item.get("classification") == "accepted" else 1 if item.get("classification") == "deterministic_candidate" else 2,
-                    0 if item.get("confidence_tier") == "high" else 1 if item.get("confidence_tier") == "medium" else 2,
-                ),
-            )[0]
-            ocr_value = float(best["numeric"])
-            if abs(value - ocr_value) > 0.0001:
-                severity = "high" if best.get("classification") == "accepted" else "medium"
-                warnings.append(
-                    _warning(
-                        warning_type="sheet_differs_from_ocr",
-                        severity=severity,
-                        row_index=row_idx,
-                        col_index=col_idx,
-                        field=field,
-                        label=label,
-                        value=raw_value,
-                        message=f"シート値 {raw_value} と OCR候補 {_numeric_display(best.get('value'))} が異なります。",
-                        evidence={"ocr_value": best.get("value"), "classification": best.get("classification"), "confidence_tier": best.get("confidence_tier")},
                     )
                 )
 
@@ -1181,7 +1191,7 @@ def _normalize_llm_warnings(payload: dict[str, Any] | None, fields: list[str], h
                 field=field,
                 label=label,
                 value=item.get("value"),
-                message=_normalize_text(item.get("message")) or _normalize_text(item.get("reason")) or "LLMが確認対象として検出しました。",
+                message=_normalize_text(item.get("message")) or _normalize_text(item.get("reason")) or "AIが確認対象として検出しました。",
                 evidence=item.get("evidence") if isinstance(item.get("evidence"), dict) else {},
             )
         )
@@ -1201,8 +1211,7 @@ def build_sheet_anomaly_report(
         return {"status": "error", "error": "sheet_required", "warnings": [], "rule_warnings": [], "llm": {"status": "not_run"}}
     fields, header, _rows = _sheet_dimensions(sheet)
     computed_context = _aggregate_quantity_context(sheet)
-    ocr_sheet_comparison = _ocr_sheet_comparison(sheet=sheet, evidence_payload=evidence_payload)
-    rule_warnings = _rule_based_anomaly_warnings(sheet, evidence_payload)
+    rule_warnings = _rule_based_anomaly_warnings(sheet)
     should_use_llm = (
         bool(use_llm)
         if use_llm is not None
@@ -1214,8 +1223,9 @@ def build_sheet_anomaly_report(
     if should_use_llm:
         system_prompt = (
             "You audit a Japanese meal-order quantity sheet before bagging. Return JSON only. "
-            "Find suspicious quantity cells by comparing OCR evidence, same-day totals, other rows, other days, and special diet totals. "
-            "Flag obvious high/low values and values that visibly differ from OCR evidence. Do not rewrite the sheet."
+            "Use only the confirmed sheet numbers and derived totals. Do not compare against OCR. "
+            "Find suspicious quantity cells by comparing same-day totals, same-daypart totals, same-menu totals, same-column values on other days, and special diet totals. "
+            "Flag obvious high/low values such as a likely extra digit. Do not rewrite the sheet."
         )
         llm_payload, llm_meta = _gemini_json_request(
             system_prompt=system_prompt,
@@ -1224,8 +1234,10 @@ def build_sheet_anomaly_report(
                     sheet,
                     [],
                     rule_warnings,
-                    evidence_payload=evidence_payload,
+                    evidence_payload=None,
                     computed_context=computed_context,
+                    include_ocr_sheet_comparison=False,
+                    include_ocr_context=False,
                 ),
                 "materialization_candidate": materialization_candidate or {},
                 "bagging_summary": (bagging_result or {}).get("summary") if isinstance(bagging_result, dict) else {},
@@ -1259,10 +1271,8 @@ def build_sheet_anomaly_report(
             "high_count": sum(1 for item in merged if item.get("severity") == "high"),
             "medium_count": sum(1 for item in merged if item.get("severity") == "medium"),
             "quantity_cell_count": computed_context.get("quantity_cell_count"),
-            "ocr_sheet_comparison": ocr_sheet_comparison.get("summary"),
         },
         "computed_context": computed_context,
-        "ocr_sheet_comparison": ocr_sheet_comparison,
         "llm": llm_meta,
         "llm_raw": llm_payload if os.getenv("WORKFLOW_V2_LLM_DEBUG_RAW", "").strip() == "1" else None,
     }

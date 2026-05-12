@@ -6,7 +6,7 @@ from src.services.hakodate_preprocessing_pipeline_service import (
 )
 
 
-def test_snap_target_region_x_boundaries_uses_detected_fax_lines() -> None:
+def test_snap_target_region_x_boundaries_is_disabled_after_axis_alignment() -> None:
     image = np.full((140, 260, 3), 255, dtype=np.uint8)
     image[10:130, 48:51] = 0
     image[10:130, 108:111] = 0
@@ -18,10 +18,9 @@ def test_snap_target_region_x_boundaries_uses_detected_fax_lines() -> None:
 
     snapped, evidence = snap_target_region_x_boundaries(image, regions)
 
-    assert evidence["applied"] is True
-    assert evidence["snapped_boundaries"] == [49, 109, 169]
-    assert snapped[0]["bbox"] == [49.0, 20.0, 109.0, 60.0]
-    assert snapped[1]["bbox"] == [109.0, 20.0, 169.0, 60.0]
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "disabled_after_header_intersection_axis_alignment"
+    assert snapped == regions
 
 
 def test_target_cell_map_preserves_sheet_identity_and_centers() -> None:

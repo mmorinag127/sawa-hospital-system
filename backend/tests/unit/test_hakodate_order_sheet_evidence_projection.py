@@ -4,6 +4,50 @@ from types import SimpleNamespace
 from src.services import order_service
 
 
+def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns() -> None:
+    template = {
+        "columns": [
+            {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+            {"index": 2, "role": "menu", "header": "メニュー", "name": "menu"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "header_group": "常食",
+                "header": "月",
+                "name": "qty.regular_3f",
+                "diet_type": "regular",
+                "area_id": "3F",
+            },
+            {
+                "index": 4,
+                "role": "quantity",
+                "header_group": "軟菜",
+                "header": "花",
+                "name": "qty.soft_2f",
+                "diet_type": "soft",
+                "area_id": "2F",
+            },
+            {
+                "index": 5,
+                "role": "quantity",
+                "header_group": "禁食",
+                "header": "肉禁",
+                "name": "qty.no_meat_x",
+                "diet_type": "no_meat",
+                "area_id": "X",
+            },
+        ],
+    }
+
+    header = order_service._sheet_header_from_template(  # noqa: SLF001
+        ["date_mmdd", "daypart", "menu", "qty.regular_3f", "qty.soft_2f", "qty.no_meat_x"],
+        template,
+    )
+
+    assert header == ["日付", "区分", "メニュー", "常食月", "軟菜花", "肉禁"]
+
+
 def test_hakodate_canonical_payload_reads_digit_evidence_from_best_method_records(monkeypatch, tmp_path) -> None:
     regions_path = tmp_path / "best_method_ocr_regions.json"
     records_path = tmp_path / "best_method_records.json"

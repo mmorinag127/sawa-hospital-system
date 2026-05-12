@@ -102,74 +102,14 @@ def snap_target_region_x_boundaries(
     target_regions = [
         region for region in regions if isinstance(region.get("bbox"), list) and len(region["bbox"]) == 4
     ]
-    if not target_regions:
-        return regions, {"applied": False, "reason": "no_target_regions"}
     original_boundaries = sorted(
         {int(round(float(region["bbox"][0]))) for region in target_regions}
         | {int(round(float(region["bbox"][2]))) for region in target_regions}
     )
-    if len(original_boundaries) < 2:
-        return regions, {"applied": False, "reason": "insufficient_boundaries"}
-    peaks = _extract_vertical_line_peaks(rectified, target_regions)
-    if not peaks:
-        return regions, {
-            "applied": False,
-            "reason": "no_fax_line_peaks",
-            "original_boundaries": original_boundaries,
-        }
-    snapped_boundaries: list[int] = []
-    assignments: list[dict[str, Any]] = []
-    for index, boundary in enumerate(original_boundaries):
-        tolerance = 55 if 0 < index < len(original_boundaries) - 1 else 35
-        candidates = [(x, score) for x, score in peaks if abs(x - boundary) <= tolerance]
-        if candidates:
-            chosen_x, chosen_score = max(candidates, key=lambda item: item[1])
-        else:
-            chosen_x, chosen_score = boundary, 0.0
-        snapped_boundaries.append(int(chosen_x))
-        assignments.append(
-            {
-                "template_x": int(boundary),
-                "snapped_x": int(chosen_x),
-                "delta": int(chosen_x - boundary),
-                "score": round(float(chosen_score), 2),
-                "candidate_count": len(candidates),
-            }
-        )
-    for index in range(1, len(snapped_boundaries)):
-        min_gap = 35
-        if snapped_boundaries[index] <= snapped_boundaries[index - 1] + min_gap:
-            snapped_boundaries[index] = original_boundaries[index]
-            assignments[index]["snapped_x"] = int(original_boundaries[index])
-            assignments[index]["delta"] = 0
-            assignments[index]["score"] = 0.0
-            assignments[index]["fallback_reason"] = "non_monotonic_after_snap"
-    boundary_by_original = dict(zip(original_boundaries, snapped_boundaries))
-    snapped_regions: list[dict[str, Any]] = []
-    for region in regions:
-        copied = dict(region)
-        box = copied.get("bbox")
-        if isinstance(box, list) and len(box) == 4:
-            left = int(round(float(box[0])))
-            right = int(round(float(box[2])))
-            new_box = list(box)
-            new_box[0] = float(boundary_by_original.get(left, left))
-            new_box[2] = float(boundary_by_original.get(right, right))
-            if new_box[2] > new_box[0]:
-                copied["bbox"] = new_box
-                copied["x_snap"] = {
-                    "original_left": left,
-                    "original_right": right,
-                    "snapped_left": int(new_box[0]),
-                    "snapped_right": int(new_box[2]),
-                }
-        snapped_regions.append(copied)
-    return snapped_regions, {
-        "applied": True,
+    return regions, {
+        "applied": False,
+        "reason": "disabled_after_header_intersection_axis_alignment",
         "original_boundaries": original_boundaries,
-        "snapped_boundaries": snapped_boundaries,
-        "assignments": assignments,
-        "peaks": [{"x": int(x), "score": round(float(score), 2)} for x, score in peaks],
     }
 
 

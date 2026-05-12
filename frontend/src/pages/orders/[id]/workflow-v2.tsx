@@ -94,6 +94,7 @@ type InspectionPayload = {
   } | null;
   artifact_lineage?: Record<string, unknown>;
   bagging_result?: Record<string, unknown> | null;
+  anomaly_review?: Record<string, unknown> | null;
   output_bundle?: Record<string, unknown> | null;
 };
 
@@ -151,19 +152,6 @@ type SheetAnomalyWarning = {
   value?: string | null;
   message?: string | null;
   evidence?: Record<string, unknown> | null;
-};
-
-type OcrSheetComparisonItem = {
-  row_index?: number | null;
-  col_index?: number | null;
-  field?: string | null;
-  label?: string | null;
-  date?: string | null;
-  daypart?: string | null;
-  menu?: string | null;
-  sheet_value?: string | null;
-  ocr_values?: string[];
-  status?: string | null;
 };
 
 type TargetCellMapItem = {
@@ -889,6 +877,29 @@ const llmPromptPresetLabels: Record<LlmPromptPreset, string> = {
   freeform: "自由入力中心",
 };
 
+const formatAiStatus = (status: unknown) => {
+  const value = String(status || "").trim();
+  if (!value) return "未実行";
+  const labels: Record<string, string> = {
+    ok: "完了",
+    failed: "失敗",
+    disabled: "無効",
+    skipped_no_api_key: "APIキーなし",
+    not_run: "未実行",
+  };
+  return labels[value] || value;
+};
+
+const formatAnomalySeverity = (severity: unknown) => {
+  const value = String(severity || "").trim();
+  const labels: Record<string, string> = {
+    high: "高",
+    medium: "中",
+    low: "低",
+  };
+  return labels[value] || value || "-";
+};
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -1066,26 +1077,16 @@ export default function OrderWorkflowV2Page() {
   );
 
   const anomalyReview = useMemo(() => {
-    const review = inspection?.bagging_result?.anomaly_review;
+    const review = inspection?.anomaly_review;
     return review && typeof review === "object" && !Array.isArray(review)
       ? review as Record<string, unknown>
       : null;
-  }, [inspection?.bagging_result]);
+  }, [inspection?.anomaly_review]);
 
   const anomalyWarnings = useMemo(() => {
     const warnings = anomalyReview?.warnings;
     return Array.isArray(warnings)
       ? warnings.filter((item): item is SheetAnomalyWarning => Boolean(item && typeof item === "object"))
-      : [];
-  }, [anomalyReview]);
-
-  const ocrSheetComparisonItems = useMemo(() => {
-    const comparison = anomalyReview?.ocr_sheet_comparison;
-    const items = comparison && typeof comparison === "object" && !Array.isArray(comparison)
-      ? (comparison as Record<string, unknown>).items
-      : null;
-    return Array.isArray(items)
-      ? items.filter((item): item is OcrSheetComparisonItem => Boolean(item && typeof item === "object"))
       : [];
   }, [anomalyReview]);
 
@@ -1815,7 +1816,7 @@ export default function OrderWorkflowV2Page() {
         });
       },
       {
-        successMessage: ocrRunMode === "llm" ? "Step1 LLM OCR run が開始しました" : "Step1 OCR run が開始しました",
+        successMessage: ocrRunMode === "llm" ? "Step1 AI OCR run が開始しました" : "Step1 OCR run が開始しました",
         nextStep: 2,
       },
     );
@@ -1931,10 +1932,10 @@ export default function OrderWorkflowV2Page() {
   };
 
   const proposeSheetAutoEdit = () =>
-    runAction("Step3 LLM auto edit", async () => {
+    runAction("Step3 AI auto edit", async () => {
       const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
       if (!parsed) {
-        throw new Error("LLM自動編集に渡せるシートがありません");
+        throw new Error("AI自動編集に渡せるシートがありません");
       }
       const response = await apiClient.post<SheetAutoEditResult>(`/orders/${orderId}/workflow-v2/sheet/auto-edit`, {
         sheet: parsed,
@@ -1942,7 +1943,7 @@ export default function OrderWorkflowV2Page() {
       });
       setSheetAutoEditResult(response.data);
     }, {
-      successMessage: "LLM自動編集の候補を作成しました",
+      successMessage: "AI自動編集の候補を作成しました",
       refreshAfter: false,
     });
 
@@ -1984,6 +1985,17 @@ export default function OrderWorkflowV2Page() {
   const runBagging = () =>
     runAction("Step4 bagging", async () => {
       await apiClient.post(`/orders/${orderId}/workflow-v2/bagging`);
+    }, {
+      successMessage: "袋分けを計算しました",
+    });
+
+  const runAnomalyReview = () =>
+    runAction("Step4 anomaly review", async () => {
+      await apiClient.post(`/orders/${orderId}/workflow-v2/sheet/anomaly-review`, {
+        use_llm: true,
+      });
+    }, {
+      successMessage: "数量異常チェックを実行しました",
     });
 
   const confirmBagging = () =>
@@ -2121,46 +2133,13 @@ export default function OrderWorkflowV2Page() {
       </header>
 
       <section className="panel state-panel">
-        <div>
-          <p className="eyebrow">Current State</p>
+        <div className="state-panel-main">
+          <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
           ) : null}
-        </div>
-        <div className="state-actions">
-          <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
-            再読込
-          </button>
-          {orderId ? (
-            <>
-              <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
-                確認専用ページ
-              </Link>
-              <Link className="ghost-link" href="/orders">
-                注文一覧へ戻る
-              </Link>
-            </>
-          ) : null}
-        </div>
-      </section>
-
-      {message ? <div className="notice success">{message}</div> : null}
-      {error ? <div className="notice error">{error}</div> : null}
-      {workflowBlockers.length ? (
-        <div className="notice error">
-          {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}
-        </div>
-      ) : null}
-
-      <section className="panel order-info-panel">
-        <div className="panel-header">
-          <div>
-            <p className="step-tag">Order Info</p>
-            <h2>注文情報</h2>
-            <p className="subtle">前工程と照合するための基本情報です。</p>
-          </div>
         </div>
         <div className="summary-grid summary-grid--compact summary-grid--order-info">
           <div className="summary-primary-card">
@@ -2194,7 +2173,30 @@ export default function OrderWorkflowV2Page() {
             <p className="summary-value">{formatDateTime(inspection?.saved_sheet?.edited_at || inspection?.saved_sheet?.created_at)}</p>
           </div>
         </div>
+        <div className="state-actions">
+          <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
+            再読込
+          </button>
+          {orderId ? (
+            <>
+              <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
+                確認専用ページ
+              </Link>
+              <Link className="ghost-link" href="/orders">
+                注文一覧へ戻る
+              </Link>
+            </>
+          ) : null}
+        </div>
       </section>
+
+      {message ? <div className="notice success">{message}</div> : null}
+      {error ? <div className="notice error">{error}</div> : null}
+      {workflowBlockers.length ? (
+        <div className="notice error">
+          {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}
+        </div>
+      ) : null}
 
       <nav className="step-nav" aria-label="workflow steps">
         {stepLabels.map((item) => (
@@ -2410,7 +2412,7 @@ export default function OrderWorkflowV2Page() {
                   </select>
                 </label>
                 <label className="toolbar-field">
-                  <span>AI provider</span>
+                  <span>AIエンジン</span>
                   <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)} disabled={Boolean(busy)}>
                     <option value="openai">OpenAI</option>
                     <option value="gemini">Gemini</option>
@@ -2418,11 +2420,11 @@ export default function OrderWorkflowV2Page() {
                 </label>
                 {llmProvider === "gemini" ? (
                   <label className="toolbar-field">
-                    <span>Gemini model</span>
+                    <span>Geminiモデル</span>
                     <select value={llmModelMode} onChange={(event) => setLlmModelMode(event.target.value as "flash" | "pro" | "other")} disabled={Boolean(busy)}>
                       <option value="flash">Flash</option>
                       <option value="pro">Pro</option>
-                      <option value="other">Other</option>
+                      <option value="other">カスタム</option>
                     </select>
                   </label>
                 ) : null}
@@ -2435,7 +2437,7 @@ export default function OrderWorkflowV2Page() {
                   />
                 ) : null}
                 <details className="inline-details">
-                  <summary>LLM追加指示（任意）</summary>
+                  <summary>AI追加指示（任意）</summary>
                   <textarea
                     className="ocr-llm-prompt-textarea"
                     value={ocrPrompt}
@@ -2831,10 +2833,10 @@ export default function OrderWorkflowV2Page() {
                       表示中提案を採用
                     </button>
                     <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
-                      LLM自動補正を提案
+                      AI自動補正を提案
                     </button>
                     <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
-                      LLM提案を反映
+                      AI提案を反映
                     </button>
                     <label className="toolbar-field">
                       <span>OCR信頼度表示</span>
@@ -2887,9 +2889,15 @@ export default function OrderWorkflowV2Page() {
                   {sheetAutoEditResult ? (
                     <div className="llm-review-panel">
                       <div className="llm-review-header">
-                        <strong>LLM自動編集候補</strong>
-                        <span>{sheetAutoEditResult.patches?.length || 0}件 / {String(sheetAutoEditResult.llm?.status || "unknown")}</span>
+                        <strong>AI自動編集候補</strong>
+                        <span>{sheetAutoEditResult.patches?.length || 0}件 / AI: {formatAiStatus(sheetAutoEditResult.llm?.status)}</span>
                       </div>
+                      <p className="subtle">
+                        原本FAX画像・OCR候補・現在のシートを照合して、数字の欠落、読み違い、斜線訂正の可能性を提案します。
+                        {sheetAutoEditResult.llm?.fax_image && typeof sheetAutoEditResult.llm.fax_image === "object"
+                          ? ` FAX画像: ${formatAiStatus((sheetAutoEditResult.llm.fax_image as Record<string, unknown>).status)}`
+                          : ""}
+                      </p>
                       {sheetAutoEditResult.patches?.length ? (
                         <ul className="llm-review-list">
                           {sheetAutoEditResult.patches.slice(0, 12).map((patch, idx) => (
@@ -3001,6 +3009,9 @@ export default function OrderWorkflowV2Page() {
               <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
                 袋分けを計算
               </button>
+              <button className="btn" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
+                数量異常チェック
+              </button>
               <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
                 確定して次へ
               </button>
@@ -3029,21 +3040,39 @@ export default function OrderWorkflowV2Page() {
               {!anomalyReview ? (
                 <div className="anomaly-review-panel pending">
                   <strong>数量異常チェック</strong>
-                  <span className="subtle">この袋分け結果には異常チェック結果がありません。袋分けを再計算してください。</span>
+                  <span className="subtle">袋分けとは別に実行します。AI処理が遅い場合でも袋分け結果は表示できます。</span>
                 </div>
               ) : anomalyWarnings.length ? (
                 <div className="anomaly-review-panel">
                   <div className="llm-review-header">
                     <strong>数量異常チェック</strong>
-                    <span>{anomalyWarnings.length}件</span>
+                    <span>{anomalyWarnings.length}件 / AI: {formatAiStatus(anomalyReview?.llm && typeof anomalyReview.llm === "object" ? (anomalyReview.llm as Record<string, unknown>).status : null)}</span>
                   </div>
-                  <ul className="llm-review-list">
-                    {anomalyWarnings.slice(0, 20).map((warning, idx) => (
-                      <li key={`anomaly-${idx}`} className={`anomaly-${warning.severity || "medium"}`}>
-                        R{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"} C{typeof warning.col_index === "number" ? warning.col_index + 1 : "-"} {warning.label || warning.field || ""}: {warning.value || "-"} / {warning.message || warning.type || "確認対象"}
-                      </li>
-                    ))}
-                  </ul>
+                  <p className="subtle">確定シート内の数値だけを使い、同日・食区分・同列・同一メニュー傾向から外れた値を確認対象にします。OCR結果との一致/不一致はここでは判定しません。</p>
+                  <div className="table-wrap anomaly-table-wrap">
+                    <table className="anomaly-table">
+                      <thead>
+                        <tr>
+                          <th>重要度</th>
+                          <th>行</th>
+                          <th>列</th>
+                          <th>値</th>
+                          <th>内容</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {anomalyWarnings.slice(0, 40).map((warning, idx) => (
+                          <tr key={`anomaly-${idx}`} className={`anomaly-${warning.severity || "medium"}`}>
+                            <td>{formatAnomalySeverity(warning.severity)}</td>
+                            <td>{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"}</td>
+                            <td>{warning.label || warning.field || (typeof warning.col_index === "number" ? `C${warning.col_index + 1}` : "-")}</td>
+                            <td>{warning.value || "-"}</td>
+                            <td>{warning.message || warning.type || "確認対象"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ) : (
                 <div className="anomaly-review-panel ok">
@@ -3051,48 +3080,6 @@ export default function OrderWorkflowV2Page() {
                   <span className="subtle">袋分け計算時点で明確な異常候補はありません。</span>
                 </div>
               )}
-              {anomalyReview ? (
-                <div className="ocr-sheet-compare-panel">
-                  <div className="llm-review-header">
-                    <strong>OCR結果とシート比較</strong>
-                    <span>{ocrSheetComparisonItems.length}セル</span>
-                  </div>
-                  {ocrSheetComparisonItems.length ? (
-                    <div className="table-wrap">
-                      <table className="ocr-sheet-compare-table">
-                        <thead>
-                          <tr>
-                            <th>行</th>
-                            <th>日付</th>
-                            <th>区分</th>
-                            <th>メニュー</th>
-                            <th>列</th>
-                            <th>シート</th>
-                            <th>OCR</th>
-                            <th>状態</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {ocrSheetComparisonItems.slice(0, 80).map((item, idx) => (
-                            <tr key={`ocr-sheet-compare-${idx}`} className={`compare-${item.status || "unknown"}`}>
-                              <td>R{typeof item.row_index === "number" ? item.row_index + 1 : "-"}</td>
-                              <td>{item.date || "-"}</td>
-                              <td>{item.daypart || "-"}</td>
-                              <td>{item.menu || "-"}</td>
-                              <td>{item.label || item.field || (typeof item.col_index === "number" ? `C${item.col_index + 1}` : "-")}</td>
-                              <td>{item.sheet_value || ""}</td>
-                              <td>{Array.isArray(item.ocr_values) && item.ocr_values.length ? item.ocr_values.join(" / ") : ""}</td>
-                              <td>{item.status || "-"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="subtle">OCR結果とシートを比較できる数量セルがありません。</p>
-                  )}
-                </div>
-              ) : null}
               {bagSummaryGroups.length ? (
                 <div className="wrap-grid workflow-bag-groups">
                   <p className="bag-summary-note subtle">
@@ -3365,9 +3352,15 @@ export default function OrderWorkflowV2Page() {
           gap: 4px;
         }
         .state-panel {
-          align-items: center;
-          display: flex;
-          justify-content: space-between;
+          align-items: start;
+          display: grid;
+          gap: 12px;
+          grid-template-columns: minmax(220px, 0.9fr) minmax(420px, 2.8fr) auto;
+          padding: 16px 22px;
+        }
+        .state-panel-main h2 {
+          font-size: 22px;
+          line-height: 1.15;
         }
         .ocr-progress-inline {
           background: #edf3ef;
@@ -3385,6 +3378,9 @@ export default function OrderWorkflowV2Page() {
           display: flex;
           flex-wrap: wrap;
           gap: 10px;
+        }
+        .state-actions {
+          justify-content: flex-end;
         }
         .step-page {
           display: block;
@@ -4270,8 +4266,7 @@ export default function OrderWorkflowV2Page() {
           z-index: 2;
         }
         .llm-review-panel,
-        .anomaly-review-panel,
-        .ocr-sheet-compare-panel {
+        .anomaly-review-panel {
           background: #fff8e8;
           border: 1px solid #e8d6af;
           border-radius: 14px;
@@ -4280,27 +4275,28 @@ export default function OrderWorkflowV2Page() {
           margin-top: 10px;
           padding: 12px;
         }
-        .ocr-sheet-compare-panel {
-          background: #fffdf7;
-          border-color: #ded6c3;
+        .anomaly-table-wrap {
+          max-height: 360px;
+          overflow: auto;
         }
-        .ocr-sheet-compare-table {
+        .anomaly-table {
           border-collapse: collapse;
           font-size: 12px;
-          min-width: 900px;
+          min-width: 760px;
           width: 100%;
         }
-        .ocr-sheet-compare-table th,
-        .ocr-sheet-compare-table td {
-          border-bottom: 1px solid #ece4d3;
-          padding: 6px 8px;
+        .anomaly-table th,
+        .anomaly-table td {
+          border-bottom: 1px solid #eadfcb;
+          padding: 7px 8px;
           text-align: left;
+          vertical-align: top;
         }
-        .ocr-sheet-compare-table tr.compare-mismatch td {
+        .anomaly-table tr.anomaly-high td {
           background: #fff0e8;
         }
-        .ocr-sheet-compare-table tr.compare-ocr_only td {
-          background: #eef7ff;
+        .anomaly-table tr.anomaly-medium td {
+          background: #fff8e8;
         }
         .anomaly-review-panel.ok {
           background: #edf7ef;

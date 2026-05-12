@@ -155,6 +155,387 @@ def _clustered_projection_positions(
     return [int(round(sum(group) / len(group))) for group in groups]
 
 
+def _header_bounds_for_axis_alignment(table_bbox: list[int], template_ys: list[int]) -> tuple[int, int, int, int]:
+    x0, _table_y0, x1, _table_y1 = [int(round(float(value))) for value in table_bbox]
+    sorted_ys = sorted(int(round(float(value))) for value in template_ys)
+    if len(sorted_ys) >= 3:
+        y0 = sorted_ys[0] - 18
+        y1 = sorted_ys[2] + 12
+    else:
+        y0 = table_bbox[1] - 18
+        y1 = table_bbox[1] + 240
+    return x0, max(0, int(y0)), x1, max(0, int(y1))
+
+
+def _cluster_header_intersection_points(mask: np.ndarray) -> list[dict[str, Any]]:
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    points: list[dict[str, Any]] = []
+    for label in range(1, count):
+        x, y, w, h, area = [int(value) for value in stats[label]]
+        if area < 4:
+            continue
+        cx, cy = centroids[label]
+        points.append(
+            {
+                "x": round(float(cx), 2),
+                "y": round(float(cy), 2),
+                "bbox": [x, y, w, h],
+                "area": area,
+            }
+        )
+    return sorted(points, key=lambda item: (float(item["y"]), float(item["x"])))
+
+
+def _detect_header_intersections_for_axis_alignment(
+    rectified_bgr: np.ndarray,
+    *,
+    table_bbox: list[int],
+    template_ys: list[int],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    h_mask, v_mask = _split_line_masks(rectified_bgr)
+    x0, y0, x1, y1 = _header_bounds_for_axis_alignment(table_bbox, template_ys)
+    h = h_mask[y0:y1, x0:x1]
+    v = v_mask[y0:y1, x0:x1]
+    if h.size == 0 or v.size == 0:
+        return [], {"reason": "empty_header_roi", "header_roi": [x0, y0, x1, y1]}
+    h_dilated = cv2.dilate(h, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5)), iterations=1)
+    v_dilated = cv2.dilate(v, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 7)), iterations=1)
+    intersections = cv2.bitwise_and(h_dilated, v_dilated)
+    points = _cluster_header_intersection_points(intersections)
+    for point in points:
+        point["x"] = round(float(point["x"]) + x0, 2)
+        point["y"] = round(float(point["y"]) + y0, 2)
+        bx, by, bw, bh = point["bbox"]
+        point["bbox"] = [int(bx + x0), int(by + y0), int(bw), int(bh)]
+    return points, {
+        "header_roi": [x0, y0, x1, y1],
+        "horizontal_pixels": int(np.count_nonzero(h)),
+        "vertical_pixels": int(np.count_nonzero(v)),
+        "intersection_count": len(points),
+    }
+
+
+def _cluster_header_axis_values(points: list[dict[str, Any]], axis: str, tolerance_px: float = 18.0) -> list[dict[str, Any]]:
+    indexed_values = sorted(
+        [(index, float(point[axis])) for index, point in enumerate(points)],
+        key=lambda item: item[1],
+    )
+    clusters: list[list[tuple[int, float]]] = []
+    for point_index, value in indexed_values:
+        if not clusters:
+            clusters.append([(point_index, value)])
+            continue
+        center = float(np.median([item[1] for item in clusters[-1]]))
+        if abs(value - center) <= tolerance_px:
+            clusters[-1].append((point_index, value))
+        else:
+            clusters.append([(point_index, value)])
+    result: list[dict[str, Any]] = []
+    for cluster_index, cluster in enumerate(clusters):
+        values = [item[1] for item in cluster]
+        result.append(
+            {
+                "cluster_index": cluster_index,
+                "value": round(float(np.median(values)), 2),
+                "count": len(cluster),
+                "point_indexes": [item[0] for item in cluster],
+            }
+        )
+    return result
+
+
+def _filter_header_x_clusters_by_y_coverage(
+    *,
+    x_clusters: list[dict[str, Any]],
+    y_clusters: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    point_to_y: dict[int, int] = {}
+    for cluster in y_clusters:
+        for point_index in cluster["point_indexes"]:
+            point_to_y[int(point_index)] = int(cluster["cluster_index"])
+
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for cluster in x_clusters:
+        y_cluster_indexes = sorted(
+            {point_to_y[int(point_index)] for point_index in cluster["point_indexes"] if int(point_index) in point_to_y}
+        )
+        enriched = dict(cluster)
+        enriched["raw_cluster_index"] = int(cluster["cluster_index"])
+        enriched["covered_y_cluster_indexes"] = y_cluster_indexes
+        if len(y_cluster_indexes) >= 2:
+            enriched["cluster_index"] = len(accepted)
+            accepted.append(enriched)
+        else:
+            enriched["reject_reason"] = "x_cluster_touches_less_than_two_header_y_levels"
+            rejected.append(enriched)
+    return accepted, rejected
+
+
+def _filter_header_x_clusters_by_table_span(
+    *,
+    x_clusters: list[dict[str, Any]],
+    vertical_mask: np.ndarray,
+    table_y0: int,
+    table_y1: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for cluster in x_clusters:
+        evidence = _vertical_line_span_evidence(
+            vertical_mask,
+            x=int(round(float(cluster["value"]))),
+            y0=table_y0,
+            y1=table_y1,
+        )
+        enriched = dict(cluster)
+        enriched["table_span_evidence"] = evidence
+        if evidence.get("valid"):
+            enriched["cluster_index"] = len(accepted)
+            accepted.append(enriched)
+        else:
+            enriched["reject_reason"] = "x_cluster_not_full_table_vertical_line"
+            rejected.append(enriched)
+    return accepted, rejected
+
+
+def _structural_match_header_x_clusters(
+    *,
+    template_xs: list[int],
+    x_clusters: list[dict[str, Any]],
+) -> tuple[list[float] | None, dict[str, Any]]:
+    """Align header-derived X clusters to template axes without requiring equal counts."""
+    n = len(template_xs)
+    m = len(x_clusters)
+    if n < 2 or m < 2:
+        return None, {
+            "used": False,
+            "reason": "insufficient_header_x_clusters_for_structural_match",
+            "template_count": n,
+            "cluster_count": m,
+        }
+
+    template = [float(value) for value in template_xs]
+    clusters = [float(cluster["value"]) for cluster in x_clusters]
+
+    expected_match_count = min(n, m)
+    if n >= m:
+        cluster_index_sets = [tuple(range(m))]
+        template_index_sets = itertools.combinations(range(n), expected_match_count)
+    else:
+        cluster_index_sets = itertools.combinations(range(m), expected_match_count)
+        template_index_sets = [tuple(range(n))]
+
+    best_score = float("inf")
+    best_cluster_indexes: tuple[int, ...] | None = None
+    best_template_indexes: tuple[int, ...] | None = None
+    checked = 0
+    max_combinations = 250_000
+    for cluster_indexes in cluster_index_sets:
+        cluster_values = np.array([clusters[index] for index in cluster_indexes], dtype=np.float32)
+        cluster_span = max(1.0, float(cluster_values[-1] - cluster_values[0]))
+        cluster_gaps = np.diff(cluster_values) / cluster_span
+        for template_indexes in template_index_sets:
+            checked += 1
+            if checked > max_combinations:
+                break
+            template_values = np.array([template[index] for index in template_indexes], dtype=np.float32)
+            template_span = max(1.0, float(template_values[-1] - template_values[0]))
+            template_gaps = np.diff(template_values) / template_span
+            gap_score = float(np.mean(np.abs(cluster_gaps - template_gaps))) if len(cluster_gaps) else 0.0
+            scale = cluster_span / template_span
+            projected = cluster_values[0] + (template_values - template_values[0]) * scale
+            affine_residual = float(np.mean(np.abs(projected - cluster_values))) / cluster_span
+            score = gap_score + 0.35 * affine_residual
+            if score < best_score:
+                best_score = score
+                best_cluster_indexes = tuple(int(index) for index in cluster_indexes)
+                best_template_indexes = tuple(int(index) for index in template_indexes)
+        if checked > max_combinations:
+            break
+
+    if best_cluster_indexes is None or best_template_indexes is None:
+        return None, {
+            "used": False,
+            "reason": "no_structural_header_gap_match",
+            "template_count": n,
+            "cluster_count": m,
+            "checked": checked,
+        }
+
+    matched_pairs = list(zip(best_cluster_indexes, best_template_indexes, strict=False))
+    skipped_template_indexes = [index for index in range(n) if index not in set(best_template_indexes)]
+    skipped_cluster_indexes = [index for index in range(m) if index not in set(best_cluster_indexes)]
+
+    min_matches = max(4, min(n, m) - 1)
+    if len(matched_pairs) < min_matches:
+        return None, {
+            "used": False,
+            "reason": "too_few_structural_header_matches",
+            "match_count": len(matched_pairs),
+            "required_match_count": min_matches,
+            "skipped_template_indexes": skipped_template_indexes,
+            "skipped_cluster_indexes": skipped_cluster_indexes,
+            "score": round(float(best_score), 6),
+        }
+
+    corrected: list[float | None] = [None for _ in range(n)]
+    for cluster_index, template_index in matched_pairs:
+        corrected[template_index] = clusters[cluster_index]
+    corrected[0] = float(template_xs[0])
+    corrected[-1] = float(template_xs[-1])
+
+    known_indexes = [index for index, value in enumerate(corrected) if value is not None]
+    if len(known_indexes) < 2:
+        return None, {
+            "used": False,
+            "reason": "insufficient_known_axes_after_structural_match",
+            "match_count": len(matched_pairs),
+        }
+    known_template = np.array([template[index] for index in known_indexes], dtype=np.float32)
+    known_corrected = np.array([float(corrected[index]) for index in known_indexes], dtype=np.float32)
+    all_template = np.array(template, dtype=np.float32)
+    interpolated = np.interp(all_template, known_template, known_corrected).astype(np.float32).tolist()
+    interpolated[0] = float(template_xs[0])
+    interpolated[-1] = float(template_xs[-1])
+    if not np.all(np.diff(np.array(interpolated, dtype=np.float32)) > 0):
+        return None, {
+            "used": False,
+            "reason": "structural_header_match_not_monotonic",
+            "matched_pairs": matched_pairs,
+            "skipped_template_indexes": skipped_template_indexes,
+            "skipped_cluster_indexes": skipped_cluster_indexes,
+        }
+    return [float(value) for value in interpolated], {
+        "used": True,
+        "reason": "applied_structural_header_x_match",
+        "match_count": len(matched_pairs),
+        "score": round(float(best_score), 6),
+        "checked": checked,
+        "matched_pairs": [
+            {
+                "cluster_index": int(cluster_index),
+                "template_index": int(template_index),
+                "cluster_x": round(float(clusters[cluster_index]), 3),
+                "template_x": round(float(template[template_index]), 3),
+            }
+            for cluster_index, template_index in matched_pairs
+        ],
+        "skipped_template_indexes": skipped_template_indexes,
+        "skipped_cluster_indexes": skipped_cluster_indexes,
+    }
+
+
+def _header_intersection_correct_xs(
+    *,
+    rectified_fax: np.ndarray,
+    template_xs: list[int],
+    template_ys: list[int],
+) -> tuple[list[float] | None, dict[str, Any]]:
+    if len(template_xs) < 5 or len(template_ys) < 3:
+        return None, {"used": False, "reason": "insufficient_template_axes"}
+    table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
+    points, detection = _detect_header_intersections_for_axis_alignment(
+        rectified_fax,
+        table_bbox=table_bbox,
+        template_ys=template_ys,
+    )
+    _h_mask, v_mask = _split_line_masks(rectified_fax)
+    v_mask = cv2.dilate(v_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 5)), iterations=1)
+    raw_x_clusters = _cluster_header_axis_values(points, "x")
+    y_clusters = _cluster_header_axis_values(points, "y")
+    span_x_clusters, span_rejected_x_clusters = _filter_header_x_clusters_by_table_span(
+        x_clusters=raw_x_clusters,
+        vertical_mask=v_mask,
+        table_y0=max(0, int(round(float(template_ys[0])))),
+        table_y1=min(v_mask.shape[0], int(round(float(template_ys[-1])))),
+    )
+    filtered_x_clusters, rejected_x_clusters = _filter_header_x_clusters_by_y_coverage(
+        x_clusters=raw_x_clusters,
+        y_clusters=y_clusters,
+    )
+    span_and_y_x_clusters, span_and_y_rejected = _filter_header_x_clusters_by_y_coverage(
+        x_clusters=span_x_clusters,
+        y_clusters=y_clusters,
+    )
+    x_clusters = raw_x_clusters
+    x_cluster_source = "raw_x_clusters"
+    if len(span_and_y_x_clusters) == len(template_xs):
+        x_clusters = span_and_y_x_clusters
+        rejected_x_clusters = span_rejected_x_clusters + span_and_y_rejected
+        x_cluster_source = "filtered_by_table_span_and_header_y_coverage"
+    elif len(span_x_clusters) == len(template_xs):
+        x_clusters = span_x_clusters
+        rejected_x_clusters = span_rejected_x_clusters
+        x_cluster_source = "filtered_by_table_span"
+    elif len(raw_x_clusters) > len(template_xs) and len(filtered_x_clusters) == len(template_xs):
+        x_clusters = filtered_x_clusters
+        x_cluster_source = "filtered_extra_x_clusters_by_header_y_coverage"
+    elif len(raw_x_clusters) > len(template_xs):
+        fixed_left_count = 4
+        fixed_right_count = 1
+        span_source = span_x_clusters if len(span_x_clusters) >= fixed_left_count + fixed_right_count else raw_x_clusters
+        left_clusters = [dict(cluster) for cluster in span_source[:fixed_left_count]]
+        right_clusters = [dict(cluster) for cluster in span_source[-fixed_right_count:]]
+        rest_filtered, rest_rejected = _filter_header_x_clusters_by_y_coverage(
+            x_clusters=span_source[fixed_left_count:-fixed_right_count],
+            y_clusters=y_clusters,
+        )
+        left_and_filtered = left_clusters + rest_filtered + right_clusters
+        if len(left_and_filtered) == len(template_xs):
+            x_clusters = []
+            for cluster in left_and_filtered:
+                enriched = dict(cluster)
+                enriched["cluster_index"] = len(x_clusters)
+                enriched.setdefault("raw_cluster_index", int(cluster["cluster_index"]))
+                x_clusters.append(enriched)
+            rejected_x_clusters = span_rejected_x_clusters + rest_rejected
+            x_cluster_source = "fixed_outer_then_filtered_extra_x_clusters_by_header_y_coverage"
+
+    evidence = {
+        "used": False,
+        "method": "header_intersection_structural_x_axis_correction",
+        **detection,
+        "raw_fax_x_cluster_count": len(raw_x_clusters),
+        "span_filtered_fax_x_cluster_count": len(span_x_clusters),
+        "fax_x_cluster_count": len(x_clusters),
+        "fax_y_cluster_count": len(y_clusters),
+        "template_x_count": len(template_xs),
+        "template_header_y_count": min(3, len(template_ys)),
+        "fax_x_cluster_source": x_cluster_source,
+        "header_intersection_points": points,
+        "raw_fax_x_clusters": raw_x_clusters,
+        "span_filtered_fax_x_clusters": span_x_clusters,
+        "fax_x_clusters": x_clusters,
+        "rejected_fax_x_clusters": rejected_x_clusters,
+    }
+    if len(y_clusters) != min(3, len(template_ys)):
+        evidence["reason"] = "header_y_cluster_count_mismatch"
+        return None, evidence
+    structural_corrected, structural_evidence = _structural_match_header_x_clusters(
+        template_xs=template_xs,
+        x_clusters=x_clusters,
+    )
+    evidence["structural_match"] = structural_evidence
+    if structural_corrected is not None:
+        corrected = structural_corrected
+    else:
+        if len(x_clusters) != len(template_xs):
+            evidence["reason"] = "header_x_cluster_count_mismatch"
+            return None, evidence
+        corrected = [float(cluster["value"]) for cluster in x_clusters]
+        corrected[0] = float(template_xs[0])
+        corrected[-1] = float(template_xs[-1])
+    if not np.all(np.diff(np.array(corrected, dtype=np.float32)) > 0):
+        evidence["reason"] = "corrected_x_not_monotonic"
+        return None, evidence
+    evidence["used"] = True
+    evidence["reason"] = "applied"
+    evidence["corrected_xs"] = [round(float(value), 3) for value in corrected]
+    evidence["x_offsets_px"] = [round(float(value) - float(template_xs[index]), 3) for index, value in enumerate(corrected)]
+    return corrected, evidence
+
+
 def _draw_line_extraction(rectified: np.ndarray) -> tuple[Image.Image, dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified)
     image = _bgr_to_rgb_image(rectified).convert("RGBA")
@@ -545,6 +926,42 @@ def _nearest_line_positions_in_rectified(
     }
 
 
+def _vertical_line_span_evidence(
+    vertical_mask: np.ndarray,
+    *,
+    x: int,
+    y0: int,
+    y1: int,
+    band_count: int = 14,
+) -> dict[str, Any]:
+    height = max(1, int(y1 - y0))
+    x0 = max(0, int(x) - 2)
+    x1 = min(vertical_mask.shape[1], int(x) + 3)
+    strip = vertical_mask[max(0, y0) : min(vertical_mask.shape[0], y1), x0:x1]
+    if strip.size == 0:
+        return {
+            "coverage_ratio": 0.0,
+            "hit_band_ratio": 0.0,
+            "top_band_hit": False,
+            "bottom_band_hit": False,
+            "valid": False,
+        }
+    row_hits = (strip.sum(axis=1) / 255.0) >= 1.0
+    coverage_ratio = float(row_hits.sum()) / float(height)
+    bands = np.array_split(row_hits, max(1, int(band_count)))
+    band_hits = [bool(band.size and band.any()) for band in bands]
+    hit_band_ratio = float(sum(1 for hit in band_hits if hit)) / float(len(band_hits))
+    top_band_hit = any(band_hits[:2])
+    bottom_band_hit = any(band_hits[-2:])
+    return {
+        "coverage_ratio": round(coverage_ratio, 4),
+        "hit_band_ratio": round(hit_band_ratio, 4),
+        "top_band_hit": top_band_hit,
+        "bottom_band_hit": bottom_band_hit,
+        "valid": bool(hit_band_ratio >= 0.72 and top_band_hit and bottom_band_hit),
+    }
+
+
 def _detect_vertical_candidates(rectified_bgr: np.ndarray, table_bbox: list[int]) -> list[float]:
     _h_mask, v_mask = _split_line_masks(rectified_bgr)
     v_mask = cv2.dilate(v_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 5)), iterations=1)
@@ -556,7 +973,17 @@ def _detect_vertical_candidates(rectified_bgr: np.ndarray, table_bbox: list[int]
         threshold_ratio=0.08,
         min_value=max(6.0, (y1 - y0) * 0.030),
     )
-    return [float(x0 + x) for x in xs]
+    candidates = [float(x0 + x) for x in xs]
+    return [
+        candidate
+        for candidate in candidates
+        if _vertical_line_span_evidence(
+            v_mask,
+            x=int(round(candidate)),
+            y0=max(0, y0),
+            y1=min(v_mask.shape[0], y1),
+        )["valid"]
+    ]
 
 
 def _gap_order_match(template_xs: list[int], candidates: list[float]) -> tuple[list[float], dict[str, Any]]:
@@ -720,6 +1147,13 @@ def _align_axes(
     matched_xs, x_match = _gap_order_match(template_xs, fax_x_candidates)
     if not x_match.get("used"):
         matched_xs = np.maximum.accumulate(np.median(source_x, axis=0)).astype(np.float32).tolist()
+    header_corrected_xs, header_x_match = _header_intersection_correct_xs(
+        rectified_fax=rectified_fax,
+        template_xs=template_xs,
+        template_ys=template_ys,
+    )
+    if header_corrected_xs is not None:
+        matched_xs = [float(value) for value in header_corrected_xs]
     matched_xs, post_menu_x_match = _post_menu_boundary_preserving_xs(
         worksheet=worksheet,
         matched_xs=[float(value) for value in matched_xs],
@@ -734,9 +1168,11 @@ def _align_axes(
         fax_x_candidates=fax_x_candidates,
         matched_xs=matched_xs,
         adjusted_ys=adjusted_ys,
+        header_x_match=header_x_match,
     )
     evidence = {
         "x_match": x_match,
+        "header_intersection_x_match": header_x_match,
         "post_menu_x_match": post_menu_x_match,
         "grid": grid_evidence,
         "x_gaps": [round(float(b - a), 3) for a, b in zip(matched_xs, matched_xs[1:])],
@@ -758,14 +1194,13 @@ def _draw_axis_match(
     fax_x_candidates: list[float],
     matched_xs: list[float],
     adjusted_ys: list[float],
+    header_x_match: dict[str, Any] | None = None,
 ) -> Image.Image:
     image = _bgr_to_rgb_image(rectified_fax).convert("RGBA")
     layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     y0, y1 = int(round(template_ys[0])), int(round(template_ys[-1]))
     x0, x1 = int(round(template_xs[0])), int(round(template_xs[-1]))
-    for x in fax_x_candidates:
-        draw.line((int(round(x)), y0, int(round(x)), y1), fill=(255, 0, 0, 130), width=2)
     for x in matched_xs:
         draw.line((int(round(x)), y0, int(round(x)), y1), fill=(0, 190, 0, 230), width=3)
     for y in adjusted_ys:
@@ -1105,7 +1540,7 @@ def build_hakodate_step_review_for_manifest_item(
             details=details,
         ),
         "step4": _make_review_canvas(
-            title="STEP4 detected candidates(red) and matched axes(green)",
+            title="STEP4 final adopted axes only (green)",
             facility_code=facility_code,
             order_id=order_id,
             image=_draw_quad_points(axis_match_image, rectified_quad_points, prefix="Q"),
@@ -1184,7 +1619,7 @@ def build_all_facility_hakodate_step_review_pdfs(
         "step1": "step1_original_fax_accepted_quad_all14.pdf",
         "step2": "step2_rectified_fax_by_accepted_quad_all14.pdf",
         "step3": "step3_extracted_fax_lines_all14.pdf",
-        "step4": "step4_axis_match_candidates_and_selected_all14.pdf",
+        "step4": "step4_final_adopted_axes_only_all14.pdf",
         "step5": "step5_rectified_merge_aware_grid_all14.pdf",
         "step6": "step6_post_menu_target_red_points_all14.pdf",
     }
