@@ -520,6 +520,23 @@ def _normalize_authoritative_fax_override(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
+def _merge_authoritative_fax_override_metadata(
+    target: dict[str, Any],
+    *sources: Any,
+) -> dict[str, Any]:
+    """Keep non-column template semantics when columns are operator-authored."""
+
+    for key in ("large_cell_mode", "body_merge_policy"):
+        if key in target:
+            continue
+        for source in sources:
+            if not isinstance(source, dict) or key not in source:
+                continue
+            target[key] = deepcopy(source.get(key))
+            break
+    return target
+
+
 def _preserve_authoritative_fax_override(
     current_override: Any,
     incoming_override: Any,
@@ -560,7 +577,12 @@ def _preserve_authoritative_fax_override(
     if normalized_authoritative.get("main_ocr_row_fields"):
         preserved["main_ocr_row_fields"] = deepcopy(normalized_authoritative["main_ocr_row_fields"])
     preserved["columns_authoritative"] = True
-    return preserved
+    return _merge_authoritative_fax_override_metadata(
+        preserved,
+        incoming_override,
+        current_override,
+        master_override,
+    )
 
 
 def _should_prefer_master_fax_override(
@@ -629,7 +651,14 @@ def _reconcile_fax_template_override(
     if not isinstance(current_override, dict):
         return None
     if _fax_override_columns_are_authoritative(current_override):
-        return _normalize_authoritative_fax_override(current_override)
+        normalized = _normalize_authoritative_fax_override(current_override)
+        if normalized is not None:
+            return _merge_authoritative_fax_override_metadata(
+                normalized,
+                current_override,
+                master_override,
+            )
+        return None
     if _fax_override_columns_are_authoritative(master_override):
         preserved = _preserve_authoritative_fax_override(
             current_override,

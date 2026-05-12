@@ -89,6 +89,38 @@ def test_facility_get_does_not_create_template_version_from_resolved_config():
         assert versions == []
 
 
+def test_operator_override_columns_preserve_master_body_merge_policy():
+    _clear_facilities()
+    facility_id = "FAC00007"
+    master = config_service.load_facility_master()
+    master_facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == facility_id)
+    stale_override = {
+        "columns_authoritative": True,
+        "columns": [
+            column
+            for column in master_facility["fax_template_override"]["columns"]
+            if column["role"] in {"date", "daypart", "menu_name", "quantity", "note"}
+        ],
+    }
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name=master_facility["facility_name"]))
+        session.add(
+            FacilityConfig(
+                facility_id=facility_id,
+                config_json={
+                    "fax_template_id": master_facility["fax_template_id"],
+                    "facility_template_source": "operator_override",
+                    "fax_template_override": stale_override,
+                },
+            )
+        )
+
+    resolved = config_service.get_facility_config(facility_id)
+
+    assert resolved is not None
+    assert resolved["fax_template"]["body_merge_policy"] == master_facility["fax_template_override"]["body_merge_policy"]
+
+
 def test_facility_template_registration_does_not_sync_master_for_missing_facility():
     _clear_facilities()
     client = TestClient(app)

@@ -865,6 +865,12 @@ def _warning(
     message: str,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_evidence = evidence or {}
+    evidence_keys = normalized_evidence.get("keys") if isinstance(normalized_evidence.get("keys"), dict) else {}
+    date = _normalize_text(normalized_evidence.get("date") or evidence_keys.get("date"))
+    daypart = _normalize_text(normalized_evidence.get("daypart") or evidence_keys.get("daypart"))
+    menu = _normalize_text(normalized_evidence.get("menu") or evidence_keys.get("menu"))
+    context_parts = [part for part in (date, daypart, menu) if part]
     return {
         "type": warning_type,
         "severity": severity,
@@ -874,7 +880,11 @@ def _warning(
         "label": label,
         "value": _normalize_text(value),
         "message": message,
-        "evidence": evidence or {},
+        "date": date or None,
+        "daypart": daypart or None,
+        "menu": menu or None,
+        "context_label": " / ".join(context_parts) if context_parts else None,
+        "evidence": normalized_evidence,
     }
 
 

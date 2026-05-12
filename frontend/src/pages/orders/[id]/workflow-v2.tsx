@@ -151,6 +151,10 @@ type SheetAnomalyWarning = {
   label?: string | null;
   value?: string | null;
   message?: string | null;
+  date?: string | null;
+  daypart?: string | null;
+  menu?: string | null;
+  context_label?: string | null;
   evidence?: Record<string, unknown> | null;
 };
 
@@ -900,6 +904,33 @@ const formatAnomalySeverity = (severity: unknown) => {
     low: "低",
   };
   return labels[value] || value || "-";
+};
+
+const anomalyEvidenceKeys = (warning: SheetAnomalyWarning) => {
+  const evidence = warning.evidence;
+  const keys = evidence?.keys;
+  return keys && typeof keys === "object" && !Array.isArray(keys)
+    ? keys as Record<string, unknown>
+    : {};
+};
+
+const anomalyContextValue = (warning: SheetAnomalyWarning, key: "date" | "daypart" | "menu") => {
+  const direct = String(warning[key] || "").trim();
+  if (direct) return direct;
+  const evidence = warning.evidence;
+  const evidenceValue = evidence && typeof evidence === "object" ? String(evidence[key] || "").trim() : "";
+  if (evidenceValue) return evidenceValue;
+  return String(anomalyEvidenceKeys(warning)[key] || "").trim();
+};
+
+const formatAnomalyBasis = (warning: SheetAnomalyWarning) => {
+  const evidence = warning.evidence || {};
+  const baseline = typeof evidence.baseline === "number" || typeof evidence.baseline === "string"
+    ? String(evidence.baseline)
+    : "";
+  const type = String(warning.type || "").trim();
+  if (baseline) return `基準 ${baseline}`;
+  return type || "-";
 };
 
 export default function OrderWorkflowV2Page() {
@@ -1774,8 +1805,13 @@ export default function OrderWorkflowV2Page() {
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
       await refreshAll();
-      setVisibleStep(3);
-      setMessage("拡大セルコピー設定を変更しました。選択OCRからシートを再生成してください。");
+      if (response.data?.selected_ocr_result_id) {
+        setVisibleStep(3);
+        setMessage("拡大セルコピー設定を変更しました。選択OCRからシートを再生成してください。");
+      } else {
+        setVisibleStep(1);
+        setMessage("拡大セルコピー設定を変更しました。OCR実行前に設定を確認できます。");
+      }
     } catch (err: any) {
       setError(formatApiError(err, "拡大セルコピー設定の保存に失敗しました"));
     } finally {
@@ -2376,6 +2412,18 @@ export default function OrderWorkflowV2Page() {
               <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady || facilityTemplateMissing)}>
                 {facilityTemplateMissing ? "先にテンプレート登録" : contextReady ? "設定を保存" : "施設と週を選択"}
               </button>
+              <label className="toolbar-field expanded-cell-toggle">
+                <span>拡大セルコピー</span>
+                <select
+                  value={expandedCellCopyMode}
+                  onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
+                  disabled={Boolean(busy || expandedCellCopySaving || !workflow?.order_id)}
+                >
+                  <option value="auto">自動</option>
+                  <option value="enabled">ON</option>
+                  <option value="disabled">OFF</option>
+                </select>
+              </label>
               <label className="toolbar-field ocr-mode-field">
                 <span>OCR実行方式</span>
                 <select value={ocrRunMode} onChange={(event) => setOcrRunMode(event.target.value as OcrRunMode)} disabled={Boolean(busy)}>
@@ -2455,6 +2503,9 @@ export default function OrderWorkflowV2Page() {
                 </details>
               </div>
             ) : null}
+            <p className="subtle">
+              拡大セルコピーは、merged cell施設で同じ食区分内へ数量を反映する設定です。自動は施設テンプレート設定に従います。
+            </p>
             {contextForm.facility_id ? (
               <div className={`facility-template-resolution ${facilityTemplateReadyForOcr ? "resolved" : "blocked"}`}>
                 <div className="facility-template-resolution-copy">
@@ -3062,9 +3113,13 @@ export default function OrderWorkflowV2Page() {
                       <thead>
                         <tr>
                           <th>重要度</th>
+                          <th>日付</th>
+                          <th>食区分</th>
+                          <th>メニュー</th>
                           <th>行</th>
                           <th>列</th>
                           <th>値</th>
+                          <th>基準</th>
                           <th>内容</th>
                         </tr>
                       </thead>
@@ -3072,9 +3127,13 @@ export default function OrderWorkflowV2Page() {
                         {anomalyWarnings.slice(0, 40).map((warning, idx) => (
                           <tr key={`anomaly-${idx}`} className={`anomaly-${warning.severity || "medium"}`}>
                             <td>{formatAnomalySeverity(warning.severity)}</td>
+                            <td>{anomalyContextValue(warning, "date") || "-"}</td>
+                            <td>{anomalyContextValue(warning, "daypart") || "-"}</td>
+                            <td className="anomaly-menu-cell">{anomalyContextValue(warning, "menu") || "-"}</td>
                             <td>{typeof warning.row_index === "number" ? warning.row_index + 1 : "-"}</td>
                             <td>{warning.label || warning.field || (typeof warning.col_index === "number" ? `C${warning.col_index + 1}` : "-")}</td>
                             <td>{warning.value || "-"}</td>
+                            <td>{formatAnomalyBasis(warning)}</td>
                             <td>{warning.message || warning.type || "確認対象"}</td>
                           </tr>
                         ))}
@@ -4290,7 +4349,7 @@ export default function OrderWorkflowV2Page() {
         .anomaly-table {
           border-collapse: collapse;
           font-size: 12px;
-          min-width: 760px;
+          min-width: 1080px;
           width: 100%;
         }
         .anomaly-table th,
@@ -4305,6 +4364,9 @@ export default function OrderWorkflowV2Page() {
         }
         .anomaly-table tr.anomaly-medium td {
           background: #fff8e8;
+        }
+        .anomaly-menu-cell {
+          min-width: 180px;
         }
         .anomaly-review-panel.ok {
           background: #edf7ef;
