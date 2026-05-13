@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -792,13 +793,16 @@ def propose_auto_sheet_edits(
             chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "40")), 80))
         except ValueError:
             chunk_size = 40
+        try:
+            max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "3")), 6))
+        except ValueError:
+            max_workers = 3
         target_chunks = _chunk_items(_target_cells_from_sheet(sheet), chunk_size)
         if not target_chunks:
             target_chunks = [[]]
-        chunk_meta: list[dict[str, Any]] = []
-        combined_payload_patches: list[dict[str, Any]] = []
-        failed_chunks = 0
-        for chunk_index, target_chunk in enumerate(target_chunks):
+
+        def request_chunk(chunk_item: tuple[int, list[dict[str, Any]]]) -> tuple[dict[str, Any] | None, dict[str, Any], int, int]:
+            chunk_index, target_chunk = chunk_item
             payload, meta = _gemini_json_request(
                 system_prompt=system_prompt,
                 user_payload=_sheet_context_for_llm(
@@ -819,6 +823,14 @@ def propose_auto_sheet_edits(
                 array_key="patches",
                 image_png_base64=fax_image_png_base64,
             )
+            return payload, meta, chunk_index, len(target_chunk)
+
+        chunk_meta: list[dict[str, Any]] = []
+        combined_payload_patches: list[dict[str, Any]] = []
+        failed_chunks = 0
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(target_chunks))) as executor:
+            chunk_results = list(executor.map(request_chunk, enumerate(target_chunks)))
+        for payload, meta, chunk_index, target_count in chunk_results:
             chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
             patch_items = payload.get("patches") if isinstance(payload, dict) else []
             patch_count = len(patch_items) if isinstance(patch_items, list) else 0
@@ -826,7 +838,7 @@ def propose_auto_sheet_edits(
                 {
                     "chunk_index": chunk_index,
                     "status": chunk_status or "unknown",
-                    "target_count": len(target_chunk),
+                    "target_count": target_count,
                     "patch_count": patch_count,
                     "error": meta.get("error") if isinstance(meta, dict) else None,
                 }
