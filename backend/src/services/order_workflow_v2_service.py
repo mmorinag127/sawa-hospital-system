@@ -81,6 +81,8 @@ _OCR_PROGRESS_STEPS: dict[str, tuple[int, str]] = {
     "queued": (1, "OCR準備中"),
     "document_load": (2, "PDF読込"),
     "ocr_pipeline": (3, "OCR処理"),
+    "quad_estimation": (3, "4点推定"),
+    "template_resolution": (3, "テンプレート解決"),
     "hakodate_live_pipeline": (3, "位置合わせ/OCR"),
     "inference": (3, "OCR推論"),
     "persist_evidence": (4, "OCR結果保存"),
@@ -482,6 +484,11 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     if elapsed_seconds is None and isinstance(started_at, datetime) and isinstance(finished_at, datetime):
         elapsed_seconds = max((finished_at - started_at).total_seconds(), 0.0)
     progress = _ocr_progress_payload(job, metrics)
+    error_code = _normalize_id(metrics.get("error")) or None
+    error_message = _normalize_id(job.error_message) or None
+    error_detail = _normalize_id(metrics.get("error_detail")) or None
+    error_user_message = _normalize_id(metrics.get("error_user_message")) or None
+    recovery_action = _normalize_id(metrics.get("recovery_action")) or None
     return {
         "ocr_job_id": job.id,
         "order_id": job.order_id,
@@ -497,8 +504,11 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
         "processing_stage": metrics.get("processing_stage"),
         "result_state": metrics.get("result_state"),
-        "error_message": _normalize_id(job.error_message) or None,
-        "error": _normalize_id(metrics.get("error")) or None,
+        "error_message": error_message,
+        "error": error_code,
+        "error_detail": error_detail,
+        "error_user_message": error_user_message,
+        "recovery_action": recovery_action,
         **progress,
     }
 

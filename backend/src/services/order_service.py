@@ -12791,6 +12791,32 @@ def rerun_ocr_evidence_only(
         metrics_patch=base_metrics_patch,
     )
 
+    def _hakodate_rerun_failure_payload(exc: Exception) -> dict[str, Any]:
+        raw_message = str(exc).strip()
+        if "edge locked quad estimation failed" in raw_message:
+            return {
+                "error": "quad_estimation_failed",
+                "error_detail": raw_message,
+                "error_user_message": "FAXの表外枠4点を自動推定できませんでした。原本PDFの表の四隅を確認し、4点補正を行ってからOCRを再実行してください。",
+                "recovery_action": "review_or_edit_quad",
+                "processing_stage": "quad_estimation",
+            }
+        if "template_version" in raw_message or "template" in raw_message:
+            return {
+                "error": "template_resolution_failed",
+                "error_detail": raw_message,
+                "error_user_message": "施設テンプレートを解決できませんでした。Step1で施設テンプレートと施設区分列を確認してください。",
+                "recovery_action": "review_facility_template",
+                "processing_stage": "template_resolution",
+            }
+        return {
+            "error": "hakodate_live_rerun_failed",
+            "error_detail": raw_message,
+            "error_user_message": "箱館方式のOCR処理中に失敗しました。詳細を確認し、PDF・施設・週次・テンプレート設定を確認してから再実行してください。",
+            "recovery_action": "review_ocr_error",
+            "processing_stage": "hakodate_live_pipeline",
+        }
+
     # OCR reruns use the same accepted Hakodate live pipeline as order previews.
     # Do not fall back to the deprecated external OCR pipeline here.
     try:
@@ -12812,22 +12838,23 @@ def rerun_ocr_evidence_only(
                 or preferred_template_id,
             }
     except Exception as exc:  # noqa: BLE001
+        failure = _hakodate_rerun_failure_payload(exc)
         _update_reparse_job_progress(
             ocr_job_id,
             status="failed",
-            processing_stage="hakodate_live_pipeline",
+            processing_stage=str(failure.get("processing_stage") or "hakodate_live_pipeline"),
             result_state="hard_failed",
-            error_message=f"hakodate_live_rerun_failed:{exc}",
+            error_message=f"{failure['error']}:{failure['error_detail']}",
             metrics_patch={
                 **pipeline_metrics_patch,
-                "error": "hakodate_live_rerun_failed",
+                **failure,
             },
         )
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as refresh_exc:  # noqa: BLE001
             logger.warning("Workflow state refresh failed after Hakodate OCR rerun failure", order_id=order_id, error=str(refresh_exc))
-        return None, "hakodate_live_rerun_failed"
+        return None, str(failure["error"])
 
     if not isinstance(output, dict):
         _update_reparse_job_progress(
@@ -12839,6 +12866,8 @@ def rerun_ocr_evidence_only(
             metrics_patch={
                 **pipeline_metrics_patch,
                 "error": "hakodate_live_rerun_invalid_output",
+                "error_user_message": "OCR処理は終了しましたが、保存できる形式の結果が返りませんでした。PDF・施設・週次・テンプレート設定を確認してから再実行してください。",
+                "recovery_action": "review_ocr_error",
             },
         )
         try:

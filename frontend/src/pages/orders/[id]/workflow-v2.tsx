@@ -43,6 +43,11 @@ type WorkflowV2 = {
     progress_step?: number | null;
     progress_total?: number | null;
     progress_label?: string | null;
+    error?: string | null;
+    error_message?: string | null;
+    error_detail?: string | null;
+    error_user_message?: string | null;
+    recovery_action?: string | null;
   } | null;
 };
 
@@ -587,6 +592,9 @@ const describeWorkflowBlocker = (code: string) => {
     monthly_menu_facility_scope_missing: "対象施設の月次メニュー差分を解決できません。メニュー設定を確認してください。",
     week_unresolved: "週次が未確定です。Step1で週次を確定してください。",
     facility_template_unresolved: "施設テンプレートが未登録です。",
+    quad_estimation_failed: "FAXの表外枠4点を自動推定できませんでした。4点補正を確認してからOCRを再実行してください。",
+    template_resolution_failed: "施設テンプレートを解決できませんでした。施設テンプレートと施設区分列を確認してください。",
+    hakodate_live_rerun_failed: "箱館方式のOCR処理中に失敗しました。詳細を確認してから再実行してください。",
   };
   return labels[normalized] || normalized;
 };
@@ -1037,6 +1045,14 @@ export default function OrderWorkflowV2Page() {
   const workflowBlockers = Array.isArray(workflow?.blockers)
     ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
+  const ocrJobErrorMessage = String(
+    workflow?.ocr_job?.error_user_message
+      || workflow?.ocr_job?.error_detail
+      || workflow?.ocr_job?.error_message
+      || workflow?.ocr_job?.error
+      || "",
+  ).trim();
+  const ocrJobRecoveryAction = String(workflow?.ocr_job?.recovery_action || "").trim();
   const ocrPrerequisiteBlockers = workflowBlockers.filter((item) =>
     [
       "menu_entries_missing",
@@ -2437,6 +2453,14 @@ export default function OrderWorkflowV2Page() {
 
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
+      {ocrJobErrorMessage && workflow?.ocr_job?.status === "failed" ? (
+        <div className="notice error">
+          <strong>OCR失敗:</strong> {ocrJobErrorMessage}
+          {ocrJobRecoveryAction === "review_or_edit_quad" ? (
+            <span> 4点推定を確認/補正してから再実行してください。</span>
+          ) : null}
+        </div>
+      ) : null}
       {workflowBlockers.length ? (
         <div className="notice error">
           {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}

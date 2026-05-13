@@ -328,7 +328,7 @@ def _edge_locked_reasons(
         if metric["gap_max_px_est"] > 140:
             reasons.append(f"{edge}_gap_large:{metric['gap_max_px_est']}")
     if len(mild_offset_edges) >= 2:
-        reasons.append(f"multiple_edge_offset_borderline:{','.join(mild_offset_edges)}")
+        warnings.append(f"multiple_edge_offset_borderline:{','.join(mild_offset_edges)}")
     return reasons, warnings
 
 
