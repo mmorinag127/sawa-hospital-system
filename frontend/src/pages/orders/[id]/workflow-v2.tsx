@@ -1024,7 +1024,10 @@ export default function OrderWorkflowV2Page() {
   );
 
   const contextSuggestion = workflow?.context_suggestion || null;
-  const contextReady = Boolean(contextForm.facility_id.trim() && contextForm.week_start && contextForm.week_end);
+  const selectedWeekRange = useMemo(() => weekRangeFromValue(selectedWeekValue), [selectedWeekValue]);
+  const effectiveWeekStart = contextForm.week_start || selectedWeekRange.week_start;
+  const effectiveWeekEnd = contextForm.week_end || selectedWeekRange.week_end;
+  const contextReady = Boolean(contextForm.facility_id.trim() && effectiveWeekStart && effectiveWeekEnd);
   const workflowContextConfirmed = Boolean(
     workflow?.facility_id
       && workflow?.week_start
@@ -1611,7 +1614,16 @@ export default function OrderWorkflowV2Page() {
           if (currentNormalized) return currentNormalized;
           const workflowWeekValue = weekValueFromRange(workflow?.week_start, workflow?.week_end);
           if (workflowWeekValue) return workflowWeekValue;
-          return options.find((item: WeekOption) => item.selected)?.week_id || "";
+          const selectedOptionWeek = options.find((item: WeekOption) => item.selected)?.week_id || "";
+          if (selectedOptionWeek) {
+            const selectedRange = weekRangeFromValue(selectedOptionWeek);
+            setContextForm((form) => (
+              form.week_start || form.week_end
+                ? form
+                : { ...form, week_start: selectedRange.week_start, week_end: selectedRange.week_end }
+            ));
+          }
+          return selectedOptionWeek;
         });
       } catch (err: any) {
         if (!active) return;
@@ -1706,10 +1718,11 @@ export default function OrderWorkflowV2Page() {
 
   const confirmContext = () =>
     runAction("Step1 context confirm", async () => {
+      const fallbackRange = weekRangeFromValue(selectedWeekValue);
       await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
         facility_id: contextForm.facility_id,
-        week_start: contextForm.week_start,
-        week_end: contextForm.week_end,
+        week_start: contextForm.week_start || fallbackRange.week_start,
+        week_end: contextForm.week_end || fallbackRange.week_end,
       });
     });
 
