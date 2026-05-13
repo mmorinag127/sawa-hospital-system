@@ -950,6 +950,32 @@ const formatAnomalyBasis = (warning: SheetAnomalyWarning) => {
   return type || "-";
 };
 
+const sameSheetPatchTarget = (
+  left: { row_index?: number | null; col_index?: number | null; suggested_value?: string | null },
+  right: { row_index?: number | null; col_index?: number | null; suggested_value?: string | null },
+) => (
+  Number(left.row_index) === Number(right.row_index)
+  && Number(left.col_index) === Number(right.col_index)
+  && String(left.suggested_value || "").trim() === String(right.suggested_value || "").trim()
+);
+
+const removeFirstMatchingItem = <T,>(items: T[], matcher: (item: T) => boolean) => {
+  let removed = false;
+  return items.filter((item) => {
+    if (!removed && matcher(item)) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+};
+
+const removeItemsForSheetCell = <T extends { row_index?: number | null; col_index?: number | null }>(
+  items: T[],
+  rowIndex: number,
+  colIndex: number,
+) => items.filter((item) => Number(item.row_index) !== rowIndex || Number(item.col_index) !== colIndex);
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -1980,9 +2006,18 @@ export default function OrderWorkflowV2Page() {
     });
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
-    setLocalAnomalyReview(null);
-    setSelectedAutoEditIndex(null);
-    setSelectedAnomalyIndex(null);
+    setLocalAnomalyReview((current) => {
+      const sourceReview = current || anomalyReview;
+      if (!sourceReview) return current;
+      const warnings = removeItemsForSheetCell(anomalyWarnings, rowIndex, colIndex);
+      return { ...sourceReview, warnings };
+    });
+    setSheetAutoEditResult((current) => {
+      if (!current) return current;
+      return { ...current, patches: removeItemsForSheetCell(current.patches || [], rowIndex, colIndex) };
+    });
+    if (selectedAutoEditIndex !== null) setSelectedAutoEditIndex(null);
+    if (selectedAnomalyIndex !== null) setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row, idx) => (
@@ -2192,6 +2227,38 @@ export default function OrderWorkflowV2Page() {
     setSheetAutoEditResult(null);
   };
 
+  const applySingleSheetAutoEditPatch = (patch: SheetAutoEditPatch) => {
+    if (!sheetPayload || typeof patch.row_index !== "number" || typeof patch.col_index !== "number") return;
+    const suggestedValue = String(patch.suggested_value || "").trim();
+    if (!suggestedValue) return;
+    setLocalAnomalyReview((current) => {
+      const sourceReview = current || anomalyReview;
+      if (!sourceReview) return current;
+      return {
+        ...sourceReview,
+        warnings: removeItemsForSheetCell(anomalyWarnings, patch.row_index, patch.col_index),
+      };
+    });
+    setSelectedAnomalyIndex(null);
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => [...row]);
+      if (!rows[patch.row_index] || patch.col_index < 0 || patch.col_index >= rows[patch.row_index].length) return current;
+      rows[patch.row_index][patch.col_index] = suggestedValue;
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+    setSheetAutoEditResult((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        patches: removeFirstMatchingItem(current.patches || [], (item) => sameSheetPatchTarget(item, patch)),
+      };
+    });
+    setSelectedAutoEditIndex(null);
+  };
+
   const applyAnomalyCorrections = () => {
     const patches = anomalyWarnings.filter((warning) => (
       typeof warning.row_index === "number"
@@ -2211,6 +2278,34 @@ export default function OrderWorkflowV2Page() {
       const nextSheet = { ...current, rows };
       setSheetJson(formatJson(nextSheet));
       return nextSheet;
+    });
+    setSelectedAnomalyIndex(null);
+    setSelectedAutoEditIndex(null);
+  };
+
+  const applySingleAnomalyCorrection = (warning: SheetAnomalyWarning) => {
+    if (!sheetPayload || typeof warning.row_index !== "number" || typeof warning.col_index !== "number") return;
+    const suggestedValue = String(warning.suggested_value || "").trim();
+    if (!suggestedValue) return;
+    const rowIndex = Number(warning.row_index);
+    const colIndex = Number(warning.col_index);
+    setSheetPayload((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => [...row]);
+      if (!rows[rowIndex] || colIndex < 0 || colIndex >= rows[rowIndex].length) return current;
+      rows[rowIndex][colIndex] = suggestedValue;
+      const nextSheet = { ...current, rows };
+      setSheetJson(formatJson(nextSheet));
+      return nextSheet;
+    });
+    const sourceReview = anomalyReview || {};
+    setLocalAnomalyReview({
+      ...sourceReview,
+      warnings: removeFirstMatchingItem(anomalyWarnings, (item) => sameSheetPatchTarget(item, warning)),
+    });
+    setSheetAutoEditResult((current) => {
+      if (!current) return current;
+      return { ...current, patches: removeItemsForSheetCell(current.patches || [], rowIndex, colIndex) };
     });
     setSelectedAnomalyIndex(null);
     setSelectedAutoEditIndex(null);
@@ -3208,6 +3303,16 @@ export default function OrderWorkflowV2Page() {
                                 {patch.current_value || "空"} → <strong>{patch.suggested_value}</strong>
                               </span>
                               <span className="subtle"> {patch.reason || patch.evidence || ""}</span>
+                              <button
+                                className="btn tiny row-apply-button"
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  applySingleSheetAutoEditPatch(patch);
+                                }}
+                              >
+                                この提案を反映
+                              </button>
                             </li>
                           ))}
                         </ul>
@@ -3249,6 +3354,7 @@ export default function OrderWorkflowV2Page() {
                                 <th>補正案</th>
                                 <th>基準</th>
                                 <th>内容</th>
+                                <th>操作</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -3271,6 +3377,19 @@ export default function OrderWorkflowV2Page() {
                                   <td>{warning.suggested_value || "-"}</td>
                                   <td>{formatAnomalyBasis(warning)}</td>
                                   <td>{warning.message || warning.type || "確認対象"}</td>
+                                  <td>
+                                    <button
+                                      className="btn tiny row-apply-button"
+                                      type="button"
+                                      disabled={!String(warning.suggested_value || "").trim()}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        applySingleAnomalyCorrection(warning);
+                                      }}
+                                    >
+                                      反映
+                                    </button>
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -4766,6 +4885,10 @@ export default function OrderWorkflowV2Page() {
           font-weight: 800;
           margin-right: 6px;
         }
+        .row-apply-button {
+          margin-left: 8px;
+          vertical-align: middle;
+        }
         .llm-review-list li.anomaly-high {
           box-shadow: inset 4px 0 0 #d7351d;
         }
@@ -4802,6 +4925,11 @@ export default function OrderWorkflowV2Page() {
         }
         .btn.ghost {
           background: #ebe5d5;
+        }
+        .btn.tiny {
+          font-size: 12px;
+          min-height: 30px;
+          padding: 0 10px;
         }
         .btn.danger {
           background: #f5d5cb;
