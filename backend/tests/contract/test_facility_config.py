@@ -158,7 +158,7 @@ def test_operator_override_columns_preserve_master_body_merge_policy():
     assert resolved["fax_template"]["body_merge_policy"] == master_facility["fax_template_override"]["body_merge_policy"]
 
 
-def test_facility_template_registration_does_not_sync_master_for_missing_facility():
+def test_facility_template_registration_materializes_master_facility():
     _clear_facilities()
     client = TestClient(app)
 
@@ -167,10 +167,16 @@ def test_facility_template_registration_does_not_sync_master_for_missing_facilit
         json={"fax_template_id": "fax_layout_regular_forbidden_v1"},
     )
 
-    assert update.status_code == 404
+    assert update.status_code == 200
+    payload = update.json()
+    assert payload["config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
+    assert payload["resolved_config"]["facility_id"] == "FAC00002"
+    assert payload["template_version"]["id"]
     with session_scope() as session:
-        assert session.query(Facility).count() == 0
-        assert session.query(FacilityTemplateVersion).count() == 0
+        facility = session.get(Facility, "FAC00002")
+        assert facility is not None
+        assert facility.name == "シルバーホームなごみ"
+        assert session.query(FacilityTemplateVersion).count() == 1
 
 
 def test_active_template_version_import_does_not_sync_master_for_missing_facility():

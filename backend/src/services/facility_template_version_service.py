@@ -18,7 +18,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import config_service
+from src.services import config_service, facility_service
 from src.services.config_validator import validate_facility_config
 from src.services.template_field_schema_service import derive_row_fields_from_columns
 
@@ -644,7 +644,7 @@ def save_template_registration_for_facility(
     if missing_template_ids:
         return {"error": "fax_template_not_found", "template_ids": missing_template_ids}, "fax_template_not_found"
 
-    facility = session.get(Facility, normalized_facility_id)
+    facility = facility_service.ensure_facility_materialized(session, normalized_facility_id)
     if facility is None:
         return None, "facility_not_found"
 

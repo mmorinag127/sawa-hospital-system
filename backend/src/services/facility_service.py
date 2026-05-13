@@ -196,6 +196,36 @@ def list_facilities() -> list[dict]:
     return list(merged.values())
 
 
+def ensure_facility_materialized(session, facility_id: str) -> Facility | None:
+    normalized_facility_id = str(facility_id or "").strip()
+    if not normalized_facility_id:
+        return None
+    existing = session.get(Facility, normalized_facility_id)
+    if existing is not None:
+        return existing
+    master = config_service.load_facility_master()
+    for entry in master.get("facilities", []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("facility_id") or "").strip() != normalized_facility_id:
+            continue
+        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+        if not name:
+            return None
+        fac = Facility(id=normalized_facility_id, name=name)
+        session.add(fac)
+        seen_area_ids: set[str] = set()
+        for area in _normalize_area_payload(entry.get("areas")):
+            if area["id"] in seen_area_ids:
+                continue
+            seen_area_ids.add(area["id"])
+            session.add(FacilityArea(id=area["id"], facility_id=normalized_facility_id, name=area["name"]))
+        session.flush()
+        logger.info("Facility materialized from master", fac=normalized_facility_id)
+        return fac
+    return None
+
+
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
         fac = session.get(Facility, facility_id)
