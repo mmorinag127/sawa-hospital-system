@@ -175,15 +175,45 @@ def update_config(
 
 
 def list_facilities() -> list[dict]:
+    master = config_service.load_facility_master()
+    merged: dict[str, dict] = {}
+    for entry in master.get("facilities", []):
+        if not isinstance(entry, dict):
+            continue
+        facility_id = str(entry.get("facility_id") or "").strip()
+        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+        if not facility_id or not name:
+            continue
+        merged[facility_id] = {
+            "id": facility_id,
+            "name": name,
+            "areas": _normalize_area_payload(entry.get("areas")),
+        }
     with session_scope() as session:
         facilities = session.execute(select(Facility)).scalars().all()
-        return [serialize_facility(fac) for fac in facilities]
+        for fac in facilities:
+            merged[fac.id] = serialize_facility(fac)
+    return list(merged.values())
 
 
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
         fac = session.get(Facility, facility_id)
         if not fac:
+            master = config_service.load_facility_master()
+            for entry in master.get("facilities", []):
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("facility_id") or "").strip() != facility_id:
+                    continue
+                name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+                if not name:
+                    return None
+                return {
+                    "id": facility_id,
+                    "name": name,
+                    "areas": _normalize_area_payload(entry.get("areas")),
+                }
             return None
         return serialize_facility(fac)
 

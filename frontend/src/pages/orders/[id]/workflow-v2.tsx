@@ -3288,34 +3288,51 @@ export default function OrderWorkflowV2Page() {
                           : ""}
                       </p>
                       {sheetAutoEditResult.patches?.length ? (
-                        <ul className="llm-review-list">
-                          {sheetAutoEditResult.patches.slice(0, 40).map((patch, idx) => (
-                            <li
-                              key={`auto-edit-${idx}`}
-                              className={[
-                                "auto-edit-candidate-row",
-                                selectedAutoEditIndex === idx ? "selected-auto-edit-row" : "",
-                              ].filter(Boolean).join(" ")}
-                              onClick={() => selectAutoEditPatch(patch, idx)}
-                            >
-                              <span className="candidate-location">R{patch.row_index + 1} C{patch.col_index + 1} {patch.label || patch.field || ""}</span>
-                              <span className="candidate-change">
-                                {patch.current_value || "空"} → <strong>{patch.suggested_value}</strong>
-                              </span>
-                              <span className="subtle"> {patch.reason || patch.evidence || ""}</span>
-                              <button
-                                className="btn tiny row-apply-button"
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  applySingleSheetAutoEditPatch(patch);
-                                }}
-                              >
-                                この提案を反映
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="table-wrap anomaly-table-wrap step3-anomaly-table-wrap">
+                          <table className="anomaly-table auto-edit-table">
+                            <thead>
+                              <tr>
+                                <th>行</th>
+                                <th>列</th>
+                                <th>現状</th>
+                                <th>候補</th>
+                                <th>理由</th>
+                                <th>操作</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sheetAutoEditResult.patches.slice(0, 40).map((patch, idx) => (
+                                <tr
+                                  key={`auto-edit-${idx}`}
+                                  className={[
+                                    "auto-edit-candidate-row",
+                                    selectedAutoEditIndex === idx ? "selected-auto-edit-row" : "",
+                                  ].filter(Boolean).join(" ")}
+                                  onClick={() => selectAutoEditPatch(patch, idx)}
+                                >
+                                  <td>R{patch.row_index + 1}</td>
+                                  <td>{patch.label || patch.field || `C${patch.col_index + 1}`}</td>
+                                  <td>{patch.current_value || "空"}</td>
+                                  <td><strong>{patch.suggested_value}</strong></td>
+                                  <td>{patch.reason || patch.evidence || ""}</td>
+                                  <td>
+                                    <button
+                                      className="btn tiny row-apply-button"
+                                      type="button"
+                                      disabled={!String(patch.suggested_value || "").trim()}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        applySingleSheetAutoEditPatch(patch);
+                                      }}
+                                    >
+                                      採用
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       ) : sheetAutoEditResult.llm?.status === "failed" || sheetAutoEditResult.llm?.status === "partial_failed" ? (
                         <p className="subtle error">
                           AI自動編集の解析に失敗しました。
@@ -4832,6 +4849,15 @@ export default function OrderWorkflowV2Page() {
         }
         .anomaly-table tr.selected-anomaly-row td {
           box-shadow: inset 0 -2px 0 #e6532e, inset 0 2px 0 #e6532e;
+        }
+        .auto-edit-table tbody tr {
+          cursor: pointer;
+        }
+        .auto-edit-table tr.auto-edit-candidate-row td {
+          background: #f0fbff;
+        }
+        .auto-edit-table tr.selected-auto-edit-row td {
+          box-shadow: inset 0 -2px 0 #0284c7, inset 0 2px 0 #0284c7;
         }
         .anomaly-menu-cell {
           min-width: 180px;

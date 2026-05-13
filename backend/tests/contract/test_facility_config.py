@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import json
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
@@ -54,16 +55,52 @@ def test_facility_config_update_contract():
     assert payload["config"]["label_profile_override"]["storage_mode"] == "frozen"
 
 
-def test_facility_list_does_not_sync_master_on_read():
+def test_facility_list_exposes_master_facilities_without_db_sync():
     _clear_facilities()
     client = TestClient(app)
 
     fetched = client.get("/facilities")
 
     assert fetched.status_code == 200
-    assert fetched.json()["facilities"] == []
+    facilities = fetched.json()["facilities"]
+    assert any(item["id"] == "FAC00016" and item["name"] == "いこいの森プラス" for item in facilities)
     with session_scope() as session:
         assert session.query(Facility).count() == 0
+
+
+def test_user_added_master_facility_is_available_for_order_step1_options(monkeypatch, tmp_path):
+    _clear_facilities()
+    source = config_service.load_facility_master()
+    next_master = {
+        **source,
+        "facilities": [
+            *(source.get("facilities") or []),
+            {
+                "facility_id": "FAC99991",
+                "facility_name": "ケアホーム長生苑",
+                "aliases": ["長生苑"],
+                "areas": [],
+                "fax_template_id": "fax_layout_regular_forbidden_v1",
+                "fax_template_ids": ["fax_layout_regular_forbidden_v1"],
+            },
+        ],
+    }
+    master_path = tmp_path / "facility_master.template.json"
+    master_path.write_text(json.dumps(next_master, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
+    config_service.reload_configs()
+    client = TestClient(app)
+
+    listed = client.get("/facilities")
+    fetched = client.get("/facilities/FAC99991")
+
+    assert listed.status_code == 200
+    assert any(item["id"] == "FAC99991" and item["name"] == "ケアホーム長生苑" for item in listed.json()["facilities"])
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    assert payload["facility"]["id"] == "FAC99991"
+    assert payload["facility"]["name"] == "ケアホーム長生苑"
+    assert payload["resolved_config"]["facility_id"] == "FAC99991"
 
 
 def test_facility_get_does_not_create_template_version_from_resolved_config():

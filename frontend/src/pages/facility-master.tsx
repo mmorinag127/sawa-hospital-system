@@ -15,6 +15,17 @@ type FacilityMaster = {
   facilities?: FacilityEntry[];
 };
 
+type FacilityEditDraft = {
+  facility_id: string;
+  facility_name: string;
+  aliases_text: string;
+  areas_text: string;
+  address: string;
+  phone: string;
+  order_form_pattern_id: string;
+  fax_template_id: string;
+};
+
 const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
 const parseJson = (text: string) => {
@@ -69,6 +80,57 @@ const readAreas = (value: unknown) => {
     .filter((item): item is { id: string; name: string } => Boolean(item));
 };
 
+const facilityEntryToDraft = (facility?: FacilityEntry | null): FacilityEditDraft => {
+  const record = facility && typeof facility === "object" ? (facility as Record<string, unknown>) : {};
+  return {
+    facility_id: readString(record.facility_id),
+    facility_name: readString(record.facility_name),
+    aliases_text: readStringList(record.aliases).join("\n"),
+    areas_text: readAreas(record.areas)
+      .map((area) => area.name)
+      .join("\n"),
+    address: readString(record.address),
+    phone: readString(record.phone),
+    order_form_pattern_id: readString(record.order_form_pattern_id),
+    fax_template_id: readString(record.fax_template_id),
+  };
+};
+
+const facilityDraftToEntry = (draft: FacilityEditDraft, base: FacilityEntry | null): FacilityEntry => {
+  const next: FacilityEntry = { ...(base || {}) };
+  next.facility_id = draft.facility_id.trim();
+  next.facility_name = draft.facility_name.trim();
+  next.aliases = draft.aliases_text
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  next.areas = draft.areas_text
+    .split(/\r?\n|,/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => ({ id: name, name }));
+  if (draft.address.trim()) {
+    next.address = draft.address.trim();
+  } else {
+    delete next.address;
+  }
+  if (draft.phone.trim()) {
+    next.phone = draft.phone.trim();
+  } else {
+    delete next.phone;
+  }
+  if (draft.order_form_pattern_id.trim()) {
+    next.order_form_pattern_id = draft.order_form_pattern_id.trim();
+  } else {
+    delete next.order_form_pattern_id;
+  }
+  if (draft.fax_template_id.trim()) {
+    next.fax_template_id = draft.fax_template_id.trim();
+    next.fax_template_ids = [draft.fax_template_id.trim()];
+  }
+  return next;
+};
+
 const readInvoiceTemplate = (facility?: FacilityEntry) => {
   if (!facility || typeof facility !== "object") return null;
   const invoice = (facility as Record<string, unknown>).invoice_template;
@@ -102,6 +164,7 @@ export default function FacilityMasterPage() {
   const [masterText, setMasterText] = useState("");
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [facilityText, setFacilityText] = useState("");
+  const [facilityDraft, setFacilityDraft] = useState<FacilityEditDraft>(() => facilityEntryToDraft(null));
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [path, setPath] = useState("");
@@ -124,9 +187,11 @@ export default function FacilityMasterPage() {
       if (nextFacilities.length > 0) {
         setSelectedIndex(0);
         setFacilityText(prettyJson(nextFacilities[0]));
+        setFacilityDraft(facilityEntryToDraft(nextFacilities[0]));
       } else {
         setSelectedIndex(-1);
         setFacilityText("{}");
+        setFacilityDraft(facilityEntryToDraft(null));
       }
       setMessage("");
     } catch (err) {
@@ -143,6 +208,7 @@ export default function FacilityMasterPage() {
     if (!target) return;
     setSelectedIndex(index);
     setFacilityText(prettyJson(target));
+    setFacilityDraft(facilityEntryToDraft(target));
   };
 
   const updateFacilityState = (nextFacility: FacilityEntry) => {
@@ -157,8 +223,36 @@ export default function FacilityMasterPage() {
     const nextMaster = { ...master, facilities: nextFacilities };
     setMaster(nextMaster);
     setFacilityText(prettyJson(nextFacility));
+    setFacilityDraft(facilityEntryToDraft(nextFacility));
     setMasterText(prettyJson(nextMaster));
     return nextMaster;
+  };
+
+  const updateFacilityDraft = (field: keyof FacilityEditDraft, value: string) => {
+    setFacilityDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const applyFacilityForm = () => {
+    if (!master) return null;
+    if (!facilityDraft.facility_id.trim()) {
+      setMessage("施設IDを入力してください。");
+      return null;
+    }
+    if (!facilityDraft.facility_name.trim()) {
+      setMessage("施設名を入力してください。");
+      return null;
+    }
+    const duplicate = facilities.some((facility, index) => {
+      if (index === selectedIndex) return false;
+      return String(facility.facility_id || "").trim() === facilityDraft.facility_id.trim();
+    });
+    if (duplicate) {
+      setMessage(`施設ID ${facilityDraft.facility_id.trim()} は既に使われています。`);
+      return null;
+    }
+    const base = selectedIndex >= 0 && selectedIndex < facilities.length ? facilities[selectedIndex] : null;
+    const nextFacility = facilityDraftToEntry(facilityDraft, base);
+    return updateFacilityState(nextFacility) || master;
   };
 
   const applyFacilityEditor = () => {
@@ -197,6 +291,7 @@ export default function FacilityMasterPage() {
     setMaster(nextMaster);
     setSelectedIndex(nextFacilities.length - 1);
     setFacilityText(prettyJson(nextFacility));
+    setFacilityDraft(facilityEntryToDraft(nextFacility));
     setMasterText(prettyJson(nextMaster));
     setMessage("新規施設を追加しました。");
   };
@@ -218,16 +313,18 @@ export default function FacilityMasterPage() {
     if (nextFacilities.length > 0) {
       setSelectedIndex(0);
       setFacilityText(prettyJson(nextFacilities[0]));
+      setFacilityDraft(facilityEntryToDraft(nextFacilities[0]));
     } else {
       setSelectedIndex(-1);
       setFacilityText("{}");
+      setFacilityDraft(facilityEntryToDraft(null));
     }
     setMessage("Master JSON を反映しました。");
   };
 
   const saveMaster = async () => {
     if (!master) return;
-    const nextMaster = applyFacilityEditor();
+    const nextMaster = applyFacilityForm();
     if (!nextMaster) return;
     try {
       const res = await apiClient.put("/facility-master", nextMaster);
@@ -333,6 +430,86 @@ export default function FacilityMasterPage() {
               })}
             </div>
             <div className="editor">
+              <div className="form-grid">
+                <label className="field">
+                  <span className="field-label">施設ID</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.facility_id}
+                    onChange={(e) => updateFacilityDraft("facility_id", e.target.value)}
+                    placeholder="FAC00017"
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">施設名</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.facility_name}
+                    onChange={(e) => updateFacilityDraft("facility_name", e.target.value)}
+                    placeholder="ケアホーム長生苑"
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">注文書テンプレート</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.fax_template_id}
+                    onChange={(e) => updateFacilityDraft("fax_template_id", e.target.value)}
+                    placeholder="fax_layout_regular_forbidden_v1"
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">注文書パターン</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.order_form_pattern_id}
+                    onChange={(e) => updateFacilityDraft("order_form_pattern_id", e.target.value)}
+                    placeholder="PATTERN_A"
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">住所</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.address}
+                    onChange={(e) => updateFacilityDraft("address", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">電話番号</span>
+                  <input
+                    className="input"
+                    value={facilityDraft.phone}
+                    onChange={(e) => updateFacilityDraft("phone", e.target.value)}
+                  />
+                </label>
+                <label className="field form-wide">
+                  <span className="field-label">別名 (改行またはカンマ区切り)</span>
+                  <textarea
+                    className="textarea compact-textarea"
+                    value={facilityDraft.aliases_text}
+                    onChange={(e) => updateFacilityDraft("aliases_text", e.target.value)}
+                    rows={3}
+                  />
+                </label>
+                <label className="field form-wide">
+                  <span className="field-label">施設区分/エリア (改行またはカンマ区切り)</span>
+                  <textarea
+                    className="textarea compact-textarea"
+                    value={facilityDraft.areas_text}
+                    onChange={(e) => updateFacilityDraft("areas_text", e.target.value)}
+                    rows={3}
+                  />
+                </label>
+              </div>
+              <div className="actions">
+                <button className="btn ghost" onClick={applyFacilityForm}>
+                  フォーム内容を反映
+                </button>
+                <button className="btn primary" onClick={saveMaster}>
+                  施設一覧を保存
+                </button>
+              </div>
               <div className="detail-grid">
                 <div className="detail-card">
                   <p className="detail-label">施設ID</p>
@@ -447,9 +624,6 @@ export default function FacilityMasterPage() {
               <div className="actions">
                 <button className="btn ghost" onClick={applyFacilityEditor}>
                   施設編集を反映
-                </button>
-                <button className="btn primary" onClick={saveMaster}>
-                  施設一覧を保存
                 </button>
               </div>
             </div>
@@ -669,6 +843,20 @@ export default function FacilityMasterPage() {
           gap: 14px;
         }
 
+        .form-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          background: #fbfaf7;
+        }
+
+        .form-wide {
+          grid-column: 1 / -1;
+        }
+
         .detail-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -747,6 +935,11 @@ export default function FacilityMasterPage() {
         .textarea {
           min-height: 120px;
           resize: vertical;
+        }
+
+        .compact-textarea {
+          min-height: 72px;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
         }
 
         .json-textarea {

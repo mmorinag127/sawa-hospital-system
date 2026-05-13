@@ -5496,6 +5496,7 @@ def _apply_expanded_cell_copy_to_materialization_rows_payload(
         rows=normalized_rows,
         fields=normalized_fields,
         quantity_index=quantity_index,
+        facility_config=facility_config,
     )
     if filled <= 0:
         return rows_payload
@@ -25045,15 +25046,112 @@ def _expanded_cell_same_daypart_copy_enabled(
     return False
 
 
+def _expanded_cell_body_merge_policy(facility_config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(facility_config, dict):
+        return {}
+    fax_template = facility_config.get("fax_template")
+    for source in (fax_template, facility_config.get("fax_template_override"), facility_config):
+        if not isinstance(source, dict):
+            continue
+        policy = source.get("body_merge_policy")
+        if isinstance(policy, dict):
+            return dict(policy)
+    return {}
+
+
+def _expanded_cell_body_merge_target_tokens(policy: dict[str, Any]) -> set[str]:
+    raw_columns = policy.get("columns")
+    if raw_columns is None:
+        raw_columns = policy.get("target_columns")
+    if raw_columns is None:
+        raw_columns = policy.get("target_names")
+    if raw_columns is None:
+        raw_columns = policy.get("quantity_names")
+    if isinstance(raw_columns, str):
+        raw_columns = [raw_columns]
+    if not isinstance(raw_columns, list):
+        return set()
+    return {_normalize_sheet_text(item).lower() for item in raw_columns if _normalize_sheet_text(item)}
+
+
+def _expanded_cell_template_field_tokens(
+    facility_config: dict[str, Any] | None,
+    fields: list[str],
+) -> dict[str, set[str]]:
+    if not isinstance(facility_config, dict):
+        return {}
+    template = facility_config.get("fax_template")
+    if not isinstance(template, dict):
+        template = facility_config.get("fax_template_override")
+    columns = template.get("columns") if isinstance(template, dict) else None
+    if not isinstance(columns, list):
+        return {}
+    tokens_by_field: dict[str, set[str]] = {str(field or "").strip(): set() for field in fields}
+    for fallback_index, column in enumerate(columns):
+        if not isinstance(column, dict):
+            continue
+        field = fax_extractor._canonical_field_name_from_template_column(column, fallback_index=fallback_index)
+        if field not in tokens_by_field:
+            continue
+        raw_tokens = [
+            field,
+            column.get("name"),
+            column.get("header"),
+            column.get("display_name"),
+            column.get("label"),
+            column.get("diet_type"),
+        ]
+        tokens_by_field[field].update(
+            _normalize_sheet_text(token).lower()
+            for token in raw_tokens
+            if _normalize_sheet_text(token)
+        )
+    return tokens_by_field
+
+
+def _expanded_cell_same_daypart_copy_target_columns(
+    *,
+    fields: list[str],
+    quantity_index: dict[tuple[str, str], int],
+    facility_config: dict[str, Any] | None,
+) -> list[int]:
+    all_quantity_columns = sorted(set(quantity_index.values()))
+    if not all_quantity_columns:
+        return []
+    policy = _expanded_cell_body_merge_policy(facility_config)
+    mode = _normalize_sheet_text(policy.get("mode")).lower()
+    target_tokens = _expanded_cell_body_merge_target_tokens(policy)
+    if not target_tokens:
+        # Legacy explicit boolean mode predates column-level body_merge_policy.
+        # Keep it as the only case that applies to all quantity columns.
+        return all_quantity_columns
+    if mode not in {"daypart", "meal", "meal_period"}:
+        return []
+    template_tokens_by_field = _expanded_cell_template_field_tokens(facility_config, fields)
+    target_columns: list[int] = []
+    for col_idx in all_quantity_columns:
+        field = str(fields[col_idx] if 0 <= col_idx < len(fields) else "").strip()
+        tokens = {_normalize_sheet_text(field).lower()}
+        tokens.update(template_tokens_by_field.get(field, set()))
+        if tokens.intersection(target_tokens):
+            target_columns.append(col_idx)
+    return sorted(set(target_columns))
+
+
 def _apply_expanded_cell_same_daypart_copy(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
     quantity_index: dict[tuple[str, str], int],
+    facility_config: dict[str, Any] | None = None,
 ) -> int:
     if not rows or not fields or not quantity_index:
         return 0
-    target_columns = sorted(set(quantity_index.values()))
+    target_columns = _expanded_cell_same_daypart_copy_target_columns(
+        fields=fields,
+        quantity_index=quantity_index,
+        facility_config=facility_config,
+    )
     if not target_columns:
         return 0
     return _fill_cluster_consensus_quantities(
@@ -28737,6 +28835,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             rows=expanded_rows,
             fields=fields,
             quantity_index=quantity_index,
+            facility_config=effective_facility_config,
         )
         if expanded_cell_filled > 0:
             rows = [

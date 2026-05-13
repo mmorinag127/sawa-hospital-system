@@ -414,6 +414,7 @@ type NormalizedEditorSheetPayload = {
   ocrNumericCellSummary: OcrNumericCellSummary;
   source: string;
   warnings: string[];
+  bodyMergeFields: string[];
 };
 
 type OcrCellConfidenceTier = "high" | "medium" | "low";
@@ -657,6 +658,8 @@ type DetailLine = OrderDetail["lines"][number];
 
 const EXPANDED_CELL_COPY_FACILITY_KEY = "expanded_cell_same_daypart_copy_enabled";
 
+const normalizeExpandedCellFieldToken = (value: unknown) => String(value ?? "").trim().toLowerCase();
+
 const canonicalizeExpandedCellDaypart = (value: string) => {
   const normalized = String(value || "").trim();
   if (!normalized) return "";
@@ -716,14 +719,23 @@ const applyExpandedCellSameDaypartCopyToRows = ({
   fields,
   header,
   rows,
+  targetFields,
 }: {
   fields: string[];
   header: string[];
   rows: string[][];
+  targetFields?: string[];
 }) => {
   if (!rows.length) return rows;
   const { dateIndex, daypartIndex, quantityIndexes } = resolveExpandedCellSheetIndexes(fields, header);
   if (dateIndex < 0 || daypartIndex < 0 || quantityIndexes.length === 0) {
+    return rows;
+  }
+  const normalizedTargetFields = new Set((targetFields || []).map((field) => normalizeExpandedCellFieldToken(field)).filter(Boolean));
+  const targetQuantityIndexes = normalizedTargetFields.size
+    ? quantityIndexes.filter((columnIndex) => normalizedTargetFields.has(normalizeExpandedCellFieldToken(fields[columnIndex] || "")))
+    : quantityIndexes;
+  if (!targetQuantityIndexes.length) {
     return rows;
   }
   const nextRows = rows.map((row) => [...row]);
@@ -735,7 +747,7 @@ const applyExpandedCellSameDaypartCopyToRows = ({
     if (clusterLength < 2 || clusterLength > 3) {
       return;
     }
-    quantityIndexes.forEach((columnIndex) => {
+    targetQuantityIndexes.forEach((columnIndex) => {
       const observed: Array<{ text: string; value: number }> = [];
       for (let rowIndex = start; rowIndex < endExclusive; rowIndex += 1) {
         const text = String(nextRows[rowIndex]?.[columnIndex] || "").trim();
@@ -3674,6 +3686,7 @@ export default function OrderDetailPage() {
       ocrNumericCellSummary: blankOcrNumericCellSummary(),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
+      bodyMergeFields: [],
     };
   };
 
@@ -3713,6 +3726,7 @@ export default function OrderDetailPage() {
         ocrNumericCellSummary: blankOcrNumericCellSummary(),
         source: typeof payload.source === "string" ? payload.source : "",
         warnings: rowValues.length ? Array.from(new Set([...warnings, "sheet_contract_invalid"])) : warnings,
+        bodyMergeFields: [],
       };
     }
     const normalizedHeader = Array.from({ length: columnCount }, (_, idx) => headerCells[idx] || fields[idx] || "");
@@ -3745,6 +3759,7 @@ export default function OrderDetailPage() {
       ocrNumericCellSummary: normalizeOcrNumericCellSummary((payload as Record<string, unknown>).ocrNumericCellSummary),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
+      bodyMergeFields: [],
     };
   };
 
@@ -3866,17 +3881,24 @@ export default function OrderDetailPage() {
     if (!shouldCopy) {
       return payload;
     }
+    const rawPolicy = facilityResolvedConfig?.fax_template?.body_merge_policy ?? facilityResolvedConfig?.body_merge_policy;
+    const rawTargets = rawPolicy && typeof rawPolicy === "object" ? (rawPolicy as Record<string, unknown>).columns : null;
+    const targetFields = Array.isArray(rawTargets)
+      ? rawTargets.map((field) => String(field || "").trim()).filter(Boolean)
+      : [];
     return {
       ...payload,
       rows: applyExpandedCellSameDaypartCopyToRows({
         fields: payload.fields,
         header: payload.header,
         rows: payload.rows,
+        targetFields,
       }),
       cellConfidenceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
       cellProvenanceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
       ocrNumericCellItems: [],
       ocrNumericCellSummary: blankOcrNumericCellSummary(),
+      bodyMergeFields: targetFields,
     };
   };
 
@@ -3912,7 +3934,7 @@ export default function OrderDetailPage() {
     setOcrSheetNumericCellSummary(effectivePayload.ocrNumericCellSummary);
     setOcrSheetSource(effectivePayload.source);
     setOcrSheetWarnings(effectivePayload.warnings);
-  }, [expandedCellCopyMode]);
+  }, [expandedCellCopyMode, facilityResolvedConfig]);
 
   const normalizeDraftSheetPayload = (payload?: DraftSheetPayload | null): NormalizedEditorSheetPayload => {
     const draftSheetJson =
