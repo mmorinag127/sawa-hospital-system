@@ -1095,12 +1095,26 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
                 "menu_temp_type": line.get("menu_temp_type"),
                 "quantity": 0.0,
                 "_condiment_names": set(),
+                "_source_refs": [],
             }
         if is_condiment:
             name_value = (line.get("menu_name") or "").strip()
             if name_value:
                 grouped[key]["_condiment_names"].add(name_value)
         grouped[key]["quantity"] += float(qty)
+        source_ref = {
+            "order_id": order.get("id"),
+            "source_row_index": line.get("source_row_index"),
+            "source_col_index": line.get("source_col_index"),
+            "source_field": line.get("source_field"),
+            "value_source": line.get("value_source"),
+            "was_user_edited": line.get("was_user_edited"),
+            "ocr_confidence": line.get("ocr_confidence"),
+            "ocr_confidence_tier": line.get("ocr_confidence_tier"),
+            "cell_image_ref": line.get("cell_image_ref"),
+            "quantity": float(qty),
+        }
+        grouped[key]["_source_refs"].append(source_ref)
     result = list(grouped.values())
     for bag in result:
         if bag.get("bag_type") == "condiment":
@@ -1169,6 +1183,7 @@ def _serialize_bag_payload_rows(rows: list[dict]) -> list[dict]:
             "area_id": bag.get("area_id"),
             "bag_type": bag.get("bag_type"),
             "quantity": bag.get("quantity"),
+            "source_refs": bag.get("_source_refs") or bag.get("source_refs") or [],
         }
         for bag in rows
     ]

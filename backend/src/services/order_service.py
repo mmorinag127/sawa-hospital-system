@@ -11,6 +11,9 @@ import time
 import threading
 import unicodedata
 import tempfile
+import socket
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from urllib.parse import urlparse
 from difflib import SequenceMatcher
@@ -5034,6 +5037,13 @@ def _serialize_snapshot_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any
                 "quantity_corrected": line.get("quantity_corrected"),
                 "change_note": line.get("change_note"),
                 "source_row_index": line.get("source_row_index"),
+                "source_col_index": line.get("source_col_index"),
+                "source_field": line.get("source_field"),
+                "value_source": line.get("value_source"),
+                "was_user_edited": line.get("was_user_edited"),
+                "ocr_confidence": line.get("ocr_confidence"),
+                "ocr_confidence_tier": line.get("ocr_confidence_tier"),
+                "cell_image_ref": line.get("cell_image_ref"),
             }
         )
     return serialized
@@ -5127,6 +5137,9 @@ def _build_materialization_candidate_from_draft_record(
     candidate_lines = _build_materialization_lines_from_sheet_rows(
         fields=draft_sheet.get("fields"),
         rows_payload=effective_rows_payload,
+        cell_confidence_rows=draft_sheet.get("cell_confidence_rows"),
+        cell_score_rows=draft_sheet.get("cell_score_rows"),
+        cell_provenance_rows=draft_sheet.get("cell_provenance_rows"),
         received_at=effective_received_at,
     )
     if semantic_materialization_supported and not candidate_lines:
@@ -5341,6 +5354,39 @@ def _normalize_materialization_row_values(
     return values
 
 
+def _materialization_confidence_score_from_tier(value: object) -> float | None:
+    token = str(value or "").strip().lower()
+    if not token:
+        return None
+    # Exact recognizer scores are not persisted in saved sheets. Preserve a stable
+    # numeric proxy that matches the tier thresholds used by Hakodate OCR.
+    if token in {"strict", "high"}:
+        return 0.45
+    if token in {"medium", "mid"}:
+        return 0.15
+    if token in {"low", "weak"}:
+        return 0.05
+    try:
+        parsed = float(token)
+    except Exception:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _materialization_row_metadata_values(
+    *,
+    rows_payload: object,
+    row_index: int,
+    fields: list[str],
+) -> list[str]:
+    if not isinstance(rows_payload, list) or row_index < 0 or row_index >= len(rows_payload):
+        return [""] * len(fields)
+    values = _normalize_materialization_row_values(fields=fields, row=rows_payload[row_index])
+    if not values:
+        return [""] * len(fields)
+    return values
+
+
 def _apply_expanded_cell_copy_to_materialization_rows_payload(
     *,
     fields: object,
@@ -5382,6 +5428,9 @@ def _build_materialization_lines_from_sheet_rows(
     *,
     fields: object,
     rows_payload: object,
+    cell_confidence_rows: object | None = None,
+    cell_score_rows: object | None = None,
+    cell_provenance_rows: object | None = None,
     received_at: datetime,
 ) -> list[dict[str, Any]]:
     if not isinstance(fields, list) or not isinstance(rows_payload, list):
@@ -5408,6 +5457,21 @@ def _build_materialization_lines_from_sheet_rows(
         values = _normalize_materialization_row_values(fields=normalized_fields, row=row)
         if not values:
             continue
+        confidence_values = _materialization_row_metadata_values(
+            rows_payload=cell_confidence_rows,
+            row_index=row_index,
+            fields=normalized_fields,
+        )
+        score_values = _materialization_row_metadata_values(
+            rows_payload=cell_score_rows,
+            row_index=row_index,
+            fields=normalized_fields,
+        )
+        provenance_values = _materialization_row_metadata_values(
+            rows_payload=cell_provenance_rows,
+            row_index=row_index,
+            fields=normalized_fields,
+        )
 
         raw_date = values[date_idx] if date_idx is not None and date_idx < len(values) else ""
         parsed_date = _extract_entry_date_from_sheet_cell(raw_date, received_at)
@@ -5435,6 +5499,13 @@ def _build_materialization_lines_from_sheet_rows(
             qty = _parse_materialization_quantity_cell(values[col_idx])
             if qty is None:
                 continue
+            confidence_tier = str(confidence_values[col_idx] if col_idx < len(confidence_values) else "").strip()
+            confidence_score = str(score_values[col_idx] if col_idx < len(score_values) else "").strip()
+            provenance = str(provenance_values[col_idx] if col_idx < len(provenance_values) else "").strip()
+            ocr_confidence = _materialization_confidence_score_from_tier(confidence_score)
+            if ocr_confidence is None:
+                ocr_confidence = _materialization_confidence_score_from_tier(confidence_tier)
+            value_source = "ocr" if confidence_tier or provenance.startswith("hakodate_ocr") else None
             materialized_lines.append(
                 {
                     "date": parsed_date,
@@ -5447,6 +5518,13 @@ def _build_materialization_lines_from_sheet_rows(
                     "quantity_corrected": None,
                     "change_note": change_note or None,
                     "source_row_index": row_index,
+                    "source_col_index": col_idx,
+                    "source_field": normalized_fields[col_idx] if col_idx < len(normalized_fields) else None,
+                    "value_source": value_source,
+                    "was_user_edited": False if value_source == "ocr" else None,
+                    "ocr_confidence": ocr_confidence,
+                    "ocr_confidence_tier": confidence_tier or None,
+                    "cell_image_ref": None,
                 }
             )
 
@@ -7009,6 +7087,80 @@ def delete_daily_output_portion_override(override_id: str) -> dict[str, Any] | N
     }
 
 
+def _daily_bag_source_ref_meta(bag: dict[str, Any]) -> dict[str, Any]:
+    refs = bag.get("source_refs")
+    if not isinstance(refs, list):
+        refs = bag.get("_source_refs")
+    if not isinstance(refs, list) or not refs:
+        return {}
+
+    confidences: list[float] = []
+    tiers: list[str] = []
+    value_sources: set[str] = set()
+    edited_values: set[bool] = set()
+    cell_image_ref: str | None = None
+    normalized_refs: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        normalized_ref = {
+            "source_row_index": ref.get("source_row_index"),
+            "source_col_index": ref.get("source_col_index"),
+            "source_field": ref.get("source_field"),
+            "quantity": ref.get("quantity"),
+            "value_source": ref.get("value_source"),
+            "was_user_edited": ref.get("was_user_edited"),
+            "ocr_confidence": ref.get("ocr_confidence"),
+            "ocr_confidence_tier": ref.get("ocr_confidence_tier"),
+            "cell_image_ref": ref.get("cell_image_ref"),
+        }
+        normalized_refs.append(normalized_ref)
+        confidence = _daily_audit_float(ref.get("ocr_confidence"))
+        if confidence is not None:
+            confidences.append(confidence)
+        tier = str(ref.get("ocr_confidence_tier") or "").strip()
+        if tier:
+            tiers.append(tier)
+        value_source = str(ref.get("value_source") or "").strip()
+        if value_source:
+            value_sources.add(value_source)
+        was_user_edited = ref.get("was_user_edited")
+        if isinstance(was_user_edited, bool):
+            edited_values.add(was_user_edited)
+        if not cell_image_ref:
+            candidate_image_ref = str(ref.get("cell_image_ref") or "").strip()
+            cell_image_ref = candidate_image_ref or None
+
+    tier_rank = {"low": 0, "weak": 0, "medium": 1, "mid": 1, "high": 2, "strict": 2}
+    worst_tier = None
+    if tiers:
+        worst_tier = min(tiers, key=lambda item: tier_rank.get(str(item).strip().lower(), 99))
+    value_source: str | None
+    if len(value_sources) == 1:
+        value_source = next(iter(value_sources))
+    elif len(value_sources) > 1:
+        value_source = "mixed"
+    else:
+        value_source = None
+    was_user_edited: bool | None
+    if edited_values == {True}:
+        was_user_edited = True
+    elif edited_values == {False}:
+        was_user_edited = False
+    elif edited_values:
+        was_user_edited = True
+    else:
+        was_user_edited = None
+    return {
+        "value_source": value_source,
+        "was_user_edited": was_user_edited,
+        "ocr_confidence": min(confidences) if confidences else None,
+        "ocr_confidence_tier": worst_tier,
+        "cell_image_ref": cell_image_ref,
+        "source_refs": normalized_refs,
+    }
+
+
 def get_daily_bag_summary(
     target_date: date,
     facility_id: Optional[str] = None,
@@ -7112,6 +7264,7 @@ def get_daily_bag_summary(
                     "facility_label": facility_label,
                     "area_id": bag.get("area_id"),
                     "quantity": quantity if math.isfinite(quantity) else None,
+                    **_daily_bag_source_ref_meta(bag),
                 }
             )
 
@@ -7199,6 +7352,405 @@ def get_daily_bag_summary(
         "facility_id": facility_id,
         "order_count": len(orders),
         "groups": normalized_groups,
+    }
+
+
+def _daily_audit_float(value: object) -> float | None:
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(resolved):
+        return None
+    return resolved
+
+
+def _daily_audit_num_text(value: object) -> str:
+    resolved = _daily_audit_float(value)
+    if resolved is None:
+        return "-"
+    if float(resolved).is_integer():
+        return str(int(resolved))
+    return f"{resolved:.3f}".rstrip("0").rstrip(".")
+
+
+def _daily_audit_median(values: list[float]) -> float | None:
+    cleaned = sorted(value for value in values if math.isfinite(value))
+    if not cleaned:
+        return None
+    midpoint = len(cleaned) // 2
+    if len(cleaned) % 2:
+        return cleaned[midpoint]
+    return (cleaned[midpoint - 1] + cleaned[midpoint]) / 2.0
+
+
+def _daily_audit_mad(values: list[float], median: float) -> float:
+    deviations = [abs(value - median) for value in values if math.isfinite(value)]
+    resolved = _daily_audit_median(deviations)
+    return float(resolved or 0.0)
+
+
+def _daily_audit_severity(score: float) -> str:
+    if score >= 3.0:
+        return "high"
+    if score >= 1.75:
+        return "medium"
+    return "low"
+
+
+def _daily_audit_gemini_key() -> str:
+    return (
+        str(os.getenv("GEMINI_API_KEY") or "").strip()
+        or str(os.getenv("GOOGLE_API_KEY") or "").strip()
+        or str(os.getenv("GOOGLE_GENERATIVE_AI_API_KEY") or "").strip()
+    )
+
+
+def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date) -> dict[str, Any]:
+    api_key = _daily_audit_gemini_key()
+    if not api_key:
+        return {
+            "status": "unavailable",
+            "error": "gemini_api_key_missing",
+            "items": [],
+        }
+    if not findings:
+        return {
+            "status": "skipped",
+            "items": [],
+        }
+    model = str(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 20.0
+    clipped_findings = findings[:24]
+    system_prompt = (
+        "You are a quantity audit assistant for Japanese meal order daily output.\n"
+        "Use only the provided rule-based findings and daily-output quantities.\n"
+        "Do not invent hidden source data. Do not treat OCR as ground truth.\n"
+        "Return strict JSON only with shape "
+        '{"items":[{"finding_id":"","priority":"","summary":"","operator_action":""}],"notes":""}.'
+    )
+    user_payload = {
+        "date": target_date.isoformat(),
+        "findings": clipped_findings,
+        "priority_rule": "Prioritize cells that can change daily totals materially, then low-confidence unedited OCR-adopted cells.",
+    }
+    body = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": (
+                            "Rank and explain these daily-output audit findings for an operator.\n"
+                            f"{json.dumps(user_payload, ensure_ascii=False)}"
+                        )
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 3000,
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "finding_id": {"type": "string"},
+                                "priority": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "operator_action": {"type": "string"},
+                            },
+                        },
+                    },
+                    "notes": {"type": "string"},
+                },
+            },
+        },
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except (TimeoutError, socket.timeout) as exc:
+        return {"status": "failed", "error": f"gemini_timeout_after_{timeout:.0f}s", "items": []}
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8")
+        except Exception:
+            detail = str(exc)
+        return {"status": "failed", "error": f"gemini_http_{exc.code}", "detail": detail[:1000], "items": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "failed", "error": str(exc), "items": []}
+    try:
+        parsed = json.loads(raw)
+        candidates = parsed.get("candidates") if isinstance(parsed, dict) else []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+        payload = json.loads(text) if text else {}
+        return {
+            "status": "completed",
+            "model": model,
+            "items": payload.get("items") if isinstance(payload.get("items"), list) else [],
+            "notes": str(payload.get("notes") or "").strip(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "failed", "error": f"gemini_parse_failed: {exc}", "items": []}
+
+
+def get_daily_bag_audit(
+    target_date: date,
+    facility_id: Optional[str] = None,
+    status: Optional[str] = None,
+    *,
+    use_ai: bool = False,
+) -> dict[str, Any]:
+    summary = get_daily_bag_summary(target_date, facility_id=facility_id, status=status)
+    groups = summary.get("groups") if isinstance(summary.get("groups"), list) else []
+    findings: list[dict[str, Any]] = []
+    cells: list[dict[str, Any]] = []
+    group_totals_by_diet: dict[str, list[tuple[str, float]]] = {}
+    facility_values_by_key: dict[tuple[str, str, str], list[float]] = {}
+
+    for group_index, group in enumerate(groups):
+        daypart = str(group.get("daypart") or group.get("daypart_key") or "-").strip() or "-"
+        category = str(group.get("menu_category") or "-").strip() or "-"
+        menu_name = str(group.get("menu_name") or "-").strip() or "-"
+        group_key = f"{daypart}::{category}::{menu_name}"
+        for diet in group.get("diet_groups") or []:
+            diet_type = bucket_diet_type_for_aggregation(diet.get("diet_type")) or "unknown"
+            total_quantity = _daily_audit_float(diet.get("total_quantity")) or 0.0
+            group_totals_by_diet.setdefault(diet_type, []).append((group_key, total_quantity))
+            facility_totals: dict[tuple[str, str], dict[str, Any]] = {}
+            for bag_type_group in diet.get("bag_type_groups") or []:
+                for breakdown in bag_type_group.get("breakdowns") or []:
+                    for order_ref in breakdown.get("order_refs") or []:
+                        if not isinstance(order_ref, dict):
+                            continue
+                        quantity = _daily_audit_float(order_ref.get("quantity"))
+                        if quantity is None:
+                            continue
+                        order_id = str(order_ref.get("order_id") or "").strip()
+                        facility_label = str(order_ref.get("facility_label") or "").strip()
+                        area_id = str(order_ref.get("area_id") or "").strip()
+                        facility_key = facility_label or order_id or "unknown"
+                        bucket = facility_totals.setdefault(
+                            (facility_key, order_id),
+                            {
+                                "facility_label": facility_label,
+                                "order_id": order_id,
+                                "quantity": 0.0,
+                                "areas": set(),
+                                "value_source": str(order_ref.get("value_source") or "").strip(),
+                                "was_user_edited": order_ref.get("was_user_edited"),
+                                "ocr_confidence": order_ref.get("ocr_confidence"),
+                                "ocr_confidence_tier": order_ref.get("ocr_confidence_tier"),
+                                "cell_image_ref": order_ref.get("cell_image_ref"),
+                                "source_refs": order_ref.get("source_refs") if isinstance(order_ref.get("source_refs"), list) else [],
+                            },
+                        )
+                        bucket["quantity"] = round(float(bucket.get("quantity") or 0.0) + quantity, 4)
+                        if area_id:
+                            bucket["areas"].add(area_id)
+                        current_confidence = _daily_audit_float(bucket.get("ocr_confidence"))
+                        next_confidence = _daily_audit_float(order_ref.get("ocr_confidence"))
+                        if next_confidence is not None and (
+                            current_confidence is None or next_confidence < current_confidence
+                        ):
+                            bucket["ocr_confidence"] = next_confidence
+                            bucket["ocr_confidence_tier"] = order_ref.get("ocr_confidence_tier")
+                        if isinstance(order_ref.get("source_refs"), list):
+                            bucket["source_refs"].extend(order_ref.get("source_refs") or [])
+            for (_facility_key, _order_id), bucket in facility_totals.items():
+                quantity = float(bucket.get("quantity") or 0.0)
+                cell = {
+                    "cell_id": f"daily-audit-{group_index}-{diet_type}-{len(cells)}",
+                    "date": target_date.isoformat(),
+                    "daypart": daypart,
+                    "menu_category": category,
+                    "menu_name": menu_name,
+                    "diet_type": diet_type,
+                    "facility_label": bucket.get("facility_label") or "",
+                    "order_id": bucket.get("order_id") or "",
+                    "area_ids": sorted(str(item) for item in (bucket.get("areas") or set()) if str(item).strip()),
+                    "quantity": quantity,
+                    "value_source": bucket.get("value_source") or None,
+                    "was_user_edited": bucket.get("was_user_edited"),
+                    "ocr_confidence": bucket.get("ocr_confidence"),
+                    "ocr_confidence_tier": bucket.get("ocr_confidence_tier"),
+                    "cell_image_ref": bucket.get("cell_image_ref"),
+                    "source_refs": bucket.get("source_refs") or [],
+                }
+                cells.append(cell)
+                facility_values_by_key.setdefault((str(cell["facility_label"]), diet_type, daypart), []).append(quantity)
+
+    finding_seq = 0
+
+    def add_finding(
+        *,
+        rule_code: str,
+        severity: str,
+        title: str,
+        message: str,
+        score: float,
+        target: dict[str, Any],
+        reference_values: list[str] | None = None,
+        suggested_action: str | None = None,
+    ) -> None:
+        nonlocal finding_seq
+        finding_seq += 1
+        findings.append(
+            {
+                "finding_id": f"daily-audit-{finding_seq}",
+                "rule_code": rule_code,
+                "severity": severity,
+                "title": title,
+                "message": message,
+                "score": round(float(score), 4),
+                "target": target,
+                "reference_values": reference_values or [],
+                "suggested_action": suggested_action or "日別出力の施設別内訳と元注文シートを確認してください。",
+            }
+        )
+
+    for diet_type, values in group_totals_by_diet.items():
+        quantities = [value for _key, value in values if value > 0]
+        if len(quantities) < 3:
+            continue
+        median = _daily_audit_median(quantities)
+        if median is None or median <= 0:
+            continue
+        mad = _daily_audit_mad(quantities, median)
+        tolerance = max(6.0, mad * 3.0, median * 0.08)
+        for group_key, quantity in values:
+            if quantity <= 0:
+                continue
+            delta = abs(quantity - median)
+            if delta <= tolerance:
+                continue
+            daypart, category, menu_name = group_key.split("::", 2)
+            score = delta / max(tolerance, 1.0)
+            add_finding(
+                rule_code="same_day_diet_total_outlier",
+                severity=_daily_audit_severity(score),
+                title="同日同区分の合計から外れています",
+                message=(
+                    f"{daypart} / {menu_name} / {diet_type} が {_daily_audit_num_text(quantity)}。"
+                    f"同日同区分の中央値 {_daily_audit_num_text(median)} から外れています。"
+                ),
+                score=score,
+                target={
+                    "date": target_date.isoformat(),
+                    "daypart": daypart,
+                    "menu_category": category,
+                    "menu_name": menu_name,
+                    "diet_type": diet_type,
+                    "quantity": quantity,
+                },
+                reference_values=[_daily_audit_num_text(value) for value in quantities[:12]],
+            )
+
+    for (facility_label, diet_type, daypart), quantities in facility_values_by_key.items():
+        positive_values = [value for value in quantities if value > 0]
+        if len(positive_values) < 3:
+            continue
+        median = _daily_audit_median(positive_values)
+        if median is None or median <= 0:
+            continue
+        tolerance = max(5.0, _daily_audit_mad(positive_values, median) * 3.0, median * 0.25)
+        for cell in cells:
+            if (
+                cell.get("facility_label") != facility_label
+                or cell.get("diet_type") != diet_type
+                or cell.get("daypart") != daypart
+            ):
+                continue
+            quantity = _daily_audit_float(cell.get("quantity")) or 0.0
+            delta = abs(quantity - median)
+            if quantity <= 0 or delta <= tolerance:
+                continue
+            score = delta / max(tolerance, 1.0)
+            add_finding(
+                rule_code="facility_same_day_outlier",
+                severity=_daily_audit_severity(score),
+                title="同施設内の数量から外れています",
+                message=(
+                    f"{facility_label} / {daypart} / {cell.get('menu_name')} / {diet_type} が"
+                    f" {_daily_audit_num_text(quantity)}。同施設同日同区分の中央値"
+                    f" {_daily_audit_num_text(median)} から外れています。"
+                ),
+                score=score,
+                target=cell,
+                reference_values=[_daily_audit_num_text(value) for value in positive_values[:12]],
+                suggested_action="この施設の該当セルをFAX cropまたは注文シートで確認してください。",
+            )
+
+    for cell in cells:
+        value_source = str(cell.get("value_source") or "").strip().lower()
+        was_user_edited = cell.get("was_user_edited")
+        confidence = _daily_audit_float(cell.get("ocr_confidence"))
+        if value_source not in {"ocr", "hakodate", "ocr_adopted"}:
+            continue
+        if was_user_edited is True:
+            continue
+        if confidence is None or confidence >= 0.35:
+            continue
+        score = 1.0 + (0.35 - confidence) * 4.0
+        add_finding(
+            rule_code="low_confidence_unedited_ocr",
+            severity=_daily_audit_severity(score),
+            title="低信頼OCR値が未編集のまま採用されています",
+            message=(
+                f"{cell.get('facility_label') or cell.get('order_id')} / {cell.get('daypart')} / "
+                f"{cell.get('menu_name')} / {cell.get('diet_type')} のOCR信頼度が {confidence:.2f} です。"
+            ),
+            score=score,
+            target=cell,
+            reference_values=[f"ocr_confidence={confidence:.2f}"],
+            suggested_action="OCR値をそのまま採用したセルです。FAX画像とシート値を確認してください。",
+        )
+
+    findings.sort(
+        key=lambda item: (
+            {"high": 0, "medium": 1, "low": 2}.get(str(item.get("severity") or ""), 9),
+            -float(item.get("score") or 0.0),
+            str(item.get("rule_code") or ""),
+        )
+    )
+    ai = _daily_audit_run_gemini(findings=findings, target_date=target_date) if use_ai else {
+        "status": "not_requested",
+        "items": [],
+    }
+    summary_by_severity: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+    summary_by_rule: dict[str, int] = {}
+    for finding in findings:
+        severity = str(finding.get("severity") or "low")
+        summary_by_severity[severity] = summary_by_severity.get(severity, 0) + 1
+        rule_code = str(finding.get("rule_code") or "unknown")
+        summary_by_rule[rule_code] = summary_by_rule.get(rule_code, 0) + 1
+    return {
+        "date": target_date.isoformat(),
+        "status": status,
+        "facility_id": facility_id,
+        "source": "daily_bag_summary",
+        "rule_based": {
+            "status": "completed",
+            "finding_count": len(findings),
+            "cell_count": len(cells),
+            "summary_by_severity": summary_by_severity,
+            "summary_by_rule": summary_by_rule,
+            "findings": findings[:120],
+        },
+        "ai": ai,
     }
 
 
@@ -27873,6 +28425,10 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         ["" for _ in range(column_count)]
         for _ in range(len(rows))
     ]
+    cell_score_rows = [
+        ["" for _ in range(column_count)]
+        for _ in range(len(rows))
+    ]
     cell_provenance_rows = [
         ["" for _ in range(column_count)]
         for _ in range(len(rows))
@@ -27980,9 +28536,11 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             rows[row_index].append("")
         while len(cell_confidence_rows) <= row_index:
             cell_confidence_rows.append(["" for _ in range(column_count)])
+            cell_score_rows.append(["" for _ in range(column_count)])
             cell_provenance_rows.append(["" for _ in range(column_count)])
         while len(cell_confidence_rows[row_index]) < column_count:
             cell_confidence_rows[row_index].append("")
+            cell_score_rows[row_index].append("")
             cell_provenance_rows[row_index].append("")
         previous = rows[row_index][col_index]
         confidence = cell.get("assignment_confidence")
@@ -28022,6 +28580,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             rows[row_index][col_index] = value
             if col_index < len(cell_confidence_rows[row_index]):
                 cell_confidence_rows[row_index][col_index] = confidence_tier
+                cell_score_rows[row_index][col_index] = confidence
                 cell_provenance_rows[row_index][col_index] = "hakodate_ocr_strict_threshold"
             applied.append(
                 {
@@ -28094,6 +28653,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     projected["rows"] = rows
     projected["fields"] = fields
     projected["cell_confidence_rows"] = cell_confidence_rows
+    projected["cell_score_rows"] = cell_score_rows
     projected["cell_provenance_rows"] = cell_provenance_rows
     projected["ocr_numeric_cell_items"] = ocr_numeric_cell_items
     projected["ocr_numeric_cell_summary"] = ocr_numeric_cell_summary
