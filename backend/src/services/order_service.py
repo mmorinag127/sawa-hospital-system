@@ -4378,6 +4378,10 @@ def _invalidate_orders_cache() -> None:
         _orders_cache.clear()
 
 
+def invalidate_orders_cache() -> None:
+    _invalidate_orders_cache()
+
+
 def _invalidate_current_sheet_state_after_order_lines_write(order_id: str) -> None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -4433,6 +4437,80 @@ def _fetch_orders(status: Optional[str], *, include_archived: bool = True) -> li
                     "is_archived": bool(archived_at),
                 }
             )
+        if not status or status == "アップロード済み":
+            uploaded_rows = (
+                session.execute(
+                    select(
+                        UploadedPdf.id,
+                        UploadedPdf.message_id,
+                        UploadedPdf.original_filename,
+                        UploadedPdf.storage_uri,
+                        UploadedPdf.received_at,
+                        UploadedPdf.facility_hint,
+                        UploadedPdf.week_hint,
+                        UploadedPdf.facility_name,
+                        UploadedPdf.status,
+                        UploadedPdf.current_stage,
+                        UploadedPdf.current_order_id,
+                        UploadedPdf.current_document_id,
+                        UploadedPdf.last_error_code,
+                        UploadedPdf.last_error_message,
+                    )
+                    .where(UploadedPdf.current_order_id.is_(None))
+                    .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
+                    .limit(200)
+                )
+                .mappings()
+                .all()
+            )
+            for upload in uploaded_rows:
+                upload_status = str(upload["status"] or "").strip().lower()
+                if upload_status == "completed" and upload["current_document_id"]:
+                    continue
+                week_hint = str(upload["week_hint"] or "").strip()
+                week_month_id = _to_sheet_month_id(week_hint)
+                week_value = _normalize_sheet_week_value(week_hint) or week_month_id or week_hint
+                week_label = _format_sheet_week_label(week_hint) or week_month_id or week_hint
+                stage = str(upload["current_stage"] or "uploaded").strip() or "uploaded"
+                headline = "PDFアップロード済み"
+                if stage == "ingest_running":
+                    headline = "取り込み処理中"
+                elif upload_status in {"retry_wait", "error"}:
+                    headline = "取り込み要確認"
+                payloads.append(
+                    {
+                        "id": f"UPLOAD-{upload['id']}",
+                        "uploaded_pdf_id": upload["id"],
+                        "source_kind": "uploaded_pdf",
+                        "ocr_job_id": None,
+                        "facility": upload["facility_hint"],
+                        "facility_name": upload["facility_name"],
+                        "week": week_month_id,
+                        "week_value": week_value,
+                        "week_label": week_label,
+                        "status": "アップロード済み",
+                        "document": upload["storage_uri"],
+                        "message_id": upload["message_id"],
+                        "received_at": upload["received_at"],
+                        "document_id": upload["current_document_id"],
+                        "superseded_document_ids": [],
+                        "lines_updated_at": None,
+                        "archived_at": None,
+                        "archived_by": None,
+                        "is_archived": False,
+                        "workflow_state": {
+                            "state": "uploaded",
+                            "headline": headline,
+                            "primary_action": "取り込み状況を確認",
+                            "blockers_json": [],
+                            "warnings_json": [upload["last_error_code"]] if upload["last_error_code"] else [],
+                        },
+                        "upload_stage": stage,
+                        "upload_status": upload["status"],
+                        "upload_error": upload["last_error_message"],
+                        "original_filename": upload["original_filename"],
+                    }
+                )
         payloads.sort(
             key=lambda item: (
                 item.get("received_at") or datetime.min,

@@ -37,6 +37,12 @@ type Order = {
     } | null;
   } | null;
   id?: string;
+  uploaded_pdf_id?: string | null;
+  source_kind?: string | null;
+  original_filename?: string | null;
+  upload_stage?: string | null;
+  upload_status?: string | null;
+  upload_error?: string | null;
   received_at?: string | null;
   message_id?: string | null;
   ocr_status?: string | null;
@@ -117,6 +123,7 @@ const compareOrdersByReceivedAt = (left: Order, right: Order) => {
 };
 
 const effectiveOrderStatus = (order: Order) => {
+  if (order.source_kind === "uploaded_pdf") return "アップロード済み";
   const workflowState = String(order.workflow_state?.state || "").trim().toLowerCase();
   if (workflowState === "confirmed") return "確定";
   return String(order.status || "").trim();
@@ -456,6 +463,8 @@ export default function OrdersPage() {
 
   const statusClass = (status?: string | null) => {
     switch (status) {
+      case "アップロード済み":
+        return "status-uploaded";
       case "未着":
         return "status-pending";
       case "要確認":
@@ -830,12 +839,14 @@ export default function OrdersPage() {
     const badges = visibleReviewBadges(order);
     const weekBucket = normalizeWeekGroup(order);
     const displayStatus = effectiveOrderStatus(order);
+    const isUploadedPdf = order.source_kind === "uploaded_pdf";
+    const detailHref = isUploadedPdf ? `/pdf-upload?uploaded_pdf_id=${order.uploaded_pdf_id || ""}` : `/orders/${order.id}/workflow-v2`;
     return (
       <article key={order.id || order.document} className={`order-card ${reviewToneClass(order)}`.trim()}>
         <div className="order-card-top">
           <div>
             <p className="order-card-facility">{facilityLabel(order)}</p>
-            <p className="order-card-title">{order.id || "注文ID未発行"}</p>
+            <p className="order-card-title">{isUploadedPdf ? order.original_filename || order.id || "アップロードPDF" : order.id || "注文ID未発行"}</p>
           </div>
           <span className={`status-pill ${statusClass(displayStatus)}`}>{displayStatus}</span>
         </div>
@@ -869,8 +880,8 @@ export default function OrdersPage() {
           </div>
         ) : null}
         <div className="list-actions">
-          <Link href={`/orders/${order.id}/workflow-v2`} className="list-link">
-            詳細
+          <Link href={detailHref} className="list-link">
+            {isUploadedPdf ? "アップロード確認" : "詳細"}
           </Link>
           {weekMenuId(order) ? (
             <Link href={`/menus/${weekMenuId(order)}`} className="list-link">
@@ -986,6 +997,7 @@ export default function OrdersPage() {
             <span className="field-label">ステータス</span>
             <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">全て</option>
+              <option value="アップロード済み">アップロード済み</option>
               <option value="未着">未着</option>
               <option value="要確認">要確認</option>
               <option value="確定">確定</option>
@@ -1621,6 +1633,11 @@ export default function OrdersPage() {
         :global(.status-pill.status-pending) {
           background: #f6dfe6;
           color: #7a2f4b;
+        }
+
+        :global(.status-pill.status-uploaded) {
+          background: #e8eee8;
+          color: #405b47;
         }
 
         :global(.status-pill.status-review) {

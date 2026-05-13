@@ -169,6 +169,7 @@ def _handle_uploaded_pdf_bytes(
         job_id, enqueued = create_ingest_job(payload, force=force_value)
         if not duplicate_blocked:
             enqueue_uploaded_pdf_async(uploaded_pdf["id"])
+            order_service.invalidate_orders_cache()
         order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued and not duplicate_blocked else None
         existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if duplicate_blocked else None
         items.append(
