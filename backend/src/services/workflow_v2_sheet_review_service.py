@@ -659,6 +659,7 @@ def _gemini_json_request(
     max_tokens: int = 8192,
     array_key: str | None = None,
     image_png_base64: str | None = None,
+    response_schema: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     resolved_model = _normalize_text(model) or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro"
     try:
@@ -697,6 +698,8 @@ def _gemini_json_request(
             "responseMimeType": "application/json",
         },
     }
+    if response_schema:
+        body["generationConfig"]["responseSchema"] = response_schema
     try:
         raw = gemini_ocr_service._request_gemini_json(  # noqa: SLF001
             model=resolved_model,
@@ -718,6 +721,13 @@ def _gemini_json_request(
     }
 
 
+def _patch_index_from_item(item: dict[str, Any], primary_key: str, fallback_keys: tuple[str, ...]) -> int | None:
+    value = _coerce_int(item.get(primary_key))
+    if value is not None:
+        return value
+    return _first_int(item, fallback_keys)
+
+
 def _normalize_llm_patches(payload: dict[str, Any] | None, fields: list[str], header: list[str]) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -729,9 +739,9 @@ def _normalize_llm_patches(payload: dict[str, Any] | None, fields: list[str], he
     for item in patches:
         if not isinstance(item, dict):
             continue
-        row_index = item.get("row_index")
-        col_index = item.get("col_index")
-        if not isinstance(row_index, int) or not isinstance(col_index, int):
+        row_index = _patch_index_from_item(item, "row_index", ("target_row_index", "sheet_row_index"))
+        col_index = _patch_index_from_item(item, "col_index", ("target_col_index", "sheet_col_index"))
+        if row_index is None or col_index is None:
             continue
         suggested = _normalize_text(item.get("suggested_value"))
         if not suggested:
@@ -779,6 +789,33 @@ def propose_auto_sheet_edits(
     llm_meta: dict[str, Any] = {"status": "disabled"}
     llm_patches: list[dict[str, Any]] = []
     if use_llm:
+        patch_response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "patches": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "row_index": {"type": "INTEGER"},
+                            "col_index": {"type": "INTEGER"},
+                            "target_row_index": {"type": "INTEGER"},
+                            "target_col_index": {"type": "INTEGER"},
+                            "current_value": {"type": "STRING"},
+                            "suggested_value": {"type": "STRING"},
+                            "confidence": {"type": "STRING"},
+                            "reason": {"type": "STRING"},
+                            "evidence": {"type": "STRING"},
+                            "alternatives": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                            },
+                        },
+                    },
+                },
+            },
+            "required": ["patches"],
+        }
         system_prompt = (
             "You review a Japanese FAX order sheet. Return JSON only. "
             "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
@@ -822,6 +859,7 @@ def propose_auto_sheet_edits(
                 model=model,
                 array_key="patches",
                 image_png_base64=fax_image_png_base64,
+                response_schema=patch_response_schema,
             )
             return payload, meta, chunk_index, len(target_chunk)
 

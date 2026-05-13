@@ -1881,6 +1881,7 @@ def test_workflow_v2_sheet_auto_edit_chunks_target_cells_and_reports_partial_fai
     )
 
     assert len(calls) == 3
+    assert calls[0]["response_schema"]["required"] == ["patches"]
     assert result["llm"]["status"] == "partial_failed"
     assert result["llm"]["failed_chunks"] == 1
     assert result["llm"]["total_chunks"] == 3
