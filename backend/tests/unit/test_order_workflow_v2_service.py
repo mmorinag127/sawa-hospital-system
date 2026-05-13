@@ -1974,6 +1974,37 @@ def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatc
     assert user_payload["rows"][0]["quantities"][0]["value"] == "110"
 
 
+def test_workflow_v2_sheet_anomaly_review_always_returns_suggestions() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
+        order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "regular", "soft"],
+            "header": ["日付", "区分", "献立", "常食", "軟菜"],
+            "rows": [
+                ["04/26", "朝", "A", "10", "5"],
+                ["04/27", "朝", "B", "11", "5"],
+                ["04/28", "朝", "C", "110", "5"],
+                ["04/29", "朝", "D", "12", "5"],
+            ],
+        },
+        use_llm=False,
+    )
+
+    assert error is None
+    warnings = anomaly["anomaly_review"]["warnings"]
+    assert warnings
+    assert all(str(item.get("suggested_value") or "").strip() for item in warnings)
+
+
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()

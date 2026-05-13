@@ -947,6 +947,7 @@ def _total_outlier_warnings(
                     value=total,
                     message=f"{label} {key_text} の合計 {total:g} が基準 {baseline:g} に対して大きすぎます。",
                     evidence={"baseline": baseline, "keys": {key: item.get(key) for key in keys}, "breakdown": item.get("breakdown")},
+                    suggested_value=_numeric_display(baseline),
                 )
             )
         elif baseline >= minimum_baseline and total <= baseline * 0.5:
@@ -961,6 +962,7 @@ def _total_outlier_warnings(
                     value=total,
                     message=f"{label} {key_text} の合計 {total:g} が基準 {baseline:g} に対して小さすぎます。",
                     evidence={"baseline": baseline, "keys": {key: item.get(key) for key in keys}, "breakdown": item.get("breakdown")},
+                    suggested_value=_numeric_display(baseline),
                 )
             )
     return warnings
@@ -1005,6 +1007,7 @@ def _other_day_quantity_warnings(records: list[dict[str, Any]]) -> list[dict[str
                             "menu": record.get("menu"),
                             "comparison_basis": "same_field_other_days",
                         },
+                        suggested_value=_numeric_display(baseline),
                     )
                 )
             elif baseline >= 20 and value <= baseline * 0.25:
@@ -1025,6 +1028,7 @@ def _other_day_quantity_warnings(records: list[dict[str, Any]]) -> list[dict[str
                             "menu": record.get("menu"),
                             "comparison_basis": "same_field_other_days",
                         },
+                        suggested_value=_numeric_display(baseline),
                     )
                 )
     return warnings
@@ -1146,6 +1150,10 @@ def _normalize_llm_warnings(payload: dict[str, Any] | None, fields: list[str], h
             col_index = None
         field = fields[col_index] if isinstance(col_index, int) and 0 <= col_index < len(fields) else _normalize_text(item.get("field")) or None
         label = header[col_index] if isinstance(col_index, int) and 0 <= col_index < len(header) else _normalize_text(item.get("label")) or field
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        suggested_value = _normalize_text(item.get("suggested_value")) or _normalize_text(evidence.get("baseline"))
+        if not suggested_value:
+            continue
         normalized.append(
             _warning(
                 warning_type=_normalize_text(item.get("type")) or "llm_anomaly",
@@ -1156,8 +1164,8 @@ def _normalize_llm_warnings(payload: dict[str, Any] | None, fields: list[str], h
                 label=label,
                 value=item.get("value"),
                 message=_normalize_text(item.get("message")) or _normalize_text(item.get("reason")) or "AIが確認対象として検出しました。",
-                evidence=item.get("evidence") if isinstance(item.get("evidence"), dict) else {},
-                suggested_value=item.get("suggested_value"),
+                evidence=evidence,
+                suggested_value=suggested_value,
             )
         )
     return normalized
