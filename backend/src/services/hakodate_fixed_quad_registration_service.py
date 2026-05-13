@@ -302,20 +302,34 @@ def _edge_locked_reasons(
     metrics: dict[str, dict[str, float]],
     edge_sources: dict[str, str],
     component_source: str,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
+    warnings: list[str] = []
     if component_source != "large_grid_component":
         reasons.append(component_source)
+    mild_offset_edges: list[str] = []
     for edge, metric in metrics.items():
         if edge_sources.get(edge) != "fit":
             reasons.append(f"{edge}_line_not_refit")
         if metric["hit_rate"] < 0.78:
             reasons.append(f"{edge}_hit_rate_low:{metric['hit_rate']}")
-        if metric["mean_abs_offset_px"] > 4.5:
+        if metric["mean_abs_offset_px"] > 8.0:
             reasons.append(f"{edge}_offset_high:{metric['mean_abs_offset_px']}")
+        elif metric["mean_abs_offset_px"] > 4.5:
+            if (
+                metric["hit_rate"] < 0.95
+                or metric["gap_max_px_est"] > 40
+                or metric["max_abs_offset_px"] > 24
+            ):
+                reasons.append(f"{edge}_offset_high:{metric['mean_abs_offset_px']}")
+            else:
+                mild_offset_edges.append(edge)
+                warnings.append(f"{edge}_offset_borderline:{metric['mean_abs_offset_px']}")
         if metric["gap_max_px_est"] > 140:
             reasons.append(f"{edge}_gap_large:{metric['gap_max_px_est']}")
-    return reasons
+    if len(mild_offset_edges) >= 2:
+        reasons.append(f"multiple_edge_offset_borderline:{','.join(mild_offset_edges)}")
+    return reasons, warnings
 
 
 def estimate_edge_locked_quad_from_pdf(
@@ -334,7 +348,7 @@ def estimate_edge_locked_quad_from_pdf(
         vertical_mask,
     )
     metrics = _edge_locked_validate(horizontal_mask, vertical_mask, combined_mask, refined, refined_lines)
-    reasons = _edge_locked_reasons(metrics, edge_sources, component_source)
+    reasons, warnings = _edge_locked_reasons(metrics, edge_sources, component_source)
     shift = {
         key: round(float(np.linalg.norm(np.asarray(refined[index]) - np.asarray(initial[index]))), 2)
         for index, key in enumerate(["TL", "TR", "BR", "BL"])
@@ -342,6 +356,7 @@ def estimate_edge_locked_quad_from_pdf(
     return {
         "status": "ok" if not reasons else "ng",
         "reasons": reasons,
+        "warnings": warnings,
         "component_source": component_source,
         "component": component,
         "edge_sources": edge_sources,

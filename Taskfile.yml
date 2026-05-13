@@ -372,8 +372,23 @@ tasks:
     desc: Build the staging backend app image from a fresh deploy source and a prebuilt dependency base image.
     cmds:
       - >-
+        current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)";
         if [ -z "${BACKEND_BASE_IMAGE:-}" ] && [ ! -s last_backend_base_image.txt ]; then
           echo "BACKEND_BASE_IMAGE or last_backend_base_image.txt is required. Run: task build_stg_backend_base";
+          exit 1;
+        fi;
+        recorded_base_fingerprint="${BACKEND_BASE_FINGERPRINT:-}";
+        if [ -z "$recorded_base_fingerprint" ] && [ -s last_backend_base_fingerprint.txt ]; then
+          recorded_base_fingerprint="$(cat last_backend_base_fingerprint.txt)";
+        fi;
+        if [ -z "$recorded_base_fingerprint" ]; then
+          echo "BACKEND_BASE_FINGERPRINT or last_backend_base_fingerprint.txt is required. Run: task build_stg_backend_base";
+          exit 1;
+        fi;
+        if [ "$current_base_fingerprint" != "$recorded_base_fingerprint" ]; then
+          echo "backend base fingerprint changed. Run: task build_stg_backend_base";
+          echo "current:  $current_base_fingerprint";
+          echo "recorded: $recorded_base_fingerprint";
           exit 1;
         fi;
         base_image="${BACKEND_BASE_IMAGE:-$(cat last_backend_base_image.txt)}";
@@ -383,7 +398,7 @@ tasks:
         build_config="$(mktemp)";
         printf "%s\n" "steps:" > "$build_config";
         printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'" >> "$build_config";
-        printf "%s\n" "    args: ['build', '--build-arg', 'BASE_IMAGE=${base_image}', '-t', '${image}', '.']" >> "$build_config";
+        printf "%s\n" "    args: ['build', '--build-arg', 'BASE_IMAGE=${base_image}', '--label', 'sawa.backend_base_image=${base_image}', '--label', 'sawa.backend_base_fingerprint=${current_base_fingerprint}', '-t', '${image}', '.']" >> "$build_config";
         printf "%s\n" "images: ['${image}']" >> "$build_config";
         gcloud builds submit "$deploy_dir" --project="{{.STG_PROJECT_ID}}" --config="$build_config";
         echo "$image" | tee last_backend_image.txt
@@ -392,16 +407,19 @@ tasks:
     desc: Build the staging backend dependency base image with pinned yomitoku/torch/opencv and prewarmed models.
     cmds:
       - >-
+        current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)";
         deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh stg-backend-base)";
-        tag="stg-backend-base-yomitoku-cpu-$(date +%Y%m%d-%H%M%S)";
+        short_fingerprint="$(printf "%s" "$current_base_fingerprint" | cut -c1-12)";
+        tag="stg-backend-base-yomitoku-cpu-${short_fingerprint}-$(date +%Y%m%d-%H%M%S)";
         image="asia-northeast2-docker.pkg.dev/{{.STG_PROJECT_ID}}/backend/backend:${tag}";
         build_config="$(mktemp)";
         printf "%s\n" "steps:" > "$build_config";
         printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'" >> "$build_config";
-        printf "%s\n" "    args: ['build', '-f', 'Dockerfile.base', '-t', '${image}', '.']" >> "$build_config";
+        printf "%s\n" "    args: ['build', '-f', 'Dockerfile.base', '--label', 'sawa.backend_base_fingerprint=${current_base_fingerprint}', '-t', '${image}', '.']" >> "$build_config";
         printf "%s\n" "images: ['${image}']" >> "$build_config";
         gcloud builds submit "$deploy_dir" --project="{{.STG_PROJECT_ID}}" --config="$build_config";
-        echo "$image" | tee last_backend_base_image.txt
+        echo "$image" | tee last_backend_base_image.txt;
+        echo "$current_base_fingerprint" | tee last_backend_base_fingerprint.txt
 
   deploy_prod_worker:
     desc: Deploy worker-prod with mandatory regression, OCR sheet quality, and exact-order Step2 parity gates.
