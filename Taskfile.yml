@@ -369,19 +369,39 @@ tasks:
         ./scripts/deploy_web_with_checks.sh
 
   build_stg_backend:
-    desc: Build the staging backend image from a fresh deploy source and write last_backend_image.txt.
+    desc: Build the staging backend app image from a fresh deploy source and a prebuilt dependency base image.
     cmds:
       - >-
+        if [ -z "${BACKEND_BASE_IMAGE:-}" ] && [ ! -s last_backend_base_image.txt ]; then
+          echo "BACKEND_BASE_IMAGE or last_backend_base_image.txt is required. Run: task build_stg_backend_base";
+          exit 1;
+        fi;
+        base_image="${BACKEND_BASE_IMAGE:-$(cat last_backend_base_image.txt)}";
         deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh stg-backend)";
         tag="stg-backend-$(date +%Y%m%d-%H%M%S)";
         image="asia-northeast2-docker.pkg.dev/{{.STG_PROJECT_ID}}/backend/backend:${tag}";
         build_config="$(mktemp)";
         printf "%s\n" "steps:" > "$build_config";
         printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'" >> "$build_config";
-        printf "%s\n" "    args: ['build', '-t', '${image}', '.']" >> "$build_config";
+        printf "%s\n" "    args: ['build', '--build-arg', 'BASE_IMAGE=${base_image}', '-t', '${image}', '.']" >> "$build_config";
         printf "%s\n" "images: ['${image}']" >> "$build_config";
         gcloud builds submit "$deploy_dir" --project="{{.STG_PROJECT_ID}}" --config="$build_config";
         echo "$image" | tee last_backend_image.txt
+
+  build_stg_backend_base:
+    desc: Build the staging backend dependency base image with pinned yomitoku/torch/opencv and prewarmed models.
+    cmds:
+      - >-
+        deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh stg-backend-base)";
+        tag="stg-backend-base-yomitoku-cpu-$(date +%Y%m%d-%H%M%S)";
+        image="asia-northeast2-docker.pkg.dev/{{.STG_PROJECT_ID}}/backend/backend:${tag}";
+        build_config="$(mktemp)";
+        printf "%s\n" "steps:" > "$build_config";
+        printf "%s\n" "  - name: 'gcr.io/cloud-builders/docker'" >> "$build_config";
+        printf "%s\n" "    args: ['build', '-f', 'Dockerfile.base', '-t', '${image}', '.']" >> "$build_config";
+        printf "%s\n" "images: ['${image}']" >> "$build_config";
+        gcloud builds submit "$deploy_dir" --project="{{.STG_PROJECT_ID}}" --config="$build_config";
+        echo "$image" | tee last_backend_base_image.txt
 
   deploy_prod_worker:
     desc: Deploy worker-prod with mandatory regression, OCR sheet quality, and exact-order Step2 parity gates.
