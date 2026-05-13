@@ -226,6 +226,33 @@ def ensure_facility_materialized(session, facility_id: str) -> Facility | None:
     return None
 
 
+def upsert_facility_rows_from_master(session, master: dict) -> None:
+    facilities = master.get("facilities") if isinstance(master, dict) else None
+    if not isinstance(facilities, list):
+        return
+    for entry in facilities:
+        if not isinstance(entry, dict):
+            continue
+        facility_id = str(entry.get("facility_id") or "").strip()
+        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+        if not facility_id or not name:
+            continue
+        fac = session.get(Facility, facility_id)
+        if fac is None:
+            fac = Facility(id=facility_id, name=name)
+            session.add(fac)
+            session.flush()
+        elif fac.name != name:
+            fac.name = name
+        session.execute(delete(FacilityArea).where(FacilityArea.facility_id == facility_id))
+        seen_area_ids: set[str] = set()
+        for area in _normalize_area_payload(entry.get("areas")):
+            if area["id"] in seen_area_ids:
+                continue
+            seen_area_ids.add(area["id"])
+            session.add(FacilityArea(id=area["id"], facility_id=facility_id, name=area["name"]))
+
+
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
         fac = session.get(Facility, facility_id)

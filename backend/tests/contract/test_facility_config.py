@@ -103,6 +103,43 @@ def test_user_added_master_facility_is_available_for_order_step1_options(monkeyp
     assert payload["resolved_config"]["facility_id"] == "FAC99991"
 
 
+def test_facility_master_save_materializes_new_facility_rows(monkeypatch, tmp_path):
+    _clear_facilities()
+    source = config_service.load_facility_master()
+    master_path = tmp_path / "facility_master.template.json"
+    master_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
+    config_service.reload_configs()
+    client = TestClient(app)
+
+    next_master = {
+        **source,
+        "facilities": [
+            *(source.get("facilities") or []),
+            {
+                "facility_id": "FAC99992",
+                "facility_name": "ケアホーム長生苑",
+                "aliases": ["長生苑"],
+                "areas": [{"id": "2F", "name": "2F"}],
+            },
+        ],
+    }
+    saved = client.put("/facility-master", json=next_master)
+    listed = client.get("/facilities")
+    fetched = client.get("/facilities/FAC99992")
+
+    assert saved.status_code == 200
+    assert listed.status_code == 200
+    assert any(item["id"] == "FAC99992" and item["name"] == "ケアホーム長生苑" for item in listed.json()["facilities"])
+    assert fetched.status_code == 200
+    assert fetched.json()["facility"]["id"] == "FAC99992"
+    with session_scope() as session:
+        facility = session.get(Facility, "FAC99992")
+        assert facility is not None
+        assert facility.name == "ケアホーム長生苑"
+        assert [area.name for area in facility.areas] == ["2F"]
+
+
 def test_facility_get_does_not_create_template_version_from_resolved_config():
     _clear_facilities()
     facility_id = "FAC_READ_NO_CREATE"

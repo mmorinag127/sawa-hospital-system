@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
+from src.db import session_scope
 from src.services import config_service
+from src.services import facility_service
 
 
 def get_master() -> dict:
@@ -21,3 +23,5 @@ def save_master(master: dict) -> None:
     tmp_path.write_text(payload, encoding="utf-8")
     tmp_path.replace(path)
     config_service.reload_configs()
+    with session_scope() as session:
+        facility_service.upsert_facility_rows_from_master(session, master)
