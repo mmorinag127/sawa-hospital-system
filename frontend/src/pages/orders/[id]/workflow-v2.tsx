@@ -985,6 +985,7 @@ export default function OrderWorkflowV2Page() {
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
   const [localAnomalyReview, setLocalAnomalyReview] = useState<Record<string, unknown> | null>(null);
+  const [selectedAutoEditIndex, setSelectedAutoEditIndex] = useState<number | null>(null);
   const [selectedAnomalyIndex, setSelectedAnomalyIndex] = useState<number | null>(null);
   const [columnFillTarget, setColumnFillTarget] = useState<string>("");
   const [columnFillValue, setColumnFillValue] = useState<string>("");
@@ -1141,6 +1142,26 @@ export default function OrderWorkflowV2Page() {
     });
     return map;
   }, [anomalyWarnings]);
+
+  const autoEditPatches = useMemo(() => (
+    (sheetAutoEditResult?.patches || []).filter((patch): patch is SheetAutoEditPatch => (
+      Boolean(patch)
+      && typeof patch.row_index === "number"
+      && typeof patch.col_index === "number"
+      && String(patch.suggested_value || "").trim().length > 0
+    ))
+  ), [sheetAutoEditResult]);
+
+  const autoEditCellMap = useMemo(() => {
+    const map = new Map<string, { patch: SheetAutoEditPatch; index: number }>();
+    autoEditPatches.forEach((patch, index) => {
+      const key = `${patch.row_index}:${patch.col_index}`;
+      if (!map.has(key)) {
+        map.set(key, { patch, index });
+      }
+    });
+    return map;
+  }, [autoEditPatches]);
 
   const ocrOverlayItemMap = useMemo(() => {
     const map = new Map<string, OcrNumericCellItem>();
@@ -1906,6 +1927,7 @@ export default function OrderWorkflowV2Page() {
       setSheetJson(formatJson(normalized));
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
+      setSelectedAutoEditIndex(null);
       setSelectedAnomalyIndex(null);
     }, {
       successMessage: "選択OCRからシートを生成しました",
@@ -1914,6 +1936,7 @@ export default function OrderWorkflowV2Page() {
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
     setLocalAnomalyReview(null);
+    setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
@@ -1945,9 +1968,19 @@ export default function OrderWorkflowV2Page() {
 
   const selectAnomalyWarning = (warning: SheetAnomalyWarning, index: number) => {
     setSelectedAnomalyIndex(index);
+    setSelectedAutoEditIndex(null);
     if (typeof warning.row_index === "number" && typeof warning.col_index === "number") {
       setFocusedSheetCell({ rowIndex: warning.row_index, colIndex: warning.col_index });
       focusSheetInput(warning.row_index, warning.col_index);
+    }
+  };
+
+  const selectAutoEditPatch = (patch: SheetAutoEditPatch, index: number) => {
+    setSelectedAutoEditIndex(index);
+    setSelectedAnomalyIndex(null);
+    if (typeof patch.row_index === "number" && typeof patch.col_index === "number") {
+      setFocusedSheetCell({ rowIndex: patch.row_index, colIndex: patch.col_index });
+      focusSheetInput(patch.row_index, patch.col_index);
     }
   };
 
@@ -1955,6 +1988,7 @@ export default function OrderWorkflowV2Page() {
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
     setLocalAnomalyReview(null);
+    setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
@@ -1970,6 +2004,7 @@ export default function OrderWorkflowV2Page() {
     const right = Number(swapRightColumn);
     if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
     setLocalAnomalyReview(null);
+    setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
@@ -1989,6 +2024,7 @@ export default function OrderWorkflowV2Page() {
   const applyVisibleOcrSuggestions = () => {
     if (!sheetPayload || !ocrOverlayItemMap.size) return;
     setLocalAnomalyReview(null);
+    setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
@@ -2021,20 +2057,18 @@ export default function OrderWorkflowV2Page() {
         { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
       );
       setSheetAutoEditResult(response.data);
+      setSelectedAutoEditIndex(null);
     }, {
       successMessage: "AI自動編集の候補を作成しました",
       refreshAfter: false,
     });
 
   const applySheetAutoEditPatches = () => {
-    const patches = (sheetAutoEditResult?.patches || []).filter((patch) => (
-      typeof patch.row_index === "number"
-      && typeof patch.col_index === "number"
-      && String(patch.suggested_value || "").trim()
-    ));
+    const patches = autoEditPatches;
     if (!sheetPayload || !patches.length) return;
     setLocalAnomalyReview(null);
     setSelectedAnomalyIndex(null);
+    setSelectedAutoEditIndex(null);
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => [...row]);
@@ -2069,6 +2103,7 @@ export default function OrderWorkflowV2Page() {
       return nextSheet;
     });
     setSelectedAnomalyIndex(null);
+    setSelectedAutoEditIndex(null);
   };
 
   const saveSheet = () =>
@@ -2082,6 +2117,7 @@ export default function OrderWorkflowV2Page() {
         edited_by: "operator",
       });
       setSelectedAnomalyIndex(null);
+      setSelectedAutoEditIndex(null);
     }, {
       successMessage: "シートを保存しました",
       nextStep: 4,
@@ -2107,6 +2143,7 @@ export default function OrderWorkflowV2Page() {
       );
       setLocalAnomalyReview(response.data.anomaly_review || null);
       setSelectedAnomalyIndex(null);
+      setSelectedAutoEditIndex(null);
     }, {
       successMessage: "数量異常チェックを実行しました",
       refreshAfter: false,
@@ -2876,7 +2913,7 @@ export default function OrderWorkflowV2Page() {
               <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
                 AI自動補正を提案
               </button>
-              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!sheetAutoEditResult?.patches?.length || Boolean(busy)}>
+              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!autoEditPatches.length || Boolean(busy)}>
                 AI提案を反映
               </button>
               <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
@@ -3039,9 +3076,19 @@ export default function OrderWorkflowV2Page() {
                       </p>
                       {sheetAutoEditResult.patches?.length ? (
                         <ul className="llm-review-list">
-                          {sheetAutoEditResult.patches.slice(0, 12).map((patch, idx) => (
-                            <li key={`auto-edit-${idx}`}>
-                              R{patch.row_index + 1} C{patch.col_index + 1} {patch.label || patch.field || ""}: {patch.current_value || "空"} → <strong>{patch.suggested_value}</strong>
+                          {sheetAutoEditResult.patches.slice(0, 40).map((patch, idx) => (
+                            <li
+                              key={`auto-edit-${idx}`}
+                              className={[
+                                "auto-edit-candidate-row",
+                                selectedAutoEditIndex === idx ? "selected-auto-edit-row" : "",
+                              ].filter(Boolean).join(" ")}
+                              onClick={() => selectAutoEditPatch(patch, idx)}
+                            >
+                              <span className="candidate-location">R{patch.row_index + 1} C{patch.col_index + 1} {patch.label || patch.field || ""}</span>
+                              <span className="candidate-change">
+                                {patch.current_value || "空"} → <strong>{patch.suggested_value}</strong>
+                              </span>
                               <span className="subtle"> {patch.reason || patch.evidence || ""}</span>
                             </li>
                           ))}
@@ -3136,9 +3183,15 @@ export default function OrderWorkflowV2Page() {
                             const belowThreshold = confidenceTier && !confidenceTierVisible(confidenceTier, ocrConfidenceDisplayMode);
                             const overlayItem = !String(row[colIdx] || "").trim() ? ocrOverlayItemMap.get(`${rowIdx}:${colIdx}`) : null;
                             const overlayValue = String(overlayItem?.value || "").trim();
+                            const autoEditCell = autoEditCellMap.get(`${rowIdx}:${colIdx}`);
+                            const autoEditSelected = autoEditCell && selectedAutoEditIndex === autoEditCell.index;
+                            const autoEditCurrent = autoEditCell ? String(autoEditCell.patch.current_value ?? row[colIdx] ?? "").trim() : "";
+                            const autoEditSuggested = autoEditCell ? String(autoEditCell.patch.suggested_value || "").trim() : "";
                             const anomalyCell = anomalyCellMap.get(`${rowIdx}:${colIdx}`);
                             const anomalySeverity = anomalyCell ? String(anomalyCell.warning.severity || "medium").trim() || "medium" : "";
                             const anomalySelected = anomalyCell && selectedAnomalyIndex === anomalyCell.index;
+                            const anomalyCurrent = anomalyCell ? String(anomalyCell.warning.value ?? row[colIdx] ?? "").trim() : "";
+                            const anomalySuggested = anomalyCell ? String(anomalyCell.warning.suggested_value || "").trim() : "";
                             return (
                               <td
                                 key={`${field}-${colIdx}`}
@@ -3148,6 +3201,8 @@ export default function OrderWorkflowV2Page() {
                                   confidenceTier ? `confidence-${confidenceTier}` : "",
                                   belowThreshold ? "below-confidence-threshold" : "",
                                   overlayValue ? "has-overlay-suggestion" : "",
+                                  autoEditCell ? "sheet-auto-edit-candidate" : "",
+                                  autoEditSelected ? "sheet-auto-edit-selected" : "",
                                   anomalySeverity ? `sheet-anomaly-${anomalySeverity}` : "",
                                   anomalySelected ? "sheet-anomaly-selected" : "",
                                 ].filter(Boolean).join(" ")}
@@ -3155,6 +3210,16 @@ export default function OrderWorkflowV2Page() {
                               >
                                 <div className="sheet-input-wrap">
                                   {overlayValue ? <span className="sheet-overlay-suggestion">{overlayValue}</span> : null}
+                                  {autoEditSuggested ? (
+                                    <span className="sheet-cell-candidate sheet-cell-candidate-ai">
+                                      {(autoEditCurrent || "空")}→{autoEditSuggested}
+                                    </span>
+                                  ) : null}
+                                  {anomalySuggested ? (
+                                    <span className="sheet-cell-candidate sheet-cell-candidate-anomaly">
+                                      {(anomalyCurrent || "空")}→{anomalySuggested}
+                                    </span>
+                                  ) : null}
                                   <input
                                     data-sheet-row={rowIdx}
                                     data-sheet-col={colIdx}
@@ -4434,6 +4499,37 @@ export default function OrderWorkflowV2Page() {
           top: -8px;
           z-index: 2;
         }
+        .sheet-cell-candidate {
+          border-radius: 999px;
+          font-size: 10px;
+          font-weight: 900;
+          left: 2px;
+          max-width: calc(100% - 4px);
+          overflow: hidden;
+          padding: 1px 5px;
+          pointer-events: none;
+          position: absolute;
+          text-overflow: ellipsis;
+          top: -9px;
+          white-space: nowrap;
+          z-index: 3;
+        }
+        .sheet-cell-candidate-ai {
+          background: rgba(221, 246, 255, 0.94);
+          color: #075985;
+        }
+        .sheet-cell-candidate-anomaly {
+          background: rgba(255, 237, 213, 0.96);
+          color: #b45309;
+          top: 23px;
+        }
+        .sheet-table td.sheet-auto-edit-candidate,
+        .sheet-table td.sheet-auto-edit-candidate input {
+          background: #e0f7ff !important;
+        }
+        .sheet-table td.sheet-auto-edit-selected {
+          box-shadow: inset 0 0 0 3px #0284c7;
+        }
         .sheet-table td.sheet-anomaly-high,
         .sheet-table td.sheet-anomaly-high input {
           background: #ffd9cc !important;
@@ -4448,6 +4544,9 @@ export default function OrderWorkflowV2Page() {
         }
         .sheet-table td.sheet-anomaly-selected {
           box-shadow: inset 0 0 0 3px #e6532e;
+        }
+        .sheet-table td.sheet-auto-edit-selected.sheet-anomaly-selected {
+          box-shadow: inset 0 0 0 3px #0284c7, inset 0 0 0 6px #e6532e;
         }
         .llm-review-panel,
         .anomaly-review-panel {
@@ -4518,7 +4617,27 @@ export default function OrderWorkflowV2Page() {
         .llm-review-list li {
           background: rgba(255, 253, 247, 0.82);
           border-radius: 10px;
+          cursor: pointer;
           padding: 8px 10px;
+        }
+        .llm-review-list li.auto-edit-candidate-row {
+          border-left: 4px solid #38bdf8;
+        }
+        .llm-review-list li.selected-auto-edit-row {
+          background: #e0f7ff;
+          box-shadow: inset 0 0 0 2px #0284c7;
+        }
+        .candidate-location {
+          color: #075985;
+          display: inline-block;
+          font-weight: 900;
+          margin-right: 8px;
+        }
+        .candidate-change {
+          color: #0f172a;
+          display: inline-block;
+          font-weight: 800;
+          margin-right: 6px;
         }
         .llm-review-list li.anomaly-high {
           box-shadow: inset 4px 0 0 #d7351d;
