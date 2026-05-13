@@ -2886,9 +2886,23 @@ export default function OrderWorkflowV2Page() {
               >
                 選択OCRからシート生成
               </button>
+              <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
+                AI自動補正を提案
+              </button>
+              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!autoEditPatches.length || Boolean(busy)}>
+                AI提案を反映
+              </button>
+              <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
+                異常チェック
+              </button>
+              <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
+                異常を補正
+              </button>
               <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
                 {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
               </button>
+            </div>
+            <div className="step3-top-actions-right">
               <button
                 className="btn ghost"
                 type="button"
@@ -2908,20 +2922,6 @@ export default function OrderWorkflowV2Page() {
                   <option value="disabled">OFF</option>
                 </select>
               </label>
-            </div>
-            <div className="step3-top-actions-right">
-              <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
-                AI自動補正を提案
-              </button>
-              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!autoEditPatches.length || Boolean(busy)}>
-                AI提案を反映
-              </button>
-              <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
-                異常チェック
-              </button>
-              <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
-                異常を補正
-              </button>
             </div>
           </div>
           <p className="subtle">
