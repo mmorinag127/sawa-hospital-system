@@ -1693,7 +1693,7 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     assert "anomaly_review" not in bagging["bagging_result"]
 
 
-def test_workflow_v2_sheet_auto_edit_uses_selected_ocr_and_current_sheet() -> None:
+def test_workflow_v2_sheet_auto_edit_ignores_ocr_values() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -1726,8 +1726,95 @@ def test_workflow_v2_sheet_auto_edit_uses_selected_ocr_and_current_sheet() -> No
 
     assert error is None
     assert result["status"] == "ok"
-    assert result["patches"][0]["suggested_value"] == "10"
-    assert result["patches"][0]["reason"] == "sheet_value_differs_from_ocr"
+    assert result["patches"] == []
+    assert result["rule_patches"] == []
+
+
+def test_workflow_v2_sheet_auto_edit_does_not_require_selected_ocr() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+
+    result, error = order_workflow_v2_service.propose_sheet_auto_edit(
+        order_id=order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "qty.regular"],
+            "header": ["日付", "区分", "献立", "常食"],
+            "rows": [["04/26", "朝", "大豆のトマト煮", "110"]],
+        },
+        use_llm=False,
+    )
+
+    assert error is None
+    assert result["status"] == "ok"
+    assert result["patches"] == []
+
+
+def test_workflow_v2_sheet_auto_edit_llm_payload_excludes_ocr_values(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {"patches": []}, {"status": "ok", "model": "fake"}
+
+    monkeypatch.setattr(
+        order_workflow_v2_service.workflow_v2_sheet_review_service,
+        "_gemini_json_request",
+        fake_gemini_json_request,
+    )
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    result, error = order_workflow_v2_service.propose_sheet_auto_edit(
+        order_id=order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "qty.regular"],
+            "header": ["日付", "区分", "献立", "常食"],
+            "rows": [["04/26", "朝", "大豆のトマト煮", "110"]],
+            "ocr_numeric_cell_items": [
+                {
+                    "target_row_index": 0,
+                    "target_col_index": 3,
+                    "value": "10",
+                    "classification": "accepted",
+                    "confidence_tier": "high",
+                }
+            ],
+            "target_cell_map": [
+                {
+                    "target_cell_id": "cell-r0c3",
+                    "sheet_cell": "R0C3",
+                    "worksheet_row": 11,
+                    "worksheet_col": 4,
+                    "bbox": [100, 100, 120, 120],
+                    "field": "qty.regular",
+                    "field_label": "常食",
+                }
+            ],
+        },
+        use_llm=True,
+    )
+
+    assert error is None
+    assert result["status"] == "ok"
+    user_payload = captured["user_payload"]
+    assert isinstance(user_payload, dict)
+    assert user_payload["ocr_numeric_cell_items"] == []
+    assert "ocr_sheet_comparison" not in user_payload
+    assert user_payload["target_cell_map"][0]["target_cell_id"] == "cell-r0c3"
 
 
 def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) -> None:
@@ -1828,6 +1915,63 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisti
     assert error is None
     assert inspection["anomaly_review"] is None
     assert inspection["artifact_lineage"]["anomaly_review_id"] is None
+
+
+def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {"warnings": []}, {"status": "ok", "model": "fake"}
+
+    monkeypatch.setattr(
+        order_workflow_v2_service.workflow_v2_sheet_review_service,
+        "_gemini_json_request",
+        fake_gemini_json_request,
+    )
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
+        order_id,
+        sheet={
+            "fields": ["date", "daypart", "menu", "regular", "soft"],
+            "header": ["日付", "区分", "献立", "常食", "軟菜"],
+            "rows": [
+                ["04/28", "朝", "A", "110", "5"],
+                ["04/28", "朝", "B", "12", "5"],
+                ["04/29", "朝", "C", "10", "5"],
+            ],
+            "ocr_numeric_cell_items": [
+                {
+                    "target_row_index": 0,
+                    "target_col_index": 3,
+                    "value": "10",
+                    "classification": "accepted",
+                    "confidence_tier": "high",
+                }
+            ],
+        },
+        use_llm=True,
+    )
+
+    assert error is None
+    assert anomaly["anomaly_review"]["status"] == "ok"
+    user_payload = captured["user_payload"]
+    assert isinstance(user_payload, dict)
+    assert user_payload["ocr_numeric_cell_items"] == []
+    assert "ocr_sheet_comparison" not in user_payload
+    assert "materialization_candidate" not in user_payload
+    assert "bagging_summary" not in user_payload
+    assert user_payload["rows"][0]["quantities"][0]["value"] == "110"
 
 
 def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None:

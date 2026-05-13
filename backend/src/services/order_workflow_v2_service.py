@@ -1896,14 +1896,8 @@ def propose_sheet_auto_edit(
         if error:
             return None, error
         workflow = _get_workflow(session, order.id)
-        if workflow is None or not workflow.evidence_run_id:
-            return None, "selected_ocr_required"
-        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
-        if evidence is None or evidence.order_id != order.id:
-            return None, "selected_ocr_missing"
-        evidence_payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else None
         review_sheet = sheet if isinstance(sheet, dict) else None
-        if review_sheet is None and workflow.draft_id:
+        if review_sheet is None and workflow is not None and workflow.draft_id:
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is not None and draft.order_id == order.id and isinstance(draft.draft_sheet_json, dict):
                 review_sheet = dict(draft.draft_sheet_json)
@@ -1913,7 +1907,7 @@ def propose_sheet_auto_edit(
     fax_image_png_base64, fax_image_meta = _render_order_fax_page_for_ai(document_uri)
     result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
         sheet=review_sheet,
-        evidence_payload=evidence_payload,
+        evidence_payload=None,
         model=model,
         use_llm=use_llm,
         fax_image_png_base64=fax_image_png_base64,
@@ -2472,8 +2466,6 @@ def run_sheet_anomaly_review(
         if review_sheet is None and not workflow.draft_id:
             return None, "saved_sheet_required"
         draft = session.get(OrderSheetDraft, workflow.draft_id) if workflow.draft_id else None
-        materialization_candidate: dict[str, Any] | None = None
-        materialization_error = None
         source_saved_sheet_id = None
         if review_sheet is None:
             if draft is None or draft.order_id != order.id:
@@ -2484,18 +2476,9 @@ def run_sheet_anomaly_review(
                 return None, "saved_sheet_template_mismatch"
             review_sheet = draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {}
             source_saved_sheet_id = draft.id
-            materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
-            if not isinstance(materialization_candidate, dict):
-                materialization_candidate = {"error": "saved_sheet_materialization_failed"}
-                materialization_error = "saved_sheet_materialization_failed"
-            else:
-                materialization_error = _normalize_id(materialization_candidate.get("error"))
-        bagging_result = _current_bagging_result(workflow)
         anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
             sheet=review_sheet,
             evidence_payload=None,
-            materialization_candidate=materialization_candidate,
-            bagging_result=bagging_result,
             model=model,
             use_llm=use_llm,
         )
@@ -2503,23 +2486,7 @@ def run_sheet_anomaly_review(
         anomaly_review["anomaly_review_id"] = anomaly_review_id
         anomaly_review["source_saved_sheet_id"] = source_saved_sheet_id
         anomaly_review["source"] = "unsaved_sheet" if sheet is not None else "saved_sheet"
-        anomaly_review["source_bagging_result_id"] = (
-            bagging_result.get("bagging_result_id") if isinstance(bagging_result, dict) else None
-        )
-        if materialization_error:
-            anomaly_review.setdefault("warnings", []).append(
-                {
-                    "type": "materialization_unavailable",
-                    "severity": "medium",
-                    "row_index": None,
-                    "col_index": None,
-                    "field": None,
-                    "label": None,
-                    "value": "",
-                    "message": f"袋分け用データの作成に失敗しています: {materialization_error}",
-                    "evidence": {"error": materialization_error},
-                }
-            )
+        anomaly_review["source_bagging_result_id"] = None
         if sheet is None:
             meta = _workflow_meta(workflow)
             meta["anomaly_review_id"] = anomaly_review_id

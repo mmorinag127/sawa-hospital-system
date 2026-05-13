@@ -553,77 +553,16 @@ def _rule_based_auto_edit_patches(
     sheet: dict[str, Any],
     evidence_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    fields, header, rows = _sheet_dimensions(sheet)
-    evidence_by_cell = _ocr_item_map(sheet, evidence_payload)
-    patches: list[dict[str, Any]] = []
-    seen: set[tuple[int, int, str]] = set()
+    # AI自動編集ではOCR結果値を正解候補として使わない。
+    # シート値とFAX画像の矛盾だけをAIが判断するため、rule patchは生成しない。
+    return []
 
-    for (row_index, col_index), items in sorted(evidence_by_cell.items()):
-        if row_index >= len(rows) or col_index >= len(fields) or _is_structural_field(fields[col_index]):
-            continue
-        current = rows[row_index][col_index]
-        current_numeric = _numeric_value(current)
-        numeric_items = [item for item in items if item.get("numeric") is not None]
-        if not numeric_items:
-            continue
-        numeric_items.sort(
-            key=lambda item: (
-                0 if item.get("classification") == "accepted" else 1 if item.get("classification") == "deterministic_candidate" else 2,
-                0 if item.get("confidence_tier") == "high" else 1 if item.get("confidence_tier") == "medium" else 2,
-            )
-        )
-        best = numeric_items[0]
-        suggested = _numeric_display(best["value"])
-        groups = _digit_groups(current)
-        correction_mark_like = len(groups) > 1 and bool(re.search(r"[^\d０-９.\s]", _normalize_text(current)))
-        if (current_numeric is None and _normalize_text(current)) or correction_mark_like:
-            alternatives = list(dict.fromkeys(groups + [suggested]))
-            patch = _make_patch(
-                row_index=row_index,
-                col_index=col_index,
-                fields=fields,
-                header=header,
-                current_value=current,
-                suggested_value=suggested if suggested in alternatives else (groups[-1] if groups else suggested),
-                confidence="medium",
-                reason="non_numeric_or_corrected_mark_cell",
-                evidence=f"OCR候補 {suggested}。セル文字列に斜線/訂正を含む可能性があります。",
-                alternatives=alternatives,
-            )
-        elif current_numeric is None:
-            patch = _make_patch(
-                row_index=row_index,
-                col_index=col_index,
-                fields=fields,
-                header=header,
-                current_value=current,
-                suggested_value=suggested,
-                confidence="medium" if best.get("classification") != "accepted" else "high",
-                reason="blank_cell_has_ocr_number",
-                evidence=f"OCR候補 {suggested} ({best.get('classification') or '-'}/{best.get('confidence_tier') or '-'})",
-                alternatives=[_numeric_display(item["value"]) for item in numeric_items[:5]],
-            )
-        elif best.get("numeric") is not None and abs(float(current_numeric) - float(best["numeric"])) > 0.0001:
-            alternatives = list(dict.fromkeys([_numeric_display(item["value"]) for item in numeric_items[:5]] + [_numeric_display(current)]))
-            patch = _make_patch(
-                row_index=row_index,
-                col_index=col_index,
-                fields=fields,
-                header=header,
-                current_value=current,
-                suggested_value=suggested,
-                confidence="medium" if best.get("classification") != "accepted" else "high",
-                reason="sheet_value_differs_from_ocr",
-                evidence=f"シート {_numeric_display(current)} / OCR {suggested}",
-                alternatives=alternatives,
-            )
-        else:
-            continue
-        key = (patch["row_index"], patch["col_index"], patch["suggested_value"])
-        if key not in seen:
-            seen.add(key)
-            patches.append(patch)
-    return patches
+
+def _target_cells_from_sheet(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    items = sheet.get("target_cell_map") if isinstance(sheet, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
 
 
 def _sheet_context_for_llm(
@@ -634,8 +573,10 @@ def _sheet_context_for_llm(
     computed_context: dict[str, Any] | None = None,
     include_ocr_sheet_comparison: bool = True,
     include_ocr_context: bool = True,
+    include_target_cell_map: bool | None = None,
 ) -> dict[str, Any]:
     fields, header, _rows = _sheet_dimensions(sheet)
+    include_target_cell_map = include_ocr_context if include_target_cell_map is None else include_target_cell_map
     payload = {
         "fields": fields,
         "header": header,
@@ -656,13 +597,13 @@ def _sheet_context_for_llm(
                 "field_label": item.get("field_label") or item.get("label"),
                 "logical_targets": item.get("logical_targets"),
             }
-            for item in (_hakodate_target_cells_from_payload(evidence_payload)[:_MAX_LLM_EVIDENCE] if include_ocr_context else [])
+            for item in (_target_cells_from_sheet(sheet)[:_MAX_LLM_EVIDENCE] if include_target_cell_map else [])
         ],
         "computed_context": computed_context or {},
         "rule_patches": patches[:_MAX_LLM_WARNINGS],
         "rule_warnings": (warnings or [])[:_MAX_LLM_WARNINGS],
     }
-    if include_ocr_sheet_comparison:
+    if include_ocr_sheet_comparison and include_ocr_context:
         payload["ocr_sheet_comparison"] = _ocr_sheet_comparison(sheet=sheet, evidence_payload=evidence_payload)
     return payload
 
@@ -819,15 +760,24 @@ def propose_auto_sheet_edits(
     if use_llm:
         system_prompt = (
             "You review a Japanese FAX order sheet. Return JSON only. "
-            "Use the attached original FAX page image as the primary evidence. OCR evidence and the current sheet are auxiliary. "
-            "For each quantity cell, compare the visible handwritten number in the FAX image with OCR candidates and the current sheet value. "
-            "Propose cell edits when the FAX image suggests a missing number, a different number, or a crossed-out/slash-corrected number. "
-            "For corrections, include alternative digit candidates and explain the visible basis from the FAX image. "
+            "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
+            "Do not use OCR output, OCR candidates, OCR confidence, OCR evidence, or OCR-vs-sheet comparisons. "
+            "For each quantity cell, use target_cell_map to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "Propose cell edits only when the FAX image itself clearly suggests a missing number, a different number, or a crossed-out/slash-corrected number. "
+            "If the sheet value is plausible from the FAX image, do not propose a change. "
+            "For corrections, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         llm_payload, llm_meta = _gemini_json_request(
             system_prompt=system_prompt,
-            user_payload=_sheet_context_for_llm(sheet, rule_patches, evidence_payload=evidence_payload),
+            user_payload=_sheet_context_for_llm(
+                sheet,
+                rule_patches,
+                evidence_payload=None,
+                include_ocr_sheet_comparison=False,
+                include_ocr_context=False,
+                include_target_cell_map=True,
+            ),
             model=model,
             array_key="patches",
             image_png_base64=fax_image_png_base64,
@@ -1217,8 +1167,6 @@ def build_sheet_anomaly_report(
     *,
     sheet: dict[str, Any],
     evidence_payload: dict[str, Any] | None = None,
-    materialization_candidate: dict[str, Any] | None = None,
-    bagging_result: dict[str, Any] | None = None,
     model: str | None = None,
     use_llm: bool | None = None,
 ) -> dict[str, Any]:
@@ -1255,8 +1203,6 @@ def build_sheet_anomaly_report(
                     include_ocr_sheet_comparison=False,
                     include_ocr_context=False,
                 ),
-                "materialization_candidate": materialization_candidate or {},
-                "bagging_summary": (bagging_result or {}).get("summary") if isinstance(bagging_result, dict) else {},
             },
             model=model,
             array_key="warnings",
