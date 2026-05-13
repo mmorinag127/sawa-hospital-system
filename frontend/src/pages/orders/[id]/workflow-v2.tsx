@@ -140,6 +140,14 @@ type SheetAutoEditResult = {
   rule_patches?: SheetAutoEditPatch[];
   llm_patches?: SheetAutoEditPatch[];
   llm?: Record<string, unknown> | null;
+  job?: {
+    job_id?: string | null;
+    status?: string | null;
+    started_at?: string | null;
+    updated_at?: string | null;
+    finished_at?: string | null;
+    error?: string | null;
+  } | null;
 };
 
 type SheetAnomalyWarning = {
@@ -1003,6 +1011,7 @@ export default function OrderWorkflowV2Page() {
   const [outputPreviewLoading, setOutputPreviewLoading] = useState<boolean>(false);
   const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
+  const sheetAutoEditPollRef = useRef<number | null>(null);
 
   const selectedOcr = useMemo(
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
@@ -1412,6 +1421,13 @@ export default function OrderWorkflowV2Page() {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
+
+  useEffect(() => () => {
+    if (sheetAutoEditPollRef.current !== null) {
+      window.clearTimeout(sheetAutoEditPollRef.current);
+      sheetAutoEditPollRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     if (!router.isReady || !orderId || workflow?.state !== "ocr_running") return undefined;
@@ -2042,24 +2058,88 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
+  const pollSheetAutoEditJob = (jobId: string, attempt = 0) => {
+    if (!orderId || !jobId) return;
+    if (sheetAutoEditPollRef.current !== null) {
+      window.clearTimeout(sheetAutoEditPollRef.current);
+      sheetAutoEditPollRef.current = null;
+    }
+    sheetAutoEditPollRef.current = window.setTimeout(async () => {
+      try {
+        const response = await apiClient.get<{
+          job?: SheetAutoEditResult["job"];
+          result?: SheetAutoEditResult | null;
+        }>(`/orders/${orderId}/workflow-v2/sheet/auto-edit/${jobId}`);
+        const job = response.data.job || null;
+        if (job?.status === "done" && response.data.result) {
+          setSheetAutoEditResult({ ...response.data.result, job });
+          setSelectedAutoEditIndex(null);
+          setMessage("AI自動編集の候補を作成しました");
+          return;
+        }
+        if (job?.status === "failed") {
+          setSheetAutoEditResult({
+            status: "failed",
+            patches: [],
+            llm: { status: "failed", error: job.error || "AI自動編集に失敗しました" },
+            job,
+          });
+          setError(job.error || "AI自動編集に失敗しました");
+          return;
+        }
+        setSheetAutoEditResult((current) => ({
+          ...(current || {}),
+          status: "running",
+          patches: current?.patches || [],
+          llm: { ...(current?.llm || {}), status: "running" },
+          job,
+        }));
+        pollSheetAutoEditJob(jobId, attempt + 1);
+      } catch (err) {
+        if (attempt < 3) {
+          pollSheetAutoEditJob(jobId, attempt + 1);
+          return;
+        }
+        const formatted = formatApiError(err, "AI自動編集の状態取得に失敗しました");
+        setSheetAutoEditResult({
+          status: "failed",
+          patches: [],
+          llm: { status: "failed", error: formatted },
+          job: { job_id: jobId, status: "failed", error: formatted },
+        });
+        setError(formatted);
+      }
+    }, attempt === 0 ? 1200 : 3000);
+  };
+
   const proposeSheetAutoEdit = () =>
     runAction("Step3 AI auto edit", async () => {
       const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
       if (!parsed) {
         throw new Error("AI自動編集に渡せるシートがありません");
       }
-      const response = await apiClient.post<SheetAutoEditResult>(
+      const response = await apiClient.post<{
+        job?: SheetAutoEditResult["job"];
+      }>(
         `/orders/${orderId}/workflow-v2/sheet/auto-edit`,
         {
           sheet: parsed,
           use_llm: true,
-        },
-        { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
+        }
       );
-      setSheetAutoEditResult(response.data);
+      const job = response.data.job || null;
+      setSheetAutoEditResult({
+        status: "running",
+        patches: [],
+        llm: { status: "running" },
+        job,
+      });
       setSelectedAutoEditIndex(null);
+      if (job?.job_id) {
+        pollSheetAutoEditJob(job.job_id);
+      }
     }, {
-      successMessage: "AI自動編集の候補を作成しました",
+      successMessage: "AI自動編集を開始しました",
       refreshAfter: false,
     });
 
@@ -3066,7 +3146,7 @@ export default function OrderWorkflowV2Page() {
                     <div className="llm-review-panel">
                       <div className="llm-review-header">
                         <strong>AI自動編集候補</strong>
-                        <span>{sheetAutoEditResult.patches?.length || 0}件 / AI: {formatAiStatus(sheetAutoEditResult.llm?.status)}</span>
+                        <span>{sheetAutoEditResult.patches?.length || 0}件 / AI: {formatAiStatus(sheetAutoEditResult.llm?.status || sheetAutoEditResult.job?.status)}</span>
                       </div>
                       <p className="subtle">
                         原本FAX画像と現在のシートだけを照合し、100%一致と断定できない数量セルに候補を提案します。
@@ -3100,6 +3180,8 @@ export default function OrderWorkflowV2Page() {
                             ? ` ${sheetAutoEditResult.llm.error}`
                             : " 候補なしとは判定していません。"}
                         </p>
+                      ) : sheetAutoEditResult.job?.status === "running" || sheetAutoEditResult.llm?.status === "running" ? (
+                        <p className="subtle">AI自動編集を実行中です。完了したら候補を表示します。</p>
                       ) : (
                         <p className="subtle">修正候補はありません。</p>
                       )}

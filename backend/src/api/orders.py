@@ -1756,15 +1756,44 @@ def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
 
 
 @router.post("/{order_id}/workflow-v2/sheet/auto-edit", dependencies=[Depends(require_role("operator"))])
-def propose_order_workflow_v2_sheet_auto_edit(order_id: str, body: WorkflowV2SheetAutoEditBody):
-    return _workflow_v2_or_404(
-        order_workflow_v2_service.propose_sheet_auto_edit(
-            order_id=order_id,
-            sheet=body.sheet,
-            model=body.model,
-            use_llm=body.use_llm,
+def propose_order_workflow_v2_sheet_auto_edit(
+    order_id: str,
+    body: WorkflowV2SheetAutoEditBody,
+    background_tasks: BackgroundTasks,
+    wait: bool = Query(default=False),
+):
+    if wait:
+        return _workflow_v2_or_404(
+            order_workflow_v2_service.propose_sheet_auto_edit(
+                order_id=order_id,
+                sheet=body.sheet,
+                model=body.model,
+                use_llm=body.use_llm,
+            )
         )
+    payload, error = order_workflow_v2_service.start_sheet_auto_edit_job(
+        order_id=order_id,
+        sheet=body.sheet,
+        model=body.model,
+        use_llm=body.use_llm,
     )
+    if error:
+        return _workflow_v2_or_404((payload, error))
+    job = payload.get("job") if isinstance(payload, dict) else {}
+    background_tasks.add_task(
+        order_workflow_v2_service.run_sheet_auto_edit_job,
+        order_id=order_id,
+        job_id=str(job.get("job_id") or ""),
+        sheet=body.sheet,
+        model=body.model,
+        use_llm=body.use_llm,
+    )
+    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=payload)
+
+
+@router.get("/{order_id}/workflow-v2/sheet/auto-edit/{job_id}", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_sheet_auto_edit_job(order_id: str, job_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_sheet_auto_edit_job(order_id=order_id, job_id=job_id))
 
 
 @router.post("/{order_id}/workflow-v2/bagging", dependencies=[Depends(require_role("operator"))])

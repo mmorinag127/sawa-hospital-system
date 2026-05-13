@@ -25,6 +25,7 @@ from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.storage_service import load_bytes_from_uri
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
+SHEET_AUTO_EDIT_JOB_META_KEY = "sheet_auto_edit_job"
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
 _WORKFLOW_V2_CANONICAL_STATES = {
     "uploaded",
@@ -113,6 +114,10 @@ _OCR_PREREQUISITE_BLOCKERS = {
 
 def _now() -> datetime:
     return datetime.utcnow()
+
+
+def _stable_json_hash(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _normalize_id(value: object) -> str:
@@ -1914,6 +1919,145 @@ def propose_sheet_auto_edit(
         fax_image_meta=fax_image_meta,
     )
     return result, None
+
+
+def start_sheet_auto_edit_job(
+    *,
+    order_id: str,
+    sheet: dict[str, Any] | None = None,
+    model: str | None = None,
+    use_llm: bool = True,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(sheet, dict):
+        return None, "sheet_required"
+    job_id = _new_id("SAE")
+    now = _now().isoformat()
+    sheet_hash = _stable_json_hash(sheet)
+    job = {
+        "job_id": job_id,
+        "order_id": order_id,
+        "status": "running",
+        "started_at": now,
+        "updated_at": now,
+        "finished_at": None,
+        "error": None,
+        "request": {
+            "model": model,
+            "use_llm": bool(use_llm),
+            "sheet_hash": sheet_hash,
+        },
+        "result": None,
+    }
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_found"
+        meta = _workflow_meta(workflow)
+        meta[SHEET_AUTO_EDIT_JOB_META_KEY] = job
+        _write_workflow_meta(workflow, meta)
+        return {"job": _serialize_sheet_auto_edit_job(job)}, None
+
+
+def run_sheet_auto_edit_job(
+    *,
+    order_id: str,
+    job_id: str,
+    sheet: dict[str, Any] | None = None,
+    model: str | None = None,
+    use_llm: bool = True,
+) -> None:
+    def _write_job_patch(patch: dict[str, Any]) -> None:
+        with session_scope() as session:
+            order, error = _get_order_or_error(session, order_id)
+            if error:
+                return
+            workflow = _get_workflow(session, order.id)
+            if workflow is None:
+                return
+            meta = _workflow_meta(workflow)
+            existing = meta.get(SHEET_AUTO_EDIT_JOB_META_KEY)
+            if not isinstance(existing, dict) or existing.get("job_id") != job_id:
+                return
+            next_job = dict(existing)
+            next_job.update(patch)
+            next_job["updated_at"] = _now().isoformat()
+            meta[SHEET_AUTO_EDIT_JOB_META_KEY] = next_job
+            _write_workflow_meta(workflow, meta)
+
+    try:
+        result, error = propose_sheet_auto_edit(
+            order_id=order_id,
+            sheet=sheet,
+            model=model,
+            use_llm=use_llm,
+        )
+        if error:
+            _write_job_patch(
+                {
+                    "status": "failed",
+                    "finished_at": _now().isoformat(),
+                    "error": error,
+                    "result": None,
+                }
+            )
+            return
+        _write_job_patch(
+            {
+                "status": "done",
+                "finished_at": _now().isoformat(),
+                "error": None,
+                "result": result if isinstance(result, dict) else {},
+            }
+        )
+    except BaseException as exc:  # noqa: BLE001
+        _write_job_patch(
+            {
+                "status": "failed",
+                "finished_at": _now().isoformat(),
+                "error": str(exc),
+                "result": None,
+            }
+        )
+
+
+def get_sheet_auto_edit_job(
+    *,
+    order_id: str,
+    job_id: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_found"
+        meta = _workflow_meta(workflow)
+        job = meta.get(SHEET_AUTO_EDIT_JOB_META_KEY)
+        if not isinstance(job, dict):
+            return None, "sheet_auto_edit_job_not_found"
+        if job_id and job.get("job_id") != job_id:
+            return None, "sheet_auto_edit_job_not_found"
+        return {
+            "job": _serialize_sheet_auto_edit_job(job),
+            "result": job.get("result") if isinstance(job.get("result"), dict) else None,
+        }, None
+
+
+def _serialize_sheet_auto_edit_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": job.get("job_id"),
+        "order_id": job.get("order_id"),
+        "status": job.get("status"),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+        "finished_at": job.get("finished_at"),
+        "error": job.get("error"),
+        "request": job.get("request") if isinstance(job.get("request"), dict) else {},
+    }
 
 
 def _render_order_fax_page_for_ai(document_uri: str) -> tuple[str | None, dict[str, Any]]:

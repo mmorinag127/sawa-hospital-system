@@ -2310,3 +2310,46 @@ def test_get_workflow_projects_legacy_state_from_v2_lineage() -> None:
     assert projected["blockers"] == []
     assert projected["warnings"] == []
     assert projected["legacy_state"] == "apply_ready"
+
+
+def test_sheet_auto_edit_job_stores_running_and_done_result(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    assert error is None
+    assert workflow is not None
+
+    started, error = order_workflow_v2_service.start_sheet_auto_edit_job(
+        order_id=order_id,
+        sheet={"rows": [["menu", "70"]]},
+        use_llm=True,
+    )
+    assert error is None
+    assert started is not None
+    job_id = started["job"]["job_id"]
+    assert started["job"]["status"] == "running"
+
+    def fake_propose_sheet_auto_edit(**kwargs):
+        assert kwargs["order_id"] == order_id
+        assert kwargs["sheet"] == {"rows": [["menu", "70"]]}
+        return {"status": "ok", "patches": [{"row_index": 0, "col_index": 1, "suggested_value": "70"}]}, None
+
+    monkeypatch.setattr(order_workflow_v2_service, "propose_sheet_auto_edit", fake_propose_sheet_auto_edit)
+
+    order_workflow_v2_service.run_sheet_auto_edit_job(
+        order_id=order_id,
+        job_id=job_id,
+        sheet={"rows": [["menu", "70"]]},
+        use_llm=True,
+    )
+    payload, error = order_workflow_v2_service.get_sheet_auto_edit_job(order_id=order_id, job_id=job_id)
+
+    assert error is None
+    assert payload is not None
+    assert payload["job"]["status"] == "done"
+    assert payload["result"]["patches"][0]["suggested_value"] == "70"
