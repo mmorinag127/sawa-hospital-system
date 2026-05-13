@@ -1815,6 +1815,10 @@ def test_workflow_v2_sheet_auto_edit_llm_payload_excludes_ocr_values(monkeypatch
     assert user_payload["ocr_numeric_cell_items"] == []
     assert "ocr_sheet_comparison" not in user_payload
     assert user_payload["target_cell_map"][0]["target_cell_id"] == "cell-r0c3"
+    system_prompt = captured["system_prompt"]
+    assert isinstance(system_prompt, str)
+    assert "100% certainty" in system_prompt
+    assert "merely plausible" in system_prompt
 
 
 def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) -> None:

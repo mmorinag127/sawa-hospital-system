@@ -763,9 +763,9 @@ def propose_auto_sheet_edits(
             "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
             "Do not use OCR output, OCR candidates, OCR confidence, OCR evidence, or OCR-vs-sheet comparisons. "
             "For each quantity cell, use target_cell_map to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
-            "Propose cell edits only when the FAX image itself clearly suggests a missing number, a different number, or a crossed-out/slash-corrected number. "
-            "If the sheet value is plausible from the FAX image, do not propose a change. "
-            "For corrections, include alternative digit candidates and explain the visible basis from the FAX image only. "
+            "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
+            "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
+            "For corrections or uncertainty reviews, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         llm_payload, llm_meta = _gemini_json_request(
