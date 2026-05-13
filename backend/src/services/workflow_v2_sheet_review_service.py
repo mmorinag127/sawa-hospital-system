@@ -746,6 +746,11 @@ def _normalize_llm_patches(payload: dict[str, Any] | None, fields: list[str], he
         suggested = _normalize_text(item.get("suggested_value"))
         if not suggested:
             continue
+        current = _normalize_text(item.get("current_value"))
+        current_numeric = _numeric_value(current)
+        suggested_numeric = _numeric_value(suggested)
+        if current_numeric is not None and suggested_numeric is not None and abs(current_numeric - suggested_numeric) <= 0.0001:
+            continue
         key = (row_index, col_index, suggested)
         if key in seen:
             continue
@@ -756,7 +761,7 @@ def _normalize_llm_patches(payload: dict[str, Any] | None, fields: list[str], he
                 col_index=col_index,
                 fields=fields,
                 header=header,
-                current_value=item.get("current_value"),
+                current_value=current,
                 suggested_value=suggested,
                 reason=_normalize_text(item.get("reason")) or "llm_suggested_correction",
                 confidence=_normalize_text(item.get("confidence")) or "medium",
@@ -827,13 +832,13 @@ def propose_auto_sheet_edits(
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         try:
-            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "40")), 80))
+            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "20")), 80))
         except ValueError:
-            chunk_size = 40
+            chunk_size = 20
         try:
-            max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "3")), 6))
+            max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
         except ValueError:
-            max_workers = 3
+            max_workers = 6
         target_chunks = _chunk_items(_target_cells_from_sheet(sheet), chunk_size)
         if not target_chunks:
             target_chunks = [[]]
