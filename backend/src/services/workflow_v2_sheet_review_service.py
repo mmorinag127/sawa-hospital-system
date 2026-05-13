@@ -843,7 +843,7 @@ def propose_auto_sheet_edits(
         if not target_chunks:
             target_chunks = [[]]
 
-        def request_chunk(chunk_item: tuple[int, list[dict[str, Any]]]) -> tuple[dict[str, Any] | None, dict[str, Any], int, int]:
+        def request_chunk(chunk_item: tuple[int, list[dict[str, Any]]]) -> tuple[dict[str, Any] | None, dict[str, Any], int, int, list[dict[str, Any]]]:
             chunk_index, target_chunk = chunk_item
             payload, meta = _gemini_json_request(
                 system_prompt=system_prompt,
@@ -866,14 +866,15 @@ def propose_auto_sheet_edits(
                 image_png_base64=fax_image_png_base64,
                 response_schema=patch_response_schema,
             )
-            return payload, meta, chunk_index, len(target_chunk)
+            return payload, meta, chunk_index, len(target_chunk), target_chunk
 
         chunk_meta: list[dict[str, Any]] = []
         combined_payload_patches: list[dict[str, Any]] = []
         failed_chunks = 0
         with ThreadPoolExecutor(max_workers=min(max_workers, len(target_chunks))) as executor:
             chunk_results = list(executor.map(request_chunk, enumerate(target_chunks)))
-        for payload, meta, chunk_index, target_count in chunk_results:
+        retry_entries: list[tuple[int, list[dict[str, Any]]]] = []
+        for payload, meta, chunk_index, target_count, target_chunk in chunk_results:
             chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
             patch_items = payload.get("patches") if isinstance(payload, dict) else []
             patch_count = len(patch_items) if isinstance(patch_items, list) else 0
@@ -887,10 +888,36 @@ def propose_auto_sheet_edits(
                 }
             )
             if chunk_status != "ok":
-                failed_chunks += 1
+                if target_count > 5:
+                    for retry_index, retry_chunk in enumerate(_chunk_items(target_chunk, 5)):
+                        retry_entries.append((1000 + chunk_index * 100 + retry_index, retry_chunk))
+                else:
+                    failed_chunks += 1
                 continue
             if isinstance(patch_items, list):
                 combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
+        if retry_entries:
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(retry_entries))) as executor:
+                retry_results = list(executor.map(request_chunk, retry_entries))
+            for payload, meta, chunk_index, target_count, _target_chunk in retry_results:
+                chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
+                patch_items = payload.get("patches") if isinstance(payload, dict) else []
+                patch_count = len(patch_items) if isinstance(patch_items, list) else 0
+                chunk_meta.append(
+                    {
+                        "chunk_index": chunk_index,
+                        "status": chunk_status or "unknown",
+                        "target_count": target_count,
+                        "patch_count": patch_count,
+                        "error": meta.get("error") if isinstance(meta, dict) else None,
+                        "retry": True,
+                    }
+                )
+                if chunk_status != "ok":
+                    failed_chunks += 1
+                    continue
+                if isinstance(patch_items, list):
+                    combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
         llm_payload = {"patches": combined_payload_patches}
         if failed_chunks == len(target_chunks):
             llm_status = "failed"
