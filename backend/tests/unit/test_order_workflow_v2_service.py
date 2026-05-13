@@ -1821,6 +1821,73 @@ def test_workflow_v2_sheet_auto_edit_llm_payload_excludes_ocr_values(monkeypatch
     assert "merely plausible" in system_prompt
 
 
+def test_workflow_v2_sheet_auto_edit_chunks_target_cells_and_reports_partial_failure(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_gemini_json_request(**kwargs):
+        calls.append(kwargs)
+        user_payload = kwargs["user_payload"]
+        assert isinstance(user_payload, dict)
+        assert user_payload["ocr_numeric_cell_items"] == []
+        assert "ocr_sheet_comparison" not in user_payload
+        target_cells = user_payload["target_cell_map"]
+        assert isinstance(target_cells, list)
+        if len(calls) == 2:
+            return None, {"status": "failed", "model": "fake", "error": "bad json"}
+        first_cell = target_cells[0]
+        assert isinstance(first_cell, dict)
+        return {
+            "patches": [
+                {
+                    "row_index": first_cell["target_row_index"],
+                    "col_index": first_cell["target_col_index"],
+                    "current_value": "1",
+                    "suggested_value": "7",
+                    "reason": "not_100_percent_match",
+                }
+            ]
+        }, {"status": "ok", "model": "fake"}
+
+    monkeypatch.setenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "2")
+    monkeypatch.setattr(
+        order_workflow_v2_service.workflow_v2_sheet_review_service,
+        "_gemini_json_request",
+        fake_gemini_json_request,
+    )
+    target_cell_map = [
+        {
+            "target_cell_id": f"cell-r0c{col}",
+            "sheet_cell": f"R0C{col}",
+            "target_row_index": 0,
+            "target_col_index": col,
+            "worksheet_row": 11,
+            "worksheet_col": col + 1,
+            "bbox": [100 + col, 100, 120 + col, 120],
+            "field": f"qty.{col}",
+            "field_label": f"数量{col}",
+        }
+        for col in range(3, 8)
+    ]
+
+    result = order_workflow_v2_service.workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet={
+            "fields": ["date", "daypart", "menu", "qty.3", "qty.4", "qty.5", "qty.6", "qty.7"],
+            "header": ["日付", "区分", "献立", "数量3", "数量4", "数量5", "数量6", "数量7"],
+            "rows": [["04/26", "朝", "大豆のトマト煮", "1", "2", "3", "4", "5"]],
+            "ocr_numeric_cell_items": [{"target_row_index": 0, "target_col_index": 3, "value": "999"}],
+            "target_cell_map": target_cell_map,
+        },
+        use_llm=True,
+    )
+
+    assert len(calls) == 3
+    assert result["llm"]["status"] == "partial_failed"
+    assert result["llm"]["failed_chunks"] == 1
+    assert result["llm"]["total_chunks"] == 3
+    assert result["llm"]["error"] == "bad json"
+    assert len(result["patches"]) == 2
+
+
 def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()

@@ -3069,7 +3069,7 @@ export default function OrderWorkflowV2Page() {
                         <span>{sheetAutoEditResult.patches?.length || 0}件 / AI: {formatAiStatus(sheetAutoEditResult.llm?.status)}</span>
                       </div>
                       <p className="subtle">
-                        原本FAX画像・OCR候補・現在のシートを照合して、数字の欠落、読み違い、斜線訂正の可能性を提案します。
+                        原本FAX画像と現在のシートだけを照合し、100%一致と断定できない数量セルに候補を提案します。
                         {sheetAutoEditResult.llm?.fax_image && typeof sheetAutoEditResult.llm.fax_image === "object"
                           ? ` FAX画像: ${formatAiStatus((sheetAutoEditResult.llm.fax_image as Record<string, unknown>).status)}`
                           : ""}
@@ -3093,6 +3093,13 @@ export default function OrderWorkflowV2Page() {
                             </li>
                           ))}
                         </ul>
+                      ) : sheetAutoEditResult.llm?.status === "failed" || sheetAutoEditResult.llm?.status === "partial_failed" ? (
+                        <p className="subtle error">
+                          AI自動編集の解析に失敗しました。
+                          {typeof sheetAutoEditResult.llm?.error === "string" && sheetAutoEditResult.llm.error
+                            ? ` ${sheetAutoEditResult.llm.error}`
+                            : " 候補なしとは判定していません。"}
+                        </p>
                       ) : (
                         <p className="subtle">修正候補はありません。</p>
                       )}

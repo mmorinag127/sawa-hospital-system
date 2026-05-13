@@ -565,6 +565,29 @@ def _target_cells_from_sheet(sheet: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _target_cell_context_items(target_cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "target_cell_id": item.get("target_cell_id") or item.get("sheet_cell"),
+            "sheet_cell": item.get("sheet_cell"),
+            "worksheet_row": item.get("worksheet_row"),
+            "worksheet_col": item.get("worksheet_col"),
+            "target_row_index": item.get("target_row_index"),
+            "target_col_index": item.get("target_col_index"),
+            "bbox": item.get("bbox"),
+            "field": item.get("field") or item.get("semantic_field"),
+            "field_label": item.get("field_label") or item.get("label"),
+            "logical_targets": item.get("logical_targets"),
+        }
+        for item in target_cells
+    ]
+
+
+def _chunk_items(items: list[dict[str, Any]], chunk_size: int) -> list[list[dict[str, Any]]]:
+    safe_size = max(1, chunk_size)
+    return [items[index : index + safe_size] for index in range(0, len(items), safe_size)]
+
+
 def _sheet_context_for_llm(
     sheet: dict[str, Any],
     patches: list[dict[str, Any]],
@@ -574,6 +597,7 @@ def _sheet_context_for_llm(
     include_ocr_sheet_comparison: bool = True,
     include_ocr_context: bool = True,
     include_target_cell_map: bool | None = None,
+    target_cells_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     fields, header, _rows = _sheet_dimensions(sheet)
     include_target_cell_map = include_ocr_context if include_target_cell_map is None else include_target_cell_map
@@ -586,19 +610,15 @@ def _sheet_context_for_llm(
             if include_ocr_context
             else []
         ),
-        "target_cell_map": [
-            {
-                "target_cell_id": item.get("target_cell_id") or item.get("sheet_cell"),
-                "sheet_cell": item.get("sheet_cell"),
-                "worksheet_row": item.get("worksheet_row"),
-                "worksheet_col": item.get("worksheet_col"),
-                "bbox": item.get("bbox"),
-                "field": item.get("field") or item.get("semantic_field"),
-                "field_label": item.get("field_label") or item.get("label"),
-                "logical_targets": item.get("logical_targets"),
-            }
-            for item in (_target_cells_from_sheet(sheet)[:_MAX_LLM_EVIDENCE] if include_target_cell_map else [])
-        ],
+        "target_cell_map": _target_cell_context_items(
+            (
+                target_cells_override
+                if target_cells_override is not None
+                else _target_cells_from_sheet(sheet)[:_MAX_LLM_EVIDENCE]
+            )
+            if include_target_cell_map
+            else []
+        ),
         "computed_context": computed_context or {},
         "rule_patches": patches[:_MAX_LLM_WARNINGS],
         "rule_warnings": (warnings or [])[:_MAX_LLM_WARNINGS],
@@ -768,21 +788,71 @@ def propose_auto_sheet_edits(
             "For corrections or uncertainty reviews, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
-        llm_payload, llm_meta = _gemini_json_request(
-            system_prompt=system_prompt,
-            user_payload=_sheet_context_for_llm(
-                sheet,
-                rule_patches,
-                evidence_payload=None,
-                include_ocr_sheet_comparison=False,
-                include_ocr_context=False,
-                include_target_cell_map=True,
-            ),
-            model=model,
-            array_key="patches",
-            image_png_base64=fax_image_png_base64,
-        )
-        llm_meta["fax_image"] = fax_image_meta or {"status": "not_provided"}
+        try:
+            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "40")), 80))
+        except ValueError:
+            chunk_size = 40
+        target_chunks = _chunk_items(_target_cells_from_sheet(sheet), chunk_size)
+        if not target_chunks:
+            target_chunks = [[]]
+        chunk_meta: list[dict[str, Any]] = []
+        combined_payload_patches: list[dict[str, Any]] = []
+        failed_chunks = 0
+        for chunk_index, target_chunk in enumerate(target_chunks):
+            payload, meta = _gemini_json_request(
+                system_prompt=system_prompt,
+                user_payload=_sheet_context_for_llm(
+                    sheet,
+                    rule_patches,
+                    evidence_payload=None,
+                    computed_context={
+                        "target_chunk_index": chunk_index,
+                        "target_chunk_count": len(target_chunks),
+                        "target_chunk_size": len(target_chunk),
+                    },
+                    include_ocr_sheet_comparison=False,
+                    include_ocr_context=False,
+                    include_target_cell_map=True,
+                    target_cells_override=target_chunk,
+                ),
+                model=model,
+                array_key="patches",
+                image_png_base64=fax_image_png_base64,
+            )
+            chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
+            patch_items = payload.get("patches") if isinstance(payload, dict) else []
+            patch_count = len(patch_items) if isinstance(patch_items, list) else 0
+            chunk_meta.append(
+                {
+                    "chunk_index": chunk_index,
+                    "status": chunk_status or "unknown",
+                    "target_count": len(target_chunk),
+                    "patch_count": patch_count,
+                    "error": meta.get("error") if isinstance(meta, dict) else None,
+                }
+            )
+            if chunk_status != "ok":
+                failed_chunks += 1
+                continue
+            if isinstance(patch_items, list):
+                combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
+        llm_payload = {"patches": combined_payload_patches}
+        if failed_chunks == len(target_chunks):
+            llm_status = "failed"
+        elif failed_chunks:
+            llm_status = "partial_failed"
+        else:
+            llm_status = "ok"
+        first_error = next((item.get("error") for item in chunk_meta if item.get("error")), None)
+        llm_meta = {
+            "status": llm_status,
+            "model": model or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro",
+            "chunks": chunk_meta,
+            "failed_chunks": failed_chunks,
+            "total_chunks": len(target_chunks),
+            "error": first_error,
+            "fax_image": fax_image_meta or {"status": "not_provided"},
+        }
         llm_patches = _normalize_llm_patches(llm_payload, fields, header)
     merged: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
