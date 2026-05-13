@@ -1447,7 +1447,7 @@ def build_hakodate_step_review_for_manifest_item(
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
-    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
     registration, step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,

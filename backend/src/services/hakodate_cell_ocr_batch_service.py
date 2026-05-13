@@ -982,7 +982,7 @@ def _build_preprocess_for_ocr(
         week_sheet_name=week_sheet_name,
     )
     fax_template = _fax_template_for_manifest_item(item, facility_code)
-    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item)
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,

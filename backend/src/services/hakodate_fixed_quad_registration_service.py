@@ -336,8 +336,15 @@ def estimate_edge_locked_quad_from_pdf(
     pdf_path: str | Path,
     *,
     dpi: int = 220,
+    render_width: int | None = None,
 ) -> dict[str, Any]:
-    image = render_pdf_page_to_rgb_at_dpi(pdf_path, dpi=dpi)
+    if render_width is not None:
+        bgr = render_pdf_page_to_bgr(str(pdf_path), width=int(render_width))
+        image = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        coordinate_space = {"mode": "render_width", "width": int(render_width)}
+    else:
+        image = render_pdf_page_to_rgb_at_dpi(pdf_path, dpi=dpi)
+        coordinate_space = {"mode": "dpi", "dpi": int(dpi)}
     arr = np.array(image)
     thresholded = _edge_locked_binarize(arr)
     horizontal_mask, vertical_mask, combined_mask = _edge_locked_masks(thresholded)
@@ -358,6 +365,8 @@ def estimate_edge_locked_quad_from_pdf(
         "reasons": reasons,
         "warnings": warnings,
         "component_source": component_source,
+        "image_size": [int(image.width), int(image.height)],
+        "coordinate_space": coordinate_space,
         "component": component,
         "edge_sources": edge_sources,
         "edge_point_counts": edge_point_counts,
@@ -368,14 +377,26 @@ def estimate_edge_locked_quad_from_pdf(
     }
 
 
-def resolve_fixed_quad_px_for_manifest_item(item: dict[str, Any]) -> tuple[list[list[float]], str, dict[str, Any] | None]:
+def _is_operator_quad_source(source: str) -> bool:
+    normalized = source.strip().lower()
+    return any(token in normalized for token in ("operator", "manual", "user_adjusted", "quad_override"))
+
+
+def resolve_fixed_quad_px_for_manifest_item(
+    item: dict[str, Any],
+    *,
+    render_width: int | None = None,
+) -> tuple[list[list[float]], str, dict[str, Any] | None]:
     quad = item.get("quad_px")
-    if isinstance(quad, list) and len(quad) == 4:
-        return quad, str(item.get("quad_source") or "manifest_quad_px"), None
+    quad_source = str(item.get("quad_source") or "manifest_quad_px")
+    if isinstance(quad, list) and len(quad) == 4 and _is_operator_quad_source(quad_source):
+        return quad, quad_source, None
     pdf_path = item.get("fax_pdf") or item.get("local_pdf")
     if not pdf_path:
+        if isinstance(quad, list) and len(quad) == 4:
+            return quad, quad_source, None
         raise ValueError("quad_px missing and fax_pdf/local_pdf unavailable")
-    estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220)
+    estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220, render_width=render_width)
     if estimate["status"] != "ok":
         raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
     return estimate["refined_quad_px"], "edge_locked_v4_estimated_from_fax_pdf", estimate
@@ -778,7 +799,7 @@ def build_fixed_quad_template_registration(
     template_axes_y: list[int] | None = None,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
     if quad_px is None:
-        estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220)
+        estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220, render_width=render_width)
         if estimate["status"] != "ok":
             raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
         quad_px = estimate["refined_quad_px"]
