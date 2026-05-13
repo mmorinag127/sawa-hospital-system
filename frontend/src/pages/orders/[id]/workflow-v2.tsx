@@ -2160,6 +2160,7 @@ export default function OrderWorkflowV2Page() {
       setSheetJson(formatJson(nextSheet));
       return nextSheet;
     });
+    setSheetAutoEditResult(null);
   };
 
   const applyAnomalyCorrections = () => {
