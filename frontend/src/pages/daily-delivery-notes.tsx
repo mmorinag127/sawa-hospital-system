@@ -27,6 +27,10 @@ type DailyBagBreakdown = {
     facility_label?: string | null;
     area_id?: string | null;
     quantity?: number | null;
+    value_source?: string | null;
+    was_user_edited?: boolean | null;
+    ocr_confidence?: number | null;
+    ocr_confidence_tier?: string | null;
   }[];
 };
 
@@ -58,6 +62,57 @@ type DailyBagSummaryResponse = {
   date?: string | null;
   order_count?: number | null;
   groups?: DailyBagMenuGroup[];
+};
+
+type DailyBagAuditFinding = {
+  finding_id?: string | null;
+  rule_code?: string | null;
+  severity?: "high" | "medium" | "low" | string | null;
+  title?: string | null;
+  message?: string | null;
+  score?: number | null;
+  target?: {
+    date?: string | null;
+    daypart?: string | null;
+    menu_category?: string | null;
+    menu_name?: string | null;
+    diet_type?: string | null;
+    facility_label?: string | null;
+    order_id?: string | null;
+    quantity?: number | null;
+    value_source?: string | null;
+    was_user_edited?: boolean | null;
+    ocr_confidence?: number | null;
+    ocr_confidence_tier?: string | null;
+    cell_image_ref?: string | null;
+  } | null;
+  reference_values?: string[] | null;
+  suggested_action?: string | null;
+};
+
+type DailyBagAuditResponse = {
+  date?: string | null;
+  source?: string | null;
+  rule_based?: {
+    status?: string | null;
+    finding_count?: number | null;
+    cell_count?: number | null;
+    summary_by_severity?: Record<string, number> | null;
+    summary_by_rule?: Record<string, number> | null;
+    findings?: DailyBagAuditFinding[] | null;
+  } | null;
+  ai?: {
+    status?: string | null;
+    model?: string | null;
+    notes?: string | null;
+    error?: string | null;
+    items?: {
+      finding_id?: string | null;
+      priority?: string | null;
+      summary?: string | null;
+      operator_action?: string | null;
+    }[] | null;
+  } | null;
 };
 
 type DailyOutputOverrideVariant = {
@@ -184,11 +239,56 @@ const formatQuantity = (value?: number | null) => {
   return Number(value).toLocaleString("ja-JP");
 };
 
+const auditSeverityLabels: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+const auditRuleLabels: Record<string, string> = {
+  same_day_diet_total_outlier: "同日同区分の外れ値",
+  facility_same_day_outlier: "同施設内の外れ値",
+  low_confidence_unedited_ocr: "低信頼OCR未編集",
+};
+
+const formatAuditSeverity = (value?: string | null) => {
+  const token = String(value || "").trim().toLowerCase();
+  return auditSeverityLabels[token] || token || "-";
+};
+
+const formatAuditRule = (value?: string | null) => {
+  const token = String(value || "").trim();
+  return auditRuleLabels[token] || token || "-";
+};
+
+const formatAuditTarget = (finding: DailyBagAuditFinding) => {
+  const target = finding.target || {};
+  const parts = [
+    target.facility_label || target.order_id || "",
+    target.daypart || "",
+    target.menu_name || "",
+    target.diet_type ? formatDietType(target.diet_type) : "",
+  ].filter(Boolean);
+  return parts.join(" / ") || "-";
+};
+
+const formatOcrScore = (value?: { ocr_confidence?: number | null; ocr_confidence_tier?: string | null; value_source?: string | null; was_user_edited?: boolean | null }) => {
+  if (!value) return "";
+  const score = typeof value.ocr_confidence === "number" && Number.isFinite(value.ocr_confidence)
+    ? `OCR ${value.ocr_confidence.toFixed(2)}`
+    : "";
+  const tier = value.ocr_confidence_tier ? `信頼度 ${value.ocr_confidence_tier}` : "";
+  const source = value.value_source ? `由来 ${value.value_source}` : "";
+  const edited = value.was_user_edited === true ? "編集済" : value.was_user_edited === false ? "未編集" : "";
+  return [score, tier, source, edited].filter(Boolean).join(" / ");
+};
+
 const formatBagOrderRef = (value: NonNullable<DailyBagBreakdown["order_refs"]>[number]) => {
   const parts = [
     value.facility_label || value.order_id || "注文",
     value.area_id ? `${value.area_id}` : "",
     value.quantity != null && !Number.isNaN(value.quantity) ? `${formatQuantity(value.quantity)}食` : "",
+    formatOcrScore(value),
   ].filter(Boolean);
   return parts.join(" / ");
 };
@@ -295,9 +395,12 @@ export default function DailyDeliveryNotesPage() {
   const [message, setMessage] = useState("");
   const [bagMessage, setBagMessage] = useState("");
   const [totalsMessage, setTotalsMessage] = useState("");
+  const [auditMessage, setAuditMessage] = useState("");
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
   const [dailyBagSummary, setDailyBagSummary] = useState<DailyBagSummaryResponse>({});
+  const [dailyBagAudit, setDailyBagAudit] = useState<DailyBagAuditResponse>({});
+  const [auditAiLoading, setAuditAiLoading] = useState(false);
   const [totalsRows, setTotalsRows] = useState<TotalRow[]>([]);
   const [overrideEditor, setOverrideEditor] = useState<DailyOutputOverrideResponse | null>(null);
   const [overrideEditorLoading, setOverrideEditorLoading] = useState(false);
@@ -392,14 +495,17 @@ export default function DailyDeliveryNotesPage() {
     setMessage("");
     setBagMessage("");
     setTotalsMessage("");
+    setAuditMessage("");
     setDailyBagSummary({});
+    setDailyBagAudit({});
     setTotalsRows([]);
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
-      const [ordersRes, bagRes, totalsRes] = await Promise.allSettled([
+      const [ordersRes, bagRes, auditRes, totalsRes] = await Promise.allSettled([
         apiClient.get("/orders/by-line-date", { params }),
         apiClient.get("/orders/daily-bags", { params }),
+        apiClient.get("/orders/daily-bags/audit", { params }),
         apiClient.get("/totals", { params: { date } }),
       ]);
 
@@ -425,6 +531,17 @@ export default function DailyDeliveryNotesPage() {
         setBagMessage("袋分け結果の取得に失敗しました。");
       }
 
+      if (auditRes.status === "fulfilled") {
+        const payload = auditRes.value.data || {};
+        setDailyBagAudit(payload);
+        if (!Number(payload?.rule_based?.finding_count || 0)) {
+          setAuditMessage("ルールベース監査で確認候補はありません。");
+        }
+      } else {
+        setDailyBagAudit({});
+        setAuditMessage("数量監査の取得に失敗しました。");
+      }
+
       if (totalsRes.status === "fulfilled") {
         const rows = Array.isArray(totalsRes.value.data?.rows) ? totalsRes.value.data.rows : [];
         setTotalsRows(rows);
@@ -440,9 +557,37 @@ export default function DailyDeliveryNotesPage() {
       setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
       setOrders([]);
       setDailyBagSummary({});
+      setDailyBagAudit({});
       setTotalsRows([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runAuditAi = async () => {
+    if (!date) return;
+    setAuditAiLoading(true);
+    setAuditMessage("Gemini補助を実行中です...");
+    try {
+      const params: Record<string, string | boolean> = { date, use_ai: true };
+      if (status) params.status = status;
+      const res = await apiClient.get("/orders/daily-bags/audit", { params, timeout: 0 });
+      setDailyBagAudit(res.data || {});
+      const aiStatus = String(res.data?.ai?.status || "");
+      if (aiStatus === "completed") {
+        setAuditMessage("Gemini補助が完了しました。");
+      } else if (aiStatus === "unavailable") {
+        setAuditMessage("Gemini補助はAPIキー未設定のため実行できません。ルールベース監査は利用できます。");
+      } else if (aiStatus === "failed") {
+        setAuditMessage(`Gemini補助に失敗しました: ${res.data?.ai?.error || "unknown"}`);
+      } else {
+        setAuditMessage("Gemini補助は実行対象がありません。");
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setAuditMessage(detail ? `Gemini補助に失敗しました: ${detail}` : "Gemini補助に失敗しました。");
+    } finally {
+      setAuditAiLoading(false);
     }
   };
 
@@ -829,6 +974,21 @@ export default function DailyDeliveryNotesPage() {
     return rows;
   }, [totalsRows]);
 
+  const auditFindings = useMemo(
+    () => (Array.isArray(dailyBagAudit.rule_based?.findings) ? dailyBagAudit.rule_based?.findings || [] : []),
+    [dailyBagAudit],
+  );
+
+  const auditAiItemsById = useMemo(() => {
+    const map = new Map<string, { finding_id?: string | null; priority?: string | null; summary?: string | null; operator_action?: string | null }>();
+    const items = Array.isArray(dailyBagAudit.ai?.items) ? dailyBagAudit.ai?.items || [] : [];
+    items.forEach((item) => {
+      const findingId = String(item?.finding_id || "").trim();
+      if (findingId) map.set(findingId, item);
+    });
+    return map;
+  }, [dailyBagAudit]);
+
   return (
     <main className="page">
       <header className="hero">
@@ -1078,6 +1238,100 @@ export default function DailyDeliveryNotesPage() {
                 </div>
               </section>
             ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
+          <div>
+            <h2>数量監査</h2>
+            <p className="subtle">
+              正解差分がない運用で、日別出力の数量だけから確認候補を出します。Geminiは候補の説明補助で、ルールベース監査は単独で動きます。
+            </p>
+          </div>
+          <div className="actions">
+            <span className="badge">
+              候補 {dailyBagAudit.rule_based?.finding_count ?? auditFindings.length} 件
+            </span>
+            <button className="btn ghost" type="button" onClick={runAuditAi} disabled={loading || auditAiLoading || !auditFindings.length}>
+              {auditAiLoading ? "Gemini実行中..." : "Gemini補助"}
+            </button>
+          </div>
+        </header>
+        {auditMessage ? <p className="subtle">{auditMessage}</p> : null}
+        <div className="audit-summary-row">
+          <span>高: {dailyBagAudit.rule_based?.summary_by_severity?.high || 0}</span>
+          <span>中: {dailyBagAudit.rule_based?.summary_by_severity?.medium || 0}</span>
+          <span>低: {dailyBagAudit.rule_based?.summary_by_severity?.low || 0}</span>
+          <span>対象セル: {dailyBagAudit.rule_based?.cell_count || 0}</span>
+          <span>AI: {dailyBagAudit.ai?.status || "not_requested"}</span>
+        </div>
+        {auditFindings.length === 0 ? (
+          <p className="subtle">確認候補なし</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>重要度</th>
+                  <th>ルール</th>
+                  <th>対象</th>
+                  <th>数量</th>
+                  <th>理由</th>
+                  <th>Gemini補助</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditFindings.map((finding) => {
+                  const aiItem = auditAiItemsById.get(String(finding.finding_id || ""));
+                  return (
+                    <tr key={finding.finding_id || `${finding.rule_code}-${finding.message}`}>
+                      <td>
+                        <span className={`audit-severity audit-severity-${String(finding.severity || "low").toLowerCase()}`}>
+                          {formatAuditSeverity(finding.severity)}
+                        </span>
+                      </td>
+                      <td>{formatAuditRule(finding.rule_code)}</td>
+                      <td>
+                        <div className="audit-target">
+                          <span>{formatAuditTarget(finding)}</span>
+                          {formatOcrScore(finding.target || undefined) ? (
+                            <small>{formatOcrScore(finding.target || undefined)}</small>
+                          ) : null}
+                          {finding.target?.order_id ? (
+                            <Link href={`/orders/${finding.target.order_id}/workflow-v2`} className="link">
+                              注文
+                            </Link>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="numeric">{formatQuantity(finding.target?.quantity)}</td>
+                      <td>
+                        <div className="audit-reason">
+                          <strong>{finding.title || "-"}</strong>
+                          <span>{finding.message || "-"}</span>
+                          {(finding.reference_values || []).length ? (
+                            <small>参照: {(finding.reference_values || []).join(", ")}</small>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td>
+                        {aiItem ? (
+                          <div className="audit-reason">
+                            <strong>{aiItem.priority || "AI"}</strong>
+                            <span>{aiItem.summary || "-"}</span>
+                            {aiItem.operator_action ? <small>{aiItem.operator_action}</small> : null}
+                          </div>
+                        ) : (
+                          <span className="subtle">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
@@ -1711,6 +1965,73 @@ export default function DailyDeliveryNotesPage() {
           gap: 12px;
           font-size: 12px;
           color: #758680;
+        }
+
+        .audit-summary-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 12px 0 14px;
+        }
+
+        .audit-summary-row span {
+          border-radius: 999px;
+          background: #edf3f0;
+          color: #40524d;
+          padding: 6px 10px;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .audit-severity {
+          display: inline-flex;
+          min-width: 34px;
+          justify-content: center;
+          border-radius: 999px;
+          padding: 5px 9px;
+          font-size: 12px;
+          font-weight: 800;
+        }
+
+        .audit-severity-high {
+          background: #ffe0d7;
+          color: #8d2716;
+        }
+
+        .audit-severity-medium {
+          background: #fff0c4;
+          color: #73510b;
+        }
+
+        .audit-severity-low {
+          background: #e4eef8;
+          color: #244d76;
+        }
+
+        .audit-target {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+          min-width: 220px;
+        }
+
+        .audit-reason {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+          min-width: 260px;
+        }
+
+        .audit-reason strong {
+          font-size: 13px;
+          color: #243330;
+        }
+
+        .audit-reason span,
+        .audit-reason small {
+          color: #63736f;
+          font-size: 12px;
+          line-height: 1.5;
         }
 
         .override-modal-backdrop {

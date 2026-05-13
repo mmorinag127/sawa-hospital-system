@@ -1052,6 +1052,22 @@ def get_daily_bags(date: str, facility: str | None = None, status: str | None = 
     return order_service.get_daily_bag_summary(target_date, facility_id=facility, status=status)
 
 
+@router.get("/daily-bags/audit", dependencies=[Depends(require_role("operator"))])
+def get_daily_bags_audit(
+    date: str,
+    facility: str | None = None,
+    status: str | None = None,
+    use_ai: bool = False,
+):
+    target_date = _parse_iso_date(date)
+    return order_service.get_daily_bag_audit(
+        target_date,
+        facility_id=facility,
+        status=status,
+        use_ai=use_ai,
+    )
+
+
 @router.get("/daily-output-overrides", dependencies=[Depends(require_role("operator"))])
 def get_daily_output_overrides(
     date: str,
