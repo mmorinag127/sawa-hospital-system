@@ -2104,7 +2104,10 @@ export default function OrderWorkflowV2Page() {
     setHeaderAxisLoading(true);
     setHeaderAxisMessage("");
     try {
-      const response = await apiClient.get<HeaderAxisReviewPayload>(`/orders/${orderId}/workflow-v2/header-axis-review`);
+      const response = await apiClient.get<HeaderAxisReviewPayload>(
+        `/orders/${orderId}/workflow-v2/header-axis-review`,
+        { timeout: 120000 },
+      );
       setHeaderAxisReview(response.data);
       const savedXs = response.data?.saved_override?.corrected_xs;
       const detectedXs = response.data?.x_positions;
