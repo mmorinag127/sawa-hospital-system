@@ -1212,15 +1212,12 @@ export default function OrderWorkflowV2Page() {
     || workflowBlockers.includes("quad_estimation_failed")
     || Boolean(workflow?.quad_override?.quad_px?.length);
   const stepLabels = useMemo(() => {
-    const headerAxisStep = { step: 1.6, label: "ヘッダー補正" };
-    if (!quadReviewRequired) return [baseStepLabels[0], headerAxisStep, ...baseStepLabels.slice(1)];
-    return [
-      baseStepLabels[0],
-      { step: 1.5, label: "4点確認/補正" },
-      headerAxisStep,
-      ...baseStepLabels.slice(1),
-    ];
-  }, [quadReviewRequired]);
+    const labels = [baseStepLabels[0]];
+    if (quadReviewRequired || visibleStep === 1.5) labels.push({ step: 1.5, label: "4点確認/補正" });
+    if (visibleStep === 1.6) labels.push({ step: 1.6, label: "ヘッダー補正" });
+    labels.push(...baseStepLabels.slice(1));
+    return labels;
+  }, [quadReviewRequired, visibleStep]);
   const ocrPrerequisiteBlockers = workflowBlockers.filter((item) =>
     [
       "menu_entries_missing",
@@ -4019,7 +4016,7 @@ export default function OrderWorkflowV2Page() {
                               key={`sheet-review-${entry.rowIndex}-${entry.colIndex}`}
                               className="sheet-review-value"
                               style={{
-                                left: `${entry.box.left + entry.box.width + 8}px`,
+                                left: `${entry.box.left + entry.box.width + 6}px`,
                                 top: `${entry.box.top + 3}px`,
                               }}
                               title={`R${entry.rowIndex + 1} C${entry.colIndex + 1}: ${entry.value}`}
