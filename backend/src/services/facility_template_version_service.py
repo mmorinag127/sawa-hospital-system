@@ -450,6 +450,10 @@ def _resolved_config_from_parts(
     resolved["facility_id"] = facility_id
     if facility_name:
         resolved["facility_name"] = facility_name
+    facility_template_id = str(facility_name or facility_id or "").strip()
+    if facility_template_id:
+        resolved["facility_template_id"] = facility_template_id
+        resolved["facility_template_name"] = facility_template_id
     if template_id:
         resolved["fax_template_id"] = template_id
         resolved.setdefault("fax_template_ids", [template_id])
@@ -460,6 +464,9 @@ def _resolved_config_from_parts(
     fax_template["main_ocr_row_fields"] = derive_row_fields_from_columns(columns)
     fax_template["facility_template_version_id"] = version.id
     fax_template["facility_template_version_digest"] = version.template_digest
+    if facility_template_id:
+        fax_template["facility_template_id"] = facility_template_id
+        fax_template["facility_template_name"] = facility_template_id
     resolved["fax_template"] = fax_template
     resolved["facility_template_version_id"] = version.id
     resolved["facility_template_version"] = serialize_template_version(version)
@@ -534,13 +541,47 @@ def save_columns_for_order(
     if facility is None:
         return None, "facility_not_found"
 
+    facility_template_id = str(getattr(facility, "name", None) or facility_id).strip()
     current_config = facility.config.config_json if facility.config and isinstance(facility.config.config_json, dict) else {}
+    resolved_current_config = config_service.get_facility_config(facility_id) or {}
+    canonical_template_id = (
+        str(current_config.get("fax_template_id") or "").strip()
+        or str(resolved_current_config.get("fax_template_id") or "").strip()
+        or str(
+            (
+                (resolved_current_config.get("fax_template") or {}).get("template_id")
+                if isinstance(resolved_current_config.get("fax_template"), dict)
+                else ""
+            )
+            or ""
+        ).strip()
+        or None
+    )
+    canonical_template_ids = [
+        str(item or "").strip()
+        for item in (
+            current_config.get("fax_template_ids")
+            if isinstance(current_config.get("fax_template_ids"), list)
+            else resolved_current_config.get("fax_template_ids")
+            if isinstance(resolved_current_config.get("fax_template_ids"), list)
+            else []
+        )
+        if str(item or "").strip()
+    ]
+    if canonical_template_id and canonical_template_id not in canonical_template_ids:
+        canonical_template_ids.insert(0, canonical_template_id)
     normalized_columns = normalize_template_columns(columns)
     column_validation = validate_template_columns(normalized_columns)
     if column_validation["errors"]:
         return {"validation": column_validation}, "validation_error"
 
     next_config = deepcopy(current_config)
+    if canonical_template_id:
+        next_config["fax_template_id"] = canonical_template_id
+        next_config["fax_template_ids"] = canonical_template_ids or [canonical_template_id]
+    if facility_template_id:
+        next_config["facility_template_id"] = facility_template_id
+        next_config["facility_template_name"] = facility_template_id
     override = deepcopy(next_config.get("fax_template_override") or {})
     override["columns"] = normalized_columns
     override["columns_authoritative"] = True
@@ -581,7 +622,7 @@ def save_columns_for_order(
     template_id = (
         str(sanitized.get("fax_template_id") or "").strip()
         or str((sanitized.get("fax_template_ids") or [None])[0] or "").strip()
-        or str((current_config.get("fax_template_id") if isinstance(current_config, dict) else "") or "").strip()
+        or str(canonical_template_id or "").strip()
         or None
     )
     digest = template_digest(template_id=template_id, columns=normalized_columns)
@@ -595,7 +636,11 @@ def save_columns_for_order(
         columns_json=normalized_columns,
         cells_json=[],
         template_digest=digest,
-        validation_json=validation,
+        validation_json={
+            **validation,
+            "facility_template_id": facility_template_id or None,
+            "layout_template_id": template_id,
+        },
         created_by=actor,
         created_at=now,
         activated_at=now,

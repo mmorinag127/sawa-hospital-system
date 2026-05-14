@@ -1518,6 +1518,11 @@ def _workflow_v2_or_404(result: tuple[dict | None, str | None]) -> dict:
     payload, error = result
     if error == "order_not_found":
         raise HTTPException(status_code=404, detail=error)
+    if error == "validation_error":
+        detail = dict(payload or {})
+        detail.setdefault("error", "validation_error")
+        detail.setdefault("message", "施設テンプレート列の検証に失敗しました。エラー内容を確認して修正してください。")
+        raise HTTPException(status_code=400, detail=detail)
     if error:
         raise HTTPException(status_code=400, detail=error)
     return payload or {}

@@ -48,6 +48,31 @@ def test_workflow_v2_facility_template_columns_is_the_only_write_endpoint(monkey
     assert legacy.json()["detail"]["replacement"] == "workflow-v2"
 
 
+def test_workflow_v2_facility_template_columns_validation_error_is_actionable(monkeypatch) -> None:
+    client = TestClient(app)
+
+    def fake_save(order_id: str, columns: list[dict]) -> tuple[dict, str]:
+        _ = order_id, columns
+        return {
+            "validation": {
+                "errors": ["template_source_index_missing"],
+                "warnings": [],
+            },
+        }, "validation_error"
+
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "save_facility_template_columns", fake_save)
+
+    res = client.put(
+        "/orders/ORDcontract/workflow-v2/facility-template-columns",
+        json={"columns": [{"role": "quantity", "header": "常食"}]},
+    )
+
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert detail["error"] == "validation_error"
+    assert detail["validation"]["errors"] == ["template_source_index_missing"]
+
+
 def test_workflow_v2_ocr_run_blocks_unresolved_template_before_job_enqueue(monkeypatch) -> None:
     client = TestClient(app)
 

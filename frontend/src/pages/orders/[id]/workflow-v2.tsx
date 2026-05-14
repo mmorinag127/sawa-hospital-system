@@ -235,6 +235,7 @@ type FacilityTemplateStatus = {
   facilityId: string;
   templateId: string;
   templateIds: string[];
+  facilityTemplateId: string;
   loading: boolean;
   error: string;
 };
@@ -287,6 +288,17 @@ const formatApiError = (err: any, fallback: string) => {
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
     const error = (detail as { error?: unknown }).error;
+    if (error === "validation_error") {
+      const validation = (detail as { validation?: { errors?: unknown; warnings?: unknown } }).validation;
+      const errors = Array.isArray(validation?.errors)
+        ? validation.errors.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      const message = (detail as { message?: unknown }).message;
+      const prefix = typeof message === "string" && message.trim()
+        ? message.trim()
+        : "施設テンプレート列の検証に失敗しました。";
+      return errors.length ? `${prefix} ${errors.join(" / ")}` : prefix;
+    }
     if (error === "menu_entries_missing" || error === "monthly_menu_object_missing" || error === "monthly_menu_lookup_failed") {
       return "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。";
     }
@@ -997,6 +1009,7 @@ export default function OrderWorkflowV2Page() {
     facilityId: "",
     templateId: "",
     templateIds: [],
+    facilityTemplateId: "",
     loading: false,
     error: "",
   });
@@ -1491,6 +1504,7 @@ export default function OrderWorkflowV2Page() {
         facilityId: "",
         templateId: "",
         templateIds: [],
+        facilityTemplateId: "",
         loading: false,
         error: "",
       });
@@ -1517,6 +1531,7 @@ export default function OrderWorkflowV2Page() {
       const templateIds = Array.isArray(resolved?.fax_template_ids)
         ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
         : [];
+      const facilityTemplateId = String(resolved?.facility_template_id || resolved?.facility_template_name || "").trim();
       setFacilityResolvedConfig(resolved);
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
@@ -1527,6 +1542,7 @@ export default function OrderWorkflowV2Page() {
         facilityId: normalizedFacilityId,
         templateId,
         templateIds,
+        facilityTemplateId,
         loading: false,
         error: "",
       });
@@ -1536,6 +1552,7 @@ export default function OrderWorkflowV2Page() {
         facilityId: normalizedFacilityId,
         templateId: "",
         templateIds: [],
+        facilityTemplateId: "",
         loading: false,
         error: formatApiError(err, "施設テンプレート設定を取得できませんでした"),
       });
@@ -1791,6 +1808,7 @@ export default function OrderWorkflowV2Page() {
           templateIds: Array.isArray(resolved?.fax_template_ids)
             ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
             : [templateId],
+          facilityTemplateId: String(resolved?.facility_template_id || resolved?.facility_template_name || contextFacilityLabel || facilityId),
           loading: false,
           error: "",
         });
@@ -2834,9 +2852,14 @@ export default function OrderWorkflowV2Page() {
                     {facilityTemplateStatus.loading
                       ? "施設テンプレート設定を確認中です。"
                       : facilityTemplateStatus.templateId
-                        ? `登録済み: ${formatFaxTemplateOptionLabel(selectedFacilityRegisteredTemplateOption) || facilityTemplateStatus.templateId}`
+                        ? `登録済み: ${facilityTemplateStatus.facilityTemplateId || contextFacilityLabel}`
                         : "この施設には帳票レイアウトが登録されていません。未登録のままOCRは実行できません。"}
                   </p>
+                  {facilityTemplateStatus.templateId ? (
+                    <p className="subtle">
+                      帳票レイアウト: {formatFaxTemplateOptionLabel(selectedFacilityRegisteredTemplateOption) || facilityTemplateStatus.templateId}
+                    </p>
+                  ) : null}
                   {selectedFacility ? (
                     <p className="subtle">対象施設: {formatFacilityLabel(selectedFacility)}</p>
                   ) : null}
