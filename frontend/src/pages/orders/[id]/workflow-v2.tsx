@@ -241,6 +241,7 @@ type OverlayBox = {
 
 type ConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
 type Step3LayoutMode = "side-by-side" | "stacked";
+type OcrPreviewMode = "overlay" | "original" | "sheet";
 type OcrRunMode = "hakodate" | "llm";
 type OutputPreviewType = "labels" | "delivery" | "aggregate";
 type OutputPreview = {
@@ -652,8 +653,8 @@ const stateLabel = (state?: string | null) => {
     ocr_selected: "Step2完了: 正解OCR選択済み",
     sheet_saved: "Step3完了: シート保存済み",
     bagging_ready: "Step4: 袋分け確認",
-    bagging_confirmed: "Step4完了: 出力確認待ち",
-    output_review: "Step5: 出力確認",
+    bagging_confirmed: "Step4: 出力確認待ち",
+    output_review: "Step4: 出力確認",
     confirmed: "確定済み",
   };
   return labels[normalized] || normalized || "未開始";
@@ -682,8 +683,8 @@ const stepIndexForState = (state?: string | null) => {
   if (["ocr_selected"].includes(normalized)) return 3;
   if (["sheet_saved"].includes(normalized)) return 4;
   if (["bagging_ready"].includes(normalized)) return 4;
-  if (["bagging_confirmed"].includes(normalized)) return 5;
-  if (["output_review", "confirmed"].includes(normalized)) return 5;
+  if (["bagging_confirmed"].includes(normalized)) return 4;
+  if (["output_review", "confirmed"].includes(normalized)) return 4;
   return 1;
 };
 
@@ -691,8 +692,7 @@ const baseStepLabels = [
   { step: 1, label: "PDF/施設/週次" },
   { step: 2, label: "OCR選択" },
   { step: 3, label: "シート編集" },
-  { step: 4, label: "袋分け" },
-  { step: 5, label: "出力確認" },
+  { step: 4, label: "袋分け・出力確認" },
 ];
 
 const formatFacilityLabel = (facility: FacilityOption) => {
@@ -1115,6 +1115,7 @@ export default function OrderWorkflowV2Page() {
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
+  const [ocrPreviewMode, setOcrPreviewMode] = useState<OcrPreviewMode>("overlay");
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
@@ -1483,6 +1484,20 @@ export default function OrderWorkflowV2Page() {
   const renderedTargetCells = targetCells
     .map((item) => ({ item, box: resolveTargetOverlayBox(item) }))
     .filter((entry): entry is { item: TargetCellMapItem; box: OverlayBox } => Boolean(entry.box));
+
+  const sheetReviewItems = useMemo(() => {
+    if (!sheetPayload) return [];
+    return renderedTargetCells
+      .map(({ item, box }) => {
+        const rowIndex = item.target_row_index;
+        const colIndex = item.target_col_index;
+        const field = String(sheetPayload.fields?.[colIndex] || item.field || "").trim();
+        const value = String(sheetPayload.rows?.[rowIndex]?.[colIndex] || "").trim();
+        if (!value || isLockedSheetField(field)) return null;
+        return { item, box, value, rowIndex, colIndex, field };
+      })
+      .filter((item): item is { item: TargetCellMapItem; box: OverlayBox; value: string; rowIndex: number; colIndex: number; field: string } => Boolean(item));
+  }, [renderedTargetCells, sheetPayload]);
 
   const focusedTargetBox = resolveTargetOverlayBox(focusedTargetCell);
   const focusedField = focusedSheetCell ? String(sheetPayload?.fields?.[focusedSheetCell.colIndex] || "").trim() : "";
@@ -2721,7 +2736,7 @@ export default function OrderWorkflowV2Page() {
       },
       {
         successMessage: "袋分けを確定しました",
-        nextStep: 5,
+        nextStep: 4,
       },
     );
 
@@ -2733,7 +2748,7 @@ export default function OrderWorkflowV2Page() {
       },
       {
         successMessage: "出力確認を作成しました",
-        nextStep: 5,
+        nextStep: 4,
       },
     );
 
@@ -3690,19 +3705,52 @@ export default function OrderWorkflowV2Page() {
                     <div className="ocr-overlay-preview-card">
                       <div className="preview-header">
                         <div>
-                          <span className="field-label">OCR Overlay</span>
-                          <p className="subtle">このOCR結果に紐づくoverlay成果物です。</p>
+                          <span className="field-label">{ocrPreviewMode === "original" ? "原本PDF" : "OCR Overlay"}</span>
+                          <p className="subtle">
+                            {ocrPreviewMode === "original"
+                              ? "この注文の原本FAX PDFです。"
+                              : "このOCR結果に紐づくoverlay成果物です。"}
+                          </p>
                         </div>
-                        {item.overlay_url ? (
-                          <a className="ghost-link" href={item.overlay_url} target="_blank" rel="noreferrer">
-                            別タブで開く
-                          </a>
-                        ) : null}
+                        <div className="preview-header-actions">
+                          <div className="preview-mode-toggle" aria-label="OCR preview display mode">
+                            <button
+                              className={ocrPreviewMode !== "original" ? "active" : ""}
+                              type="button"
+                              onClick={() => setOcrPreviewMode("overlay")}
+                            >
+                              オーバーレイ
+                            </button>
+                            <button
+                              className={ocrPreviewMode === "original" ? "active" : ""}
+                              type="button"
+                              onClick={() => setOcrPreviewMode("original")}
+                            >
+                              原本PDF
+                            </button>
+                          </div>
+                          {ocrPreviewMode !== "original" && item.overlay_url ? (
+                            <a className="ghost-link" href={item.overlay_url} target="_blank" rel="noreferrer">
+                              別タブで開く
+                            </a>
+                          ) : null}
+                          {ocrPreviewMode === "original" && pdfUrl ? (
+                            <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
+                              別タブで開く
+                            </a>
+                          ) : null}
+                        </div>
                       </div>
-                      {item.overlay_url ? (
+                      {ocrPreviewMode !== "original" && item.overlay_url ? (
                         <img className="ocr-overlay-preview-image" src={item.overlay_url} alt={`${item.ocr_result_id} overlay`} />
+                      ) : ocrPreviewMode === "original" && pdfUrl ? (
+                        <iframe title={`${item.ocr_result_id}-original-pdf`} src={pdfUrl} className="ocr-overlay-preview-pdf" />
                       ) : (
-                        <div className="preview-placeholder">{item.overlay_message || "overlay成果物がありません。"}</div>
+                        <div className="preview-placeholder">
+                          {ocrPreviewMode === "overlay"
+                            ? item.overlay_message || "overlay成果物がありません。"
+                            : pdfError || "原本PDFを読み込み中..."}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3754,6 +3802,9 @@ export default function OrderWorkflowV2Page() {
               <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
                 異常を補正
               </button>
+              <button className="btn ghost" type="button" onClick={() => setOcrPreviewMode("sheet")} disabled={Boolean(!sheetPayload || !selectedOcr?.overlay_url)}>
+                シート確認
+              </button>
               <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
                 {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
               </button>
@@ -3788,17 +3839,57 @@ export default function OrderWorkflowV2Page() {
               <div className="step3-overlay-pane">
                 <div className="preview-header">
                   <div>
-                    <span className="field-label">OCR Overlay</span>
-                    <p className="subtle">現在セルに対応する行・列をoverlay上に表示します。</p>
+                    <span className="field-label">
+                      {ocrPreviewMode === "sheet" ? "シート確認" : ocrPreviewMode === "overlay" ? "OCR Overlay" : "原本PDF"}
+                    </span>
+                    <p className="subtle">
+                      {ocrPreviewMode === "sheet"
+                        ? "現在のシート値を対象セル右上に重ねて確認します。"
+                        : ocrPreviewMode === "overlay"
+                          ? "現在セルに対応する行・列をoverlay上に表示します。"
+                          : "原本FAX PDFを確認します。カーソル表示はoverlay/シート確認時だけ有効です。"}
+                    </p>
                   </div>
-                  {selectedOcr?.overlay_url ? (
-                    <a className="ghost-link" href={selectedOcr.overlay_url} target="_blank" rel="noreferrer">
-                      別タブで開く
-                    </a>
-                  ) : null}
+                  <div className="preview-header-actions">
+                    <div className="preview-mode-toggle" aria-label="Step3 preview display mode">
+                      <button
+                        className={ocrPreviewMode === "overlay" ? "active" : ""}
+                        type="button"
+                        onClick={() => setOcrPreviewMode("overlay")}
+                      >
+                        オーバーレイ
+                      </button>
+                      <button
+                        className={ocrPreviewMode === "original" ? "active" : ""}
+                        type="button"
+                        onClick={() => setOcrPreviewMode("original")}
+                      >
+                        原本PDF
+                      </button>
+                      <button
+                        className={ocrPreviewMode === "sheet" ? "active" : ""}
+                        type="button"
+                        onClick={() => setOcrPreviewMode("sheet")}
+                      >
+                        シート確認
+                      </button>
+                    </div>
+                    {ocrPreviewMode !== "original" && selectedOcr?.overlay_url ? (
+                      <a className="ghost-link" href={selectedOcr.overlay_url} target="_blank" rel="noreferrer">
+                        別タブで開く
+                      </a>
+                    ) : null}
+                    {ocrPreviewMode === "original" && pdfUrl ? (
+                      <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
+                        別タブで開く
+                      </a>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="step3-overlay-canvas">
-                  {selectedOcr?.overlay_url ? (
+                  {ocrPreviewMode === "original" && pdfUrl ? (
+                    <iframe title="workflow-v2-step3-original-pdf" src={pdfUrl} className="step3-overlay-pdf" />
+                  ) : ocrPreviewMode !== "original" && selectedOcr?.overlay_url ? (
                     <>
                       <img
                         ref={overlayImageRef}
@@ -3858,9 +3949,30 @@ export default function OrderWorkflowV2Page() {
                           {focusedTargetBox ? " / overlay対応あり" : " / overlay対応なし"}
                         </span>
                       ) : null}
+                      {ocrPreviewMode === "sheet" ? (
+                        <div className="sheet-review-overlay" aria-label="sheet values overlay">
+                          {sheetReviewItems.map((entry) => (
+                            <span
+                              key={`sheet-review-${entry.rowIndex}-${entry.colIndex}`}
+                              className="sheet-review-value"
+                              style={{
+                                left: `${entry.box.left + entry.box.width - 4}px`,
+                                top: `${entry.box.top + 3}px`,
+                              }}
+                              title={`R${entry.rowIndex + 1} C${entry.colIndex + 1}: ${entry.value}`}
+                            >
+                              {entry.value}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </>
                   ) : (
-                    <div className="preview-placeholder">{selectedOcr?.overlay_message || "overlay成果物がありません。"}</div>
+                    <div className="preview-placeholder">
+                      {ocrPreviewMode === "overlay"
+                        ? selectedOcr?.overlay_message || "overlay成果物がありません。"
+                        : pdfError || "原本PDFを読み込み中..."}
+                    </div>
                   )}
                 </div>
               </div>
@@ -4181,7 +4293,7 @@ export default function OrderWorkflowV2Page() {
                 袋分けを計算
               </button>
               <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
-                確定して次へ
+                袋分けを確定
               </button>
             </div>
           </header>
@@ -4266,9 +4378,9 @@ export default function OrderWorkflowV2Page() {
         </section>
         ) : null}
 
-        {visibleStep === 5 ? (
+        {visibleStep === 4 ? (
         <section className="panel">
-          <p className="step-tag">Step5</p>
+          <p className="step-tag">Step4</p>
           <header className="panel-header">
             <div>
               <h2>出力確認</h2>
@@ -5181,6 +5293,15 @@ export default function OrderWorkflowV2Page() {
           min-width: 920px;
           width: 100%;
         }
+        .step3-overlay-pdf {
+          background: #fff;
+          border: 0;
+          display: block;
+          height: 82vh;
+          min-height: 760px;
+          min-width: 920px;
+          width: 100%;
+        }
         .overlay-row-highlight,
         .overlay-col-highlight,
         .overlay-cell-highlight {
@@ -5218,6 +5339,28 @@ export default function OrderWorkflowV2Page() {
         .overlay-cursor-caption.missing {
           background: rgba(232, 238, 244, 0.94);
           color: #46515a;
+        }
+        .sheet-review-overlay {
+          inset: 0;
+          pointer-events: none;
+          position: absolute;
+          z-index: 5;
+        }
+        .sheet-review-value {
+          background: rgba(255, 255, 255, 0.84);
+          border: 1px solid rgba(196, 45, 28, 0.35);
+          border-radius: 999px;
+          box-shadow: 0 4px 10px rgba(20, 30, 24, 0.16);
+          color: #c42d1c;
+          font-size: 15px;
+          font-weight: 950;
+          line-height: 1;
+          min-width: 1.4em;
+          padding: 3px 5px;
+          position: absolute;
+          text-align: center;
+          transform: translateX(-100%);
+          white-space: nowrap;
         }
         .sheet-toolbar {
           border-bottom: 1px solid #e5dece;
@@ -5833,11 +5976,47 @@ export default function OrderWorkflowV2Page() {
           gap: 12px;
           padding: 10px 12px;
         }
+        .preview-header-actions {
+          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          justify-content: flex-end;
+        }
+        .preview-mode-toggle {
+          background: #f3efe5;
+          border: 1px solid #ded5c2;
+          border-radius: 999px;
+          display: inline-flex;
+          gap: 2px;
+          padding: 3px;
+        }
+        .preview-mode-toggle button {
+          background: transparent;
+          border: 0;
+          border-radius: 999px;
+          color: #516056;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 900;
+          padding: 7px 10px;
+        }
+        .preview-mode-toggle button.active {
+          background: #1b2a22;
+          color: #fffdf7;
+        }
         .ocr-overlay-preview-image {
           background: #ffffff;
           display: block;
           max-height: 78vh;
           object-fit: contain;
+          width: 100%;
+        }
+        .ocr-overlay-preview-pdf {
+          background: #fff;
+          border: 0;
+          display: block;
+          height: 580px;
           width: 100%;
         }
         .digest {
