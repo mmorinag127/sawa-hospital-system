@@ -28,6 +28,7 @@ from src.services.storage_service import load_bytes_from_uri
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 SHEET_AUTO_EDIT_JOB_META_KEY = "sheet_auto_edit_job"
+HAKODATE_LIVE_RENDER_WIDTH = 1864
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
 _WORKFLOW_V2_CANONICAL_STATES = {
     "uploaded",
@@ -1123,7 +1124,7 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         render_pdf_page_to_bgr,
     )
 
-    render_width = 2000
+    render_width = HAKODATE_LIVE_RENDER_WIDTH
     with tempfile.TemporaryDirectory(prefix="sawa_quad_review_") as tmp_dir:
         pdf_path = Path(tmp_dir) / f"{order_id}.pdf"
         pdf_path.write_bytes(pdf_bytes)
@@ -1157,6 +1158,7 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             "gap_max_px_est_max": 140,
             "max_abs_offset_px_borderline_max": 24,
         },
+        "coordinate_space": {"mode": "render_width", "width": render_width},
         "source": "workflow_v2_quad_review",
     }, None
 
@@ -1184,6 +1186,7 @@ def save_quad_review_decision(
             "quad_px": normalized_quad,
             "quad_source": source,
             "decision": normalized_decision,
+            "coordinate_space": {"mode": "render_width", "width": HAKODATE_LIVE_RENDER_WIDTH},
             "created_at": _now().isoformat(),
         }
         meta["latest_ocr_error"] = None

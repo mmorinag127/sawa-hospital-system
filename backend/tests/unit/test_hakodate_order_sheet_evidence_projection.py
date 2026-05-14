@@ -1220,3 +1220,37 @@ def test_hakodate_evidence_projection_ignores_outside_active_sheet_rows() -> Non
     assert projection["metrics"]["ignored_count"] == 1
     assert projection["ignored"][0]["sheet_cell"] == "E12"
     assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
+
+
+def test_operator_quad_override_requires_live_render_coordinate_space() -> None:
+    valid = {
+        "quad_px": [[10, 20], [1800, 20], [1800, 2600], [10, 2600]],
+        "quad_source": "operator_manual",
+        "coordinate_space": {"mode": "render_width", "width": 1864},
+    }
+    quad, source = order_service._normalize_operator_quad_override(valid, render_width=1864)  # noqa: SLF001
+
+    assert quad == [[10.0, 20.0], [1800.0, 20.0], [1800.0, 2600.0], [10.0, 2600.0]]
+    assert source == "operator_manual"
+
+    wrong_space = {
+        "quad_px": [[10, 20], [1896, 20], [1896, 2600], [10, 2600]],
+        "quad_source": "operator_manual",
+        "coordinate_space": {"mode": "render_width", "width": 2000},
+    }
+    quad, source = order_service._normalize_operator_quad_override(wrong_space, render_width=1864)  # noqa: SLF001
+
+    assert quad is None
+    assert source is None
+
+
+def test_operator_quad_override_without_space_cannot_exceed_live_render_width() -> None:
+    legacy_wrong_space = {
+        "quad_px": [[157.08, 554.7], [1896.77, 570.71], [1880.98, 2636.23], [146.47, 2620.49]],
+        "quad_source": "operator_approved_estimate",
+    }
+
+    quad, source = order_service._normalize_operator_quad_override(legacy_wrong_space, render_width=1864)  # noqa: SLF001
+
+    assert quad is None
+    assert source is None

@@ -116,9 +116,23 @@ HAKODATE_CANONICAL_PIPELINE_VERSION = "hakodate_best_method_canonical_v2"
 WORKFLOW_V2_META_KEY = "workflow_v2"
 
 
-def _normalize_operator_quad_override(value: object) -> tuple[list[list[float]] | None, str | None]:
+def _normalize_operator_quad_override(
+    value: object,
+    *,
+    render_width: int | None = None,
+) -> tuple[list[list[float]] | None, str | None]:
     if not isinstance(value, dict):
         return None, None
+    coordinate_space = value.get("coordinate_space")
+    if render_width is not None and isinstance(coordinate_space, dict):
+        mode = str(coordinate_space.get("mode") or "").strip()
+        width = coordinate_space.get("width")
+        try:
+            width_value = int(width)
+        except (TypeError, ValueError):
+            return None, None
+        if mode != "render_width" or width_value != int(render_width):
+            return None, None
     quad = value.get("quad_px")
     if not isinstance(quad, list) or len(quad) != 4:
         return None, None
@@ -132,6 +146,8 @@ def _normalize_operator_quad_override(value: object) -> tuple[list[list[float]] 
         except (TypeError, ValueError):
             return None, None
         if x < 0 or y < 0:
+            return None, None
+        if render_width is not None and x > float(render_width) + 1.0:
             return None, None
         normalized.append([round(x, 2), round(y, 2)])
     source = str(value.get("quad_source") or "operator_manual").strip() or "operator_manual"
@@ -8362,7 +8378,10 @@ def _build_live_hakodate_manifest_item(
             raw_meta = workflow.secondary_actions_json.get("workflow_v2")
             workflow_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         selected_template_id = str(workflow_meta.get("template_id") or "").strip() or None
-        quad_override_px, quad_override_source = _normalize_operator_quad_override(workflow_meta.get("quad_override"))
+        quad_override_px, quad_override_source = _normalize_operator_quad_override(
+            workflow_meta.get("quad_override"),
+            render_width=render_width,
+        )
     if not document_uri:
         raise ValueError("document_missing")
     week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
