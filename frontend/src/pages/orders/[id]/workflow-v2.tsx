@@ -335,6 +335,9 @@ const formatApiError = (err: any, fallback: string) => {
   if (detail === "facility_template_unresolved") {
     return "施設テンプレートが未登録です。下の「施設テンプレート登録」で帳票レイアウトを登録してから、Step1を保存してください。";
   }
+  if (detail === "selected_ocr_required" || detail === "selected_ocr_missing") {
+    return "正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。";
+  }
   if (detail === "fax_template_id_required") return "帳票レイアウトを選択してください。";
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
@@ -2189,6 +2192,12 @@ export default function OrderWorkflowV2Page() {
         force: true,
         mode: "hakodate",
       }, { timeout: timeoutMs });
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
+      setSheetAutoEditResult(null);
+      setLocalAnomalyReview(null);
+      setSelectedAnomalyIndex(null);
+      setSelectedAutoEditIndex(null);
       setMessage("ヘッダー交点補正を保存し、OCRを再実行しました。");
       setVisibleStep(2);
     } catch (err: any) {
@@ -2657,6 +2666,12 @@ export default function OrderWorkflowV2Page() {
 
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
+      const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`);
+      setWorkflow(latestWorkflow.data);
+      if (!latestWorkflow.data?.selected_ocr_result_id) {
+        setVisibleStep(2);
+        throw new Error("正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。");
+      }
       const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
       if (!parsed) {
         throw new Error("保存できるシートがありません");
@@ -3712,6 +3727,11 @@ export default function OrderWorkflowV2Page() {
         <section className="panel step3-panel">
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
+          {!workflow?.selected_ocr_result_id ? (
+            <div className="notice warning">
+              正解OCRが未選択です。Step2でOCR結果を一つ選択するまで、シート生成・保存はできません。
+            </div>
+          ) : null}
           <div className="row-actions step3-top-actions">
             <div className="step3-top-actions-left">
               <button
