@@ -289,9 +289,19 @@ const formatApiError = (err: any, fallback: string) => {
   if (detail && typeof detail === "object") {
     const error = (detail as { error?: unknown }).error;
     if (error === "validation_error") {
+      const validationErrorLabels: Record<string, string> = {
+        template_source_index_missing: "列の物理位置を自動解決できませんでした。ページを再読み込みしてから、列設定をもう一度保存してください。",
+        template_source_index_invalid: "列の物理位置が不正です。ページを再読み込みしてから、列設定をもう一度保存してください。",
+        template_source_index_duplicate: "同じ物理列に複数の列が割り当てられています。列の追加/削除後に再読み込みしてから保存してください。",
+        template_quantity_columns_missing: "数量列がありません。少なくとも1つの数量列を残してください。",
+        template_columns_missing: "保存する列がありません。",
+      };
       const validation = (detail as { validation?: { errors?: unknown; warnings?: unknown } }).validation;
       const errors = Array.isArray(validation?.errors)
-        ? validation.errors.map((item) => String(item || "").trim()).filter(Boolean)
+        ? validation.errors
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .map((item) => validationErrorLabels[item] || item)
         : [];
       const message = (detail as { message?: unknown }).message;
       const prefix = typeof message === "string" && message.trim()

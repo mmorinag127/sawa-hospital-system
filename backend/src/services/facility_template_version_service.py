@@ -64,6 +64,74 @@ def _source_index_required(column: dict[str, Any]) -> bool:
     return _normalize_token(column.get("role")) in _SOURCE_INDEX_REQUIRED_ROLES
 
 
+def _source_index_match_key(column: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        _normalize_token(column.get("role")),
+        str(column.get("header") or "").strip(),
+        str(column.get("header_group") or "").strip(),
+        str(column.get("name") or "").strip(),
+    )
+
+
+def _repair_missing_source_indexes(
+    columns: list[dict[str, Any]],
+    *,
+    reference_columns: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    source_index is an internal physical-column mapping. Operators should only
+    edit visible column order/name/header; missing mappings are repaired from
+    the current canonical template or appended as the next unused physical
+    column.
+    """
+    next_columns = [deepcopy(column) for column in columns]
+    references = [deepcopy(column) for column in (reference_columns or [])]
+    used = {
+        source_index
+        for column in next_columns
+        if (source_index := _parse_source_index(column)) is not None
+    }
+    reference_used = {
+        source_index
+        for column in references
+        if (source_index := _parse_source_index(column)) is not None
+    }
+    reference_by_index = {
+        int(column.get("index")): column
+        for column in references
+        if isinstance(column.get("index"), int) and _parse_source_index(column) is not None
+    }
+    reference_by_key: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for column in references:
+        if _parse_source_index(column) is None:
+            continue
+        reference_by_key.setdefault(_source_index_match_key(column), []).append(column)
+
+    next_source_index = max(used | reference_used | {-1}) + 1
+    for idx, column in enumerate(next_columns):
+        if not _source_index_required(column) or _parse_source_index(column) is not None:
+            continue
+        candidates: list[dict[str, Any]] = []
+        reference_same_index = reference_by_index.get(idx)
+        if reference_same_index is not None:
+            candidates.append(reference_same_index)
+        candidates.extend(reference_by_key.get(_source_index_match_key(column), []))
+        for candidate in candidates:
+            source_index = _parse_source_index(candidate)
+            if source_index is not None and source_index not in used:
+                column["source_index"] = source_index
+                used.add(source_index)
+                break
+        if _parse_source_index(column) is None:
+            while next_source_index in used:
+                next_source_index += 1
+            column["source_index"] = next_source_index
+            used.add(next_source_index)
+            next_source_index += 1
+        column["column_id"] = _column_id_for(column, _parse_source_index(column), idx)
+    return next_columns
+
+
 def _semantic_for_column(column: dict[str, Any]) -> dict[str, Any]:
     role = _normalize_token(column.get("role"))
     if role != "quantity":
@@ -570,7 +638,11 @@ def save_columns_for_order(
     ]
     if canonical_template_id and canonical_template_id not in canonical_template_ids:
         canonical_template_ids.insert(0, canonical_template_id)
-    normalized_columns = normalize_template_columns(columns)
+    reference_columns = normalize_template_columns((resolved_current_config.get("fax_template") or {}).get("columns"))
+    normalized_columns = _repair_missing_source_indexes(
+        normalize_template_columns(columns),
+        reference_columns=reference_columns,
+    )
     column_validation = validate_template_columns(normalized_columns)
     if column_validation["errors"]:
         return {"validation": column_validation}, "validation_error"

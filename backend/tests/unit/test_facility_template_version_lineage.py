@@ -73,6 +73,34 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
     assert "template_source_index_missing" in validation_after_placeholder["errors"]
 
 
+def test_save_path_repairs_missing_source_index_from_reference_and_next_available() -> None:
+    reference_columns = facility_template_version_service.normalize_template_columns(
+        [
+            {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+            {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+            {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 3},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 4},
+        ]
+    )
+    draft_columns = facility_template_version_service.normalize_template_columns(
+        [
+            {"index": 0, "role": "date", "header": "日付"},
+            {"index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "role": "menu_name", "header": "メニュー"},
+            {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+        ]
+    )
+
+    repaired = facility_template_version_service._repair_missing_source_indexes(  # noqa: SLF001
+        draft_columns,
+        reference_columns=reference_columns,
+    )
+
+    assert [column.get("source_index") for column in repaired] == [0, 1, 3, 4, 5]
+    assert facility_template_version_service.validate_template_columns(repaired)["errors"] == []
+
+
 def test_template_column_normalization_preserves_explicit_header_group() -> None:
     columns = facility_template_version_service.normalize_template_columns(
         [
