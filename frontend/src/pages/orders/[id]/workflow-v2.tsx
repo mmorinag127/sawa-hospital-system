@@ -1152,7 +1152,9 @@ export default function OrderWorkflowV2Page() {
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
-  const step3PreviewImageUrl = ocrPreviewMode === "sheet" ? selectedOcrSheetReviewBaseUrl : selectedOcrOverlayUrl;
+  const step3PreviewImageUrl = ocrPreviewMode === "sheet"
+    ? (selectedOcrSheetReviewBaseUrl || selectedOcrOverlayUrl)
+    : selectedOcrOverlayUrl;
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
@@ -2708,6 +2710,15 @@ export default function OrderWorkflowV2Page() {
     setSelectedAutoEditIndex(null);
   };
 
+  const dismissSingleAnomalyWarning = (warning: SheetAnomalyWarning) => {
+    const sourceReview = anomalyReview || {};
+    setLocalAnomalyReview({
+      ...sourceReview,
+      warnings: removeFirstMatchingItem(anomalyWarnings, (item) => sameSheetPatchTarget(item, warning)),
+    });
+    setSelectedAnomalyIndex(null);
+  };
+
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
       const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`);
@@ -3840,7 +3851,7 @@ export default function OrderWorkflowV2Page() {
               <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
                 異常を補正
               </button>
-              <button className="btn ghost" type="button" onClick={showSheetReview} disabled={Boolean(!sheetPayload || !selectedOcrSheetReviewBaseUrl)}>
+              <button className="btn ghost" type="button" onClick={showSheetReview} disabled={Boolean(!sheetPayload || !step3PreviewImageUrl)}>
                 {sheetReviewConfirmed ? "シート確認済み" : "シート確認"}
               </button>
               <button
@@ -3998,6 +4009,11 @@ export default function OrderWorkflowV2Page() {
                       ) : null}
                       {ocrPreviewMode === "sheet" ? (
                         <div className="sheet-review-overlay" aria-label="sheet values overlay">
+                          {!selectedOcrSheetReviewBaseUrl ? (
+                            <span className="sheet-review-fallback-note">
+                              既存OCR結果のため通常overlayを暫定表示中
+                            </span>
+                          ) : null}
                           {sheetReviewItems.map((entry) => (
                             <span
                               key={`sheet-review-${entry.rowIndex}-${entry.colIndex}`}
@@ -4019,7 +4035,7 @@ export default function OrderWorkflowV2Page() {
                       {ocrPreviewMode === "overlay"
                         ? selectedOcr?.overlay_message || "overlay成果物がありません。"
                         : ocrPreviewMode === "sheet"
-                          ? "シート確認用のクリーン画像がありません。OCRを再実行してください。"
+                          ? "シート確認に使える画像がありません。"
                         : pdfError || "原本PDFを読み込み中..."}
                     </div>
                   )}
@@ -4165,6 +4181,7 @@ export default function OrderWorkflowV2Page() {
                           <table className="anomaly-table">
                             <thead>
                               <tr>
+                                <th>操作</th>
                                 <th>重要度</th>
                                 <th>日付</th>
                                 <th>食区分</th>
@@ -4175,7 +4192,6 @@ export default function OrderWorkflowV2Page() {
                                 <th>補正案</th>
                                 <th>基準</th>
                                 <th>内容</th>
-                                <th>操作</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4188,6 +4204,31 @@ export default function OrderWorkflowV2Page() {
                                   ].filter(Boolean).join(" ")}
                                   onClick={() => selectAnomalyWarning(warning, idx)}
                                 >
+                                  <td className="anomaly-row-actions-cell">
+                                    <div className="inline-row-actions">
+                                      <button
+                                        className="btn tiny row-apply-button"
+                                        type="button"
+                                        disabled={!String(warning.suggested_value || "").trim()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          applySingleAnomalyCorrection(warning);
+                                        }}
+                                      >
+                                        反映
+                                      </button>
+                                      <button
+                                        className="btn tiny ghost"
+                                        type="button"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          dismissSingleAnomalyWarning(warning);
+                                        }}
+                                      >
+                                        却下
+                                      </button>
+                                    </div>
+                                  </td>
                                   <td>{formatAnomalySeverity(warning.severity)}</td>
                                   <td>{anomalyContextValue(warning, "date") || "-"}</td>
                                   <td>{anomalyContextValue(warning, "daypart") || "-"}</td>
@@ -4198,19 +4239,6 @@ export default function OrderWorkflowV2Page() {
                                   <td>{warning.suggested_value || "-"}</td>
                                   <td>{formatAnomalyBasis(warning)}</td>
                                   <td>{warning.message || warning.type || "確認対象"}</td>
-                                  <td>
-                                    <button
-                                      className="btn tiny row-apply-button"
-                                      type="button"
-                                      disabled={!String(warning.suggested_value || "").trim()}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        applySingleAnomalyCorrection(warning);
-                                      }}
-                                    >
-                                      反映
-                                    </button>
-                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -5407,6 +5435,18 @@ export default function OrderWorkflowV2Page() {
           transform: translateX(-100%);
           text-shadow: 0 1px 1px rgba(255, 255, 255, 0.8);
           white-space: nowrap;
+        }
+        .sheet-review-fallback-note {
+          background: rgba(255, 247, 232, 0.92);
+          border: 1px solid #ead6b0;
+          border-radius: 999px;
+          color: #8b5b1f;
+          font-size: 12px;
+          font-weight: 800;
+          left: 12px;
+          padding: 7px 10px;
+          position: absolute;
+          top: 12px;
         }
         .pre-save-checks {
           align-self: center;
