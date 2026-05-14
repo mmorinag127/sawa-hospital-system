@@ -8814,6 +8814,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             ],
         )
         overlay_uri = None
+        sheet_review_base_uri = None
         if overlay_path and Path(overlay_path).exists():
             bucket = get_default_output_bucket()
             if bucket:
@@ -8824,6 +8825,15 @@ def _hakodate_canonical_payload_from_manifest_item(
                     Path(overlay_path).read_bytes(),
                     content_type="image/png",
                 )
+                sheet_review_base_path = str(outputs.get("sheet_review_base") or "").strip()
+                if sheet_review_base_path and Path(sheet_review_base_path).exists():
+                    sheet_review_base_uri = save_artifact_bytes_to_gcs(
+                        bucket,
+                        f"OCR-{order_id}",
+                        f"hakodate-sheet-review-base-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{uuid4().hex[:8]}.png",
+                        Path(sheet_review_base_path).read_bytes(),
+                        content_type="image/png",
+                    )
         return {
             "hakodate_preprocessing": {
                 "target_cell_map": target_cells,
@@ -8839,6 +8849,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             "hakodate_ocr_evidence_records": evidence_records,
             "hakodate_overlay": {
                 "uri": overlay_uri,
+                "sheet_review_base_uri": sheet_review_base_uri,
                 "fingerprint": overlay_fingerprint,
                 "producer": "hakodate_best_method_pipeline",
                 "version": HAKODATE_CANONICAL_PIPELINE_VERSION,

@@ -130,6 +130,7 @@ type OcrResult = {
   artifact_digest?: string | null;
   artifact_manifest?: Record<string, unknown> | null;
   overlay_url?: string | null;
+  sheet_review_base_url?: string | null;
   overlay_status?: string | null;
   overlay_message?: string | null;
   created_at?: string | null;
@@ -1116,6 +1117,8 @@ export default function OrderWorkflowV2Page() {
   const [error, setError] = useState<string>("");
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
   const [ocrPreviewMode, setOcrPreviewMode] = useState<OcrPreviewMode>("overlay");
+  const [sheetReviewConfirmed, setSheetReviewConfirmed] = useState(false);
+  const [anomalyReviewConfirmed, setAnomalyReviewConfirmed] = useState(false);
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
@@ -1139,6 +1142,23 @@ export default function OrderWorkflowV2Page() {
   const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
   const sheetAutoEditPollRef = useRef<number | null>(null);
+  const selectedOcr = useMemo(
+    () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
+    [ocrResults, workflow?.selected_ocr_result_id],
+  );
+  const invalidateSheetPreSaveChecks = () => {
+    setSheetReviewConfirmed(false);
+    setAnomalyReviewConfirmed(false);
+  };
+  const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
+  const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
+  const step3PreviewImageUrl = ocrPreviewMode === "sheet" ? selectedOcrSheetReviewBaseUrl : selectedOcrOverlayUrl;
+  const canSaveSheet = Boolean(
+    workflow?.selected_ocr_result_id
+    && sheetPayload
+    && anomalyReviewConfirmed
+    && sheetReviewConfirmed,
+  );
   const getHeaderAxisTimeoutMs = () => {
     const seconds = Number(headerAxisTimeoutSeconds);
     const normalizedSeconds = Number.isFinite(seconds) && seconds > 0
@@ -1158,11 +1178,6 @@ export default function OrderWorkflowV2Page() {
     if (Array.isArray(templateXs) && templateXs.length > 0) return templateXs.length;
     return 0;
   };
-
-  const selectedOcr = useMemo(
-    () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
-    [ocrResults, workflow?.selected_ocr_result_id],
-  );
 
   const selectedWeekValue = useMemo(
     () => normalizeConcreteWeekValue(weekDraft) || weekValueFromRange(contextForm.week_start, contextForm.week_end),
@@ -1847,6 +1862,11 @@ export default function OrderWorkflowV2Page() {
   }, [workflow?.state]);
 
   useEffect(() => {
+    setSheetReviewConfirmed(false);
+    setAnomalyReviewConfirmed(false);
+  }, [workflow?.selected_ocr_result_id]);
+
+  useEffect(() => {
     const syncOverlayImageSize = () => {
       const image = overlayImageRef.current;
       if (!image) return;
@@ -1860,7 +1880,7 @@ export default function OrderWorkflowV2Page() {
     syncOverlayImageSize();
     window.addEventListener("resize", syncOverlayImageSize);
     return () => window.removeEventListener("resize", syncOverlayImageSize);
-  }, [selectedOcr?.overlay_url, step3LayoutMode, visibleStep]);
+  }, [selectedOcrOverlayUrl, selectedOcrSheetReviewBaseUrl, step3LayoutMode, visibleStep]);
 
   useEffect(() => {
     if (!router.isReady || !orderId) return;
@@ -2366,6 +2386,7 @@ export default function OrderWorkflowV2Page() {
       setSheetJson(formatJson(normalized));
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
+      invalidateSheetPreSaveChecks();
       setSelectedAutoEditIndex(null);
       setSelectedAnomalyIndex(null);
     }, {
@@ -2374,6 +2395,7 @@ export default function OrderWorkflowV2Page() {
     });
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
       if (!sourceReview) return current;
@@ -2435,6 +2457,7 @@ export default function OrderWorkflowV2Page() {
   const fillQuantityColumn = () => {
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2451,6 +2474,7 @@ export default function OrderWorkflowV2Page() {
     const left = Number(swapLeftColumn);
     const right = Number(swapRightColumn);
     if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2471,6 +2495,7 @@ export default function OrderWorkflowV2Page() {
 
   const applyVisibleOcrSuggestions = () => {
     if (!sheetPayload || !ocrOverlayItemMap.size) return;
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2578,6 +2603,7 @@ export default function OrderWorkflowV2Page() {
   const applySheetAutoEditPatches = () => {
     const patches = autoEditPatches;
     if (!sheetPayload || !patches.length) return;
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAnomalyIndex(null);
     setSelectedAutoEditIndex(null);
@@ -2599,6 +2625,7 @@ export default function OrderWorkflowV2Page() {
     if (!sheetPayload || typeof patch.row_index !== "number" || typeof patch.col_index !== "number") return;
     const suggestedValue = String(patch.suggested_value || "").trim();
     if (!suggestedValue) return;
+    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
       if (!sourceReview) return current;
@@ -2634,6 +2661,7 @@ export default function OrderWorkflowV2Page() {
       && String(warning.suggested_value || "").trim()
     ));
     if (!sheetPayload || !patches.length) return;
+    invalidateSheetPreSaveChecks();
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => [...row]);
@@ -2655,6 +2683,7 @@ export default function OrderWorkflowV2Page() {
     if (!sheetPayload || typeof warning.row_index !== "number" || typeof warning.col_index !== "number") return;
     const suggestedValue = String(warning.suggested_value || "").trim();
     if (!suggestedValue) return;
+    invalidateSheetPreSaveChecks();
     const rowIndex = Number(warning.row_index);
     const colIndex = Number(warning.col_index);
     setSheetPayload((current) => {
@@ -2691,6 +2720,9 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("保存できるシートがありません");
       }
+      if (!anomalyReviewConfirmed || !sheetReviewConfirmed) {
+        throw new Error("シート保存前に、異常チェックとシート確認を完了してください。");
+      }
       await apiClient.put(`/orders/${orderId}/workflow-v2/sheet`, {
         sheet: parsed,
         edited_by: "operator",
@@ -2721,12 +2753,18 @@ export default function OrderWorkflowV2Page() {
         { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
       );
       setLocalAnomalyReview(response.data.anomaly_review || null);
+      setAnomalyReviewConfirmed(true);
       setSelectedAnomalyIndex(null);
       setSelectedAutoEditIndex(null);
     }, {
       successMessage: "数量異常チェックを実行しました",
       refreshAfter: false,
     });
+
+  const showSheetReview = () => {
+    setOcrPreviewMode("sheet");
+    setSheetReviewConfirmed(true);
+  };
 
   const confirmBagging = () =>
     runAction(
@@ -3802,12 +3840,21 @@ export default function OrderWorkflowV2Page() {
               <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
                 異常を補正
               </button>
-              <button className="btn ghost" type="button" onClick={() => setOcrPreviewMode("sheet")} disabled={Boolean(!sheetPayload || !selectedOcr?.overlay_url)}>
-                シート確認
+              <button className="btn ghost" type="button" onClick={showSheetReview} disabled={Boolean(!sheetPayload || !selectedOcrSheetReviewBaseUrl)}>
+                {sheetReviewConfirmed ? "シート確認済み" : "シート確認"}
               </button>
-              <button className="btn primary" type="button" onClick={saveSheet} disabled={Boolean(busy || !workflow?.selected_ocr_result_id || !sheetPayload)}>
+              <button
+                className="btn primary"
+                type="button"
+                onClick={saveSheet}
+                disabled={Boolean(busy || !canSaveSheet)}
+                title={!anomalyReviewConfirmed || !sheetReviewConfirmed ? "保存前に異常チェックとシート確認を完了してください。" : undefined}
+              >
                 {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
               </button>
+              <span className={["pre-save-checks", anomalyReviewConfirmed && sheetReviewConfirmed ? "ready" : ""].filter(Boolean).join(" ")}>
+                異常チェック: {anomalyReviewConfirmed ? "済" : "未"} / シート確認: {sheetReviewConfirmed ? "済" : "未"}
+              </span>
             </div>
             <div className="step3-top-actions-right">
               <button
@@ -3874,8 +3921,8 @@ export default function OrderWorkflowV2Page() {
                         シート確認
                       </button>
                     </div>
-                    {ocrPreviewMode !== "original" && selectedOcr?.overlay_url ? (
-                      <a className="ghost-link" href={selectedOcr.overlay_url} target="_blank" rel="noreferrer">
+                    {ocrPreviewMode !== "original" && step3PreviewImageUrl ? (
+                      <a className="ghost-link" href={step3PreviewImageUrl} target="_blank" rel="noreferrer">
                         別タブで開く
                       </a>
                     ) : null}
@@ -3889,13 +3936,13 @@ export default function OrderWorkflowV2Page() {
                 <div className="step3-overlay-canvas">
                   {ocrPreviewMode === "original" && pdfUrl ? (
                     <iframe title="workflow-v2-step3-original-pdf" src={pdfUrl} className="step3-overlay-pdf" />
-                  ) : ocrPreviewMode !== "original" && selectedOcr?.overlay_url ? (
+                  ) : ocrPreviewMode !== "original" && step3PreviewImageUrl ? (
                     <>
                       <img
                         ref={overlayImageRef}
                         className="step3-overlay-image"
-                        src={selectedOcr.overlay_url}
-                        alt={`${selectedOcr.ocr_result_id} overlay`}
+                        src={step3PreviewImageUrl}
+                        alt={`${selectedOcr?.ocr_result_id || "selected"} ${ocrPreviewMode}`}
                         onLoad={(event) => {
                           const image = event.currentTarget;
                           setOverlayImageSize({
@@ -3956,7 +4003,7 @@ export default function OrderWorkflowV2Page() {
                               key={`sheet-review-${entry.rowIndex}-${entry.colIndex}`}
                               className="sheet-review-value"
                               style={{
-                                left: `${entry.box.left + entry.box.width - 4}px`,
+                                left: `${entry.box.left + entry.box.width + 8}px`,
                                 top: `${entry.box.top + 3}px`,
                               }}
                               title={`R${entry.rowIndex + 1} C${entry.colIndex + 1}: ${entry.value}`}
@@ -3971,6 +4018,8 @@ export default function OrderWorkflowV2Page() {
                     <div className="preview-placeholder">
                       {ocrPreviewMode === "overlay"
                         ? selectedOcr?.overlay_message || "overlay成果物がありません。"
+                        : ocrPreviewMode === "sheet"
+                          ? "シート確認用のクリーン画像がありません。OCRを再実行してください。"
                         : pdfError || "原本PDFを読み込み中..."}
                     </div>
                   )}
@@ -4268,6 +4317,7 @@ export default function OrderWorkflowV2Page() {
               onChange={(event) => {
                 const nextJson = event.target.value;
                 setSheetJson(nextJson);
+                invalidateSheetPreSaveChecks();
                 try {
                   setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));
                 } catch {
@@ -5347,20 +5397,31 @@ export default function OrderWorkflowV2Page() {
           z-index: 5;
         }
         .sheet-review-value {
-          background: rgba(255, 255, 255, 0.84);
-          border: 1px solid rgba(196, 45, 28, 0.35);
-          border-radius: 999px;
-          box-shadow: 0 4px 10px rgba(20, 30, 24, 0.16);
           color: #c42d1c;
-          font-size: 15px;
+          font-size: 16px;
           font-weight: 950;
           line-height: 1;
-          min-width: 1.4em;
-          padding: 3px 5px;
+          padding: 0;
           position: absolute;
           text-align: center;
           transform: translateX(-100%);
+          text-shadow: 0 1px 1px rgba(255, 255, 255, 0.8);
           white-space: nowrap;
+        }
+        .pre-save-checks {
+          align-self: center;
+          background: #fff7e8;
+          border: 1px solid #ead6b0;
+          border-radius: 999px;
+          color: #8b5b1f;
+          font-size: 12px;
+          font-weight: 800;
+          padding: 7px 10px;
+        }
+        .pre-save-checks.ready {
+          background: #edf3ef;
+          border-color: rgba(47, 125, 82, 0.24);
+          color: #2f7d52;
         }
         .sheet-toolbar {
           border-bottom: 1px solid #e5dece;

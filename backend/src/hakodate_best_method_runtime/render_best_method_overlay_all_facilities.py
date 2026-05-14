@@ -414,6 +414,26 @@ def _draw_overlay(
     )
 
 
+def _draw_sheet_review_base(
+    *,
+    raw_rectified_bgr: Any,
+    regions: list[dict[str, Any]],
+    quad_points: list[tuple[float, float]],
+) -> Image.Image:
+    """Clean review base for sheet values: no OCR dots or OCR digit labels."""
+    base = Image.fromarray(cv2.cvtColor(raw_rectified_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for region in regions:
+        box = region.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
+        draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 190, 0, 220), width=3)
+    image = Image.alpha_composite(base, layer).convert("RGB")
+    return _draw_quad_points(image, quad_points, prefix="Q")
+
+
 def _thumbnail(page: Image.Image, caption: str) -> Image.Image:
     thumb = page.copy()
     thumb.thumbnail((760, 1180), Image.Resampling.LANCZOS)
@@ -797,14 +817,21 @@ def build_best_method_for_manifest_item(
         order_id=order_id,
         details=details,
     )
+    sheet_review_base = _draw_sheet_review_base(
+        raw_rectified_bgr=pre["raw_rectified"],
+        regions=snapped_regions,
+        quad_points=quad_points,
+    )
     page_png = facility_dir / "best_method_overlay.png"
     page_pdf = facility_dir / "best_method_overlay.pdf"
+    sheet_review_base_path = facility_dir / "best_method_sheet_review_base.png"
     records_path = facility_dir / "best_method_records.json"
     regions_path = facility_dir / "best_method_ocr_regions.json"
     summary_path = facility_dir / "best_method_summary.json"
     contact_sheet_path = facility_dir / "best_method_contact_sheet.png"
     sheet_values_path = facility_dir / "best_method_sheet_values.json"
     review_page.save(page_png)
+    sheet_review_base.save(sheet_review_base_path)
     _write_pdf_from_pages([review_page], page_pdf)
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
@@ -833,6 +860,7 @@ def build_best_method_for_manifest_item(
             "pdf": str(page_pdf),
             "overlay": str(page_png),
             "overlay_png": str(page_png),
+            "sheet_review_base": str(sheet_review_base_path),
             "contact_sheet": str(contact_sheet_path),
             "records": str(records_path),
             "ocr_regions": str(regions_path),

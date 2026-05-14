@@ -1585,9 +1585,14 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
     hakodate_overlay = payload.get("hakodate_overlay") if isinstance(payload.get("hakodate_overlay"), dict) else {}
     overlay_uri = _normalize_id(hakodate_overlay.get("uri") or hakodate_overlay.get("overlay_uri"))
     overlay_url = _normalize_id(hakodate_overlay.get("url") or hakodate_overlay.get("overlay_url"))
+    sheet_review_base_uri = _normalize_id(hakodate_overlay.get("sheet_review_base_uri"))
+    sheet_review_base_url = _normalize_id(hakodate_overlay.get("sheet_review_base_url"))
     if overlay_uri and not overlay_url:
         signed_url = getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None)(overlay_uri)
         overlay_url = _normalize_id(signed_url)
+    if sheet_review_base_uri and not sheet_review_base_url:
+        signed_url = getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None)(sheet_review_base_uri)
+        sheet_review_base_url = _normalize_id(signed_url)
     overlay_status = "ready" if overlay_url else "missing"
     return {
         "ocr_result_id": row.id,
@@ -1603,6 +1608,8 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "pipeline_version": payload.get("pipeline_version") or row.producer_version,
         "overlay_url": overlay_url or None,
         "overlay_uri": overlay_uri or None,
+        "sheet_review_base_url": sheet_review_base_url or None,
+        "sheet_review_base_uri": sheet_review_base_uri or None,
         "overlay_status": overlay_status,
         "overlay_message": None if overlay_url else "このOCR結果には表示可能なoverlay成果物がありません。",
         "created_at": _serialize_datetime(row.created_at),
