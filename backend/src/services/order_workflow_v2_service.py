@@ -1104,6 +1104,7 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         document_uri = _normalize_id(order.document_uri)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        serialized_ocr_job = _serialize_ocr_job(ocr_job)
         saved_override = meta.get("quad_override") if isinstance(meta.get("quad_override"), dict) else None
     if not document_uri:
         return None, "document_missing"
@@ -1148,7 +1149,7 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         "estimate": estimate,
         "suggested_quad_px": _normalize_quad_px(estimate.get("refined_quad_px")),
         "saved_override": saved_override,
-        "ocr_job": _serialize_ocr_job(ocr_job),
+        "ocr_job": serialized_ocr_job,
         "tolerance_policy": {
             "hit_rate_min": 0.78,
             "mean_abs_offset_px_ok_max": 4.5,
