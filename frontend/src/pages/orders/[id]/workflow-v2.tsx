@@ -95,6 +95,7 @@ type HeaderAxisReviewPayload = {
     corrected_xs?: number[];
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
+  axis_evidence?: Record<string, unknown> | null;
   coordinate_space?: { mode?: string; width?: number; height?: number } | null;
 };
 
@@ -1103,6 +1104,8 @@ export default function OrderWorkflowV2Page() {
   const [headerAxisTimeoutSeconds, setHeaderAxisTimeoutSeconds] = useState(
     String(DEFAULT_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000),
   );
+  const [selectedHeaderAxisIndex, setSelectedHeaderAxisIndex] = useState<number | null>(null);
+  const [headerAxisAddMode, setHeaderAxisAddMode] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
@@ -1141,6 +1144,15 @@ export default function OrderWorkflowV2Page() {
       MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS,
       Math.max(MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS, Math.round(normalizedSeconds * 1000)),
     );
+  };
+  const getHeaderAxisExpectedCount = () => {
+    const evidence = headerAxisReview?.axis_evidence;
+    if (!evidence || typeof evidence !== "object") return 0;
+    const direct = Number((evidence as Record<string, unknown>).template_x_count);
+    if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
+    const templateXs = (evidence as Record<string, unknown>).template_xs;
+    if (Array.isArray(templateXs) && templateXs.length > 0) return templateXs.length;
+    return 0;
   };
 
   const selectedOcr = useMemo(
@@ -2130,6 +2142,8 @@ export default function OrderWorkflowV2Page() {
       const detectedXs = response.data?.x_positions;
       const nextXs = Array.isArray(savedXs) && savedXs.length >= 2 ? savedXs : detectedXs;
       setHeaderAxisXs((Array.isArray(nextXs) ? nextXs : []).map((value) => Number(value)).filter(Number.isFinite));
+      setSelectedHeaderAxisIndex(null);
+      setHeaderAxisAddMode(false);
     } catch (err: any) {
       setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
     } finally {
@@ -2152,6 +2166,15 @@ export default function OrderWorkflowV2Page() {
     setHeaderAxisMessage("");
     try {
       const timeoutMs = getHeaderAxisTimeoutMs();
+      const expectedCount = getHeaderAxisExpectedCount();
+      if (
+        expectedCount > 0
+        && headerAxisXs.length !== expectedCount
+        && typeof window !== "undefined"
+        && !window.confirm(`ヘッダー縦軸の本数がテンプレート期待値と一致しません。期待 ${expectedCount} 本 / 現在 ${headerAxisXs.length} 本です。このまま保存してOCRを再実行しますか？`)
+      ) {
+        return;
+      }
       await apiClient.put(
         `/orders/${orderId}/workflow-v2/header-axis-review`,
         {
@@ -2206,9 +2229,60 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
+  const normalizeHeaderAxisXs = (values: number[]) => {
+    const canvasWidth = Number(headerAxisReview?.canvas_size?.[0] || headerAxisReview?.coordinate_space?.width || 0);
+    const maxX = canvasWidth || Number.MAX_SAFE_INTEGER;
+    const sorted = values
+      .map((value) => Number(value))
+      .filter(Number.isFinite)
+      .map((value) => Math.min(Math.max(value, 0), maxX))
+      .sort((a, b) => a - b);
+    const normalized: number[] = [];
+    for (const value of sorted) {
+      if (normalized.length && Math.abs(value - normalized[normalized.length - 1]) < 1) continue;
+      normalized.push(Number(value.toFixed(3)));
+    }
+    return normalized;
+  };
+
+  const addHeaderAxisAt = (nextX: number) => {
+    setHeaderAxisXs((current) => {
+      const next = normalizeHeaderAxisXs([...current, nextX]);
+      const insertedIndex = next.findIndex((value) => Math.abs(value - Number(nextX)) < 1);
+      setSelectedHeaderAxisIndex(insertedIndex >= 0 ? insertedIndex : null);
+      return next;
+    });
+  };
+
+  const deleteSelectedHeaderAxis = () => {
+    if (selectedHeaderAxisIndex === null) {
+      setHeaderAxisMessage("削除するヘッダー縦軸を選択してください。");
+      return;
+    }
+    setHeaderAxisXs((current) => current.filter((_, idx) => idx !== selectedHeaderAxisIndex));
+    setSelectedHeaderAxisIndex(null);
+    setHeaderAxisMessage("");
+  };
+
+  const resetHeaderAxisXs = () => {
+    const detectedXs = (Array.isArray(headerAxisReview?.x_positions) ? headerAxisReview?.x_positions : [])
+      .map((value) => Number(value))
+      .filter(Number.isFinite);
+    setHeaderAxisXs(normalizeHeaderAxisXs(detectedXs));
+    setSelectedHeaderAxisIndex(null);
+    setHeaderAxisAddMode(false);
+    setHeaderAxisMessage("");
+  };
+
   const handleHeaderAxisPointerMove = (event: MouseEvent<SVGSVGElement>) => {
     if (draggingHeaderAxisIndex === null) return;
     moveHeaderAxis(draggingHeaderAxisIndex, headerAxisPointerToCanvasX(event));
+  };
+
+  const handleHeaderAxisCanvasClick = (event: MouseEvent<SVGSVGElement>) => {
+    if (!headerAxisAddMode) return;
+    addHeaderAxisAt(headerAxisPointerToCanvasX(event));
+    setHeaderAxisAddMode(false);
   };
 
   const runOcr = () =>
@@ -2770,6 +2844,10 @@ export default function OrderWorkflowV2Page() {
   const headerAxisDisplayYLevels = headerAxisYLevels.length
     ? headerAxisYLevels
     : [headerAxisCropY0 + headerAxisImageHeight * 0.35, headerAxisCropY0 + headerAxisImageHeight * 0.7];
+  const headerAxisExpectedCount = getHeaderAxisExpectedCount();
+  const headerAxisCountWarning = headerAxisExpectedCount > 0 && headerAxisXs.length !== headerAxisExpectedCount
+    ? `ヘッダー縦軸の本数がテンプレート期待値と一致していません。期待 ${headerAxisExpectedCount} 本 / 現在 ${headerAxisXs.length} 本。`
+    : "";
 
   return (
     <main className="page workflow-v2-page">
@@ -3477,11 +3555,33 @@ export default function OrderWorkflowV2Page() {
               <button className="btn ghost" type="button" onClick={() => void loadHeaderAxisReview()} disabled={headerAxisLoading || Boolean(busy)}>
                 {headerAxisLoading ? "取得中..." : "ヘッダーを再取得"}
               </button>
+              <button
+                className={`btn ghost ${headerAxisAddMode ? "active" : ""}`}
+                type="button"
+                onClick={() => {
+                  setHeaderAxisAddMode((current) => !current);
+                  setHeaderAxisMessage("");
+                }}
+                disabled={headerAxisLoading || Boolean(busy) || !headerAxisImageSrc}
+              >
+                {headerAxisAddMode ? "追加位置をクリック" : "縦軸を追加"}
+              </button>
+              <button className="btn ghost" type="button" onClick={deleteSelectedHeaderAxis} disabled={headerAxisLoading || Boolean(busy) || selectedHeaderAxisIndex === null}>
+                選択軸を削除
+              </button>
+              <button className="btn ghost" type="button" onClick={resetHeaderAxisXs} disabled={headerAxisLoading || Boolean(busy) || !headerAxisReview}>
+                自動検出に戻す
+              </button>
               <button className="btn primary" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || headerAxisXs.length < 2)}>
                 ヘッダー補正を保存してOCR再実行
               </button>
             </div>
           </header>
+          {headerAxisCountWarning ? <div className="notice warning">{headerAxisCountWarning}</div> : null}
+          <p className="subtle">
+            現在 {headerAxisXs.length} 本{headerAxisExpectedCount ? ` / テンプレート期待 ${headerAxisExpectedCount} 本` : ""}。
+            縦軸をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に縦軸を追加します。
+          </p>
           {headerAxisMessage ? <div className="notice error">{headerAxisMessage}</div> : null}
           <div className="header-axis-canvas-wrap">
             {headerAxisImageSrc ? (
@@ -3492,27 +3592,47 @@ export default function OrderWorkflowV2Page() {
                   onMouseMove={handleHeaderAxisPointerMove}
                   onMouseUp={() => setDraggingHeaderAxisIndex(null)}
                   onMouseLeave={() => setDraggingHeaderAxisIndex(null)}
+                  onClick={handleHeaderAxisCanvasClick}
                   aria-label="ヘッダー交点補正"
                 >
                   {headerAxisXs.map((x, idx) => {
                     const displayX = x - headerAxisCropX0;
+                    const selected = selectedHeaderAxisIndex === idx;
                     return (
                       <g key={`header-axis-${idx}`}>
-                        <line x1={displayX} y1={0} x2={displayX} y2={headerAxisImageHeight} className="header-axis-line" />
+                        <line x1={displayX} y1={0} x2={displayX} y2={headerAxisImageHeight} className={`header-axis-line ${selected ? "selected" : ""}`} />
                         {headerAxisDisplayYLevels.map((y, yIdx) => (
                           <circle
                             key={`header-axis-${idx}-${yIdx}`}
                             cx={displayX}
                             cy={y - headerAxisCropY0}
                             r="10"
-                            className="header-axis-point"
+                            className={`header-axis-point ${selected ? "selected" : ""}`}
                             onMouseDown={(event) => {
                               event.preventDefault();
+                              event.stopPropagation();
+                              setSelectedHeaderAxisIndex(idx);
                               setDraggingHeaderAxisIndex(idx);
+                            }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedHeaderAxisIndex(idx);
+                              setHeaderAxisAddMode(false);
                             }}
                           />
                         ))}
-                        <text x={displayX + 8} y={20} className="header-axis-label">{idx + 1}</text>
+                        <text
+                          x={displayX + 8}
+                          y={20}
+                          className={`header-axis-label ${selected ? "selected" : ""}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedHeaderAxisIndex(idx);
+                            setHeaderAxisAddMode(false);
+                          }}
+                        >
+                          {idx + 1}
+                        </text>
                       </g>
                     );
                   })}
@@ -5460,6 +5580,10 @@ export default function OrderWorkflowV2Page() {
         .btn.ghost {
           background: #ebe5d5;
         }
+        .btn.ghost.active {
+          background: #f4c78d;
+          color: #1c2822;
+        }
         .btn.tiny {
           font-size: 12px;
           min-height: 30px;
@@ -5486,6 +5610,10 @@ export default function OrderWorkflowV2Page() {
         .notice.error {
           background: #f8dfd8;
           color: #8a2c18;
+        }
+        .notice.warning {
+          background: #fff3d8;
+          color: #7a4a0f;
         }
         .inline-action-btn {
           background: #fffdf7;
@@ -5619,11 +5747,20 @@ export default function OrderWorkflowV2Page() {
           stroke: rgba(255, 145, 0, 0.65);
           stroke-width: 4;
         }
+        .header-axis-line.selected {
+          stroke: rgba(0, 104, 255, 0.92);
+          stroke-width: 7;
+        }
         .header-axis-point {
           cursor: ew-resize;
           fill: #ff9100;
           stroke: #fff;
           stroke-width: 3;
+        }
+        .header-axis-point.selected {
+          fill: #0068ff;
+          stroke: #fff;
+          stroke-width: 5;
         }
         .header-axis-label {
           fill: #1c2822;
@@ -5632,6 +5769,9 @@ export default function OrderWorkflowV2Page() {
           paint-order: stroke;
           stroke: #fffdf7;
           stroke-width: 5;
+        }
+        .header-axis-label.selected {
+          fill: #0068ff;
         }
         .ocr-result-list {
           display: grid;
