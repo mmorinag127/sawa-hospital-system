@@ -131,6 +131,42 @@ const facilityDraftToEntry = (draft: FacilityEditDraft, base: FacilityEntry | nu
   return next;
 };
 
+const hasDraftContentBeyondId = (draft: FacilityEditDraft) => Boolean(
+  draft.facility_name.trim()
+    || draft.aliases_text.trim()
+    || draft.areas_text.trim()
+    || draft.address.trim()
+    || draft.phone.trim()
+    || draft.order_form_pattern_id.trim()
+    || draft.fax_template_id.trim()
+);
+
+const isBlankDraftFacilityEntry = (facility: FacilityEntry) => {
+  const record = facility && typeof facility === "object" ? (facility as Record<string, unknown>) : {};
+  const name = readString(record.facility_name).trim();
+  const aliases = readStringList(record.aliases);
+  const areas = readAreas(record.areas);
+  const address = readString(record.address).trim();
+  const phone = readString(record.phone).trim();
+  const orderFormPatternId = readString(record.order_form_pattern_id).trim();
+  const faxTemplateId = readString(record.fax_template_id).trim();
+  const faxTemplateIds = readStringList(record.fax_template_ids);
+  return !name
+    && aliases.length === 0
+    && areas.length === 0
+    && !address
+    && !phone
+    && !orderFormPatternId
+    && !faxTemplateId
+    && faxTemplateIds.length === 0;
+};
+
+const removeBlankDraftFacilities = (master: FacilityMaster): FacilityMaster => {
+  if (!Array.isArray(master.facilities)) return master;
+  const facilities = master.facilities.filter((facility) => !isBlankDraftFacilityEntry(facility));
+  return facilities.length === master.facilities.length ? master : { ...master, facilities };
+};
+
 const readInvoiceTemplate = (facility?: FacilityEntry) => {
   if (!facility || typeof facility !== "object") return null;
   const invoice = (facility as Record<string, unknown>).invoice_template;
@@ -234,6 +270,9 @@ export default function FacilityMasterPage() {
 
   const applyFacilityForm = () => {
     if (!master) return null;
+    if (selectedIndex < 0 && !hasDraftContentBeyondId(facilityDraft)) {
+      return removeBlankDraftFacilities(master);
+    }
     if (!facilityDraft.facility_id.trim()) {
       setMessage("施設IDを入力してください。");
       return null;
@@ -286,14 +325,10 @@ export default function FacilityMasterPage() {
       aliases: [],
       areas: [],
     };
-    const nextFacilities = [...facilities, nextFacility];
-    const nextMaster = { ...master, facilities: nextFacilities };
-    setMaster(nextMaster);
-    setSelectedIndex(nextFacilities.length - 1);
+    setSelectedIndex(-1);
     setFacilityText(prettyJson(nextFacility));
     setFacilityDraft(facilityEntryToDraft(nextFacility));
-    setMasterText(prettyJson(nextMaster));
-    setMessage("新規施設を追加しました。");
+    setMessage("新規施設の下書きを作成しました。施設名を入力して保存すると一覧に追加されます。");
   };
 
   const applyMasterJson = () => {
@@ -326,8 +361,9 @@ export default function FacilityMasterPage() {
     if (!master) return;
     const nextMaster = applyFacilityForm();
     if (!nextMaster) return;
+    const savePayload = removeBlankDraftFacilities(nextMaster);
     try {
-      const res = await apiClient.put("/facility-master", nextMaster);
+      const res = await apiClient.put("/facility-master", savePayload);
       const updatedMaster = res.data.facility_master as FacilityMaster;
       setMaster(updatedMaster);
       setMasterText(prettyJson(updatedMaster));
