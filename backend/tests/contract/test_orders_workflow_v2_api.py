@@ -94,6 +94,43 @@ def test_workflow_v2_ocr_run_blocks_unresolved_template_before_job_enqueue(monke
     assert res.json()["detail"] == "facility_template_unresolved"
 
 
+def test_workflow_v2_header_axis_review_endpoints(monkeypatch) -> None:
+    client = TestClient(app)
+    saved: dict[str, object] = {}
+
+    def fake_get(order_id: str) -> tuple[dict, None]:
+        return {
+            "order_id": order_id,
+            "status": "ready",
+            "x_positions": [10.0, 20.0],
+            "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 80},
+        }, None
+
+    def fake_save(order_id: str, *, corrected_xs: list[float], coordinate_space: dict) -> tuple[dict, None]:
+        saved["order_id"] = order_id
+        saved["corrected_xs"] = corrected_xs
+        saved["coordinate_space"] = coordinate_space
+        return {"order_id": order_id, "state": "context_confirmed"}, None
+
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "get_header_axis_review", fake_get)
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "save_header_axis_review_decision", fake_save)
+
+    res = client.get("/orders/ORDcontract/workflow-v2/header-axis-review")
+    assert res.status_code == 200
+    assert res.json()["x_positions"] == [10.0, 20.0]
+
+    saved_res = client.put(
+        "/orders/ORDcontract/workflow-v2/header-axis-review",
+        json={
+            "corrected_xs": [11.0, 22.0],
+            "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 80},
+        },
+    )
+    assert saved_res.status_code == 200
+    assert saved["order_id"] == "ORDcontract"
+    assert saved["corrected_xs"] == [11.0, 22.0]
+
+
 def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
     client = TestClient(app)
 

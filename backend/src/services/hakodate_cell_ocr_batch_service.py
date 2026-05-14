@@ -1014,6 +1014,7 @@ def _build_preprocess_for_ocr(
         template_ys=template_ys,
         worksheet=worksheet,
         fax_template=fax_template,
+        header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,

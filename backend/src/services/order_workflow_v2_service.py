@@ -1203,6 +1203,71 @@ def save_quad_review_decision(
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
+def get_header_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        return _get_order_service_module().build_hakodate_header_axis_review(order_id), None
+    except ValueError as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "order_id": order_id,
+            "status": "error",
+            "error": "header_axis_review_failed",
+            "error_detail": str(exc),
+        }, None
+
+
+def save_header_axis_review_decision(
+    order_id: str,
+    *,
+    corrected_xs: object,
+    coordinate_space: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
+        return None, "header_axis_xs_invalid"
+    if not isinstance(coordinate_space, dict):
+        return None, "header_axis_coordinate_space_invalid"
+    try:
+        width = int(coordinate_space.get("width"))
+        height = int(coordinate_space.get("height"))
+    except (TypeError, ValueError):
+        return None, "header_axis_coordinate_space_invalid"
+    normalized_xs: list[float] = []
+    for raw in corrected_xs:
+        try:
+            x = float(raw)
+        except (TypeError, ValueError):
+            return None, "header_axis_xs_invalid"
+        if x < 0 or x > float(width):
+            return None, "header_axis_xs_invalid"
+        normalized_xs.append(round(x, 3))
+    if any(b <= a for a, b in zip(normalized_xs, normalized_xs[1:])):
+        return None, "header_axis_xs_not_monotonic"
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        meta["header_axis_override"] = {
+            "corrected_xs": normalized_xs,
+            "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
+            "source": "operator_header_axis_override",
+            "created_at": _now().isoformat(),
+        }
+        meta["latest_ocr_error"] = None
+        _write_workflow_meta(workflow, meta)
+        workflow.state = "context_confirmed"
+        workflow.headline = "ヘッダー交点補正を保存しました。OCRを再実行できます"
+        workflow.primary_action = "run_ocr"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        return _serialize_workflow(workflow, ocr_job=ocr_job), None
+
+
 def record_context_suggestion(
     *,
     order_id: str,

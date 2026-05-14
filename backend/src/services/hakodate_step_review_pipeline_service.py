@@ -536,6 +536,42 @@ def _header_intersection_correct_xs(
     return corrected, evidence
 
 
+def normalize_header_axis_override(
+    value: object,
+    *,
+    expected_count: int,
+    canvas_width: int,
+) -> list[float] | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate_space = value.get("coordinate_space")
+    if not isinstance(coordinate_space, dict):
+        return None
+    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
+        return None
+    try:
+        width_value = int(coordinate_space.get("width"))
+    except (TypeError, ValueError):
+        return None
+    if width_value != int(canvas_width):
+        return None
+    raw_xs = value.get("corrected_xs")
+    if not isinstance(raw_xs, list) or len(raw_xs) != int(expected_count):
+        return None
+    xs: list[float] = []
+    for raw in raw_xs:
+        try:
+            x = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if x < 0 or x > float(canvas_width):
+            return None
+        xs.append(round(x, 3))
+    if not np.all(np.diff(np.array(xs, dtype=np.float32)) > 0):
+        return None
+    return xs
+
+
 def _draw_line_extraction(rectified: np.ndarray) -> tuple[Image.Image, dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified)
     image = _bgr_to_rgb_image(rectified).convert("RGBA")
@@ -1140,6 +1176,7 @@ def _align_axes(
     template_ys: list[int],
     worksheet: Any | None = None,
     fax_template: dict[str, Any] | None = None,
+    header_axis_override: dict[str, Any] | None = None,
 ) -> tuple[list[float], list[float], dict[str, Any], Image.Image]:
     table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
     source_x, source_y, grid_evidence = _nearest_line_positions_in_rectified(rectified_fax, template_xs, template_ys)
@@ -1154,6 +1191,26 @@ def _align_axes(
     )
     if header_corrected_xs is not None:
         matched_xs = [float(value) for value in header_corrected_xs]
+    manual_header_xs = normalize_header_axis_override(
+        header_axis_override,
+        expected_count=len(template_xs),
+        canvas_width=rectified_fax.shape[1],
+    )
+    if manual_header_xs is not None:
+        matched_xs = [float(value) for value in manual_header_xs]
+        header_x_match = {
+            **(header_x_match if isinstance(header_x_match, dict) else {}),
+            "used": True,
+            "method": "operator_header_axis_override",
+            "reason": "applied_operator_header_axis_override",
+            "corrected_xs": [round(float(value), 3) for value in matched_xs],
+            "template_x_count": len(template_xs),
+            "coordinate_space": {
+                "mode": "template_canvas",
+                "width": int(rectified_fax.shape[1]),
+                "height": int(rectified_fax.shape[0]),
+            },
+        }
     matched_xs, post_menu_x_match = _post_menu_boundary_preserving_xs(
         worksheet=worksheet,
         matched_xs=[float(value) for value in matched_xs],

@@ -82,6 +82,22 @@ type QuadReviewPayload = {
   ocr_job?: WorkflowV2["ocr_job"];
 };
 
+type HeaderAxisReviewPayload = {
+  order_id: string;
+  status?: string | null;
+  image_png_base64?: string | null;
+  image_size?: number[] | null;
+  crop_box?: number[] | null;
+  canvas_size?: number[] | null;
+  x_positions?: number[] | null;
+  y_levels?: number[] | null;
+  saved_override?: {
+    corrected_xs?: number[];
+    coordinate_space?: { mode?: string; width?: number; height?: number };
+  } | null;
+  coordinate_space?: { mode?: string; width?: number; height?: number } | null;
+};
+
 type FacilitySuggestionCandidate = {
   facility_id?: string | null;
   id?: string | null;
@@ -1076,6 +1092,11 @@ export default function OrderWorkflowV2Page() {
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
   const [manualQuadMode, setManualQuadMode] = useState(false);
   const [manualQuadPoints, setManualQuadPoints] = useState<number[][]>([]);
+  const [headerAxisReview, setHeaderAxisReview] = useState<HeaderAxisReviewPayload | null>(null);
+  const [headerAxisLoading, setHeaderAxisLoading] = useState(false);
+  const [headerAxisMessage, setHeaderAxisMessage] = useState("");
+  const [headerAxisXs, setHeaderAxisXs] = useState<number[]>([]);
+  const [draggingHeaderAxisIndex, setDraggingHeaderAxisIndex] = useState<number | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
@@ -1558,6 +1579,13 @@ export default function OrderWorkflowV2Page() {
     if (!router.isReady || !orderId || visibleStep !== 1.5) return;
     loadQuadReview().catch((err) => {
       setQuadReviewMessage(formatApiError(err, "4点確認データの取得に失敗しました"));
+    });
+  }, [router.isReady, orderId, visibleStep]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId || visibleStep !== 1.6) return;
+    loadHeaderAxisReview().catch((err) => {
+      setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
     });
   }, [router.isReady, orderId, visibleStep]);
 
@@ -2069,6 +2097,57 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
+  const loadHeaderAxisReview = async () => {
+    if (!orderId) return;
+    setHeaderAxisLoading(true);
+    setHeaderAxisMessage("");
+    try {
+      const response = await apiClient.get<HeaderAxisReviewPayload>(`/orders/${orderId}/workflow-v2/header-axis-review`);
+      setHeaderAxisReview(response.data);
+      const savedXs = response.data?.saved_override?.corrected_xs;
+      const detectedXs = response.data?.x_positions;
+      const nextXs = Array.isArray(savedXs) && savedXs.length >= 2 ? savedXs : detectedXs;
+      setHeaderAxisXs((Array.isArray(nextXs) ? nextXs : []).map((value) => Number(value)).filter(Number.isFinite));
+    } catch (err: any) {
+      setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
+    } finally {
+      setHeaderAxisLoading(false);
+    }
+  };
+
+  const saveHeaderAxisAndRerun = async () => {
+    if (!orderId || headerAxisXs.length < 2) {
+      setHeaderAxisMessage("ヘッダー交点の縦軸が不足しています。");
+      return;
+    }
+    const coordinateSpace = headerAxisReview?.coordinate_space;
+    if (!coordinateSpace?.width || !coordinateSpace?.height) {
+      setHeaderAxisMessage("ヘッダー交点の座標系が取得できていません。");
+      return;
+    }
+    setBusy("header axis save");
+    setError("");
+    setHeaderAxisMessage("");
+    try {
+      await apiClient.put(`/orders/${orderId}/workflow-v2/header-axis-review`, {
+        corrected_xs: headerAxisXs,
+        coordinate_space: coordinateSpace,
+      });
+      await refreshAll();
+      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+        stale_action: "retry",
+        force: true,
+        mode: "hakodate",
+      });
+      setMessage("ヘッダー交点補正を保存し、OCRを再実行しました。");
+      setVisibleStep(2);
+    } catch (err: any) {
+      setError(formatApiError(err, "ヘッダー交点補正の保存またはOCR再実行に失敗しました"));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleQuadImageClick = (event: MouseEvent<HTMLImageElement>) => {
     if (!manualQuadMode || manualQuadPoints.length >= 4) return;
     const image = event.currentTarget;
@@ -2078,6 +2157,31 @@ export default function OrderWorkflowV2Page() {
     const x = ((event.clientX - rect.left) / rect.width) * naturalWidth;
     const y = ((event.clientY - rect.top) / rect.height) * naturalHeight;
     setManualQuadPoints((current) => [...current, [Number(x.toFixed(2)), Number(y.toFixed(2))]].slice(0, 4));
+  };
+
+  const headerAxisPointerToCanvasX = (event: MouseEvent<SVGSVGElement>) => {
+    const svg = event.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const cropX0 = Number(headerAxisReview?.crop_box?.[0] || 0);
+    const width = Number(headerAxisReview?.image_size?.[0] || rect.width || 1);
+    const xInCrop = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * width;
+    return Number((cropX0 + xInCrop).toFixed(3));
+  };
+
+  const moveHeaderAxis = (index: number, nextX: number) => {
+    const canvasWidth = Number(headerAxisReview?.canvas_size?.[0] || headerAxisReview?.coordinate_space?.width || 0);
+    setHeaderAxisXs((current) => {
+      if (index < 0 || index >= current.length) return current;
+      const minX = index > 0 ? current[index - 1] + 1 : 0;
+      const maxX = index < current.length - 1 ? current[index + 1] - 1 : canvasWidth || Number.MAX_SAFE_INTEGER;
+      const clamped = Math.min(Math.max(nextX, minX), maxX);
+      return current.map((value, idx) => (idx === index ? Number(clamped.toFixed(3)) : value));
+    });
+  };
+
+  const handleHeaderAxisPointerMove = (event: MouseEvent<SVGSVGElement>) => {
+    if (draggingHeaderAxisIndex === null) return;
+    moveHeaderAxis(draggingHeaderAxisIndex, headerAxisPointerToCanvasX(event));
   };
 
   const runOcr = () =>
@@ -2628,6 +2732,17 @@ export default function OrderWorkflowV2Page() {
   const quadPolylinePoints = Array.isArray(activeQuad)
     ? activeQuad.map((point) => `${Number(point?.[0] || 0)},${Number(point?.[1] || 0)}`).join(" ")
     : "";
+  const headerAxisImageSrc = headerAxisReview?.image_png_base64 ? `data:image/png;base64,${headerAxisReview.image_png_base64}` : "";
+  const headerAxisImageWidth = Number(headerAxisReview?.image_size?.[0] || 1400);
+  const headerAxisImageHeight = Number(headerAxisReview?.image_size?.[1] || 360);
+  const headerAxisCropX0 = Number(headerAxisReview?.crop_box?.[0] || 0);
+  const headerAxisCropY0 = Number(headerAxisReview?.crop_box?.[1] || 0);
+  const headerAxisYLevels = (Array.isArray(headerAxisReview?.y_levels) ? headerAxisReview?.y_levels : [])
+    .map((value) => Number(value))
+    .filter(Number.isFinite);
+  const headerAxisDisplayYLevels = headerAxisYLevels.length
+    ? headerAxisYLevels
+    : [headerAxisCropY0 + headerAxisImageHeight * 0.35, headerAxisCropY0 + headerAxisImageHeight * 0.7];
 
   return (
     <main className="page workflow-v2-page">
@@ -3308,11 +3423,83 @@ export default function OrderWorkflowV2Page() {
         </section>
         ) : null}
 
+        {visibleStep === 1.6 ? (
+        <section className="panel header-axis-review-panel">
+          <p className="step-tag">Step1.6</p>
+          <header className="panel-header">
+            <div>
+              <h2>ヘッダー交点の手動補正</h2>
+              <p className="subtle">
+                2段ヘッダーの縦線判定が手書き訂正線などに引っ張られた場合だけ使います。点を横方向にドラッグして、実FAXのヘッダー交点に合わせてからOCRを再実行します。
+              </p>
+            </div>
+            <div className="row-actions">
+              <button className="btn ghost" type="button" onClick={() => void loadHeaderAxisReview()} disabled={headerAxisLoading || Boolean(busy)}>
+                {headerAxisLoading ? "取得中..." : "ヘッダーを再取得"}
+              </button>
+              <button className="btn primary" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || headerAxisXs.length < 2)}>
+                ヘッダー補正を保存してOCR再実行
+              </button>
+            </div>
+          </header>
+          {headerAxisMessage ? <div className="notice error">{headerAxisMessage}</div> : null}
+          <div className="header-axis-canvas-wrap">
+            {headerAxisImageSrc ? (
+              <div className="header-axis-canvas">
+                <img src={headerAxisImageSrc} alt="ヘッダー交点補正" />
+                <svg
+                  viewBox={`0 0 ${headerAxisImageWidth} ${headerAxisImageHeight}`}
+                  onMouseMove={handleHeaderAxisPointerMove}
+                  onMouseUp={() => setDraggingHeaderAxisIndex(null)}
+                  onMouseLeave={() => setDraggingHeaderAxisIndex(null)}
+                  aria-label="ヘッダー交点補正"
+                >
+                  {headerAxisXs.map((x, idx) => {
+                    const displayX = x - headerAxisCropX0;
+                    return (
+                      <g key={`header-axis-${idx}`}>
+                        <line x1={displayX} y1={0} x2={displayX} y2={headerAxisImageHeight} className="header-axis-line" />
+                        {headerAxisDisplayYLevels.map((y, yIdx) => (
+                          <circle
+                            key={`header-axis-${idx}-${yIdx}`}
+                            cx={displayX}
+                            cy={y - headerAxisCropY0}
+                            r="10"
+                            className="header-axis-point"
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              setDraggingHeaderAxisIndex(idx);
+                            }}
+                          />
+                        ))}
+                        <text x={displayX + 8} y={20} className="header-axis-label">{idx + 1}</text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            ) : (
+              <div className="pdf-placeholder">{headerAxisLoading ? "ヘッダー確認画像を取得中..." : "ヘッダー確認画像がありません。"}</div>
+            )}
+          </div>
+          <p className="subtle">
+            保存すると現在の注文だけにヘッダーX軸補正を記録し、その補正を使って箱館OCRを再実行します。
+          </p>
+        </section>
+        ) : null}
+
         {visibleStep === 2 ? (
         <section className="panel">
           <p className="step-tag">Step2</p>
-          <h2>正解 OCR を一つ選ぶ</h2>
-          <p className="subtle">選択変更または削除時は、派生 sheet / bagging / output / confirmed snapshot を無効化します。</p>
+          <header className="panel-header">
+            <div>
+              <h2>正解 OCR を一つ選ぶ</h2>
+              <p className="subtle">選択変更または削除時は、派生 sheet / bagging / output / confirmed snapshot を無効化します。</p>
+            </div>
+            <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
+              ヘッダーを修正
+            </button>
+          </header>
           <div className="ocr-result-list">
             {ocrResults.length ? (
               ocrResults.map((item) => (
@@ -5337,6 +5524,47 @@ export default function OrderWorkflowV2Page() {
           paint-order: stroke;
           stroke: #fffdf7;
           stroke-width: 8;
+        }
+        .header-axis-canvas-wrap {
+          background: #ffffff;
+          border: 1px solid #ddd5c2;
+          border-radius: 16px;
+          max-height: 76vh;
+          overflow: auto;
+        }
+        .header-axis-canvas {
+          min-width: 1120px;
+          position: relative;
+          width: 100%;
+        }
+        .header-axis-canvas img {
+          display: block;
+          width: 100%;
+        }
+        .header-axis-canvas svg {
+          cursor: ew-resize;
+          inset: 0;
+          position: absolute;
+          width: 100%;
+          height: 100%;
+        }
+        .header-axis-line {
+          stroke: rgba(255, 145, 0, 0.65);
+          stroke-width: 4;
+        }
+        .header-axis-point {
+          cursor: ew-resize;
+          fill: #ff9100;
+          stroke: #fff;
+          stroke-width: 3;
+        }
+        .header-axis-label {
+          fill: #1c2822;
+          font-size: 18px;
+          font-weight: 900;
+          paint-order: stroke;
+          stroke: #fffdf7;
+          stroke-width: 5;
         }
         .ocr-result-list {
           display: grid;

@@ -2,6 +2,7 @@ from typing import Any, Optional
 from pathlib import Path
 from copy import deepcopy
 import base64
+import io
 import json
 import os
 import hashlib
@@ -154,6 +155,42 @@ def _normalize_operator_quad_override(
     if not any(token in source.lower() for token in ("operator", "manual", "user_adjusted", "quad_override")):
         source = f"operator_{source}"
     return normalized, source
+
+
+def _normalize_operator_header_axis_override(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate_space = value.get("coordinate_space")
+    if not isinstance(coordinate_space, dict):
+        return None
+    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
+        return None
+    try:
+        width = int(coordinate_space.get("width"))
+        height = int(coordinate_space.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    raw_xs = value.get("corrected_xs")
+    if not isinstance(raw_xs, list) or len(raw_xs) < 2:
+        return None
+    corrected_xs: list[float] = []
+    for raw in raw_xs:
+        try:
+            x = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if x < 0 or x > float(width):
+            return None
+        corrected_xs.append(round(x, 3))
+    if any(b <= a for a, b in zip(corrected_xs, corrected_xs[1:])):
+        return None
+    return {
+        "corrected_xs": corrected_xs,
+        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
+        "source": str(value.get("source") or "operator_header_axis_override"),
+    }
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
@@ -8382,6 +8419,7 @@ def _build_live_hakodate_manifest_item(
             workflow_meta.get("quad_override"),
             render_width=render_width,
         )
+        header_axis_override = _normalize_operator_header_axis_override(workflow_meta.get("header_axis_override"))
     if not document_uri:
         raise ValueError("document_missing")
     week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
@@ -8467,9 +8505,93 @@ def _build_live_hakodate_manifest_item(
         "template_axes_y": template_axes_y,
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
+        "header_axis_override": header_axis_override,
         "week_sheet_name": week_sheet_name,
         "source": "live_order_master_facility_template",
     }
+
+
+def build_hakodate_header_axis_review(order_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            raise ValueError("order_not_found")
+        facility_id = str(order.facility_code or "").strip()
+    if not facility_id:
+        raise ValueError("facility_missing")
+    with tempfile.TemporaryDirectory(prefix=f"hakodate_header_review_{order_id}_") as tmp:
+        output_dir = Path(tmp)
+        runtime_item = _build_live_hakodate_manifest_item(
+            order_id=order_id,
+            facility_id=facility_id,
+            output_dir=output_dir,
+            render_width=1864,
+        )
+        pre = hakodate_cell_ocr_batch_service._build_preprocess_for_ocr(  # noqa: SLF001
+            item=runtime_item,
+            page=1,
+            render_width=1864,
+        )
+        image = pre["target_overlay"].convert("RGB")
+        axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
+        match = axis_evidence.get("header_intersection_x_match") if isinstance(axis_evidence, dict) else {}
+        if not isinstance(match, dict):
+            match = {}
+        header_roi = match.get("header_roi")
+        if not isinstance(header_roi, list) or len(header_roi) != 4:
+            table_bbox = pre.get("template_outer_grid_bbox_used") or [0, 0, image.width, min(image.height, 360)]
+            x0, y0, x1, y1 = [int(round(float(value))) for value in table_bbox]
+            header_roi = [x0, max(0, y0 - 24), x1, min(image.height, y0 + 260)]
+        x0, y0, x1, y1 = [int(round(float(value))) for value in header_roi]
+        pad = 36
+        crop_box = [
+            max(0, x0 - pad),
+            max(0, y0 - pad),
+            min(image.width, x1 + pad),
+            min(image.height, y1 + pad),
+        ]
+        crop = image.crop(tuple(crop_box))
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        corrected_xs = match.get("corrected_xs")
+        if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
+            clusters = match.get("fax_x_clusters")
+            if isinstance(clusters, list):
+                corrected_xs = [cluster.get("value") for cluster in clusters if isinstance(cluster, dict)]
+        if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
+            corrected_xs = list(runtime_item.get("template_axes_x") or [])
+        xs: list[float] = []
+        for raw in corrected_xs:
+            try:
+                xs.append(round(float(raw), 3))
+            except (TypeError, ValueError):
+                continue
+        y_clusters = match.get("fax_y_clusters")
+        y_levels: list[float] = []
+        if isinstance(y_clusters, list):
+            for cluster in y_clusters:
+                if not isinstance(cluster, dict):
+                    continue
+                try:
+                    y_levels.append(round(float(cluster.get("value")), 3))
+                except (TypeError, ValueError):
+                    continue
+        if not y_levels:
+            y_levels = [float(value) for value in list(runtime_item.get("template_axes_y") or [])[:3]]
+        return {
+            "order_id": order_id,
+            "status": "ready",
+            "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+            "image_size": [crop.width, crop.height],
+            "crop_box": crop_box,
+            "canvas_size": [image.width, image.height],
+            "x_positions": xs,
+            "y_levels": y_levels,
+            "axis_evidence": match,
+            "saved_override": runtime_item.get("header_axis_override"),
+            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height},
+            "source": "hakodate_header_axis_review",
+        }
 
 
 def _hakodate_overlay_fingerprint(

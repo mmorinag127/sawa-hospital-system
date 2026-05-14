@@ -107,6 +107,11 @@ class WorkflowV2QuadReviewBody(BaseModel):
     quad_px: list[list[float]]
 
 
+class WorkflowV2HeaderAxisReviewBody(BaseModel):
+    corrected_xs: list[float]
+    coordinate_space: dict
+
+
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
@@ -1742,6 +1747,22 @@ def save_order_workflow_v2_quad_review(order_id: str, body: WorkflowV2QuadReview
             order_id,
             decision=body.decision,
             quad_px=body.quad_px,
+        )
+    )
+
+
+@router.get("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_header_axis_review(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_header_axis_review(order_id))
+
+
+@router.put("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])
+def save_order_workflow_v2_header_axis_review(order_id: str, body: WorkflowV2HeaderAxisReviewBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.save_header_axis_review_decision(
+            order_id,
+            corrected_xs=body.corrected_xs,
+            coordinate_space=body.coordinate_space,
         )
     )
 
