@@ -4,7 +4,9 @@ import base64
 import hashlib
 import json
 import os
+import tempfile
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -176,6 +178,24 @@ def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
     existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
     existing[WORKFLOW_V2_META_KEY] = dict(meta)
     row.secondary_actions_json = existing
+
+
+def _normalize_quad_px(value: object) -> list[list[float]] | None:
+    if not isinstance(value, list) or len(value) != 4:
+        return None
+    normalized: list[list[float]] = []
+    for point in value:
+        if not isinstance(point, list | tuple) or len(point) != 2:
+            return None
+        try:
+            x = float(point[0])
+            y = float(point[1])
+        except (TypeError, ValueError):
+            return None
+        if x < 0 or y < 0:
+            return None
+        normalized.append([round(x, 2), round(y, 2)])
+    return normalized
 
 
 def _normalize_context_suggestion(suggestion: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -666,6 +686,7 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
     meta = _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
     template_version_id = _effective_workflow_template_version_id(row, meta)
+    quad_override = meta.get("quad_override")
     return {
         "order_id": row.order_id,
         "state": row.state,
@@ -683,6 +704,7 @@ def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = Non
         "expanded_cell_copy_mode": _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode")),
         "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
         or None,
+        "quad_override": quad_override if isinstance(quad_override, dict) else None,
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "ocr_job": _serialize_ocr_job(ocr_job),
@@ -1070,6 +1092,111 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if not serialized.get("context_suggestion"):
             serialized["context_suggestion"] = _order_context_suggestion(order)
         return serialized, None
+
+
+def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        document_uri = _normalize_id(order.document_uri)
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        saved_override = meta.get("quad_override") if isinstance(meta.get("quad_override"), dict) else None
+    if not document_uri:
+        return None, "document_missing"
+
+    try:
+        pdf_bytes = load_bytes_from_uri(document_uri)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "order_id": order_id,
+            "error": "document_load_failed",
+            "error_detail": str(exc),
+        }, None
+
+    from src.services.hakodate_fixed_quad_registration_service import (
+        estimate_edge_locked_quad_from_pdf,
+        render_pdf_page_to_bgr,
+    )
+
+    render_width = 2000
+    with tempfile.TemporaryDirectory(prefix="sawa_quad_review_") as tmp_dir:
+        pdf_path = Path(tmp_dir) / f"{order_id}.pdf"
+        pdf_path.write_bytes(pdf_bytes)
+        estimate = estimate_edge_locked_quad_from_pdf(pdf_path, render_width=render_width)
+        image_bgr = render_pdf_page_to_bgr(str(pdf_path), width=render_width)
+    try:
+        import cv2  # type: ignore
+
+        ok, encoded = cv2.imencode(".png", image_bgr)
+        image_png_base64 = base64.b64encode(encoded.tobytes()).decode("ascii") if ok else None
+    except Exception as exc:  # noqa: BLE001
+        image_png_base64 = None
+        estimate = {
+            **estimate,
+            "render_warning": f"preview_encode_failed:{exc}",
+        }
+
+    return {
+        "order_id": order_id,
+        "status": "ready",
+        "image_png_base64": image_png_base64,
+        "image_size": estimate.get("image_size"),
+        "estimate": estimate,
+        "suggested_quad_px": _normalize_quad_px(estimate.get("refined_quad_px")),
+        "saved_override": saved_override,
+        "ocr_job": _serialize_ocr_job(ocr_job),
+        "tolerance_policy": {
+            "hit_rate_min": 0.78,
+            "mean_abs_offset_px_ok_max": 4.5,
+            "mean_abs_offset_px_hard_ng": 8.0,
+            "gap_max_px_est_max": 140,
+            "max_abs_offset_px_borderline_max": 24,
+        },
+        "source": "workflow_v2_quad_review",
+    }, None
+
+
+def save_quad_review_decision(
+    order_id: str,
+    *,
+    decision: str,
+    quad_px: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_decision = _normalize_id(decision).lower()
+    if normalized_decision not in {"approved_estimate", "manual_override"}:
+        return None, "quad_decision_invalid"
+    normalized_quad = _normalize_quad_px(quad_px)
+    if normalized_quad is None:
+        return None, "quad_px_invalid"
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        source = "operator_approved_estimate" if normalized_decision == "approved_estimate" else "operator_manual"
+        meta["quad_override"] = {
+            "quad_px": normalized_quad,
+            "quad_source": source,
+            "decision": normalized_decision,
+            "created_at": _now().isoformat(),
+        }
+        meta["latest_ocr_error"] = None
+        _write_workflow_meta(workflow, meta)
+        if workflow.state == "ocr_failed" and "quad_estimation_failed" in (workflow.blockers_json or []):
+            workflow.state = "context_confirmed"
+            workflow.headline = "4点補正を保存しました。OCRを再実行できます"
+            workflow.primary_action = "run_ocr"
+            workflow.blockers_json = []
+            workflow.warnings_json = []
+            workflow.last_transition_at = _now()
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
 def record_context_suggestion(

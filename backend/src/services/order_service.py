@@ -113,6 +113,31 @@ from src.services.ocr_pipeline_service import (
 
 HAKODATE_EVIDENCE_PROJECTION_VERSION = "hakodate_projection_truth_v2"
 HAKODATE_CANONICAL_PIPELINE_VERSION = "hakodate_best_method_canonical_v2"
+WORKFLOW_V2_META_KEY = "workflow_v2"
+
+
+def _normalize_operator_quad_override(value: object) -> tuple[list[list[float]] | None, str | None]:
+    if not isinstance(value, dict):
+        return None, None
+    quad = value.get("quad_px")
+    if not isinstance(quad, list) or len(quad) != 4:
+        return None, None
+    normalized: list[list[float]] = []
+    for point in quad:
+        if not isinstance(point, list | tuple) or len(point) != 2:
+            return None, None
+        try:
+            x = float(point[0])
+            y = float(point[1])
+        except (TypeError, ValueError):
+            return None, None
+        if x < 0 or y < 0:
+            return None, None
+        normalized.append([round(x, 2), round(y, 2)])
+    source = str(value.get("quad_source") or "operator_manual").strip() or "operator_manual"
+    if not any(token in source.lower() for token in ("operator", "manual", "user_adjusted", "quad_override")):
+        source = f"operator_{source}"
+    return normalized, source
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
@@ -8337,6 +8362,7 @@ def _build_live_hakodate_manifest_item(
             raw_meta = workflow.secondary_actions_json.get("workflow_v2")
             workflow_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         selected_template_id = str(workflow_meta.get("template_id") or "").strip() or None
+        quad_override_px, quad_override_source = _normalize_operator_quad_override(workflow_meta.get("quad_override"))
     if not document_uri:
         raise ValueError("document_missing")
     week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
@@ -8395,12 +8421,12 @@ def _build_live_hakodate_manifest_item(
         order_id=order_id,
         fax_pdf=fax_pdf_for_registration,
         template_pdf=str(structure_pdf),
-        quad_px=None,
+        quad_px=quad_override_px,
         manifest_template_bbox=template_bbox,
         canvas_width=accepted_canvas_width,
         canvas_height=accepted_canvas_height,
         render_width=render_width,
-        quad_source=None,
+        quad_source=quad_override_source,
         output_dir=registration_dir,
         template_axes_x=template_axes_x,
         template_axes_y=template_axes_y,
@@ -12798,7 +12824,7 @@ def rerun_ocr_evidence_only(
             return {
                 "error": "quad_estimation_failed",
                 "error_detail": raw_message,
-                "error_user_message": "FAXの表外枠4点を自動推定できませんでした。原本PDFの表の四隅を確認し、4点補正を行ってからOCRを再実行してください。",
+                "error_user_message": "FAXの表外枠4点が自動判定の許容範囲を超えました。Step1.5で推定4点と許容範囲を目視確認し、OKまたは手動4点補正を行ってからOCRを再実行してください。",
                 "recovery_action": "review_or_edit_quad",
                 "processing_stage": "quad_estimation",
             }

@@ -102,6 +102,11 @@ class WorkflowV2FacilityTemplateColumnsBody(BaseModel):
     columns: list[dict]
 
 
+class WorkflowV2QuadReviewBody(BaseModel):
+    decision: str
+    quad_px: list[list[float]]
+
+
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
@@ -1722,6 +1727,22 @@ def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, 
         background_tasks,
         stale_action=stale_action,
         force=force,
+    )
+
+
+@router.get("/{order_id}/workflow-v2/quad-review", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_quad_review(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_quad_review(order_id))
+
+
+@router.put("/{order_id}/workflow-v2/quad-review", dependencies=[Depends(require_role("operator"))])
+def save_order_workflow_v2_quad_review(order_id: str, body: WorkflowV2QuadReviewBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.save_quad_review_decision(
+            order_id,
+            decision=body.decision,
+            quad_px=body.quad_px,
+        )
     )
 
 

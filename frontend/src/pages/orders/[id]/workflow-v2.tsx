@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
@@ -30,6 +30,12 @@ type WorkflowV2 = {
   output_bundle_id?: string | null;
   blockers?: string[] | null;
   warnings?: string[] | null;
+  quad_override?: {
+    quad_px?: number[][];
+    quad_source?: string | null;
+    decision?: string | null;
+    created_at?: string | null;
+  } | null;
   ocr_job?: {
     ocr_job_id?: string | null;
     status?: string | null;
@@ -49,6 +55,31 @@ type WorkflowV2 = {
     error_user_message?: string | null;
     recovery_action?: string | null;
   } | null;
+};
+
+type QuadReviewPayload = {
+  order_id: string;
+  status?: string | null;
+  image_png_base64?: string | null;
+  image_size?: number[] | null;
+  suggested_quad_px?: number[][] | null;
+  saved_override?: {
+    quad_px?: number[][];
+    quad_source?: string | null;
+    decision?: string | null;
+    created_at?: string | null;
+  } | null;
+  estimate?: {
+    status?: string | null;
+    reasons?: string[];
+    warnings?: string[];
+    refined_quad_px?: number[][];
+    initial_quad_px?: number[][];
+    corner_shift_px?: Record<string, number>;
+    metrics?: Record<string, Record<string, number>>;
+  } | null;
+  tolerance_policy?: Record<string, number>;
+  ocr_job?: WorkflowV2["ocr_job"];
 };
 
 type FacilitySuggestionCandidate = {
@@ -633,7 +664,7 @@ const stepIndexForState = (state?: string | null) => {
   return 1;
 };
 
-const stepLabels = [
+const baseStepLabels = [
   { step: 1, label: "PDF/施設/週次" },
   { step: 2, label: "OCR選択" },
   { step: 3, label: "シート編集" },
@@ -1040,6 +1071,11 @@ export default function OrderWorkflowV2Page() {
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
   const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
+  const [quadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
+  const [quadReviewLoading, setQuadReviewLoading] = useState(false);
+  const [quadReviewMessage, setQuadReviewMessage] = useState("");
+  const [manualQuadMode, setManualQuadMode] = useState(false);
+  const [manualQuadPoints, setManualQuadPoints] = useState<number[][]>([]);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
@@ -1102,6 +1138,17 @@ export default function OrderWorkflowV2Page() {
       || "",
   ).trim();
   const ocrJobRecoveryAction = String(workflow?.ocr_job?.recovery_action || "").trim();
+  const quadReviewRequired = ocrJobRecoveryAction === "review_or_edit_quad"
+    || workflowBlockers.includes("quad_estimation_failed")
+    || Boolean(workflow?.quad_override?.quad_px?.length);
+  const stepLabels = useMemo(() => {
+    if (!quadReviewRequired) return baseStepLabels;
+    return [
+      baseStepLabels[0],
+      { step: 1.5, label: "4点確認/補正" },
+      ...baseStepLabels.slice(1),
+    ];
+  }, [quadReviewRequired]);
   const ocrPrerequisiteBlockers = workflowBlockers.filter((item) =>
     [
       "menu_entries_missing",
@@ -1506,6 +1553,13 @@ export default function OrderWorkflowV2Page() {
     }, 3000);
     return () => window.clearInterval(timer);
   }, [router.isReady, orderId, workflow?.state]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId || visibleStep !== 1.5) return;
+    loadQuadReview().catch((err) => {
+      setQuadReviewMessage(formatApiError(err, "4点確認データの取得に失敗しました"));
+    });
+  }, [router.isReady, orderId, visibleStep]);
 
   const loadFacilityTemplateStatus = async (facilityId: string) => {
     const normalizedFacilityId = facilityId.trim();
@@ -1967,6 +2021,63 @@ export default function OrderWorkflowV2Page() {
     applyWeekValue(weekValue);
     setError("");
     setMessage("例外範囲を設定しました。");
+  };
+
+  const loadQuadReview = async () => {
+    if (!orderId) return;
+    setQuadReviewLoading(true);
+    setQuadReviewMessage("");
+    try {
+      const response = await apiClient.get<QuadReviewPayload>(`/orders/${orderId}/workflow-v2/quad-review`);
+      setQuadReview(response.data);
+      const savedQuad = response.data?.saved_override?.quad_px;
+      if (Array.isArray(savedQuad) && savedQuad.length === 4) {
+        setManualQuadPoints(savedQuad);
+      }
+    } catch (err: any) {
+      setQuadReviewMessage(formatApiError(err, "4点確認データの取得に失敗しました"));
+    } finally {
+      setQuadReviewLoading(false);
+    }
+  };
+
+  const saveQuadAndRerun = async (decision: "approved_estimate" | "manual_override", quadPx: number[][]) => {
+    if (!orderId || !Array.isArray(quadPx) || quadPx.length !== 4) {
+      setQuadReviewMessage("4点が揃っていません。");
+      return;
+    }
+    setBusy("quad review save");
+    setError("");
+    setQuadReviewMessage("");
+    try {
+      await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
+        decision,
+        quad_px: quadPx,
+      });
+      await refreshAll();
+      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+        stale_action: "retry",
+        force: true,
+        mode: "hakodate",
+      });
+      setMessage("4点補正を保存し、OCRを再実行しました。");
+      setVisibleStep(2);
+    } catch (err: any) {
+      setError(formatApiError(err, "4点補正の保存またはOCR再実行に失敗しました"));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleQuadImageClick = (event: MouseEvent<HTMLImageElement>) => {
+    if (!manualQuadMode || manualQuadPoints.length >= 4) return;
+    const image = event.currentTarget;
+    const rect = image.getBoundingClientRect();
+    const naturalWidth = image.naturalWidth || rect.width;
+    const naturalHeight = image.naturalHeight || rect.height;
+    const x = ((event.clientX - rect.left) / rect.width) * naturalWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * naturalHeight;
+    setManualQuadPoints((current) => [...current, [Number(x.toFixed(2)), Number(y.toFixed(2))]].slice(0, 4));
   };
 
   const runOcr = () =>
@@ -2505,6 +2616,19 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
+  const quadImageSrc = quadReview?.image_png_base64 ? `data:image/png;base64,${quadReview.image_png_base64}` : "";
+  const quadImageWidth = Number(quadReview?.image_size?.[0] || 2000);
+  const quadImageHeight = Number(quadReview?.image_size?.[1] || 2800);
+  const suggestedQuad = (
+    (Array.isArray(quadReview?.suggested_quad_px) && quadReview?.suggested_quad_px?.length === 4)
+      ? quadReview.suggested_quad_px
+      : (Array.isArray(quadReview?.estimate?.refined_quad_px) ? quadReview?.estimate?.refined_quad_px : [])
+  ) as number[][];
+  const activeQuad = manualQuadMode ? manualQuadPoints : suggestedQuad;
+  const quadPolylinePoints = Array.isArray(activeQuad)
+    ? activeQuad.map((point) => `${Number(point?.[0] || 0)},${Number(point?.[1] || 0)}`).join(" ")
+    : "";
+
   return (
     <main className="page workflow-v2-page">
       <header className="hero">
@@ -2580,7 +2704,12 @@ export default function OrderWorkflowV2Page() {
         <div className="notice error">
           <strong>OCR失敗:</strong> {ocrJobErrorMessage}
           {ocrJobRecoveryAction === "review_or_edit_quad" ? (
-            <span> 4点推定を確認/補正してから再実行してください。</span>
+            <span>
+              {" "}Step1.5で推定4点を確認してください。
+              <button className="inline-action-btn" type="button" onClick={() => setVisibleStep(1.5)}>
+                4点を確認/補正
+              </button>
+            </span>
           ) : null}
         </div>
       ) : null}
@@ -3060,6 +3189,120 @@ export default function OrderWorkflowV2Page() {
               <iframe title="workflow-v2-original-pdf" src={pdfUrl} className="pdf-frame pdf-frame-wide" />
             ) : (
               <div className="pdf-placeholder">{pdfError || "PDFを読み込み中..."}</div>
+            )}
+          </div>
+        </section>
+        ) : null}
+
+        {visibleStep === 1.5 ? (
+        <section className="panel quad-review-panel">
+          <p className="step-tag">Step1.5</p>
+          <header className="panel-header">
+            <div>
+              <h2>4点推定の確認 / 手動補正</h2>
+              <p className="subtle">
+                自動推定が許容範囲を超えた場合だけ使う復帰ページです。推定4点が表外枠に合っていればOK、合っていなければ手動で左上→右上→右下→左下の順に指定します。
+              </p>
+            </div>
+            <button className="btn ghost" type="button" onClick={() => void loadQuadReview()} disabled={quadReviewLoading || Boolean(busy)}>
+              {quadReviewLoading ? "取得中..." : "4点推定を再取得"}
+            </button>
+          </header>
+          {quadReviewMessage ? <div className="notice error">{quadReviewMessage}</div> : null}
+          {quadReview?.estimate ? (
+            <div className="quad-review-summary">
+              <div>
+                <span className="field-label">判定</span>
+                <strong>{quadReview.estimate.status || "-"}</strong>
+              </div>
+              <div>
+                <span className="field-label">NG理由</span>
+                <p>{(quadReview.estimate.reasons || []).join(" / ") || "なし"}</p>
+              </div>
+              <div>
+                <span className="field-label">警告</span>
+                <p>{(quadReview.estimate.warnings || []).join(" / ") || "なし"}</p>
+              </div>
+              <div>
+                <span className="field-label">許容範囲</span>
+                <p>
+                  平均offset OK上限 {quadReview.tolerance_policy?.mean_abs_offset_px_ok_max ?? 4.5}px /
+                  NG {quadReview.tolerance_policy?.mean_abs_offset_px_hard_ng ?? 8}px /
+                  hit率下限 {quadReview.tolerance_policy?.hit_rate_min ?? 0.78}
+                </p>
+              </div>
+            </div>
+          ) : null}
+          <div className="quad-review-actions">
+            <button
+              className="btn primary"
+              type="button"
+              onClick={() => void saveQuadAndRerun("approved_estimate", suggestedQuad)}
+              disabled={Boolean(busy || suggestedQuad.length !== 4)}
+            >
+              推定4点をOKにしてOCR再実行
+            </button>
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => {
+                setManualQuadMode(true);
+                setManualQuadPoints([]);
+              }}
+              disabled={Boolean(busy)}
+            >
+              NG: 手動で4点指定
+            </button>
+            {manualQuadMode ? (
+              <>
+                <button className="btn ghost" type="button" onClick={() => setManualQuadPoints([])} disabled={Boolean(busy)}>
+                  手動点をクリア
+                </button>
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={() => void saveQuadAndRerun("manual_override", manualQuadPoints)}
+                  disabled={Boolean(busy || manualQuadPoints.length !== 4)}
+                >
+                  手動4点を保存してOCR再実行
+                </button>
+              </>
+            ) : null}
+          </div>
+          {manualQuadMode ? (
+            <p className="workflow-warning">
+              手動指定中: {manualQuadPoints.length}/4 点。順序は 左上 → 右上 → 右下 → 左下 です。
+            </p>
+          ) : null}
+          <div className="quad-review-canvas-wrap">
+            {quadImageSrc ? (
+              <div className="quad-review-canvas">
+                <img
+                  src={quadImageSrc}
+                  alt="4点推定確認"
+                  onClick={handleQuadImageClick}
+                  className={manualQuadMode ? "quad-clickable-image" : ""}
+                />
+                <svg viewBox={`0 0 ${quadImageWidth} ${quadImageHeight}`} aria-hidden="true">
+                  {suggestedQuad.length === 4 ? (
+                    <polygon
+                      points={suggestedQuad.map((point) => `${point[0]},${point[1]}`).join(" ")}
+                      className="quad-estimate-polygon"
+                    />
+                  ) : null}
+                  {quadPolylinePoints ? (
+                    <polyline points={`${quadPolylinePoints} ${activeQuad.length === 4 ? `${activeQuad[0][0]},${activeQuad[0][1]}` : ""}`} className="quad-active-polyline" />
+                  ) : null}
+                  {(activeQuad || []).map((point, idx) => (
+                    <g key={`quad-point-${idx}`}>
+                      <circle cx={point[0]} cy={point[1]} r="18" className={manualQuadMode ? "quad-manual-point" : "quad-estimate-point"} />
+                      <text x={point[0] + 24} y={point[1] - 18} className="quad-point-label">Q{idx + 1}</text>
+                    </g>
+                  ))}
+                </svg>
+              </div>
+            ) : (
+              <div className="pdf-placeholder">{quadReviewLoading ? "4点確認画像を取得中..." : "4点確認画像がありません。"}</div>
             )}
           </div>
         </section>
@@ -5012,6 +5255,89 @@ export default function OrderWorkflowV2Page() {
           background: #f8dfd8;
           color: #8a2c18;
         }
+        .inline-action-btn {
+          background: #fffdf7;
+          border: 1px solid #c9bda2;
+          border-radius: 999px;
+          color: #162019;
+          cursor: pointer;
+          font-weight: 800;
+          margin-left: 10px;
+          padding: 4px 10px;
+        }
+        .quad-review-summary {
+          background: #fbf7ed;
+          border: 1px solid #ddd5c2;
+          border-radius: 14px;
+          display: grid;
+          gap: 10px;
+          grid-template-columns: 120px 1fr 1fr 1.4fr;
+          margin: 14px 0;
+          padding: 12px;
+        }
+        .quad-review-summary p {
+          margin: 2px 0 0;
+        }
+        .quad-review-actions {
+          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin: 12px 0;
+        }
+        .quad-review-canvas-wrap {
+          background: #ffffff;
+          border: 1px solid #ddd5c2;
+          border-radius: 16px;
+          max-height: 78vh;
+          overflow: auto;
+        }
+        .quad-review-canvas {
+          position: relative;
+          width: min(100%, 1120px);
+        }
+        .quad-review-canvas img {
+          display: block;
+          width: 100%;
+        }
+        .quad-clickable-image {
+          cursor: crosshair;
+        }
+        .quad-review-canvas svg {
+          inset: 0;
+          pointer-events: none;
+          position: absolute;
+          width: 100%;
+          height: 100%;
+        }
+        .quad-estimate-polygon {
+          fill: rgba(236, 74, 55, 0.08);
+          stroke: #ec4a37;
+          stroke-width: 6;
+        }
+        .quad-active-polyline {
+          fill: none;
+          stroke: #2f7dff;
+          stroke-width: 8;
+        }
+        .quad-estimate-point {
+          fill: #ec4a37;
+          stroke: #fff;
+          stroke-width: 5;
+        }
+        .quad-manual-point {
+          fill: #2f7dff;
+          stroke: #fff;
+          stroke-width: 5;
+        }
+        .quad-point-label {
+          fill: #162019;
+          font-size: 42px;
+          font-weight: 900;
+          paint-order: stroke;
+          stroke: #fffdf7;
+          stroke-width: 8;
+        }
         .ocr-result-list {
           display: grid;
           gap: 12px;
@@ -5084,6 +5410,7 @@ export default function OrderWorkflowV2Page() {
           .form-grid,
           .step1-control-grid,
           .step3-workspace.side-by-side,
+          .quad-review-summary,
           .ocr-card-body {
             grid-template-columns: 1fr;
           }
