@@ -263,6 +263,9 @@ const HAKODATE_REVIEW_CANVAS = {
   rectifiedCanvasHeight: 4273,
 };
 const AI_REVIEW_REQUEST_TIMEOUT_MS = 180000;
+const DEFAULT_HEADER_AXIS_REQUEST_TIMEOUT_MS = 300000;
+const MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS = 30000;
+const MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS = 900000;
 
 type FacilityOption = {
   id: string;
@@ -1097,6 +1100,9 @@ export default function OrderWorkflowV2Page() {
   const [headerAxisMessage, setHeaderAxisMessage] = useState("");
   const [headerAxisXs, setHeaderAxisXs] = useState<number[]>([]);
   const [draggingHeaderAxisIndex, setDraggingHeaderAxisIndex] = useState<number | null>(null);
+  const [headerAxisTimeoutSeconds, setHeaderAxisTimeoutSeconds] = useState(
+    String(DEFAULT_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000),
+  );
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
@@ -1126,6 +1132,16 @@ export default function OrderWorkflowV2Page() {
   const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
   const sheetAutoEditPollRef = useRef<number | null>(null);
+  const getHeaderAxisTimeoutMs = () => {
+    const seconds = Number(headerAxisTimeoutSeconds);
+    const normalizedSeconds = Number.isFinite(seconds) && seconds > 0
+      ? seconds
+      : DEFAULT_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000;
+    return Math.min(
+      MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS,
+      Math.max(MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS, Math.round(normalizedSeconds * 1000)),
+    );
+  };
 
   const selectedOcr = useMemo(
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
@@ -2104,9 +2120,10 @@ export default function OrderWorkflowV2Page() {
     setHeaderAxisLoading(true);
     setHeaderAxisMessage("");
     try {
+      const timeoutMs = getHeaderAxisTimeoutMs();
       const response = await apiClient.get<HeaderAxisReviewPayload>(
         `/orders/${orderId}/workflow-v2/header-axis-review`,
-        { timeout: 120000 },
+        { timeout: timeoutMs },
       );
       setHeaderAxisReview(response.data);
       const savedXs = response.data?.saved_override?.corrected_xs;
@@ -2134,16 +2151,21 @@ export default function OrderWorkflowV2Page() {
     setError("");
     setHeaderAxisMessage("");
     try {
-      await apiClient.put(`/orders/${orderId}/workflow-v2/header-axis-review`, {
-        corrected_xs: headerAxisXs,
-        coordinate_space: coordinateSpace,
-      });
+      const timeoutMs = getHeaderAxisTimeoutMs();
+      await apiClient.put(
+        `/orders/${orderId}/workflow-v2/header-axis-review`,
+        {
+          corrected_xs: headerAxisXs,
+          coordinate_space: coordinateSpace,
+        },
+        { timeout: timeoutMs },
+      );
       await refreshAll();
       await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
-      });
+      }, { timeout: timeoutMs });
       setMessage("ヘッダー交点補正を保存し、OCRを再実行しました。");
       setVisibleStep(2);
     } catch (err: any) {
@@ -3439,6 +3461,19 @@ export default function OrderWorkflowV2Page() {
               </p>
             </div>
             <div className="row-actions">
+              <label className="header-axis-timeout-control">
+                <span>timeout</span>
+                <input
+                  type="number"
+                  min={String(MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000)}
+                  max={String(MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000)}
+                  step="30"
+                  value={headerAxisTimeoutSeconds}
+                  onChange={(event) => setHeaderAxisTimeoutSeconds(event.target.value)}
+                  aria-label="ヘッダー補正API timeout 秒"
+                />
+                <span>秒</span>
+              </label>
               <button className="btn ghost" type="button" onClick={() => void loadHeaderAxisReview()} disabled={headerAxisLoading || Boolean(busy)}>
                 {headerAxisLoading ? "取得中..." : "ヘッダーを再取得"}
               </button>
@@ -5541,6 +5576,28 @@ export default function OrderWorkflowV2Page() {
           border-radius: 16px;
           max-height: 76vh;
           overflow: auto;
+        }
+        .header-axis-timeout-control {
+          align-items: center;
+          background: rgba(255, 255, 255, 0.78);
+          border: 1px solid rgba(54, 82, 68, 0.14);
+          border-radius: 999px;
+          color: #526258;
+          display: inline-flex;
+          font-size: 12px;
+          font-weight: 800;
+          gap: 6px;
+          padding: 6px 10px;
+        }
+        .header-axis-timeout-control input {
+          background: #fffdf7;
+          border: 1px solid #d8cdb6;
+          border-radius: 10px;
+          color: #1c2822;
+          font-size: 13px;
+          font-weight: 900;
+          padding: 6px 8px;
+          width: 76px;
         }
         .header-axis-canvas {
           min-width: 1120px;
