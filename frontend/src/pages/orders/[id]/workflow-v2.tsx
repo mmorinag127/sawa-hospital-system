@@ -1163,10 +1163,12 @@ export default function OrderWorkflowV2Page() {
     || workflowBlockers.includes("quad_estimation_failed")
     || Boolean(workflow?.quad_override?.quad_px?.length);
   const stepLabels = useMemo(() => {
-    if (!quadReviewRequired) return baseStepLabels;
+    const headerAxisStep = { step: 1.6, label: "ヘッダー補正" };
+    if (!quadReviewRequired) return [baseStepLabels[0], headerAxisStep, ...baseStepLabels.slice(1)];
     return [
       baseStepLabels[0],
       { step: 1.5, label: "4点確認/補正" },
+      headerAxisStep,
       ...baseStepLabels.slice(1),
     ];
   }, [quadReviewRequired]);
@@ -4346,10 +4348,10 @@ export default function OrderWorkflowV2Page() {
           display: block;
         }
         .step-nav {
-          display: grid;
+          display: flex;
           gap: 10px;
-          grid-template-columns: repeat(5, minmax(0, 1fr));
           margin: 16px 36px;
+          overflow-x: auto;
         }
         .step-nav-btn {
           background: rgba(255, 255, 255, 0.74);
@@ -4359,7 +4361,9 @@ export default function OrderWorkflowV2Page() {
           cursor: pointer;
           display: grid;
           gap: 4px;
+          flex: 1 1 0;
           min-height: 68px;
+          min-width: 0;
           padding: 12px 14px;
           text-align: left;
         }
@@ -4373,6 +4377,9 @@ export default function OrderWorkflowV2Page() {
         .step-nav-btn strong {
           color: #1c2822;
           font-size: 14px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .step-nav-btn.active {
           background: #1c2822;

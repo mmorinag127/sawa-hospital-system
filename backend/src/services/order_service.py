@@ -8527,19 +8527,57 @@ def build_hakodate_header_axis_review(order_id: str) -> dict[str, Any]:
             output_dir=output_dir,
             render_width=1864,
         )
-        pre = hakodate_cell_ocr_batch_service._build_preprocess_for_ocr(  # noqa: SLF001
+        rectified_fax = hakodate_cell_ocr_batch_service.cv2.imread(runtime_item["step2_png"])
+        if rectified_fax is None:
+            raise ValueError("header_axis_review_rectified_canvas_missing")
+        template_xs = [int(value) for value in runtime_item.get("template_axes_x") or []]
+        template_ys = [int(value) for value in runtime_item.get("template_axes_y") or []]
+        week_sheet_name = str(runtime_item.get("week_sheet_name") or "").strip() or hakodate_cell_ocr_batch_service.WEEK_SHEET_NAME
+        worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
             item=runtime_item,
-            page=1,
-            render_width=1864,
+            facility_id=facility_id,
+            week_sheet_name=week_sheet_name,
         )
-        image = pre["target_overlay"].convert("RGB")
-        axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
+        fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
+        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
+        aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
+            rectified_fax=rectified_fax,
+            template_xs=template_xs,
+            template_ys=template_ys,
+            worksheet=worksheet,
+            fax_template=fax_template,
+            header_axis_override=runtime_item.get("header_axis_override")
+            if isinstance(runtime_item.get("header_axis_override"), dict)
+            else None,
+        )
+        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
+            worksheet=worksheet,
+            rectified_fax=rectified_fax,
+            xs=aligned_xs,
+            ys=aligned_ys,
+            horizontal_line_mask=horizontal_line_mask,
+        )
+        target_regions, _target_evidence = hakodate_cell_ocr_batch_service._post_menu_target_regions(  # noqa: SLF001
+            worksheet=worksheet,
+            column_edges=[float(value) for value in aligned_xs],
+            row_edges=[float(value) for value in aligned_ys],
+            fax_template=fax_template,
+            horizontal_line_mask=horizontal_line_mask,
+        )
+        image = hakodate_cell_ocr_batch_service._draw_target_regions(  # noqa: SLF001
+            grid_overlay=grid_overlay,
+            regions=target_regions,
+        )
+        image = hakodate_cell_ocr_batch_service._draw_header_intersections_overlay(  # noqa: SLF001
+            image=image,
+            axis_evidence=axis_evidence,
+        ).convert("RGB")
         match = axis_evidence.get("header_intersection_x_match") if isinstance(axis_evidence, dict) else {}
         if not isinstance(match, dict):
             match = {}
         header_roi = match.get("header_roi")
         if not isinstance(header_roi, list) or len(header_roi) != 4:
-            table_bbox = pre.get("template_outer_grid_bbox_used") or [0, 0, image.width, min(image.height, 360)]
+            table_bbox = runtime_item.get("template_bbox") or [0, 0, image.width, min(image.height, 360)]
             x0, y0, x1, y1 = [int(round(float(value))) for value in table_bbox]
             header_roi = [x0, max(0, y0 - 24), x1, min(image.height, y0 + 260)]
         x0, y0, x1, y1 = [int(round(float(value))) for value in header_roi]
