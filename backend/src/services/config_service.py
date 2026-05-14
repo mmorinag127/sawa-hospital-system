@@ -1305,6 +1305,17 @@ def _build_facility_config(
     bagging_exceptions = facility.get("bagging_exceptions") or []
 
     merged = {**facility}
+    facility_template_id = str(
+        merged.get("facility_template_id")
+        or merged.get("facility_template_name")
+        or merged.get("facility_name")
+        or merged.get("name")
+        or facility_id
+        or ""
+    ).strip()
+    if facility_template_id:
+        merged["facility_template_id"] = facility_template_id
+        merged["facility_template_name"] = facility_template_id
     if template_id:
         merged["fax_template_id"] = template_id
     if template_ids:
