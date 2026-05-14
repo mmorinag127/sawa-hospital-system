@@ -1684,8 +1684,9 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     bagging, error = order_workflow_v2_service.run_bagging(order_id)
 
     assert error is None
-    assert bagging["workflow"]["state"] == "bagging_ready"
+    assert bagging["workflow"]["state"] == "output_review"
     assert bagging["bagging_result"]["source_saved_sheet_id"] == saved_sheet_id
+    assert bagging["output_bundle"]["source_bagging_result_id"] == bagging["bagging_result"]["bagging_result_id"]
     assert bagging["bagging_result"]["summary"]["total_quantity"] == 75.0
     assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
     assert bagging["bagging_result"]["summary"]["bag_row_count"] >= 1
@@ -2127,10 +2128,8 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
     bagging, error = order_workflow_v2_service.run_bagging(order_id)
     assert error is None
     bagging_result_id = bagging["bagging_result"]["bagging_result_id"]
-    confirmed_bagging, error = order_workflow_v2_service.confirm_bagging(order_id)
-    assert error is None
-    assert confirmed_bagging["workflow"]["state"] == "output_review"
-    assert confirmed_bagging["output_bundle"]["source_bagging_result_id"] == bagging_result_id
+    assert bagging["workflow"]["state"] == "output_review"
+    assert bagging["output_bundle"]["source_bagging_result_id"] == bagging_result_id
 
     confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
 

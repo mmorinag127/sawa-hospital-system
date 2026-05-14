@@ -2787,23 +2787,25 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             saved_sheet=draft,
             materialization_candidate=materialization_candidate,
         )
+        output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         meta = _workflow_meta(workflow)
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
         meta["bagging_result"] = bagging_result
         meta["anomaly_review_id"] = None
         meta["anomaly_review"] = None
-        meta["output_bundle_id"] = None
-        meta["output_bundle"] = None
+        meta["output_bundle_id"] = output_bundle["output_bundle_id"]
+        meta["output_bundle"] = output_bundle
         _write_workflow_meta(workflow, meta)
-        workflow.state = "bagging_ready"
-        workflow.headline = "袋分け結果を確認してください"
-        workflow.primary_action = "confirm_bagging"
+        workflow.state = "output_review"
+        workflow.headline = "袋分け結果と出力内容を確認してください"
+        workflow.primary_action = "final_confirm"
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
+            "output_bundle": output_bundle,
         }, None
 
 

@@ -2746,7 +2746,7 @@ export default function OrderWorkflowV2Page() {
     runAction("Step4 bagging", async () => {
       await apiClient.post(`/orders/${orderId}/workflow-v2/bagging`);
     }, {
-      successMessage: "袋分けを計算しました",
+      successMessage: "袋分け結果と出力確認を作成しました",
     });
 
   const runAnomalyReview = () =>
