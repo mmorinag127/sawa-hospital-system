@@ -225,6 +225,73 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
     assert workbook["大和なでしこ"]["A2"].value == "献立C"
 
 
+def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):
+    order = {
+        "id": "ORD-DRAFT",
+        "facility": "FAC001",
+        "lines": [
+            {
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_name": "stale",
+                "diet_type": "regular",
+                "area_id": "X",
+                "quantity_original": 1,
+            }
+        ],
+        "workflow_state": {"state": "apply_ready", "warnings": ["draft_newer_than_lines"]},
+    }
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
+    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
+    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "build_confirm_materialization_candidate",
+        lambda order_id: {
+            "error": None,
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "朝",
+                    "menu_name": "draft",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                    "quantity_original": 7,
+                }
+            ],
+        },
+    )
+
+    lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+
+    assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("draft", 7)]
+
+
+def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materialize(monkeypatch):
+    order = {
+        "id": "ORD-DRAFT",
+        "facility": "FAC001",
+        "lines": [],
+        "workflow_state": {"state": "apply_ready", "warnings": ["draft_newer_than_lines"]},
+    }
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "build_confirm_materialization_candidate",
+        lambda order_id: {"error": "draft_materialization_mismatch", "lines": []},
+    )
+
+    try:
+        output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+    except ValueError as exc:
+        assert "draft_newer_than_lines requires materialized draft lines" in str(exc)
+    else:
+        raise AssertionError("expected draft materialization blocker")
+
+
 def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
