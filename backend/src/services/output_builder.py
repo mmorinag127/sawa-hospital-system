@@ -1043,24 +1043,45 @@ def _build_nonwriting_draft_materialization_candidate(
             upgrade_generic_from_sheet=False,
         )
     )
-    candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
-        order_id,
-        draft_record=latest_draft,
-        facility_id=str(facility_id or "").strip() or None,
-        existing_week_code=str(week_value or "").strip() or None,
-        received_at=received_at or datetime.utcnow(),
-    )
-    candidate_lines = candidate.get("lines") if isinstance(candidate, dict) else None
-    if isinstance(candidate_lines, list) and candidate_lines:
-        return candidate
-
     draft_sheet = (
         latest_draft.get("draft_sheet_json")
         if isinstance(latest_draft, dict) and isinstance(latest_draft.get("draft_sheet_json"), dict)
         else {}
     )
     source = str(draft_sheet.get("source") or "").strip()
-    if not order_service._source_uses_weekly_menu_shell(source):  # noqa: SLF001
+    weekly_menu_shell = order_service._source_uses_weekly_menu_shell(source)  # noqa: SLF001
+    rows_payload = draft_sheet.get("rows")
+    fields = draft_sheet.get("fields")
+    quantity_indexes = [
+        idx
+        for idx, field in enumerate(fields if isinstance(fields, list) else [])
+        if str(field or "").strip().startswith("qty.")
+    ]
+    blank_weekly_menu_shell = bool(
+        weekly_menu_shell
+        and quantity_indexes
+        and isinstance(rows_payload, list)
+        and not any(
+            str(row[idx] if idx < len(row) else "").strip()
+            for row in rows_payload
+            if isinstance(row, list)
+            for idx in quantity_indexes
+        )
+    )
+    candidate: dict[str, Any] | None = None
+    if not blank_weekly_menu_shell:
+        candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+            order_id,
+            draft_record=latest_draft,
+            facility_id=str(facility_id or "").strip() or None,
+            existing_week_code=str(week_value or "").strip() or None,
+            received_at=received_at or datetime.utcnow(),
+        )
+        candidate_lines = candidate.get("lines") if isinstance(candidate, dict) else None
+        if isinstance(candidate_lines, list) and candidate_lines:
+            return candidate
+
+    if not weekly_menu_shell:
         return candidate
 
     evidence_run_id = str((latest_draft or {}).get("base_evidence_run_id") or "").strip()

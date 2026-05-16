@@ -382,7 +382,8 @@ def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bo
         received_at=None,
     )
 
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert calls[0]["draft_sheet_json"] is bootstrap_sheet
     assert candidate["error"] is None
     assert candidate["lines"][0]["quantity_original"] == 12
 
@@ -788,6 +789,10 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
             actual_cell = actual_ws.cell(row=19, column=col_idx)
             assert actual_cell.border.bottom.style == "medium", (
                 f"{sheet_name}!{actual_cell.coordinate} must have evening bottom border"
+            )
+            row_after_table_cell = actual_ws.cell(row=20, column=col_idx)
+            assert row_after_table_cell.border.top.style == "medium", (
+                f"{sheet_name}!{row_after_table_cell.coordinate} must preserve evening bottom as visible top edge"
             )
 
 
