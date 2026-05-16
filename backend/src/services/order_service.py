@@ -5260,13 +5260,11 @@ def _build_materialization_candidate_from_draft_record(
         received_at=effective_received_at,
     )
     if semantic_materialization_supported and not candidate_lines:
-        return {
-            "source": "draft_sheet",
-            "draft_id": draft_record.get("id"),
-            "error": "draft_semantic_materialization_failed",
-            "line_count": 0,
-            "lines": [],
-        }
+        logger.warning(
+            "Draft semantic materialization yielded no lines; falling back to structured row parser",
+            order_id=order_id,
+            draft_id=draft_record.get("id"),
+        )
     if not candidate_lines:
         parsed_rows = _normalize_structured_rows(
             header=draft_sheet.get("header"),
