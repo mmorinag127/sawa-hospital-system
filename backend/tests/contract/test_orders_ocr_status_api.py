@@ -1900,6 +1900,71 @@ def test_download_document_returns_404_when_source_and_ocr_artifacts_missing(mon
     assert res.json()["detail"] == "document not found"
 
 
+def test_daily_bag_audit_gemini_retries_truncated_json(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    calls: list[dict] = []
+
+    class _Response:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _gemini_payload(text: str, finish_reason: str) -> dict:
+        return {
+            "candidates": [
+                {
+                    "finishReason": finish_reason,
+                    "content": {"parts": [{"text": text}]},
+                }
+            ]
+        }
+
+    def _fake_urlopen(request, timeout):  # noqa: ARG001
+        body = json.loads(request.data.decode("utf-8"))
+        calls.append(body)
+        if len(calls) == 1:
+            return _Response(_gemini_payload('{"items":[{"finding_id":"daily-audit-1","summary":"', "MAX_TOKENS"))
+        return _Response(
+            _gemini_payload(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "finding_id": "daily-audit-1",
+                                "priority": "high",
+                                "summary": "数量確認",
+                                "operator_action": "元注文を確認",
+                            }
+                        ],
+                        "notes": "ok",
+                    },
+                    ensure_ascii=False,
+                ),
+                "STOP",
+            )
+        )
+
+    monkeypatch.setattr(order_service.urllib.request, "urlopen", _fake_urlopen)
+
+    result = order_service._daily_audit_run_gemini(  # noqa: SLF001
+        findings=[{"finding_id": "daily-audit-1", "severity": "high", "message": "x"}],
+        target_date=datetime(2026, 5, 16).date(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["items"][0]["summary"] == "数量確認"
+    assert len(calls) == 2
+    assert calls[1]["generationConfig"]["maxOutputTokens"] > calls[0]["generationConfig"]["maxOutputTokens"]
+
+
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003")
