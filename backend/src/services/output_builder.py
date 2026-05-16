@@ -359,9 +359,9 @@ def _infer_delivery_column_meta(name: str | None) -> tuple[str | None, str | Non
     if match:
         area = f"{match.group(1)}F"
     elif "月" in raw:
-        area = "月"
+        area = "3F"
     elif "花" in raw:
-        area = "花"
+        area = "2F"
     return diet, area
 
 
@@ -2748,9 +2748,9 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
         elif "3F" in header:
             area_id = "3F"
         elif "月" in header:
-            area_id = "月"
+            area_id = "3F"
         elif "花" in header:
-            area_id = "花"
+            area_id = "2F"
         if "肉禁" in header:
             diet_type = "no_meat"
         elif "魚禁" in header:
