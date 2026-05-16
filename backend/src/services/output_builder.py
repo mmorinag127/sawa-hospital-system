@@ -50,6 +50,7 @@ DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC00014": "さくら",
     "FAC00015": "四万十ピア",
     "FAC00016": "いこいの森",
+    "FAC636208": "長生苑",
 }
 
 _EXPANDED_CELL_COPY_ENABLED_CACHE: dict[tuple[str, str], bool] = {}
@@ -2015,6 +2016,22 @@ def _resolve_delivery_cell(row: dict, column: dict) -> Any:
     return value
 
 
+def _is_blank_cell_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _format_reference_quantity_value(value: Any, original_value: Any) -> Any:
+    if _is_blank_cell_value(value):
+        return value
+    if not isinstance(value, (int, float)):
+        return value
+    if float(value) == 0 and _is_blank_cell_value(original_value):
+        return None
+    if isinstance(original_value, str) and re.search(r"\d", original_value):
+        return re.sub(r"[-+]?[0-9]*\.?[0-9]+", _format_number(value), original_value, count=1)
+    return value
+
+
 def _copy_cell_style(source, target) -> None:
     target.font = copy(source.font)
     target.border = copy(source.border)
@@ -2569,7 +2586,8 @@ def _build_delivery_rows(
         for col in quantity_columns:
             col_diet_key = col.get("diet_key")
             if col_diet_key and col_diet_key != line_diet_key:
-                continue
+                if not (line_diet_key == "no_fried" and col_diet_key == "forbidden_other"):
+                    continue
             col_area_key = col.get("area_key")
             if col_area_key and col_area_key != line_area_key:
                 continue
@@ -2919,10 +2937,15 @@ def _write_reference_daily_delivery_sheet(
             cell = _resolve_merged_cell(ws, row_idx, col_idx)
             if isinstance(cell, MergedCell):
                 continue
+            original_value = display_ws.cell(row=row_idx, column=col_idx).value if display_ws is not None else None
             if not row_payload:
-                cell.value = None
+                cell.value = 0 if original_value == 0 else None
                 continue
             value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
+            if source == "quantity":
+                value = _format_reference_quantity_value(value, original_value)
+            elif _is_blank_cell_value(value) and not _is_blank_cell_value(original_value):
+                value = original_value
             cell.value = "" if value is None else value
 
 
