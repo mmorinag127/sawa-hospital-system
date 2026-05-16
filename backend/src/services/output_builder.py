@@ -1129,42 +1129,41 @@ def build_order_lines_for_outputs(
         or "draft_newer_than_lines" in workflow_blockers
     )
     if order_id and draft_newer_than_lines:
-        materialization_candidate = _build_nonwriting_draft_materialization_candidate(
-            str(order_id),
-            facility_id=facility_id,
-            week_value=week_value,
-            received_at=order.get("received_at"),
-        )
-        candidate_lines = (
-            materialization_candidate.get("lines")
-            if isinstance(materialization_candidate, dict)
-            and not materialization_candidate.get("error")
-            else None
-        )
-        if isinstance(candidate_lines, list) and candidate_lines:
-            raw_lines = candidate_lines
-        else:
-            error = (
-                materialization_candidate.get("error")
-                if isinstance(materialization_candidate, dict)
-                else "draft_materialization_unavailable"
-            )
+        if allow_stale_draft_lines and isinstance(raw_lines, list) and raw_lines:
             logger.warning(
-                "Daily output blocked stale order lines because draft materialization was unavailable",
+                "Daily output page read used existing order lines without draft materialization",
                 order_id=order_id,
                 facility_id=facility_id,
                 workflow_state=workflow_state.get("state"),
-                materialization_error=error,
             )
-            if allow_stale_draft_lines and isinstance(raw_lines, list) and raw_lines:
+        else:
+            materialization_candidate = _build_nonwriting_draft_materialization_candidate(
+                str(order_id),
+                facility_id=facility_id,
+                week_value=week_value,
+                received_at=order.get("received_at"),
+            )
+            candidate_lines = (
+                materialization_candidate.get("lines")
+                if isinstance(materialization_candidate, dict)
+                and not materialization_candidate.get("error")
+                else None
+            )
+            if isinstance(candidate_lines, list) and candidate_lines:
+                raw_lines = candidate_lines
+            else:
+                error = (
+                    materialization_candidate.get("error")
+                    if isinstance(materialization_candidate, dict)
+                    else "draft_materialization_unavailable"
+                )
                 logger.warning(
-                    "Daily output audit continued with existing order lines after draft materialization blocker",
+                    "Daily output blocked stale order lines because draft materialization was unavailable",
                     order_id=order_id,
                     facility_id=facility_id,
                     workflow_state=workflow_state.get("state"),
                     materialization_error=error,
                 )
-            else:
                 raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
@@ -2877,10 +2876,61 @@ def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
     if source_side is None:
         source_side = Side(style="medium", color="000000")
     for col_idx in range(1, max_col + 1):
-        cell = ws.cell(row=19, column=col_idx)
+        bottom_cell = ws.cell(row=19, column=col_idx)
+        if isinstance(bottom_cell, MergedCell):
+            for merged_range in ws.merged_cells.ranges:
+                if (
+                    merged_range.min_row <= 19 <= merged_range.max_row
+                    and merged_range.min_col <= col_idx <= merged_range.max_col
+                ):
+                    bottom_cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+                    break
+            if isinstance(bottom_cell, MergedCell):
+                continue
+        bottom_border = bottom_cell.border
+        bottom_cell.border = Border(
+            left=copy(bottom_border.left),
+            right=copy(bottom_border.right),
+            top=copy(bottom_border.top),
+            bottom=copy(source_side),
+            diagonal=copy(bottom_border.diagonal),
+            diagonal_direction=bottom_border.diagonal_direction,
+            diagonalUp=bottom_border.diagonalUp,
+            diagonalDown=bottom_border.diagonalDown,
+            outline=bottom_border.outline,
+            vertical=copy(bottom_border.vertical),
+            horizontal=copy(bottom_border.horizontal),
+        )
+        top_cell = ws.cell(row=20, column=col_idx)
+        if isinstance(top_cell, MergedCell):
+            continue
+        top_border = top_cell.border
+        top_cell.border = Border(
+            left=copy(top_border.left),
+            right=copy(top_border.right),
+            top=copy(source_side),
+            bottom=copy(top_border.bottom),
+            diagonal=copy(top_border.diagonal),
+            diagonal_direction=top_border.diagonal_direction,
+            diagonalUp=top_border.diagonalUp,
+            diagonalDown=top_border.diagonalDown,
+            outline=top_border.outline,
+            vertical=copy(top_border.vertical),
+            horizontal=copy(top_border.horizontal),
+        )
+
+
+def _apply_daily_delivery_slot_bottom_border(ws, slot_bottom_row: int, template_ws=None) -> None:
+    max_col = max(ws.max_column, template_ws.max_column if template_ws is not None else 0)
+    source_side = Side(style="medium", color="000000")
+    for col_idx in range(1, max_col + 1):
+        cell = ws.cell(row=slot_bottom_row, column=col_idx)
         if isinstance(cell, MergedCell):
             for merged_range in ws.merged_cells.ranges:
-                if merged_range.min_row <= 19 <= merged_range.max_row and merged_range.min_col <= col_idx <= merged_range.max_col:
+                if (
+                    merged_range.min_row <= slot_bottom_row <= merged_range.max_row
+                    and merged_range.min_col <= col_idx <= merged_range.max_col
+                ):
                     cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
                     break
             if isinstance(cell, MergedCell):
