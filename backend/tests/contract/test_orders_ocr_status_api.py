@@ -2069,6 +2069,23 @@ def test_daily_bag_audit_gemini_truncated_twice_falls_back_to_rule_summary(monke
     assert len(result["attempts"]) == 2
 
 
+def test_daily_bag_audit_returns_blocker_when_summary_cannot_be_built(monkeypatch):
+    def _blocked_summary(*_args, **_kwargs):
+        raise ValueError("draft_newer_than_lines requires materialized draft lines: draft_lines_empty")
+
+    monkeypatch.setattr(order_service, "get_daily_bag_summary", _blocked_summary)
+
+    result = order_service.get_daily_bag_audit(
+        datetime(2026, 5, 16).date(),
+        use_ai=True,
+    )
+
+    assert result["rule_based"]["status"] == "blocked"
+    assert result["rule_based"]["error"] == "daily_bag_summary_blocked"
+    assert result["ai"]["status"] == "blocked"
+    assert result["ai"]["items"] == []
+
+
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003")

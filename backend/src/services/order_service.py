@@ -7761,7 +7761,32 @@ def get_daily_bag_audit(
     *,
     use_ai: bool = False,
 ) -> dict[str, Any]:
-    summary = get_daily_bag_summary(target_date, facility_id=facility_id, status=status)
+    try:
+        summary = get_daily_bag_summary(target_date, facility_id=facility_id, status=status)
+    except ValueError as exc:
+        detail = str(exc)
+        return {
+            "date": target_date.isoformat(),
+            "status": status,
+            "facility_id": facility_id,
+            "source": "daily_bag_summary",
+            "rule_based": {
+                "status": "blocked",
+                "error": "daily_bag_summary_blocked",
+                "detail": detail,
+                "finding_count": 0,
+                "cell_count": 0,
+                "summary_by_severity": {"high": 0, "medium": 0, "low": 0},
+                "summary_by_rule": {},
+                "findings": [],
+            },
+            "ai": {
+                "status": "blocked",
+                "error": "daily_bag_summary_blocked",
+                "detail": detail,
+                "items": [],
+            },
+        }
     groups = summary.get("groups") if isinstance(summary.get("groups"), list) else []
     findings: list[dict[str, Any]] = []
     cells: list[dict[str, Any]] = []
