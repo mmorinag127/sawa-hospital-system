@@ -1065,7 +1065,6 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
         or workflow_state.get("draft_newer_than_lines")
         or "draft_newer_than_lines" in workflow_warnings
         or "draft_newer_than_lines" in workflow_blockers
-        or str(workflow_state.get("state") or "").strip() == "apply_ready"
     )
     if order_id and draft_newer_than_lines:
         materialization_candidate = _build_nonwriting_draft_materialization_candidate(

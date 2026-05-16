@@ -269,6 +269,39 @@ def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypa
     assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("draft", 7)]
 
 
+def test_build_order_lines_for_outputs_does_not_force_materialization_for_apply_ready_only(monkeypatch):
+    order = {
+        "id": "ORD-APPLY-READY",
+        "facility": "FAC001",
+        "lines": [
+            {
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_name": "current",
+                "diet_type": "regular",
+                "area_id": "X",
+                "quantity_original": 3,
+            }
+        ],
+        "workflow_state": {"state": "apply_ready", "warnings": []},
+    }
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
+    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
+    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
+    monkeypatch.setattr(
+        output_builder,
+        "_build_nonwriting_draft_materialization_candidate",
+        lambda order_id, **kwargs: (_ for _ in ()).throw(AssertionError("materialization should not run")),
+    )
+
+    lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+
+    assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("current", 3)]
+
+
 def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materialize(monkeypatch):
     order = {
         "id": "ORD-DRAFT",
