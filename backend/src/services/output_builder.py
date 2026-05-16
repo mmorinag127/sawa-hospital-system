@@ -1127,6 +1127,13 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
                 if isinstance(materialization_candidate, dict)
                 else "draft_materialization_unavailable"
             )
+            logger.warning(
+                "Daily output blocked stale order lines because draft materialization was unavailable",
+                order_id=order_id,
+                facility_id=facility_id,
+                workflow_state=workflow_state.get("state"),
+                materialization_error=error,
+            )
             raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
