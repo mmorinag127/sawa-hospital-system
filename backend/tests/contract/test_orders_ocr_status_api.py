@@ -2014,6 +2014,55 @@ def test_daily_bag_audit_gemini_default_timeout_allows_long_live_response(monkey
     assert observed["timeout"] == 120.0
 
 
+def test_daily_bag_audit_gemini_truncated_twice_falls_back_to_rule_summary(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "finishReason": "MAX_TOKENS",
+                            "content": {"parts": [{"text": '{"items":[{"finding_id":"daily-audit-1","summary":"'}]},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(order_service.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+
+    result = order_service._daily_audit_run_gemini(  # noqa: SLF001
+        findings=[
+            {
+                "finding_id": "daily-audit-1",
+                "severity": "high",
+                "message": "朝 / じゃが芋のコンソメ煮 / regular が 332。",
+                "suggested_action": "元注文を確認してください。",
+            }
+        ],
+        target_date=datetime(2026, 5, 16).date(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["fallback_reason"] == "gemini_output_truncated"
+    assert result["items"] == [
+        {
+            "finding_id": "daily-audit-1",
+            "priority": "high",
+            "summary": "朝 / じゃが芋のコンソメ煮 / regular が 332。",
+            "operator_action": "元注文を確認してください。",
+        }
+    ]
+    assert len(result["attempts"]) == 2
+
+
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003")

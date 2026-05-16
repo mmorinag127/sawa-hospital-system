@@ -7590,6 +7590,30 @@ def _daily_audit_parse_gemini_json(text: str) -> dict[str, Any]:
         raise
 
 
+def _daily_audit_fallback_ai_items(findings: list[dict[str, Any]]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for finding in findings[:16]:
+        finding_id = str(finding.get("finding_id") or "").strip()
+        if not finding_id:
+            continue
+        severity = str(finding.get("severity") or "medium").strip().lower()
+        priority = "high" if severity == "high" else ("medium" if severity == "medium" else "low")
+        summary = str(finding.get("message") or finding.get("title") or "数量確認候補です。").strip()
+        action = str(
+            finding.get("suggested_action")
+            or "日別出力の施設別内訳と元注文シートを確認してください。"
+        ).strip()
+        items.append(
+            {
+                "finding_id": finding_id,
+                "priority": priority,
+                "summary": summary[:120],
+                "operator_action": action[:120],
+            }
+        )
+    return items
+
+
 def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date) -> dict[str, Any]:
     api_key = _daily_audit_gemini_key()
     if not api_key:
@@ -7706,8 +7730,18 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
         except Exception as exc:  # noqa: BLE001
             parse_errors.append(str(exc))
             finish_reason = attempts[-1].get("finish_reason") if attempts else None
-            if attempt == 1 and str(finish_reason or "").upper() in {"MAX_TOKENS", "LENGTH", "STOP_SEQUENCE"} and retry_max_tokens > attempt_tokens:
+            truncated = str(finish_reason or "").upper() in {"MAX_TOKENS", "LENGTH", "STOP_SEQUENCE"}
+            if attempt == 1 and truncated and retry_max_tokens > attempt_tokens:
                 continue
+            if truncated:
+                return {
+                    "status": "completed",
+                    "model": model,
+                    "items": _daily_audit_fallback_ai_items(clipped_findings),
+                    "notes": "Gemini応答が途中で切れたため、ルールベース監査の要約で補助欄を生成しました。",
+                    "attempts": attempts,
+                    "fallback_reason": "gemini_output_truncated",
+                }
             break
     return {
         "status": "failed",
