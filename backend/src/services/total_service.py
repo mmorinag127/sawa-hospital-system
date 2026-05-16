@@ -75,7 +75,10 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
     facility_name_cache: dict[str, str] = {}
     for order in _iter_confirmed_orders():
         order_payload = serialize_order(order)
-        order_lines = output_builder.build_order_lines_for_outputs(order_payload)
+        order_lines = output_builder.build_order_lines_for_outputs(
+            order_payload,
+            allow_stale_draft_lines=True,
+        )
         order_id = str(order_payload.get("id") or order.id or "").strip()
         facility_id = str(order_payload.get("facility") or "").strip()
         for line in order_lines:

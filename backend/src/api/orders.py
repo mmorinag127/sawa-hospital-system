@@ -1179,7 +1179,12 @@ def list_orders_by_line_date(date: str, facility: str | None = None, status: str
 @router.get("/daily-bags", dependencies=[Depends(require_role("operator"))])
 def get_daily_bags(date: str, facility: str | None = None, status: str | None = None):
     target_date = _parse_iso_date(date)
-    return order_service.get_daily_bag_summary(target_date, facility_id=facility, status=status)
+    return order_service.get_daily_bag_summary(
+        target_date,
+        facility_id=facility,
+        status=status,
+        allow_stale_draft_lines=True,
+    )
 
 
 @router.get("/daily-bags/audit", dependencies=[Depends(require_role("operator"))])
