@@ -7537,6 +7537,33 @@ def _daily_audit_gemini_key() -> str:
     )
 
 
+def _daily_audit_extract_gemini_text(payload: dict[str, Any]) -> tuple[str, str | None]:
+    candidates = payload.get("candidates") if isinstance(payload, dict) else []
+    candidate = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
+    parts = candidate.get("content", {}).get("parts", []) if isinstance(candidate.get("content"), dict) else []
+    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+    finish_reason = str(candidate.get("finishReason") or "").strip() or None
+    return text, finish_reason
+
+
+def _daily_audit_parse_gemini_json(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+        if fenced:
+            raw = fenced.group(1).strip()
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        raise
+
+
 def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date) -> dict[str, Any]:
     api_key = _daily_audit_gemini_key()
     if not api_key:
@@ -7552,11 +7579,16 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
         }
     model = str(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
     timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 20.0
-    clipped_findings = findings[:24]
+    clipped_findings = findings[:16]
+    max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 6000)
+    retry_max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 12000)
+    if retry_max_tokens < max_tokens:
+        retry_max_tokens = max_tokens
     system_prompt = (
         "You are a quantity audit assistant for Japanese meal order daily output.\n"
         "Use only the provided rule-based findings and daily-output quantities.\n"
         "Do not invent hidden source data. Do not treat OCR as ground truth.\n"
+        "Keep each summary and operator_action under 80 Japanese characters.\n"
         "Return strict JSON only with shape "
         '{"items":[{"finding_id":"","priority":"","summary":"","operator_action":""}],"notes":""}.'
     )
@@ -7603,39 +7635,61 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
             },
         },
     }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-    except (TimeoutError, socket.timeout) as exc:
-        return {"status": "failed", "error": f"gemini_timeout_after_{timeout:.0f}s", "items": []}
-    except urllib.error.HTTPError as exc:
+    parse_errors: list[str] = []
+    attempts: list[dict[str, Any]] = []
+    for attempt, attempt_tokens in enumerate([max_tokens, retry_max_tokens], start=1):
+        body["generationConfig"]["maxOutputTokens"] = attempt_tokens
+        request = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            detail = exc.read().decode("utf-8")
-        except Exception:
-            detail = str(exc)
-        return {"status": "failed", "error": f"gemini_http_{exc.code}", "detail": detail[:1000], "items": []}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "error": str(exc), "items": []}
-    try:
-        parsed = json.loads(raw)
-        candidates = parsed.get("candidates") if isinstance(parsed, dict) else []
-        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
-        payload = json.loads(text) if text else {}
-        return {
-            "status": "completed",
-            "model": model,
-            "items": payload.get("items") if isinstance(payload.get("items"), list) else [],
-            "notes": str(payload.get("notes") or "").strip(),
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "error": f"gemini_parse_failed: {exc}", "items": []}
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+        except (TimeoutError, socket.timeout) as exc:
+            return {"status": "failed", "error": f"gemini_timeout_after_{timeout:.0f}s", "items": []}
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8")
+            except Exception:
+                detail = str(exc)
+            return {"status": "failed", "error": f"gemini_http_{exc.code}", "detail": detail[:1000], "items": []}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "error": str(exc), "items": []}
+        try:
+            parsed_response = json.loads(raw)
+            text, finish_reason = _daily_audit_extract_gemini_text(parsed_response)
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "max_output_tokens": attempt_tokens,
+                    "finish_reason": finish_reason,
+                    "response_chars": len(text),
+                }
+            )
+            payload = _daily_audit_parse_gemini_json(text) if text else {}
+            return {
+                "status": "completed",
+                "model": model,
+                "items": payload.get("items") if isinstance(payload.get("items"), list) else [],
+                "notes": str(payload.get("notes") or "").strip(),
+                "attempts": attempts,
+            }
+        except Exception as exc:  # noqa: BLE001
+            parse_errors.append(str(exc))
+            finish_reason = attempts[-1].get("finish_reason") if attempts else None
+            if attempt == 1 and str(finish_reason or "").upper() in {"MAX_TOKENS", "LENGTH", "STOP_SEQUENCE"} and retry_max_tokens > attempt_tokens:
+                continue
+            break
+    return {
+        "status": "failed",
+        "error": "gemini_output_invalid",
+        "detail": "; ".join(parse_errors)[-1000:],
+        "items": [],
+        "attempts": attempts,
+    }
 
 
 def get_daily_bag_audit(

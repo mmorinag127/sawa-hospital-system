@@ -115,6 +115,7 @@ def download_daily_bundle(
     date: str,
     bundle_type: str = "both",
     status: str | None = None,
+    include_weight_workbook: bool = False,
 ):
     target_date = _parse_iso_date(date)
     try:
@@ -122,6 +123,7 @@ def download_daily_bundle(
             target_date,
             bundle_type=bundle_type,
             status=status,
+            include_weight_workbook=include_weight_workbook,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -133,10 +135,16 @@ def download_daily_bundle(
         "X-Daily-Bundle-Error-Orders": str(summary.get("error_orders", 0)),
         "X-Daily-Bundle-Type": str(summary.get("bundle_type", bundle_type)),
     }
-    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.xlsx"
+    file_format = str(summary.get("file_format") or "xlsx")
+    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.{file_format}"
+    media_type = (
+        "application/zip"
+        if file_format == "zip"
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     return FileResponse(
         str(bundle_path),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=media_type,
         filename=filename,
         headers=headers,
     )

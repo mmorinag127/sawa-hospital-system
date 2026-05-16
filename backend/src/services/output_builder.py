@@ -10,14 +10,15 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
-from openpyxl.styles import Side
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
@@ -38,6 +39,8 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XLSX_CONTENT_TYPE_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 ET.register_namespace("", _XLSX_MAIN_NS)
 ET.register_namespace("r", _XLSX_REL_NS)
 
@@ -61,6 +64,43 @@ DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC636208": "長生苑",
 }
 
+DAILY_LABEL_SHEET_BY_FACILITY_ID = {
+    "FAC00001": "大和なでしこ",
+    "FAC00002": "なごみ",
+    "FAC00003": "春日苑",
+    "FAC00004": "ふれあいの丘",
+    "FAC00005": "池袋病院",
+    "FAC00006": "藍TERRACE",
+    "FAC00007": "百々家",
+    "FAC00008": "佐古グループホーム",
+    "FAC00009": "そよかぜ",
+    "FAC00010": "山城グループホーム",
+    "FAC00012": "グランフォレスト",
+    "FAC00014": "湘南さくら病院",
+    "FAC00015": "四万十ピア",
+    "FAC00016": "いこいの森",
+    "FAC636208": "ケアホーム長生苑",
+}
+
+DAILY_LABEL_SHEET_ORDER = [
+    "メニュー",
+    "藍TERRACE",
+    "百々家",
+    "池袋病院",
+    "大和なでしこ",
+    "春日苑",
+    "四万十ピア",
+    "山城グループホーム",
+    "佐古グループホーム",
+    "なごみ",
+    "いこいの森",
+    "そよかぜ",
+    "グランフォレスト",
+    "ふれあいの丘",
+    "湘南さくら病院",
+    "ケアホーム長生苑",
+]
+
 _EXPANDED_CELL_COPY_ENABLED_CACHE: dict[tuple[str, str], bool] = {}
 
 DEFAULT_LABEL_FIELDS = [
@@ -74,8 +114,6 @@ DEFAULT_LABEL_FIELDS = [
     "商品名２",
     "内容量",
     "内容詳細",
-    "実量",
-    "一人前",
     "",
 ]
 LEGACY_LABEL_FIELDS = {
@@ -92,6 +130,52 @@ LEGACY_LABEL_FIELDS = {
 }
 
 _GARNISH_SPLIT_RE = re.compile(r"\s*(?:添え|添[)）:：])\s*")
+
+_DAILY_LABEL_MENU_DEFAULTS = {
+    "ごぼうと竹輪の煮物": ("朝", "副菜①", "温菜", 70, "g"),
+    "竹輪の煮物": ("朝", "副菜①", "温菜", 70, "g"),
+    "いんげんの味噌和え": ("朝", "副菜②", "冷菜", 40, "g"),
+    "豚肉と白菜のすき煮": ("昼", "主菜", "温菜", 100, "g"),
+    "さつま芋の天ぷら": ("昼", "副菜①", "温菜", 2, "個"),
+    "さつまいもレモン煮": ("昼", "副菜①", "温菜", 40, "g"),
+    "ﾌﾞﾛｯｺﾘｰのちりめん和え": ("昼", "副菜②", "冷菜", 40, "g"),
+    "煮込みハンバーグ": ("夕", "主菜", "温菜", 100, "g"),
+    "ジャーマンポテト": ("夕", "副菜①", "温菜", 40, "g"),
+    "ほうれん草の和え物": ("夕", "副菜②", "冷菜", 40, "g"),
+    "ソース": ("夕", "ソース", "冷菜", 5, "g"),
+}
+
+DAILY_LABEL_SHEET_MAX_ROWS = {
+    "メニュー": 603,
+    "藍TERRACE": 627,
+    "百々家": 622,
+    "池袋病院": 619,
+    "大和なでしこ": 623,
+    "春日苑": 620,
+    "四万十ピア": 623,
+    "山城グループホーム": 622,
+    "佐古グループホーム": 607,
+    "なごみ": 623,
+    "いこいの森": 619,
+    "そよかぜ": 637,
+    "グランフォレスト": 622,
+    "ふれあいの丘": 629,
+    "湘南さくら病院": 627,
+    "ケアホーム長生苑": 621,
+}
+
+DAILY_LABEL_MENU_ROWS = [
+    ("朝", "副菜①", "温菜", "ごぼうと竹輪の煮物", "", 70),
+    ("朝", "副菜②", "冷菜", "いんげんの味噌和え", "", 40),
+    ("昼", "主菜", "温菜", "豚肉と白菜のすき煮", "", 100),
+    ("昼", "副菜①", "温菜", "", "", 40),
+    ("昼", "副菜①", "温菜", "さつま芋の天ぷら", "", "2個"),
+    ("昼", "副菜②", "冷菜", "ﾌﾞﾛｯｺﾘｰのちりめん和え", "", 40),
+    ("夕", "主菜", "温菜", "煮込みハンバーグ", "", 100),
+    ("夕", "ソース", "温菜", "", "", 50),
+    ("夕", "副菜①", "温菜", "ジャーマンポテト", "", 40),
+    ("夕", "副菜②", "冷菜", "ほうれん草の和え物", "", 40),
+]
 
 
 def _ensure_date(value):
@@ -426,17 +510,65 @@ def _format_servings(quantity: float | int | None) -> str:
     return f"{_format_number(quantity)}人前"
 
 
+def _label_area_suffix(area_id: Any) -> str:
+    text = str(area_id or "").strip()
+    normalized = _normalize_area_id(text)
+    if normalized == "2F":
+        return "花"
+    if normalized == "3F":
+        return "月"
+    return ""
+
+
+def _label_menu_defaults(menu_name: Any) -> tuple[str | None, str | None, str | None, float | None, str | None]:
+    name = str(menu_name or "").strip()
+    if name in _DAILY_LABEL_MENU_DEFAULTS:
+        daypart, category, temp, qty, unit = _DAILY_LABEL_MENU_DEFAULTS[name]
+        return daypart, category, temp, float(qty), unit
+    return None, None, None, None, None
+
+
+def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
+    _daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(product_name)
+    category = str(bag.get("menu_category") or default_category or "").strip()
+    if category == "副菜":
+        category = default_category or category
+    if not category:
+        category = default_category or ""
+    if diet_type in {"mixer", "soft", "soft_mixer"} and category and "ミキサー" not in category:
+        if product_name == "豚肉と白菜のすき煮":
+            category = "主菜（ミキサー）"
+        elif category.startswith("主菜"):
+            category = f"{category}（ミキサー）"
+        elif category.startswith("副菜"):
+            category = f"{category}（ミキサー）"
+    return category
+
+
+def _daily_label_display_product(product_name: str, diet_type: str) -> str:
+    if diet_type not in {"mixer", "soft", "soft_mixer"}:
+        return product_name
+    replacements = {
+        "ごぼうと竹輪の煮物": "竹輪の煮物",
+        "さつま芋の天ぷら": "さつまいもレモン煮",
+    }
+    return replacements.get(product_name, product_name)
+
+
+def _daily_label_amount_cell(amount: float | None, unit: str | None) -> Any:
+    if amount is None:
+        return ""
+    normalized_unit = _normalize_unit_type(unit)
+    if normalized_unit == "g":
+        return amount
+    return _format_amount(amount, unit)
+
+
 def _resolve_label_fields(label_profile: dict) -> tuple[list[str], str]:
     fields = label_profile.get("label_fields")
     if isinstance(fields, list) and any(field in LEGACY_LABEL_FIELDS for field in fields):
         return fields, "legacy"
-    resolved = fields if isinstance(fields, list) and fields else DEFAULT_LABEL_FIELDS
-    required = ["実量", "一人前"]
-    normalized = list(resolved)
-    for field in required:
-        if field not in normalized:
-            normalized.append(field)
-    return normalized, "jp"
+    return list(DEFAULT_LABEL_FIELDS), "jp"
 
 def _safe_qty(line: dict, zero_as_empty: bool) -> float | None:
     qty = line.get("quantity_corrected")
@@ -1387,7 +1519,14 @@ def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | N
     }
 
 def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
-    per_qty, unit = _extract_qty_and_unit(bag.get("menu_qty_per_serving"), bag.get("menu_unit_type"))
+    product_name = bag.get("menu_name") or ""
+    default_daypart, _default_category, default_temp, default_qty, default_unit = _label_menu_defaults(product_name)
+    raw_per_qty = bag.get("menu_qty_per_serving")
+    raw_unit = bag.get("menu_unit_type")
+    per_qty, unit = _extract_qty_and_unit(
+        raw_per_qty if raw_per_qty is not None else default_qty,
+        raw_unit or default_unit,
+    )
     servings = bag.get("quantity")
     total_qty = None
     if per_qty is not None and servings is not None:
@@ -1395,34 +1534,38 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
             total_qty = float(per_qty) * float(servings)
         except Exception:
             total_qty = None
-    menu_value = bag.get("menu_category") or ""
-    product_name = bag.get("menu_name") or ""
+    diet_type = str(bag.get("diet_type") or "").strip()
+    display_product_name = _daily_label_display_product(str(product_name), diet_type)
+    menu_value = _label_category_for_bag(bag, str(product_name), diet_type)
     # 重複表示を避けるため、メニュー列は分類（主菜/副菜など）を優先して扱う。
     if menu_value and product_name and str(menu_value).strip() == str(product_name).strip():
         menu_value = ""
-    real_amount = _format_amount(total_qty, unit)
-    total_amount = real_amount or _format_servings(servings)
-    detail_value = _build_label_details(bag) or _format_amount(per_qty, unit)
+    total_amount = _daily_label_amount_cell(total_qty, unit)
+    if not total_amount and servings not in (None, ""):
+        total_amount = _format_number(servings)
+    area_suffix = _label_area_suffix(bag.get("area_id"))
+    time_value = str(bag.get("daypart") or default_daypart or "").strip()
+    if area_suffix:
+        time_value = f"{time_value}　{area_suffix}".strip()
     return {
         "呼び出し番号": "",
         "発行枚数": 1,
-        "賞味期限": _format_jp_date(_resolve_label_expiry_date(bag.get("date"), label_profile)),
-        "時間": bag.get("daypart") or "",
+        "賞味期限": _resolve_label_expiry_date(bag.get("date"), label_profile),
+        "時間": time_value,
         "メニュー": menu_value,
-        "温・冷": _normalize_temp_label(bag.get("menu_temp_type")),
-        "商品名１": product_name,
+        "温・冷": _normalize_temp_label(bag.get("menu_temp_type") or default_temp),
+        "商品名１": display_product_name,
         "商品名２": "",
         "内容量": total_amount,
-        "内容詳細": detail_value,
-        "実量": real_amount,
-        "一人前": _format_amount(per_qty, unit),
-        "": _format_servings(servings),
+        "内容詳細": _daily_label_amount_cell(per_qty, unit),
+        "": servings,
     }
 
 
 def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     if not rows:
         return []
+    rows = _split_daily_label_serving_rows(rows)
     group_fields = [field for field in fields if field not in {"呼び出し番号", "発行枚数"}]
     grouped: dict[tuple, dict] = {}
     counts: dict[tuple, int] = {}
@@ -1436,16 +1579,85 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     for key, row in grouped.items():
         row["発行枚数"] = counts.get(key, 1)
         merged.append(row)
-    merged.sort(
-        key=lambda r: (
-            r.get("賞味期限", ""),
-            r.get("時間", ""),
-            r.get("メニュー", ""),
-            r.get("商品名１", ""),
-            r.get("内容量", ""),
+    daypart_order = {"朝": 0, "昼": 1, "夕": 2}
+    category_order = {
+        "主菜": 0,
+        "主菜（ミキサー）": 1,
+        "副菜①": 2,
+        "副菜①（ミキサー）": 3,
+        "副菜②": 4,
+        "副菜②（ミキサー）": 5,
+        "ソース": 6,
+    }
+
+    def sort_key(row: dict) -> tuple:
+        time_text = str(row.get("時間") or "")
+        daypart = time_text[:1]
+        try:
+            serving_sort = -float(row.get("") or 0)
+        except Exception:
+            serving_sort = 0
+        return (
+            row.get("賞味期限", ""),
+            daypart_order.get(daypart, 99),
+            time_text,
+            category_order.get(str(row.get("メニュー") or ""), 99),
+            row.get("商品名１", ""),
+            serving_sort,
         )
+
+    merged.sort(
+        key=sort_key
     )
     return merged
+
+
+def _daily_label_max_servings(row: dict) -> int | None:
+    product = str(row.get("商品名１") or "")
+    category = str(row.get("メニュー") or "")
+    if "ミキサー" in category:
+        return None
+    if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"}:
+        return 20
+    if product == "豚肉と白菜のすき煮":
+        return 15
+    if product == "さつま芋の天ぷら":
+        return 10
+    if product == "煮込みハンバーグ":
+        return 10
+    return None
+
+
+def _split_daily_label_serving_rows(rows: list[dict]) -> list[dict]:
+    split: list[dict] = []
+    for row in rows:
+        max_servings = _daily_label_max_servings(row)
+        servings = row.get("")
+        try:
+            servings_value = float(servings)
+        except Exception:
+            split.append(row)
+            continue
+        if not max_servings or servings_value <= max_servings:
+            split.append(row)
+            continue
+        detail_value = row.get("内容詳細")
+        try:
+            per_qty = float(detail_value)
+        except Exception:
+            match = re.search(r"[-+]?[0-9]*\.?[0-9]+", str(detail_value or ""))
+            per_qty = float(match.group(0)) if match else None
+        remaining = servings_value
+        while remaining > 0:
+            chunk = float(max_servings) if remaining > max_servings else remaining
+            next_row = dict(row)
+            next_row[""] = int(chunk) if chunk.is_integer() else chunk
+            if per_qty is not None:
+                total = per_qty * chunk
+                next_row["内容量"] = f"{_format_number(total)}個" if "個" in str(detail_value or "") else total
+            split.append(next_row)
+            remaining -= chunk
+    return split
 
 
 def _write_label_csv(path: Path, labels: list[dict], label_fields: list[str]) -> None:
@@ -2929,34 +3141,16 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
             target.border = copy(source.border)
 
 
-def _has_any_border(cell) -> bool:
-    border = cell.border
-    return any(side.style for side in (border.left, border.right, border.top, border.bottom))
-
-
-def _ensure_daily_delivery_evening_bottom_border(ws) -> None:
-    bottom_row = 19
-    if ws.max_row < bottom_row:
-        return
-    table_columns = [
-        col_idx
-        for col_idx in range(1, ws.max_column + 1)
-        if any(_has_any_border(ws.cell(row=row_idx, column=col_idx)) for row_idx in range(12, bottom_row + 1))
-    ]
-    if not table_columns:
-        return
-    bottom_side = Side(style="medium", color="000000")
-    for col_idx in range(min(table_columns), max(table_columns) + 1):
-        cell = ws.cell(row=bottom_row, column=col_idx)
-        if isinstance(cell, MergedCell):
-            continue
-        if cell.border.bottom.style:
-            continue
-        cell.border = copy(cell.border).copy(bottom=bottom_side)
-
-
 def _xlsx_tag(name: str) -> str:
     return f"{{{_XLSX_MAIN_NS}}}{name}"
+
+
+def _xlsx_package_rel_tag(name: str) -> str:
+    return f"{{{_XLSX_PACKAGE_REL_NS}}}{name}"
+
+
+def _xlsx_content_type_tag(name: str) -> str:
+    return f"{{{_XLSX_CONTENT_TYPE_NS}}}{name}"
 
 
 def _excel_serial_date(value: dt_date | datetime) -> float:
@@ -2994,6 +3188,130 @@ def _shared_strings(xlsx_parts: dict[str, bytes]) -> list[str]:
     return values
 
 
+def _style_ids_with_bottom_border(xlsx_parts: dict[str, bytes]) -> set[int]:
+    data = xlsx_parts.get("xl/styles.xml")
+    if not data:
+        return set()
+    root = ET.fromstring(data)
+    borders = list(root.find(_xlsx_tag("borders")) or [])
+    style_ids: set[int] = set()
+    for style_idx, xf in enumerate(list(root.find(_xlsx_tag("cellXfs")) or [])):
+        border_id_text = xf.attrib.get("borderId")
+        if border_id_text is None or not border_id_text.isdigit():
+            continue
+        border_id = int(border_id_text)
+        if border_id >= len(borders):
+            continue
+        bottom = borders[border_id].find(_xlsx_tag("bottom"))
+        if bottom is not None and bottom.attrib.get("style"):
+            style_ids.add(style_idx)
+    return style_ids
+
+
+def _cell_column_index(coordinate: str) -> int | None:
+    match = re.match(r"([A-Z]+)", str(coordinate or ""))
+    if not match:
+        return None
+    return column_index_from_string(match.group(1))
+
+
+def _set_xml_attr_text(attrs: str, name: str, value: str) -> str:
+    if re.search(rf'\s{name}="[^"]*"', attrs):
+        return re.sub(rf'\s{name}="[^"]*"', f' {name}="{value}"', attrs, count=1)
+    return f'{attrs} {name}="{value}"'
+
+
+def _remove_xml_attr_text(attrs: str, name: str) -> str:
+    return re.sub(rf'\s{name}="[^"]*"', "", attrs)
+
+
+def _xml_cell_inner_value(value: Any) -> tuple[str | None, str]:
+    if _is_blank_cell_value(value):
+        return None, ""
+    if isinstance(value, (datetime, dt_date)):
+        return "n", f"<v>{_format_number(_excel_serial_date(value))}</v>"
+    if isinstance(value, bool):
+        return "b", f"<v>{'1' if value else '0'}</v>"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return "n", f"<v>{_format_number(value)}</v>"
+    return "inlineStr", f"<is><t>{xml_escape(str(value))}</t></is>"
+
+
+def _xml_cell_with_value(attrs: str, value: Any) -> str:
+    attrs = attrs.rstrip("/")
+    attrs = _remove_xml_attr_text(attrs, "t")
+    cell_type, inner = _xml_cell_inner_value(value)
+    if cell_type:
+        attrs = _set_xml_attr_text(attrs, "t", cell_type)
+    if not inner:
+        return f"<c{attrs}/>"
+    return f"<c{attrs}>{inner}</c>"
+
+
+def _replace_xml_cell_value(sheet_xml: str, coordinate: str, value: Any) -> str:
+    escaped_coordinate = re.escape(coordinate)
+    pattern = re.compile(
+        rf'<c(?P<attrs>[^>]*\br="{escaped_coordinate}"[^>]*)(?:/>|>.*?</c>)',
+        re.DOTALL,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        return _xml_cell_with_value(match.group("attrs"), value)
+
+    next_xml, count = pattern.subn(replace, sheet_xml, count=1)
+    if count:
+        return next_xml
+
+    row_match = re.search(
+        rf'(<row(?P<attrs>[^>]*\br="{re.escape(str(re.sub(r"^[A-Z]+", "", coordinate)))}"[^>]*)>)(?P<body>.*?)(</row>)',
+        sheet_xml,
+        re.DOTALL,
+    )
+    if row_match is None:
+        return sheet_xml
+    new_cell = _xml_cell_with_value(f' r="{coordinate}"', value)
+    return (
+        sheet_xml[: row_match.end("body")]
+        + new_cell
+        + sheet_xml[row_match.end("body") :]
+    )
+
+
+def _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml: str, bottom_style_ids: set[int]) -> str:
+    if not bottom_style_ids:
+        return sheet_xml
+    row_match = re.search(r'(<row[^>]*\br="19"[^>]*>)(?P<body>.*?)(</row>)', sheet_xml, re.DOTALL)
+    if row_match is None:
+        return sheet_xml
+    body = row_match.group("body")
+    cell_pattern = re.compile(r'<c(?P<attrs>[^>]*\br="[A-Z]+19"[^>]*)(?:/>|>.*?</c>)', re.DOTALL)
+    cells: list[tuple[int, str, str, int | None]] = []
+    source_styles: list[tuple[int, int]] = []
+    for match in cell_pattern.finditer(body):
+        attrs = match.group("attrs")
+        coord_match = re.search(r'\br="([^"]+)"', attrs)
+        style_match = re.search(r'\bs="([^"]+)"', attrs)
+        col_idx = _cell_column_index(coord_match.group(1) if coord_match else "")
+        style_id = int(style_match.group(1)) if style_match and style_match.group(1).isdigit() else None
+        if col_idx is None:
+            continue
+        cells.append((match.start(), match.end(), attrs, col_idx, style_id))  # type: ignore[arg-type]
+        if style_id in bottom_style_ids:
+            source_styles.append((col_idx, int(style_id)))
+    if not source_styles:
+        return sheet_xml
+    next_body = body
+    for start, end, attrs, col_idx, style_id in reversed(cells):  # type: ignore[misc]
+        if style_id in bottom_style_ids:
+            continue
+        nearest_style = min(source_styles, key=lambda item: abs(item[0] - col_idx))[1]
+        original_cell = next_body[start:end]
+        patched_attrs = _set_xml_attr_text(attrs, "s", str(nearest_style))
+        patched_cell = original_cell.replace(f"<c{attrs}", f"<c{patched_attrs}", 1)
+        next_body = next_body[:start] + patched_cell + next_body[end:]
+    return sheet_xml[: row_match.start("body")] + next_body + sheet_xml[row_match.end("body") :]
+
+
 def _xlsx_parts_from_bytes(template_bytes: bytes) -> dict[str, bytes]:
     with zipfile.ZipFile(BytesIO(template_bytes), "r") as source:
         return {name: source.read(name) for name in source.namelist()}
@@ -3003,6 +3321,26 @@ def _write_xlsx_parts(output_path: Path, parts: dict[str, bytes]) -> None:
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as target:
         for name, content in parts.items():
             target.writestr(name, content)
+
+
+def _drop_calc_chain(parts: dict[str, bytes]) -> None:
+    if "xl/calcChain.xml" not in parts:
+        return
+    parts.pop("xl/calcChain.xml", None)
+    rels_path = "xl/_rels/workbook.xml.rels"
+    if rels_path in parts:
+        rels_root = ET.fromstring(parts[rels_path])
+        for rel in list(rels_root.findall(_xlsx_package_rel_tag("Relationship"))):
+            if str(rel.attrib.get("Target") or "").endswith("calcChain.xml"):
+                rels_root.remove(rel)
+        parts[rels_path] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+    content_types_path = "[Content_Types].xml"
+    if content_types_path in parts:
+        content_root = ET.fromstring(parts[content_types_path])
+        for override in list(content_root.findall(_xlsx_content_type_tag("Override"))):
+            if override.attrib.get("PartName") == "/xl/calcChain.xml":
+                content_root.remove(override)
+        parts[content_types_path] = ET.tostring(content_root, encoding="utf-8", xml_declaration=True)
 
 
 def _ensure_xml_row(sheet_data, row_idx: int):
@@ -3094,13 +3432,16 @@ def _patch_template_package_with_workbook_values(
     max_row: int | None = None,
 ) -> None:
     parts = _xlsx_parts_from_bytes(template_bytes)
+    _drop_calc_chain(parts)
     shared_strings = _shared_strings(parts)
+    bottom_style_ids = _style_ids_with_bottom_border(parts)
     workbook_root = ET.fromstring(parts["xl/workbook.xml"])
     sheet_paths = _worksheet_paths_by_name(parts)
     sheet_nodes = list(workbook_root.find(_xlsx_tag("sheets")) or [])
     if len(workbook.worksheets) != len(sheet_nodes):
         raise ValueError("template-preserving xlsx output cannot add or remove sheets")
     ordered_paths: list[str] = []
+    workbook_xml_changed = False
     for sheet_node in sheet_nodes:
         rel_id = sheet_node.attrib.get(f"{{{_XLSX_REL_NS}}}id")
         rels_root = ET.fromstring(parts["xl/_rels/workbook.xml.rels"])
@@ -3108,14 +3449,12 @@ def _patch_template_package_with_workbook_values(
         target = rel_targets.get(str(rel_id or ""))
         ordered_paths.append(target.lstrip("/") if target.startswith("/") else f"xl/{target}")
     for index, ws in enumerate(workbook.worksheets):
-        sheet_nodes[index].attrib["name"] = ws.title
+        if sheet_nodes[index].attrib.get("name") != ws.title:
+            sheet_nodes[index].attrib["name"] = ws.title
+            workbook_xml_changed = True
         sheet_path = sheet_paths.get(ws.title) or ordered_paths[index]
         if not sheet_path or sheet_path not in parts:
             raise ValueError(f"template-preserving xlsx output cannot add or rename sheet: {ws.title}")
-        root = ET.fromstring(parts[sheet_path])
-        sheet_data = root.find(_xlsx_tag("sheetData"))
-        if sheet_data is None:
-            continue
         row_stop = max_row if max_row is not None else ws.max_row
         row_indices = set(range(min_row, min(ws.max_row, row_stop) + 1))
         original_root = ET.fromstring(parts[sheet_path])
@@ -3140,14 +3479,15 @@ def _patch_template_package_with_workbook_values(
                         original_value = text_node.text if text_node is not None else original_value
                     if _is_delivery_static_artifact_value(original_value):
                         row_indices.add(original_row_idx)
+        sheet_xml = parts[sheet_path].decode("utf-8")
         for row_idx in sorted(row_indices):
-            row = _ensure_xml_row(sheet_data, row_idx)
             for col_idx in range(1, ws.max_column + 1):
                 coordinate = f"{get_column_letter(col_idx)}{row_idx}"
-                cell = _ensure_xml_cell(row, coordinate)
-                _set_xml_cell_value(cell, ws.cell(row=row_idx, column=col_idx).value)
-        parts[sheet_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    parts["xl/workbook.xml"] = ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True)
+                sheet_xml = _replace_xml_cell_value(sheet_xml, coordinate, ws.cell(row=row_idx, column=col_idx).value)
+        sheet_xml = _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml, bottom_style_ids)
+        parts[sheet_path] = sheet_xml.encode("utf-8")
+    if workbook_xml_changed:
+        parts["xl/workbook.xml"] = ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True)
     _write_xlsx_parts(output_path, parts)
 
 
@@ -3159,8 +3499,6 @@ def _save_reference_daily_delivery_workbook_preserving_template_package(
         workbook,
         template_bytes=DAILY_DELIVERY_REFERENCE_TEMPLATE.read_bytes(),
         output_path=output_path,
-        min_row=12,
-        max_row=19,
     )
 
 
@@ -3243,7 +3581,6 @@ def _write_reference_daily_delivery_sheet(
                 continue
             cell.value = "" if value is None else value
     _restore_daily_delivery_table_borders(ws, display_ws)
-    _ensure_daily_delivery_evening_bottom_border(ws)
 
 
 def _create_reference_daily_delivery_workbook(
@@ -3285,10 +3622,142 @@ def _create_reference_daily_delivery_workbook(
     return workbook
 
 
+def _apply_daily_label_sheet_shape(ws, max_rows: int | None = None) -> None:
+    thin = Side(style="thin", color="000000")
+    hair = Side(style="hair", color="000000")
+    header_fill = PatternFill("solid", fgColor="FFFF99")
+    cold_fill = PatternFill("solid", fgColor="CCFFFF")
+    warm_fill = PatternFill("solid", fgColor="FFCCFF")
+    header_font = Font(name="ＭＳ Ｐゴシック", size=11, bold=False)
+    body_font = Font(name="ＭＳ Ｐゴシック", size=11)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    for row_idx in range(1, (max_rows or ws.max_row) + 1):
+        ws.row_dimensions[row_idx].height = 25.5
+    if max_rows and ws.max_row < max_rows:
+        for row_idx in range(ws.max_row + 1, max_rows + 1):
+            ws.cell(row=row_idx, column=11, value="")
+    ws.row_dimensions[1].height = 39
+    for col_idx, width in enumerate([8.125, 6.5, 15.25, 6.375, 14.625, 10, 22.5, 13.75, 9, 12, 10], start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 80), min_col=1, max_col=11):
+        for cell in row:
+            cell.font = body_font
+            cell.alignment = left if cell.column in {7, 8} else center
+            if cell.row == 1:
+                cell.font = header_font
+                cell.fill = header_fill
+            elif cell.column == 6 and str(cell.value or "") == "冷菜":
+                cell.fill = cold_fill
+            elif cell.column == 6 and str(cell.value or "") == "温菜":
+                cell.fill = warm_fill
+            cell.border = Border(
+                left=thin if cell.column == 1 else hair,
+                right=thin if cell.column == 11 else hair,
+                top=thin if cell.row == 1 else hair,
+                bottom=thin if cell.row in {1, ws.max_row} else hair,
+            )
+
+
+def _populate_daily_label_menu_sheet(ws, target_date: dt_date) -> None:
+    ws.append(["製造日", "賞味期限", "時間", "メニュー", "温・冷", "商品名１", "商品名２", "内容詳細", "赤字は触らない", "", ""])
+    manufacture_date = target_date - timedelta(days=4)
+    for row_idx, (daypart, menu_category, temp, product_name, product_name2, detail) in enumerate(
+        DAILY_LABEL_MENU_ROWS,
+        start=2,
+    ):
+        ws.cell(row=row_idx, column=1, value=manufacture_date if row_idx == 2 else "")
+        ws.cell(row=row_idx, column=2, value=target_date if row_idx == 2 else "")
+        ws.cell(row=row_idx, column=3, value=daypart)
+        ws.cell(row=row_idx, column=4, value=menu_category)
+        ws.cell(row=row_idx, column=5, value=temp)
+        ws.cell(row=row_idx, column=6, value=product_name)
+        ws.cell(row=row_idx, column=7, value=product_name2)
+        ws.cell(row=row_idx, column=8, value=detail)
+    _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
+
+
 def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
     ws.append(fieldnames)
     for row in rows:
         ws.append([row.get(field, "") for field in fieldnames])
+    _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
+
+
+def _daily_label_sheet_name(facility_code: str | None, facility_name: str | None) -> str:
+    code = str(facility_code or "").strip()
+    if code in DAILY_LABEL_SHEET_BY_FACILITY_ID:
+        return DAILY_LABEL_SHEET_BY_FACILITY_ID[code]
+    name = str(facility_name or code or "").strip()
+    return name or "ラベル"
+
+
+def _daily_label_group_sort_key(group: dict) -> tuple[int, str]:
+    sheet_name = _daily_label_sheet_name(group.get("facility_code"), group.get("facility_name"))
+    try:
+        return DAILY_LABEL_SHEET_ORDER.index(sheet_name), sheet_name
+    except ValueError:
+        return len(DAILY_LABEL_SHEET_ORDER), sheet_name
+
+
+def _line_to_label_bag(order_id: str, facility_code: str | None, line: dict) -> dict:
+    qty = line.get("quantity_corrected")
+    if qty is None:
+        qty = line.get("quantity_original")
+    return {
+        "order_id": order_id,
+        "facility": facility_code,
+        "date": _ensure_date(line.get("date")),
+        "daypart": line.get("daypart"),
+        "menu_name": line.get("menu_name"),
+        "menu_category": line.get("menu_category"),
+        "diet_type": line.get("diet_type"),
+        "area_id": line.get("area_id"),
+        "bag_type": line.get("bag_type"),
+        "menu_unit_type": line.get("menu_unit_type"),
+        "menu_qty_per_serving": line.get("menu_qty_per_serving"),
+        "menu_temp_type": line.get("menu_temp_type"),
+        "quantity": qty if qty is not None else 0,
+    }
+
+
+def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_date) -> None:
+    existing_keys = {
+        (
+            _ensure_date(bag.get("date")),
+            bag.get("daypart"),
+            bag.get("menu_name"),
+            bag.get("diet_type"),
+            bag.get("area_id"),
+        )
+        for bag in group.get("bags", [])
+    }
+    order_id = str(ctx.get("order_for_outputs", {}).get("id") or ctx.get("order", {}).get("id") or "")
+    facility_code = str(ctx.get("order_for_outputs", {}).get("facility") or "").strip()
+    for line in ctx.get("order_lines", []):
+        line_date = _ensure_date(line.get("date"))
+        if line_date != target_date:
+            continue
+        qty = line.get("quantity_corrected")
+        if qty is None:
+            qty = line.get("quantity_original")
+        try:
+            qty_value = float(qty or 0)
+        except Exception:
+            qty_value = 0.0
+        if qty_value != 0:
+            continue
+        key = (
+            line_date,
+            line.get("daypart"),
+            line.get("menu_name"),
+            line.get("diet_type"),
+            line.get("area_id"),
+        )
+        if key in existing_keys:
+            continue
+        group.setdefault("bags", []).append(_line_to_label_bag(order_id, facility_code, line))
+        existing_keys.add(key)
 
 
 def _create_daily_labels_sheet(
@@ -3345,6 +3814,387 @@ def _create_daily_delivery_sheet(
             pass
 
 
+_WEEKLY_WEIGHT_DAYPART_SLOTS = [
+    ("朝", ["副①", "副②"]),
+    ("昼", ["主Ａ", "副①", "副②"]),
+    ("夕", ["主", "副①", "副②"]),
+]
+_WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
+_WEEKLY_WEIGHT_SOFT_MIXER_DIETS = {"soft", "mixer", "soft_mixer"}
+
+
+def _weekly_weight_start(target_date: dt_date) -> dt_date:
+    return target_date - timedelta(days=(target_date.weekday() + 1) % 7)
+
+
+def _weekly_weight_sheet_title(week_start: dt_date) -> str:
+    week_end = week_start + timedelta(days=6)
+    return f"{week_start.month}月{week_start.day}日～{week_end.month}月{week_end.day}日"
+
+
+def _normalize_weekly_weight_slot(value: Any) -> str:
+    text = str(value or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return ""
+    if compact in {"副1", "副①", "副一"} or "副①" in compact or "副1" in compact:
+        return "副①"
+    if compact in {"副2", "副②", "副二"} or "副②" in compact or "副2" in compact:
+        return "副②"
+    if "主" in compact and ("A" in compact.upper() or "Ａ" in compact):
+        return "主Ａ"
+    if "主" in compact:
+        return "主"
+    return text
+
+
+def _weekly_weight_slot_for_line(line: dict) -> str:
+    for key in ("menu_category", "slot_label", "category", "menu_slot", "_menu_slot_label"):
+        slot = _normalize_weekly_weight_slot(line.get(key))
+        if slot:
+            return slot
+    return ""
+
+
+def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
+    literal = amounts.get("__literal__") if isinstance(amounts, dict) else None
+    if literal not in (None, ""):
+        return literal
+    if not amounts:
+        return None
+    parts: list[str] = []
+    for unit, raw_value in sorted(amounts.items(), key=lambda item: item[0]):
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        if unit == "g":
+            parts.append(round(value / 1000, 1))
+        else:
+            parts.append(f"{_format_number(value)}{unit}")
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return "、".join(str(part) for part in parts)
+
+
+def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: float) -> None:
+    literal = line.get("actual_amount_label") or line.get("weekly_weight_amount_label")
+    if literal not in (None, ""):
+        target["__literal__"] = str(literal)
+        return
+    unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
+    if not unit:
+        return
+    amount = None
+    try:
+        per_serving = line.get("menu_qty_per_serving")
+        if per_serving is not None:
+            per_value = float(per_serving)
+            if math.isfinite(per_value) and per_value >= 0:
+                amount = per_value * quantity
+    except (TypeError, ValueError):
+        amount = None
+    if amount is None:
+        try:
+            actual_amount = float(line.get("actual_amount"))
+            if math.isfinite(actual_amount) and actual_amount >= 0:
+                amount = actual_amount
+        except (TypeError, ValueError):
+            amount = None
+    if amount is not None:
+        target[unit] = round(target.get(unit, 0.0) + float(amount), 4)
+
+
+_WEEKLY_WEIGHT_MERGED_RANGES = [
+    "A2:D2",
+    "A3:E3",
+    "A4:E5",
+    "A7:A10",
+    "B7:C10",
+    "D7:D10",
+    "E7:E10",
+    "F7:F10",
+    "G7:G10",
+    "H7:H10",
+    "I7:I10",
+    "A11:A15",
+    "B11:B12",
+    "B13:B15",
+    "A16:A18",
+    "B16:B18",
+    "A19:A23",
+    "B19:B20",
+    "B21:B23",
+    "A24:A26",
+    "B24:B26",
+    "A27:A31",
+    "B27:B28",
+    "B29:B31",
+    "A32:A34",
+    "B32:B34",
+    "A35:A39",
+    "B35:B36",
+    "B37:B39",
+    "A40:A42",
+    "B40:B42",
+    "A43:A47",
+    "B43:B44",
+    "B45:B47",
+    "A48:A50",
+    "B48:B50",
+    "A51:A55",
+    "B51:B52",
+    "B53:B55",
+    "A56:A58",
+    "B56:B58",
+    "A59:A63",
+    "B59:B60",
+    "B61:B63",
+    "A64:A66",
+    "B64:B66",
+    "A67:C67",
+    "E67:H67",
+]
+
+
+def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    reference_layout = (
+        Path(__file__).resolve().parents[4] / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
+    )
+    if reference_layout.exists():
+        workbook = load_workbook(reference_layout)
+        ws = workbook.worksheets[0]
+        ws.title = _weekly_weight_sheet_title(week_start)
+        setattr(workbook, "_weekly_weight_reference_layout", True)
+        for row_idx in range(11, 67):
+            for col_idx in range(3, 10):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if not isinstance(cell, MergedCell):
+                    cell.value = None
+        return workbook
+
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = _weekly_weight_sheet_title(week_start)
+    for merged_range in _WEEKLY_WEIGHT_MERGED_RANGES:
+        ws.merge_cells(merged_range)
+
+    widths = {"A": 8.5, "B": 3.625, "C": 7.125, "D": 54.5, "E": 15.625, "F": 29.0, "G": 15.625, "H": 25.25, "I": 27.25, "J": 9.0}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    row_heights = {1: 20.65, 2: 35.85, 3: 35.85, 4: 35.85, 5: 35.85, 6: 35.85, 7: 18.75, 8: 15.6, 9: 18.75, 10: 8.65, 67: 34.5, 86: 18.0}
+    for row_idx in range(11, 67):
+        row_heights[row_idx] = 29.1
+    for row_idx, height in row_heights.items():
+        ws.row_dimensions[row_idx].height = height
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = 9
+    ws.page_setup.scale = 40
+    ws.page_margins.left = 0.2362204724409449
+    ws.page_margins.right = 0.2362204724409449
+    ws.page_margins.top = 0.35433070866141736
+    ws.page_margins.bottom = 0.1968503937007874
+    ws.page_margins.header = 0.31496062992125984
+    ws.page_margins.footer = 0.31496062992125984
+    ws.print_options.horizontalCentered = True
+    ws.print_options.verticalCentered = True
+    ws.print_area = "A1:I66"
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill("solid", fgColor="D9EAD3")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    for row_idx in range(7, 68):
+        for col_idx in range(1, 10):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = border
+            cell.alignment = left if col_idx in {4, 9} else center
+    ws["A4"] = "各メニューの重量"
+    ws["A4"].font = Font(size=14, bold=True)
+    ws["A4"].alignment = center
+    for col_idx, value in ((1, "日　付"), (2, "区　分"), (4, "献立"), (5, "常食"), (6, "重量(㎏）"), (7, "軟菜＋ミキサー"), (8, "重量(㎏）"), (9, "軟菜別メニュー")):
+        cell = ws.cell(row=7, column=col_idx)
+        cell.value = value
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = center
+    ws.cell(row=86, column=9).value = None
+    ws.cell(row=86, column=9).border = Border()
+    return workbook
+
+
+def _xml_escape(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/xl/persons/person.xml" ContentType="application/vnd.ms-excel.person+xml"/></Types>"""
+    workbook_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><fileVersion appName="xl" lastEdited="5" lowestEdited="7" rupBuild="9303"/><workbookPr/><bookViews><workbookView xWindow="2025" yWindow="-150" windowWidth="9630" windowHeight="11925" tabRatio="702"/></bookViews><sheets><sheet name="{_xml_escape(sheet_title)}" sheetId="8" r:id="rId1"/></sheets><definedNames><definedName name="aaa">#REF!</definedName><definedName name="ColumnTitle1">#REF!</definedName><definedName name="LastDay_Week">MAX(#REF!)</definedName><definedName name="LastDayOfMonth_Week">DAY(EOMONTH(DATE(#REF!,WkMonthNum,1),0))</definedName><definedName name="MoMonth">#REF!</definedName><definedName name="MoMonthNum">MONTH(DATEVALUE(MoMonth&amp;&quot;/1&quot;))</definedName><definedName name="MoWeek2">#REF!</definedName><definedName name="MoWeek3">#REF!</definedName><definedName name="MoWeek4">#REF!</definedName><definedName name="MoWeek5">#REF!</definedName><definedName name="MoYear">#REF!</definedName><definedName name="_xlnm.Print_Area" localSheetId="0">'{_xml_escape(sheet_title)}'!$A$1:$I$66</definedName><definedName name="WkMonth">#REF!</definedName><definedName name="WkMonthNum">MONTH(DATEVALUE(#REF!&amp;&quot;/1&quot;))</definedName><definedName name="WkMonthView">#REF!</definedName><definedName name="WkWeek">LEFT(RIGHT(#REF!,3),1)</definedName></definedNames><calcPr calcId="145621"/></workbook>"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId11" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="persons/person.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"""
+    sheet_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings1.bin"/></Relationships>"""
+    app_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Microsoft Excel</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><HeadingPairs><vt:vector size="4" baseType="variant"><vt:variant><vt:lpstr>ワークシート</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant><vt:variant><vt:lpstr>名前付き一覧</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs><TitlesOfParts><vt:vector size="2" baseType="lpstr"><vt:lpstr>{_xml_escape(sheet_title)}</vt:lpstr><vt:lpstr>'{_xml_escape(sheet_title)}'!Print_Area</vt:lpstr></vt:vector></TitlesOfParts><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>14.0300</AppVersion></Properties>"""
+    calc_chain = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="A19" i="8"/><c r="A27" i="8"/><c r="A35" i="8"/><c r="A43" i="8"/><c r="A51" i="8"/><c r="A59" i="8"/></calcChain>"""
+    shared_strings = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0"/>"""
+    person = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata"><person displayName="PCUSER" id="{00000000-0000-0000-0000-000000000000}" userId="PCUSER"/></personList>"""
+    printer_settings = bytes(4664)
+
+    replacements = {
+        "[Content_Types].xml": content_types.encode("utf-8"),
+        "xl/workbook.xml": workbook_xml.encode("utf-8"),
+        "xl/_rels/workbook.xml.rels": workbook_rels.encode("utf-8"),
+        "xl/worksheets/_rels/sheet1.xml.rels": sheet_rels.encode("utf-8"),
+        "docProps/app.xml": app_xml.encode("utf-8"),
+        "xl/calcChain.xml": calc_chain.encode("utf-8"),
+        "xl/sharedStrings.xml": shared_strings.encode("utf-8"),
+        "xl/persons/person.xml": person.encode("utf-8"),
+        "xl/printerSettings/printerSettings1.bin": printer_settings,
+    }
+    temp_path = path.with_suffix(".patched.xlsx")
+    with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        written: set[str] = set()
+        ordered_names = [
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "docProps/app.xml",
+            "docProps/core.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/calcChain.xml",
+            "xl/persons/person.xml",
+            "xl/printerSettings/printerSettings1.bin",
+            "xl/sharedStrings.xml",
+            "xl/styles.xml",
+            "xl/theme/theme1.xml",
+            "xl/workbook.xml",
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "xl/worksheets/sheet1.xml",
+        ]
+        for name in ordered_names:
+            data = replacements.get(name)
+            if data is None:
+                data = source.read(name)
+            target.writestr(name, data)
+            written.add(name)
+        for name in source.namelist():
+            if name not in written:
+                target.writestr(name, source.read(name))
+    temp_path.replace(path)
+
+
+def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = None) -> dict[tuple[dt_date, str, str], dict]:
+    week_start = _weekly_weight_start(target_date)
+    rows: dict[tuple[dt_date, str, str], dict] = {}
+    for offset in range(7):
+        current_date = week_start + timedelta(days=offset)
+        for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
+            order_id = str(order_summary.get("id") or "").strip()
+            if not order_id:
+                continue
+            ctx = _prepare_output_context_for_bundle(
+                order_id,
+                include_bags=False,
+                include_ocr_menu_meta=False,
+                include_expanded_copy=True,
+            )
+            for line in ctx.get("order_lines") or []:
+                if _ensure_date(line.get("date")) != current_date:
+                    continue
+                quantity = _safe_qty(line, True)
+                try:
+                    quantity_value = float(quantity)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(quantity_value) or quantity_value <= 0:
+                    continue
+                daypart = _normalize_output_daypart(line.get("daypart"))
+                slot = _weekly_weight_slot_for_line(line)
+                if not daypart or not slot:
+                    continue
+                row = rows.setdefault(
+                    (current_date, daypart, slot),
+                    {
+                        "regular_menu": "",
+                        "regular_quantity": 0.0,
+                        "regular_amounts": {},
+                        "soft_mixer_menu": "",
+                        "soft_mixer_quantity": 0.0,
+                        "soft_mixer_amounts": {},
+                    },
+                )
+                diet = _normalize_diet_key(line.get("diet_type")) or ""
+                menu_name = str(line.get("menu_name") or "").strip()
+                if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
+                    row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
+                    row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
+                    _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
+                elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
+                    row["regular_menu"] = row["regular_menu"] or menu_name
+                    row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
+                    _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
+    return rows
+
+
+def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path | None:
+    rows_by_key = _weekly_weight_collect_rows(target_date, status=status)
+    if not rows_by_key:
+        return None
+    week_start = _weekly_weight_start(target_date)
+    workbook = _build_weekly_weight_workbook_shell(week_start)
+    ws = workbook.worksheets[0]
+    uses_reference_layout = bool(getattr(workbook, "_weekly_weight_reference_layout", False))
+    row_idx = 11
+    weekdays = ["(月)", "(火)", "（水）", "(木)", "(金)", "(土)", "（日）"]
+    for offset in range(7):
+        current_date = week_start + timedelta(days=offset)
+        day_start = row_idx
+        for daypart, slots in _WEEKLY_WEIGHT_DAYPART_SLOTS:
+            part_start = row_idx
+            for slot in slots:
+                payload = rows_by_key.get((current_date, daypart, slot), {})
+                ws.cell(row=row_idx, column=3).value = slot
+                ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or None
+                ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
+                ws.cell(row=row_idx, column=6).value = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
+                ws.cell(row=row_idx, column=7).value = payload.get("soft_mixer_quantity") if payload else None
+                ws.cell(row=row_idx, column=8).value = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
+                soft_menu = payload.get("soft_mixer_menu") or ""
+                regular_menu = payload.get("regular_menu") or ""
+                ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else None
+                row_idx += 1
+            if not uses_reference_layout:
+                ws.cell(row=part_start, column=2).value = daypart
+        if offset == 0 or not uses_reference_layout:
+            ws.cell(row=day_start, column=1).value = datetime(current_date.year, current_date.month, current_date.day)
+        if not uses_reference_layout:
+            ws.cell(row=day_start + 5, column=1).value = weekdays[current_date.weekday()]
+    output_path = OUTPUT_DIR / f"{_weekly_weight_sheet_title(week_start)} Weight.xlsx"
+    workbook.save(output_path)
+    _patch_weekly_weight_package(output_path, sheet_title=_weekly_weight_sheet_title(week_start))
+    return output_path
+
+
 def _merge_delivery_bundle_rows(rows: list[dict], invoice_template: dict | None) -> list[dict]:
     columns = invoice_template.get("columns", []) if isinstance(invoice_template, dict) else []
     quantity_names = [
@@ -3396,6 +4246,7 @@ def build_daily_output_bundle(
     *,
     bundle_type: str = "both",
     status: str | None = None,
+    include_weight_workbook: bool = False,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
     if normalized_type not in {"labels", "delivery", "both"}:
@@ -3461,6 +4312,8 @@ def build_daily_output_bundle(
                     bag for bag in ctx["bags"] if _ensure_date(bag.get("date")) == target_date
                 ]
                 group["bags"].extend(filtered_bags)
+                if normalized_type == "labels":
+                    _append_zero_quantity_label_bags(group, ctx, target_date)
             if normalized_type in {"delivery", "both"}:
                 delivery_rows = _build_delivery_rows_for_bundle(
                     ctx["order_for_outputs"],
@@ -3516,10 +4369,27 @@ def build_daily_output_bundle(
             "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
             "items": manifest_items,
         }
+        if include_weight_workbook:
+            return _zip_daily_bundle_with_weight_workbook(
+                bundle_path,
+                target_date=target_date,
+                normalized_type=normalized_type,
+                status=status,
+                summary=summary,
+            )
         return bundle_path, summary
 
+    if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
+        menu_ws = workbook.create_sheet(title="メニュー")
+        _populate_daily_label_menu_sheet(menu_ws, target_date)
+
     success_count = 0
-    for group in grouped_outputs.values():
+    output_groups = (
+        sorted(grouped_outputs.values(), key=_daily_label_group_sort_key)
+        if normalized_type == "labels"
+        else list(grouped_outputs.values())
+    )
+    for group in output_groups:
         item_payload: dict[str, object] = {
             "order_ids": list(group["order_ids"]),
             "facility_code": group["facility_code"],
@@ -3556,7 +4426,7 @@ def build_daily_output_bundle(
 
             if should_create_label_sheet:
                 label_title_seed = (
-                    group["sheet_seed"]
+                    _daily_label_sheet_name(group.get("facility_code"), group.get("facility_name"))
                     if normalized_type == "labels"
                     else f"ラベル_{group['sheet_seed']}"
                 )
@@ -3591,6 +4461,8 @@ def build_daily_output_bundle(
             item_payload["error"] = str(exc)
         manifest_items.append(item_payload)
 
+    if normalized_type == "labels" and success_count == 0:
+        raise ValueError("対象日の出力対象がありません")
     if not workbook.sheetnames:
         raise ValueError("対象日の出力対象がありません")
 
@@ -3607,7 +4479,36 @@ def build_daily_output_bundle(
         "file_format": "xlsx",
     }
 
+    if include_weight_workbook:
+        return _zip_daily_bundle_with_weight_workbook(
+            bundle_path,
+            target_date=target_date,
+            normalized_type=normalized_type,
+            status=status,
+            summary=manifest,
+        )
     return bundle_path, manifest
+
+
+def _zip_daily_bundle_with_weight_workbook(
+    bundle_path: Path,
+    *,
+    target_date: dt_date,
+    normalized_type: str,
+    status: str | None,
+    summary: dict,
+) -> tuple[Path, dict]:
+    weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
+    if weight_path is None:
+        return bundle_path, summary
+    zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_with_weight_{uuid4().hex}.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(bundle_path, arcname=bundle_path.name)
+        archive.write(weight_path, arcname=weight_path.name)
+    next_summary = dict(summary)
+    next_summary["file_format"] = "zip"
+    next_summary["weight_workbook"] = weight_path.name
+    return zip_path, next_summary
 
 
 def _prepare_output_context(

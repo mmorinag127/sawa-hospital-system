@@ -921,21 +921,21 @@ export default function DailyDeliveryNotesPage() {
     }
     const label =
       bundleType === "labels"
-        ? "当日ラベルExcel"
+        ? "当日ラベルExcel＋重量表"
         : bundleType === "delivery"
-          ? "当日納品書Excel"
-          : "当日一括Excel（ラベル+納品書）";
+          ? "当日納品書Excel＋重量表"
+          : "当日一括Excel（ラベル+納品書+重量表）";
     setMessage(`${label}を作成中です...`);
     try {
       const res = await apiClient.get("/outputs/daily-bundle", {
-        params: { date, bundle_type: bundleType, status: status || undefined },
+        params: { date, bundle_type: bundleType, status: status || undefined, include_weight_workbook: true },
         responseType: "blob",
         timeout: 0,
       });
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
-      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.xlsx`;
+      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.zip`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");

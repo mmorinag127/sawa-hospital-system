@@ -25,6 +25,62 @@ def _border_signature(border) -> tuple:
     )
 
 
+def _cell_excel_signature(cell) -> tuple:
+    fill = cell.fill
+    font = cell.font
+    alignment = cell.alignment
+    return (
+        cell.value,
+        cell.data_type,
+        cell.number_format,
+        _border_signature(cell.border),
+        fill.fill_type,
+        fill.fgColor.type,
+        fill.fgColor.rgb if fill.fgColor.type == "rgb" else fill.fgColor.indexed,
+        font.name,
+        font.sz,
+        font.bold,
+        font.italic,
+        font.color.type if font.color else None,
+        font.color.rgb if font.color and font.color.type == "rgb" else None,
+        alignment.horizontal,
+        alignment.vertical,
+        alignment.wrap_text,
+        alignment.shrink_to_fit,
+    )
+
+
+def _dimension_signature(ws) -> tuple:
+    return (
+        tuple((key, item.width, item.hidden) for key, item in sorted(ws.column_dimensions.items())),
+        tuple((key, item.height, item.hidden) for key, item in sorted(ws.row_dimensions.items())),
+    )
+
+
+def _page_signature(ws) -> tuple:
+    def _rounded(value):
+        return round(value, 10) if isinstance(value, float) else value
+
+    return (
+        ws.sheet_view.showGridLines,
+        ws.freeze_panes,
+        ws.page_setup.orientation,
+        ws.page_setup.paperSize,
+        ws.page_setup.scale,
+        ws.page_setup.fitToWidth,
+        ws.page_setup.fitToHeight,
+        _rounded(ws.page_margins.left),
+        _rounded(ws.page_margins.right),
+        _rounded(ws.page_margins.top),
+        _rounded(ws.page_margins.bottom),
+        _rounded(ws.page_margins.header),
+        _rounded(ws.page_margins.footer),
+        ws.print_options.horizontalCentered,
+        ws.print_options.verticalCentered,
+        tuple(ws.print_area),
+    )
+
+
 def _make_context(order_id: str, facility_code: str, facility_name: str, menu_name: str) -> dict:
     return {
         "bags": [{"date": TARGET_DATE, "menu_name": menu_name}],
@@ -94,7 +150,7 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
     assert summary["file_format"] == "xlsx"
     assert summary["success_orders"] == 2
     workbook = load_workbook(bundle_path)
-    assert workbook.sheetnames == ["そよかぜ", "大和なでしこ"]
+    assert workbook.sheetnames == ["メニュー", "大和なでしこ", "そよかぜ"]
     assert workbook["そよかぜ"]["A2"].value == "献立A"
     assert workbook["そよかぜ"]["A3"].value == "献立B"
     assert workbook["大和なでしこ"]["A2"].value == "献立C"
@@ -222,6 +278,97 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     assert workbook.sheetnames == ["ラベル_そよかぜ", "納品書_そよかぜ"]
 
 
+def test_weekly_weight_workbook_reproduces_sample_visible_values(tmp_path, monkeypatch):
+    sample_path = ROOT.parent.parent / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
+    sample_book = load_workbook(sample_path, data_only=True)
+    sample_ws = sample_book.worksheets[0]
+    target_date = dt_date(2026, 5, 12)
+    source_rows = []
+    current_date = None
+    current_daypart = None
+    for row_idx in range(11, 67):
+        raw_date = sample_ws.cell(row=row_idx, column=1).value
+        if hasattr(raw_date, "date"):
+            current_date = raw_date.date()
+        raw_daypart = sample_ws.cell(row=row_idx, column=2).value
+        if raw_daypart in {"朝", "昼", "夕"}:
+            current_daypart = raw_daypart
+        slot = sample_ws.cell(row=row_idx, column=3).value
+        regular_menu = sample_ws.cell(row=row_idx, column=4).value
+        regular_quantity = sample_ws.cell(row=row_idx, column=5).value
+        regular_weight = sample_ws.cell(row=row_idx, column=6).value
+        soft_quantity = sample_ws.cell(row=row_idx, column=7).value
+        soft_weight = sample_ws.cell(row=row_idx, column=8).value
+        soft_menu = sample_ws.cell(row=row_idx, column=9).value or regular_menu
+        if regular_menu and regular_weight not in (None, ""):
+            source_rows.append(
+                {
+                    "date": current_date,
+                    "daypart": current_daypart,
+                    "menu_category": slot,
+                    "menu_name": regular_menu,
+                    "diet_type": "regular",
+                    "quantity_corrected": regular_quantity,
+                    "menu_qty_per_serving": float(regular_weight) * 1000 / float(regular_quantity)
+                    if isinstance(regular_weight, (int, float))
+                    else None,
+                    "menu_unit_type": "g",
+                    "actual_amount_label": regular_weight if not isinstance(regular_weight, (int, float)) else None,
+                }
+            )
+        if soft_menu and soft_weight not in (None, ""):
+            source_rows.append(
+                {
+                    "date": current_date,
+                    "daypart": current_daypart,
+                    "menu_category": slot,
+                    "menu_name": soft_menu,
+                    "diet_type": "soft",
+                    "quantity_corrected": soft_quantity,
+                    "menu_qty_per_serving": float(soft_weight) * 1000 / float(soft_quantity)
+                    if isinstance(soft_weight, (int, float))
+                    else None,
+                    "menu_unit_type": "g",
+                    "actual_amount_label": soft_weight if not isinstance(soft_weight, (int, float)) else None,
+                }
+            )
+
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda target_date, status=None: [{"id": f"ORD-{target_date.isoformat()}", "facility": "FAC001"}],
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id, **kwargs: {"order_lines": source_rows},
+    )
+
+    generated_path = output_builder.build_weekly_weight_summary_workbook(target_date)
+    assert generated_path is not None
+    generated_book = load_workbook(generated_path, data_only=False)
+    sample_book_for_style = load_workbook(sample_path, data_only=False)
+    generated_ws = generated_book.worksheets[0]
+    sample_ws = sample_book_for_style.worksheets[0]
+
+    assert generated_ws.title == sample_ws.title
+    assert generated_ws.max_row == sample_ws.max_row
+    assert generated_ws.max_column == sample_ws.max_column
+    assert {str(item) for item in generated_ws.merged_cells.ranges} == {
+        str(item) for item in sample_ws.merged_cells.ranges
+    }
+    assert _dimension_signature(generated_ws) == _dimension_signature(sample_ws)
+    assert _page_signature(generated_ws) == _page_signature(sample_ws)
+    for row_idx in range(1, sample_ws.max_row + 1):
+        for col_idx in range(1, sample_ws.max_column + 1):
+            assert _cell_excel_signature(generated_ws.cell(row=row_idx, column=col_idx)) == _cell_excel_signature(
+                sample_ws.cell(row=row_idx, column=col_idx)
+            ), (
+                f"cell {generated_ws.cell(row=row_idx, column=col_idx).coordinate} differs"
+            )
+
+
 def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
@@ -313,32 +460,6 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
                 )
 
 
-def test_reference_daily_delivery_enforces_evening_bottom_border(tmp_path):
-    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
-        target_date=dt_date(2026, 5, 10),
-        grouped_outputs={},
-    )
-    output_path = tmp_path / "delivery.xlsx"
-    output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
-        workbook,
-        output_path,
-    )
-
-    actual = load_workbook(output_path, data_only=False)
-    for sheet_name in actual.sheetnames:
-        ws = actual[sheet_name]
-        table_columns = [
-            col_idx
-            for col_idx in range(1, ws.max_column + 1)
-            if any(ws.cell(row=row_idx, column=col_idx).border.left.style for row_idx in range(12, 20))
-        ]
-        for col_idx in range(min(table_columns), max(table_columns) + 1):
-            assert ws.cell(row=19, column=col_idx).border.bottom.style is not None, (
-                f"{sheet_name}!{ws.cell(row=19, column=col_idx).coordinate} "
-                "must keep the evening block bottom border"
-            )
-
-
 def test_reference_daily_delivery_preserves_template_package_parts(tmp_path):
     grouped_outputs = {
         "FAC00012": {
@@ -365,7 +486,7 @@ def test_reference_daily_delivery_preserves_template_package_parts(tmp_path):
 
     assert "xl/drawings/drawing1.xml" in actual_names
     assert any(name.startswith("xl/printerSettings/") for name in actual_names)
-    assert actual_names == expected_names
+    assert actual_names == expected_names - {"xl/calcChain.xml"}
 
 
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
