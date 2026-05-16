@@ -3,17 +3,20 @@ import json
 import math
 import calendar
 import re
+import zipfile
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any
+from xml.etree import ElementTree as ET
 from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.utils import get_column_letter
 
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
@@ -32,6 +35,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
+_XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ET.register_namespace("", _XLSX_MAIN_NS)
+ET.register_namespace("r", _XLSX_REL_NS)
 
 DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC00001": "大和なでしこ",
@@ -2394,7 +2401,11 @@ def _write_delivery_note(
                 if current_daypart:
                     slot_rows_by_daypart.setdefault(current_daypart, []).append(row)
         if not dates:
-            workbook.save(path)
+            _patch_template_package_with_workbook_values(
+                workbook,
+                template_bytes=template_bytes,
+                output_path=path,
+            )
             return
         for idx, date_val in enumerate(dates):
             target_ws = ws if idx == 0 else workbook.copy_worksheet(ws)
@@ -2442,7 +2453,11 @@ def _write_delivery_note(
                     )
                 else:
                     _clear_delivery_slot_row(target_ws, slot_row, columns, column_map, include_menu_name)
-        workbook.save(path)
+        _patch_template_package_with_workbook_values(
+            workbook,
+            template_bytes=template_bytes,
+            output_path=path,
+        )
         return
 
     start_row = _delivery_start_row(ws, header_row)
@@ -2465,7 +2480,11 @@ def _write_delivery_note(
                 continue
             cell.value = _resolve_delivery_cell(row, col)
 
-    workbook.save(path)
+    _patch_template_package_with_workbook_values(
+        workbook,
+        template_bytes=template_bytes,
+        output_path=path,
+    )
 
 
 def _build_delivery_rows(
@@ -2896,6 +2915,228 @@ def _materialize_daily_delivery_static_cells(ws, display_ws) -> None:
             cell.value = display_value
 
 
+def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
+    if template_ws is None:
+        return
+    max_col = max(ws.max_column, template_ws.max_column)
+    for row_idx in range(12, min(max(ws.max_row, template_ws.max_row), 19) + 1):
+        for col_idx in range(1, max_col + 1):
+            target = ws.cell(row=row_idx, column=col_idx)
+            if isinstance(target, MergedCell):
+                continue
+            source = template_ws.cell(row=row_idx, column=col_idx)
+            target.border = copy(source.border)
+
+
+def _xlsx_tag(name: str) -> str:
+    return f"{{{_XLSX_MAIN_NS}}}{name}"
+
+
+def _excel_serial_date(value: dt_date | datetime) -> float:
+    date_value = value.date() if isinstance(value, datetime) else value
+    return float((date_value - dt_date(1899, 12, 30)).days)
+
+
+def _worksheet_paths_by_name(xlsx_parts: dict[str, bytes]) -> dict[str, str]:
+    workbook_root = ET.fromstring(xlsx_parts["xl/workbook.xml"])
+    rels_root = ET.fromstring(xlsx_parts["xl/_rels/workbook.xml.rels"])
+    rel_targets = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels_root}
+    paths: dict[str, str] = {}
+    sheets = workbook_root.find(_xlsx_tag("sheets"))
+    if sheets is None:
+        return paths
+    for sheet in sheets:
+        sheet_name = str(sheet.attrib.get("name") or "")
+        rel_id = sheet.attrib.get(f"{{{_XLSX_REL_NS}}}id")
+        target = rel_targets.get(str(rel_id or ""))
+        if not sheet_name or not target:
+            continue
+        paths[sheet_name] = target.lstrip("/") if target.startswith("/") else f"xl/{target}"
+    return paths
+
+
+def _shared_strings(xlsx_parts: dict[str, bytes]) -> list[str]:
+    data = xlsx_parts.get("xl/sharedStrings.xml")
+    if not data:
+        return []
+    root = ET.fromstring(data)
+    values: list[str] = []
+    for item in root.findall(_xlsx_tag("si")):
+        texts = [node.text or "" for node in item.findall(f".//{_xlsx_tag('t')}")]
+        values.append("".join(texts))
+    return values
+
+
+def _xlsx_parts_from_bytes(template_bytes: bytes) -> dict[str, bytes]:
+    with zipfile.ZipFile(BytesIO(template_bytes), "r") as source:
+        return {name: source.read(name) for name in source.namelist()}
+
+
+def _write_xlsx_parts(output_path: Path, parts: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as target:
+        for name, content in parts.items():
+            target.writestr(name, content)
+
+
+def _ensure_xml_row(sheet_data, row_idx: int):
+    rows = {int(row.attrib["r"]): row for row in sheet_data.findall(_xlsx_tag("row")) if row.attrib.get("r")}
+    row = rows.get(row_idx)
+    if row is not None:
+        return row
+    row = ET.Element(_xlsx_tag("row"), {"r": str(row_idx)})
+    inserted = False
+    for index, existing in enumerate(list(sheet_data)):
+        existing_r = int(existing.attrib.get("r", "0") or 0)
+        if existing_r > row_idx:
+            sheet_data.insert(index, row)
+            inserted = True
+            break
+    if not inserted:
+        sheet_data.append(row)
+    return row
+
+
+def _ensure_xml_cell(row, coordinate: str):
+    cells = {cell.attrib.get("r"): cell for cell in row.findall(_xlsx_tag("c"))}
+    cell = cells.get(coordinate)
+    if cell is not None:
+        return cell
+    cell = ET.Element(_xlsx_tag("c"), {"r": coordinate})
+    inserted = False
+    for index, existing in enumerate(list(row)):
+        existing_ref = str(existing.attrib.get("r") or "")
+        if existing_ref and existing_ref > coordinate:
+            row.insert(index, cell)
+            inserted = True
+            break
+    if not inserted:
+        row.append(cell)
+    return cell
+
+
+def _set_xml_cell_value(cell, value: Any) -> None:
+    for child in list(cell):
+        if child.tag in {_xlsx_tag("f"), _xlsx_tag("v"), _xlsx_tag("is")}:
+            cell.remove(child)
+    cell.attrib.pop("t", None)
+    if _is_blank_cell_value(value):
+        return
+    if isinstance(value, (datetime, dt_date)):
+        cell.attrib["t"] = "n"
+        node = ET.SubElement(cell, _xlsx_tag("v"))
+        node.text = _format_number(_excel_serial_date(value))
+        return
+    if isinstance(value, bool):
+        cell.attrib["t"] = "b"
+        node = ET.SubElement(cell, _xlsx_tag("v"))
+        node.text = "1" if value else "0"
+        return
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        cell.attrib["t"] = "n"
+        node = ET.SubElement(cell, _xlsx_tag("v"))
+        node.text = _format_number(value)
+        return
+    cell.attrib["t"] = "inlineStr"
+    inline = ET.SubElement(cell, _xlsx_tag("is"))
+    text = ET.SubElement(inline, _xlsx_tag("t"))
+    text.text = str(value)
+
+
+def _is_delivery_static_artifact_value(value: Any) -> bool:
+    if value in {"v", "V", 0, "0"}:
+        return True
+    return False
+
+
+def _remove_delivery_static_artifacts(workbook: Workbook) -> None:
+    for ws in workbook.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+                if _is_delivery_static_artifact_value(cell.value):
+                    cell.value = None
+
+
+def _patch_template_package_with_workbook_values(
+    workbook: Workbook,
+    *,
+    template_bytes: bytes,
+    output_path: Path,
+    min_row: int = 1,
+    max_row: int | None = None,
+) -> None:
+    parts = _xlsx_parts_from_bytes(template_bytes)
+    shared_strings = _shared_strings(parts)
+    workbook_root = ET.fromstring(parts["xl/workbook.xml"])
+    sheet_paths = _worksheet_paths_by_name(parts)
+    sheet_nodes = list(workbook_root.find(_xlsx_tag("sheets")) or [])
+    if len(workbook.worksheets) != len(sheet_nodes):
+        raise ValueError("template-preserving xlsx output cannot add or remove sheets")
+    ordered_paths: list[str] = []
+    for sheet_node in sheet_nodes:
+        rel_id = sheet_node.attrib.get(f"{{{_XLSX_REL_NS}}}id")
+        rels_root = ET.fromstring(parts["xl/_rels/workbook.xml.rels"])
+        rel_targets = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels_root}
+        target = rel_targets.get(str(rel_id or ""))
+        ordered_paths.append(target.lstrip("/") if target.startswith("/") else f"xl/{target}")
+    for index, ws in enumerate(workbook.worksheets):
+        sheet_nodes[index].attrib["name"] = ws.title
+        sheet_path = sheet_paths.get(ws.title) or ordered_paths[index]
+        if not sheet_path or sheet_path not in parts:
+            raise ValueError(f"template-preserving xlsx output cannot add or rename sheet: {ws.title}")
+        root = ET.fromstring(parts[sheet_path])
+        sheet_data = root.find(_xlsx_tag("sheetData"))
+        if sheet_data is None:
+            continue
+        row_stop = max_row if max_row is not None else ws.max_row
+        row_indices = set(range(min_row, min(ws.max_row, row_stop) + 1))
+        original_root = ET.fromstring(parts[sheet_path])
+        original_sheet_data = original_root.find(_xlsx_tag("sheetData"))
+        if original_sheet_data is not None:
+            for original_row in original_sheet_data.findall(_xlsx_tag("row")):
+                original_row_idx = int(original_row.attrib.get("r", "0") or 0)
+                for original_cell in original_row.findall(_xlsx_tag("c")):
+                    value_node = original_cell.find(_xlsx_tag("v"))
+                    inline_node = original_cell.find(_xlsx_tag("is"))
+                    original_value = value_node.text if value_node is not None else None
+                    if (
+                        original_cell.attrib.get("t") == "s"
+                        and original_value is not None
+                        and str(original_value).isdigit()
+                    ):
+                        index = int(original_value)
+                        if 0 <= index < len(shared_strings):
+                            original_value = shared_strings[index]
+                    if inline_node is not None:
+                        text_node = inline_node.find(_xlsx_tag("t"))
+                        original_value = text_node.text if text_node is not None else original_value
+                    if _is_delivery_static_artifact_value(original_value):
+                        row_indices.add(original_row_idx)
+        for row_idx in sorted(row_indices):
+            row = _ensure_xml_row(sheet_data, row_idx)
+            for col_idx in range(1, ws.max_column + 1):
+                coordinate = f"{get_column_letter(col_idx)}{row_idx}"
+                cell = _ensure_xml_cell(row, coordinate)
+                _set_xml_cell_value(cell, ws.cell(row=row_idx, column=col_idx).value)
+        parts[sheet_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    parts["xl/workbook.xml"] = ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True)
+    _write_xlsx_parts(output_path, parts)
+
+
+def _save_reference_daily_delivery_workbook_preserving_template_package(
+    workbook: Workbook,
+    output_path: Path,
+) -> None:
+    _patch_template_package_with_workbook_values(
+        workbook,
+        template_bytes=DAILY_DELIVERY_REFERENCE_TEMPLATE.read_bytes(),
+        output_path=output_path,
+        min_row=12,
+        max_row=19,
+    )
+
+
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
     code = str(facility_code or "").strip()
     if code in DAILY_DELIVERY_SHEET_BY_FACILITY_ID:
@@ -2974,6 +3215,7 @@ def _write_reference_daily_delivery_sheet(
             elif _is_blank_cell_value(value):
                 continue
             cell.value = "" if value is None else value
+    _restore_daily_delivery_table_borders(ws, display_ws)
 
 
 def _create_reference_daily_delivery_workbook(
@@ -2985,6 +3227,7 @@ def _create_reference_daily_delivery_workbook(
         raise ValueError(f"daily delivery reference template not found: {DAILY_DELIVERY_REFERENCE_TEMPLATE}")
     workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE)
     display_workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=True)
+    _remove_delivery_static_artifacts(workbook)
     for ws in workbook.worksheets:
         _clear_daily_delivery_sheet_data(ws)
     for group in grouped_outputs.values():
@@ -3049,6 +3292,8 @@ def _create_daily_delivery_sheet(
 ) -> str:
     if not rows:
         raise ValueError("delivery rows not found for target date")
+    if invoice_template.get("template_uri"):
+        raise ValueError("templated delivery notes cannot be embedded into a rebuilt daily bundle workbook")
     temp_path = OUTPUT_DIR / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
     try:
         _write_delivery_note(
@@ -3222,7 +3467,7 @@ def build_daily_output_bundle(
             target_date=target_date,
             grouped_outputs=grouped_outputs,
         )
-        workbook.save(bundle_path)
+        _save_reference_daily_delivery_workbook_preserving_template_package(workbook, bundle_path)
         manifest_items.extend(
             {
                 "order_ids": list(group["order_ids"]),

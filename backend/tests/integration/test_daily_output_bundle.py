@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import zipfile
 from datetime import date as dt_date
 
 from openpyxl import Workbook, load_workbook
@@ -11,6 +12,17 @@ from src.services import output_builder  # noqa: E402
 
 
 TARGET_DATE = dt_date(2026, 3, 22)
+
+
+def _border_signature(border) -> tuple:
+    return tuple(
+        (
+            side.style,
+            side.color.type if side.color else None,
+            side.color.rgb if side.color and side.color.type == "rgb" else None,
+        )
+        for side in (border.left, border.right, border.top, border.bottom)
+    )
 
 
 def _make_context(order_id: str, facility_code: str, facility_name: str, menu_name: str) -> dict:
@@ -264,3 +276,108 @@ def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
     assert ws["D17"].value == "煮込みハンバーグ"
     assert ws["D18"].value == "ジャーマンポテト"
     assert ws["D19"].value == "ほうれん草の和え物"
+
+
+def test_reference_daily_delivery_preserves_table_borders(tmp_path):
+    grouped_outputs = {
+        "FAC00012": {
+            "facility_code": "FAC00012",
+            "facility_name": "ふれあいの丘",
+            "invoice_template": {},
+            "contexts": [],
+        }
+    }
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 10),
+        grouped_outputs=grouped_outputs,
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    workbook.save(output_path)
+
+    actual = load_workbook(output_path, data_only=False)
+    expected = load_workbook(output_builder.DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=False)
+
+    for sheet_name in expected.sheetnames:
+        assert sheet_name in actual.sheetnames
+        actual_ws = actual[sheet_name]
+        expected_ws = expected[sheet_name]
+        for row_idx in range(12, 20):
+            for col_idx in range(1, max(expected_ws.max_column, actual_ws.max_column) + 1):
+                actual_border = actual_ws.cell(row=row_idx, column=col_idx).border
+                expected_border = expected_ws.cell(row=row_idx, column=col_idx).border
+                assert _border_signature(actual_border) == _border_signature(expected_border), (
+                    f"{sheet_name}!{actual_ws.cell(row=row_idx, column=col_idx).coordinate} "
+                    "border differs from reference template"
+                )
+
+
+def test_reference_daily_delivery_preserves_template_package_parts(tmp_path):
+    grouped_outputs = {
+        "FAC00012": {
+            "facility_code": "FAC00012",
+            "facility_name": "ふれあいの丘",
+            "invoice_template": {},
+            "contexts": [],
+        }
+    }
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 10),
+        grouped_outputs=grouped_outputs,
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
+        workbook,
+        output_path,
+    )
+
+    with zipfile.ZipFile(output_builder.DAILY_DELIVERY_REFERENCE_TEMPLATE, "r") as expected_zip:
+        expected_names = set(expected_zip.namelist())
+    with zipfile.ZipFile(output_path, "r") as actual_zip:
+        actual_names = set(actual_zip.namelist())
+
+    assert "xl/drawings/drawing1.xml" in actual_names
+    assert any(name.startswith("xl/printerSettings/") for name in actual_names)
+    assert actual_names == expected_names
+
+
+def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 10),
+        grouped_outputs={},
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
+        workbook,
+        output_path,
+    )
+
+    saved = load_workbook(output_path, data_only=True)
+    assert saved["山城"]["C27"].value is None
+    for row_idx in range(12, 20):
+        assert saved["池袋病院"].cell(row=row_idx, column=5).value is None
+        assert saved["池袋病院"].cell(row=row_idx, column=6).value is None
+
+
+def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
+    template_path = tmp_path / "delivery_template.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "Template"
+    workbook.save(template_path)
+
+    try:
+        output_builder._create_daily_delivery_sheet(  # noqa: SLF001
+            Workbook(),
+            set(),
+            title_seed="delivery",
+            rows=[{"date": dt_date(2026, 5, 10), "menu_name": "A"}],
+            invoice_template={
+                "template_uri": template_path.as_uri(),
+                "columns": [{"name": "メニュー", "source": "menu_name", "column_index": 1}],
+            },
+            facility_name="施設",
+            order_id="ORD-test",
+        )
+    except ValueError as exc:
+        assert str(exc) == "templated delivery notes cannot be embedded into a rebuilt daily bundle workbook"
+    else:
+        raise AssertionError("templated delivery embedding should be blocked")
