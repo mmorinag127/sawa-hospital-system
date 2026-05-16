@@ -10785,6 +10785,8 @@ def _build_canonical_bootstrap_sheet(
     order_id: str,
     *,
     evidence_run_override: dict[str, Any] | None = None,
+    include_menu_diagnostics: bool = True,
+    augment_candidate_resolution: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
     order_payload = get_order_by_id(order_id)
     if not isinstance(order_payload, dict):
@@ -10821,7 +10823,8 @@ def _build_canonical_bootstrap_sheet(
             template=facility_template,
         )
         ocr_payload = _annotate_payload_with_template_field_schema(ocr_payload, facility_template)
-        ocr_payload = _augment_payload_with_candidate_resolution(order_id, ocr_payload)
+        if augment_candidate_resolution:
+            ocr_payload = _augment_payload_with_candidate_resolution(order_id, ocr_payload)
         if isinstance(ocr_payload, dict):
             ocr_payload = evidence_manifest_service.ensure_evidence_manifest(dict(ocr_payload))
 
@@ -10870,9 +10873,13 @@ def _build_canonical_bootstrap_sheet(
         )
         return blocked_payload, None
 
-    menu_diagnostics = _build_monthly_menu_diagnostics(
-        week_id=resolved_week_id,
-        facility_id=facility_id,
+    menu_diagnostics = (
+        _build_monthly_menu_diagnostics(
+            week_id=resolved_week_id,
+            facility_id=facility_id,
+        )
+        if include_menu_diagnostics
+        else {}
     )
     order_lines = _load_sheet_order_lines(order_id)
     entries, source = _build_sheet_menu_entries(

@@ -348,7 +348,7 @@ def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bo
     monkeypatch.setattr(
         output_builder.order_service,
         "_build_canonical_bootstrap_sheet",
-        lambda order_id, evidence_run_override=None: (bootstrap_sheet, None),
+        lambda order_id, **kwargs: (bootstrap_sheet, None),
     )
     monkeypatch.setattr(
         output_builder.order_service,

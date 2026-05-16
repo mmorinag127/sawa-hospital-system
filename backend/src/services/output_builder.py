@@ -1089,6 +1089,8 @@ def _build_nonwriting_draft_materialization_candidate(
     bootstrap_sheet, bootstrap_error = order_service._build_canonical_bootstrap_sheet(  # noqa: SLF001
         order_id,
         evidence_run_override=evidence_run if isinstance(evidence_run, dict) else None,
+        include_menu_diagnostics=False,
+        augment_candidate_resolution=False,
     )
     if not isinstance(bootstrap_sheet, dict):
         return candidate or {
