@@ -244,6 +244,22 @@ def _normalize_diet_key(value: str | None) -> str | None:
     return lowered
 
 
+def _normalize_delivery_diet_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    lowered = raw.lower()
+    if "糖尿" in raw or lowered in {"diabetes", "diabetic"}:
+        return "diabetes"
+    if "通所" in raw or lowered == "daycare":
+        return "daycare"
+    if "職員" in raw or lowered == "staff":
+        return "staff"
+    if "小口" in raw:
+        return "小口"
+    return _normalize_diet_key(raw)
+
+
 def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str, str], str]:
     if not isinstance(facility_config, dict):
         return {}
@@ -353,7 +369,7 @@ def _infer_delivery_column_meta(name: str | None) -> tuple[str | None, str | Non
     elif "禁食" in raw:
         diet = "禁食"
     else:
-        diet = _normalize_diet_key(raw)
+        diet = _normalize_delivery_diet_key(raw)
     area = None
     match = re.search(r"(\\d)\\s*(?:f|ｆ|Ｆ|階)", raw, re.IGNORECASE)
     if match:
@@ -2433,7 +2449,7 @@ def _build_delivery_rows(
         quantity_columns.append(
             {
                 "name": name,
-                "diet_key": _normalize_diet_key(diet_type),
+                "diet_key": _normalize_delivery_diet_key(diet_type),
                 "area_key": _resolve_area_key(area_id, area_aliases),
             }
         )
@@ -2520,7 +2536,7 @@ def _build_delivery_rows(
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
             row["_order_index"] = order_index
-        line_diet_key = _normalize_diet_key(line.get("diet_type"))
+        line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
         for col in quantity_columns:
             col_diet_key = col.get("diet_key")
@@ -2769,6 +2785,8 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
             diet_type = "daycare"
         elif "職員" in header:
             diet_type = "staff"
+        elif "糖尿" in header:
+            diet_type = "diabetes"
         elif "軟菜" in header:
             diet_type = "soft"
         elif "ミキサ" in header:
