@@ -2845,10 +2845,10 @@ def _write_reference_daily_delivery_sheet(
         row_payload = assignments.get(row_idx)
         if ws.title == "山城" and row_payload:
             if row_idx == 12:
-                ws.cell(row=row_idx, column=1).value = target_date
-            ws.cell(row=row_idx, column=2).value = _normalize_delivery_daypart(row_payload.get("daypart"))
-            ws.cell(row=row_idx, column=3).value = row_payload.get("menu_category") or ""
-            ws.cell(row=row_idx, column=4).value = row_payload.get("menu_name") or ""
+                _resolve_merged_cell(ws, row_idx, 1).value = target_date
+            _resolve_merged_cell(ws, row_idx, 2).value = _normalize_delivery_daypart(row_payload.get("daypart"))
+            _resolve_merged_cell(ws, row_idx, 3).value = row_payload.get("menu_category") or ""
+            _resolve_merged_cell(ws, row_idx, 4).value = row_payload.get("menu_name") or ""
         for col in columns:
             source = col.get("source")
             if source not in {"quantity", "note"}:
