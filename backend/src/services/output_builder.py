@@ -1043,13 +1043,60 @@ def _build_nonwriting_draft_materialization_candidate(
             upgrade_generic_from_sheet=False,
         )
     )
-    return order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+    candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
         order_id,
         draft_record=latest_draft,
         facility_id=str(facility_id or "").strip() or None,
         existing_week_code=str(week_value or "").strip() or None,
         received_at=received_at or datetime.utcnow(),
     )
+    candidate_lines = candidate.get("lines") if isinstance(candidate, dict) else None
+    if isinstance(candidate_lines, list) and candidate_lines:
+        return candidate
+
+    draft_sheet = (
+        latest_draft.get("draft_sheet_json")
+        if isinstance(latest_draft, dict) and isinstance(latest_draft.get("draft_sheet_json"), dict)
+        else {}
+    )
+    source = str(draft_sheet.get("source") or "").strip()
+    if not order_service._source_uses_weekly_menu_shell(source):  # noqa: SLF001
+        return candidate
+
+    evidence_run_id = str((latest_draft or {}).get("base_evidence_run_id") or "").strip()
+    evidence_run = order_service.get_ocr_evidence_run(evidence_run_id) if evidence_run_id else None
+    bootstrap_sheet, bootstrap_error = order_service._build_canonical_bootstrap_sheet(  # noqa: SLF001
+        order_id,
+        evidence_run_override=evidence_run if isinstance(evidence_run, dict) else None,
+    )
+    if not isinstance(bootstrap_sheet, dict):
+        return candidate or {
+            "source": "draft_sheet",
+            "draft_id": (latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
+            "error": bootstrap_error or "canonical_bootstrap_unavailable",
+            "line_count": 0,
+            "lines": [],
+        }
+    bootstrap_draft = order_service._build_transient_draft_record(order_id, bootstrap_sheet)  # noqa: SLF001
+    bootstrap_candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+        order_id,
+        draft_record=bootstrap_draft,
+        facility_id=str(facility_id or "").strip() or None,
+        existing_week_code=str(week_value or "").strip() or None,
+        received_at=received_at or datetime.utcnow(),
+    )
+    bootstrap_lines = bootstrap_candidate.get("lines") if isinstance(bootstrap_candidate, dict) else None
+    if isinstance(bootstrap_lines, list) and bootstrap_lines:
+        logger.info(
+            "Daily output materialized blank weekly-menu draft from canonical bootstrap sheet",
+            order_id=order_id,
+            facility_id=facility_id,
+            draft_id=(latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
+            evidence_run_id=evidence_run_id or None,
+            line_count=len(bootstrap_lines),
+        )
+        return bootstrap_candidate
+    return bootstrap_candidate or candidate
 
 
 def build_order_lines_for_outputs(

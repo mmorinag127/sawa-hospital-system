@@ -324,6 +324,69 @@ def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materializ
         raise AssertionError("expected draft materialization blocker")
 
 
+def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bootstrap(monkeypatch):
+    blank_draft = {
+        "id": "DRF-BLANK",
+        "base_evidence_run_id": "OEV-CURRENT",
+        "draft_sheet_json": {
+            "source": "weekly_menu",
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "rows": [["05/10", "昼", "献立A", ""]],
+        },
+    }
+    bootstrap_sheet = {
+        "source": "weekly_menu+identity",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        "rows": [["05/10", "昼", "献立A", "12"]],
+    }
+    calls = []
+
+    monkeypatch.setattr(output_builder.order_service, "get_current_sheet_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(output_builder.order_service, "get_latest_sheet_draft", lambda *args, **kwargs: blank_draft)
+    monkeypatch.setattr(output_builder.order_service, "_source_uses_weekly_menu_shell", lambda source: str(source).startswith("weekly_menu"))
+    monkeypatch.setattr(output_builder.order_service, "get_ocr_evidence_run", lambda evidence_run_id: {"id": evidence_run_id})
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "_build_canonical_bootstrap_sheet",
+        lambda order_id, evidence_run_override=None: (bootstrap_sheet, None),
+    )
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "_build_transient_draft_record",
+        lambda order_id, sheet: {"id": None, "draft_sheet_json": sheet},
+    )
+
+    def fake_materialize(order_id, *, draft_record, facility_id, existing_week_code, received_at):
+        calls.append(draft_record)
+        if draft_record is blank_draft:
+            return {"error": "draft_lines_empty", "lines": []}
+        return {
+            "error": None,
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "献立A",
+                    "diet_type": "regular",
+                    "quantity_original": 12,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(output_builder.order_service, "_build_materialization_candidate_from_draft_record", fake_materialize)
+
+    candidate = output_builder._build_nonwriting_draft_materialization_candidate(
+        "ORD-DRAFT",
+        facility_id="FAC001",
+        week_value="2026-05@2026-05-10~2026-05-16",
+        received_at=None,
+    )
+
+    assert len(calls) == 2
+    assert candidate["error"] is None
+    assert candidate["lines"][0]["quantity_original"] == 12
+
+
 def test_build_order_lines_for_outputs_can_allow_stale_lines_for_audit(monkeypatch):
     order = {
         "id": "ORD-DRAFT",
