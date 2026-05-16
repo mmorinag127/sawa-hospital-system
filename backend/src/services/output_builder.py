@@ -2385,6 +2385,7 @@ def _build_delivery_rows(
     quantity_rules: dict,
     facility_config: dict | None = None,
     menu_meta: dict[str, object] | None = None,
+    allow_ocr_menu_meta: bool = True,
 ) -> list[dict]:
     columns = template.get("columns", [])
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
@@ -2411,7 +2412,7 @@ def _build_delivery_rows(
             }
         )
     prefer_ocr_rows = bool(template.get("prefer_ocr_raw_rows", False))
-    if not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
+    if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
         menu_meta = _build_ocr_menu_meta(order, facility_config)
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
     if entries and prefer_ocr_rows:
@@ -2523,6 +2524,30 @@ def _build_delivery_rows(
         else:
             row["menu_display"] = row.get("menu_name") or ""
     return result
+
+
+def _build_delivery_rows_for_bundle(
+    order: dict,
+    template: dict,
+    quantity_rules: dict,
+    facility_config: dict | None,
+    menu_meta: dict[str, object] | None,
+    *,
+    allow_ocr_menu_meta: bool,
+) -> list[dict]:
+    try:
+        return _build_delivery_rows(
+            order,
+            template,
+            quantity_rules,
+            facility_config,
+            menu_meta,
+            allow_ocr_menu_meta=allow_ocr_menu_meta,
+        )
+    except TypeError as exc:
+        if "allow_ocr_menu_meta" not in str(exc):
+            raise
+        return _build_delivery_rows(order, template, quantity_rules, facility_config, menu_meta)
 
 
 def _build_label_rows(
@@ -3007,6 +3032,7 @@ def build_daily_output_bundle(
             ctx = _prepare_output_context_for_bundle(
                 order_id,
                 include_bags=normalized_type in {"labels", "both"},
+                include_ocr_menu_meta=normalized_type != "delivery",
             )
             facility_config = ctx.get("facility_config") or {}
             facility_name = str(facility_config.get("facility_name") or facility_name or "").strip()
@@ -3039,12 +3065,13 @@ def build_daily_output_bundle(
                 ]
                 group["bags"].extend(filtered_bags)
             if normalized_type in {"delivery", "both"}:
-                delivery_rows = _build_delivery_rows(
+                delivery_rows = _build_delivery_rows_for_bundle(
                     ctx["order_for_outputs"],
                     ctx["invoice_template"],
                     ctx["quantity_rules"],
                     facility_config,
                     ctx.get("ocr_menu_meta"),
+                    allow_ocr_menu_meta=normalized_type != "delivery",
                 )
                 filtered_delivery_rows = [
                     row for row in delivery_rows if _ensure_date(row.get("date")) == target_date
@@ -3186,7 +3213,12 @@ def build_daily_output_bundle(
     return bundle_path, manifest
 
 
-def _prepare_output_context(order_id: str, *, include_bags: bool = True) -> dict:
+def _prepare_output_context(
+    order_id: str,
+    *,
+    include_bags: bool = True,
+    include_ocr_menu_meta: bool = True,
+) -> dict:
     order = get_order_by_id(order_id)
     if not order:
         raise ValueError("order not found")
@@ -3204,7 +3236,7 @@ def _prepare_output_context(order_id: str, *, include_bags: bool = True) -> dict
 
     order_lines = build_order_lines_for_outputs(order)
     order_for_outputs = {**order, "lines": order_lines}
-    ocr_menu_meta = _build_ocr_menu_meta(order, facility_config)
+    ocr_menu_meta = _build_ocr_menu_meta(order, facility_config) if include_ocr_menu_meta else {}
 
     bags = []
     if include_bags:
@@ -3224,11 +3256,20 @@ def _prepare_output_context(order_id: str, *, include_bags: bool = True) -> dict
     }
 
 
-def _prepare_output_context_for_bundle(order_id: str, *, include_bags: bool) -> dict:
+def _prepare_output_context_for_bundle(
+    order_id: str,
+    *,
+    include_bags: bool,
+    include_ocr_menu_meta: bool,
+) -> dict:
     try:
-        return _prepare_output_context(order_id, include_bags=include_bags)
+        return _prepare_output_context(
+            order_id,
+            include_bags=include_bags,
+            include_ocr_menu_meta=include_ocr_menu_meta,
+        )
     except TypeError as exc:
-        if "include_bags" not in str(exc):
+        if "include_bags" not in str(exc) and "include_ocr_menu_meta" not in str(exc):
             raise
         return _prepare_output_context(order_id)
 
