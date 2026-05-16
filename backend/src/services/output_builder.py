@@ -16,7 +16,6 @@ import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
-from openpyxl.styles import Side
 from openpyxl.utils import get_column_letter
 
 from src.db import session_scope
@@ -2929,32 +2928,6 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
             target.border = copy(source.border)
 
 
-def _has_any_border(cell) -> bool:
-    border = cell.border
-    return any(side.style for side in (border.left, border.right, border.top, border.bottom))
-
-
-def _ensure_daily_delivery_evening_bottom_border(ws) -> None:
-    bottom_row = 19
-    if ws.max_row < bottom_row:
-        return
-    table_columns = [
-        col_idx
-        for col_idx in range(1, ws.max_column + 1)
-        if any(_has_any_border(ws.cell(row=row_idx, column=col_idx)) for row_idx in range(12, bottom_row + 1))
-    ]
-    if not table_columns:
-        return
-    bottom_side = Side(style="medium", color="000000")
-    for col_idx in range(min(table_columns), max(table_columns) + 1):
-        cell = ws.cell(row=bottom_row, column=col_idx)
-        if isinstance(cell, MergedCell):
-            continue
-        if cell.border.bottom.style:
-            continue
-        cell.border = copy(cell.border).copy(bottom=bottom_side)
-
-
 def _xlsx_tag(name: str) -> str:
     return f"{{{_XLSX_MAIN_NS}}}{name}"
 
@@ -3243,7 +3216,6 @@ def _write_reference_daily_delivery_sheet(
                 continue
             cell.value = "" if value is None else value
     _restore_daily_delivery_table_borders(ws, display_ws)
-    _ensure_daily_delivery_evening_bottom_border(ws)
 
 
 def _create_reference_daily_delivery_workbook(
@@ -3345,215 +3317,6 @@ def _create_daily_delivery_sheet(
             pass
 
 
-_WEIGHT_DAYPART_SLOTS = [("朝", ["副①", "副②"]), ("昼", ["主Ａ", "副①", "副②"]), ("夕", ["主", "副①", "副②"])]
-_WEIGHT_DIET_REGULAR = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
-_WEIGHT_DIET_SOFT_MIXER = {"soft", "mixer", "soft_mixer"}
-
-
-def _weight_week_start(target_date: dt_date) -> dt_date:
-    return target_date - timedelta(days=(target_date.weekday() + 1) % 7)
-
-
-def _weight_sheet_title(week_start: dt_date) -> str:
-    week_end = week_start + timedelta(days=6)
-    return f"{week_start.month}月{week_start.day}日～{week_end.month}月{week_end.day}日"
-
-
-def _normalize_weight_slot_label(value: Any) -> str:
-    text = str(value or "").strip()
-    normalized = re.sub(r"\s+", "", text)
-    if not normalized:
-        return ""
-    if normalized in {"副1", "副①", "副一"} or "副①" in normalized or "副1" in normalized:
-        return "副①"
-    if normalized in {"副2", "副②", "副二"} or "副②" in normalized or "副2" in normalized:
-        return "副②"
-    if "主" in normalized and ("A" in normalized.upper() or "Ａ" in normalized):
-        return "主Ａ"
-    if "主" in normalized:
-        return "主"
-    return text
-
-
-def _weight_slot_for_line(line: dict) -> str:
-    for key in ("menu_category", "slot_label", "category", "menu_slot", "_menu_slot_label"):
-        label = _normalize_weight_slot_label(line.get(key))
-        if label:
-            return label
-    return ""
-
-
-def _add_weight_amount(totals: dict[str, float], line: dict, quantity: float) -> None:
-    unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
-    if not unit:
-        return
-    amount = None
-    try:
-        per_serving = line.get("menu_qty_per_serving")
-        if per_serving is not None:
-            per_value = float(per_serving)
-            if math.isfinite(per_value) and per_value >= 0:
-                amount = per_value * quantity
-    except (TypeError, ValueError):
-        amount = None
-    if amount is None:
-        try:
-            raw_amount = float(line.get("actual_amount"))
-            if math.isfinite(raw_amount) and raw_amount >= 0:
-                amount = raw_amount
-        except (TypeError, ValueError):
-            amount = None
-    if amount is not None:
-        totals[unit] = round(totals.get(unit, 0.0) + float(amount), 4)
-
-
-def _format_weight_amount(totals: dict[str, float]) -> str:
-    parts: list[str] = []
-    for unit, value in sorted((totals or {}).items(), key=lambda item: item[0]):
-        try:
-            amount = float(value)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(amount):
-            continue
-        parts.append(_format_number(round(amount / 1000, 1)) if unit == "g" else f"{_format_number(amount)}{unit}")
-    return "、".join(parts)
-
-
-def _collect_weight_rows_for_week(target_date: dt_date, *, status: str | None = None) -> list[dict]:
-    week_start = _weight_week_start(target_date)
-    rows_by_key: dict[tuple[dt_date, str, str], dict] = {}
-    for offset in range(7):
-        current_date = week_start + timedelta(days=offset)
-        for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
-            order_id = str(order_summary.get("id") or "").strip()
-            if not order_id:
-                continue
-            ctx = _prepare_output_context_for_bundle(
-                order_id,
-                include_bags=False,
-                include_ocr_menu_meta=False,
-                include_expanded_copy=True,
-            )
-            for line in ctx.get("order_lines") or []:
-                if _ensure_date(line.get("date")) != current_date:
-                    continue
-                quantity = _safe_qty(line, True)
-                try:
-                    quantity_value = float(quantity)
-                except (TypeError, ValueError):
-                    continue
-                if not math.isfinite(quantity_value) or quantity_value <= 0:
-                    continue
-                daypart = _normalize_output_daypart(line.get("daypart"))
-                slot = _weight_slot_for_line(line)
-                if not daypart or not slot:
-                    continue
-                key = (current_date, daypart, slot)
-                row = rows_by_key.setdefault(
-                    key,
-                    {
-                        "date": current_date,
-                        "daypart": daypart,
-                        "slot": slot,
-                        "regular_menu": "",
-                        "regular_quantity": 0.0,
-                        "regular_amounts": {},
-                        "soft_mixer_menu": "",
-                        "soft_mixer_quantity": 0.0,
-                        "soft_mixer_amounts": {},
-                    },
-                )
-                diet = _normalize_diet_key(line.get("diet_type")) or ""
-                menu_name = str(line.get("menu_name") or "").strip()
-                if diet in _WEIGHT_DIET_SOFT_MIXER:
-                    row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
-                    row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
-                    _add_weight_amount(row["soft_mixer_amounts"], line, quantity_value)
-                elif diet in _WEIGHT_DIET_REGULAR or not diet:
-                    row["regular_menu"] = row["regular_menu"] or menu_name
-                    row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
-                    _add_weight_amount(row["regular_amounts"], line, quantity_value)
-    return list(rows_by_key.values())
-
-
-def _style_weight_summary_sheet(ws) -> None:
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-
-    thin = Side(style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    header_fill = PatternFill("solid", fgColor="D9EAD3")
-    ws.merge_cells("A4:E5")
-    ws["A4"] = "各メニューの重量"
-    ws["A4"].font = Font(size=14, bold=True)
-    ws["A4"].alignment = Alignment(horizontal="center", vertical="center")
-    for col_idx, value in enumerate(["日　付", "区　分", "", "献立", "常食", "重量(㎏）", "軟菜＋ミキサー", "重量(㎏）", "軟菜別メニュー"], start=1):
-        cell = ws.cell(row=7, column=col_idx)
-        cell.value = value
-        cell.font = Font(bold=True)
-        cell.fill = header_fill
-        cell.border = border
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    for row_idx in range(8, 67):
-        for col_idx in range(1, 10):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.cell(row=row_idx, column=4).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        ws.cell(row=row_idx, column=9).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    for col, width in {"A": 8.5, "B": 3.625, "C": 7.125, "D": 54.5, "E": 15.625, "F": 29, "G": 15.625, "H": 25.25, "I": 27.25}.items():
-        ws.column_dimensions[col].width = width
-
-
-def _create_weekly_weight_summary_sheet(workbook, used_titles: set[str], *, target_date: dt_date, status: str | None) -> str | None:
-    rows = _collect_weight_rows_for_week(target_date, status=status)
-    if not rows:
-        return None
-    week_start = _weight_week_start(target_date)
-    ws = workbook.create_sheet(title=_safe_sheet_title(_weight_sheet_title(week_start), "重量", used_titles))
-    _style_weight_summary_sheet(ws)
-    rows_by_key = {(row["date"], row["daypart"], row["slot"]): row for row in rows}
-    weekdays = ["(月)", "(火)", "（水）", "(木)", "(金)", "(土)", "（日）"]
-    row_idx = 11
-    for day_offset in range(7):
-        current_date = week_start + timedelta(days=day_offset)
-        day_start_row = row_idx
-        for daypart, slots in _WEIGHT_DAYPART_SLOTS:
-            part_start_row = row_idx
-            for slot in slots:
-                payload = rows_by_key.get((current_date, daypart, slot), {})
-                ws.cell(row=row_idx, column=3).value = slot
-                ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or ""
-                ws.cell(row=row_idx, column=5).value = _format_number(payload.get("regular_quantity") or 0) if payload else ""
-                ws.cell(row=row_idx, column=6).value = _format_weight_amount(payload.get("regular_amounts") or {})
-                ws.cell(row=row_idx, column=7).value = _format_number(payload.get("soft_mixer_quantity") or 0) if payload else ""
-                ws.cell(row=row_idx, column=8).value = _format_weight_amount(payload.get("soft_mixer_amounts") or {})
-                soft_menu = payload.get("soft_mixer_menu") or ""
-                regular_menu = payload.get("regular_menu") or ""
-                ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else ""
-                row_idx += 1
-            if part_start_row < row_idx - 1:
-                ws.merge_cells(start_row=part_start_row, start_column=2, end_row=row_idx - 1, end_column=2)
-            ws.cell(row=part_start_row, column=2).value = daypart
-        ws.merge_cells(start_row=day_start_row, start_column=1, end_row=day_start_row + 4, end_column=1)
-        ws.merge_cells(start_row=day_start_row + 5, start_column=1, end_row=row_idx - 1, end_column=1)
-        ws.cell(row=day_start_row, column=1).value = current_date
-        ws.cell(row=day_start_row + 5, column=1).value = weekdays[current_date.weekday()]
-    return ws.title
-
-
-def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path | None:
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    sheet_name = _create_weekly_weight_summary_sheet(workbook, set(), target_date=target_date, status=status)
-    if not sheet_name:
-        return None
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUT_DIR / f"weekly_weight_{target_date.isoformat()}_{stamp}.xlsx"
-    workbook.save(output_path)
-    return output_path
-
-
 def _merge_delivery_bundle_rows(rows: list[dict], invoice_template: dict | None) -> list[dict]:
     columns = invoice_template.get("columns", []) if isinstance(invoice_template, dict) else []
     quantity_names = [
@@ -3605,7 +3368,6 @@ def build_daily_output_bundle(
     *,
     bundle_type: str = "both",
     status: str | None = None,
-    include_weight_workbook: bool = False,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
     if normalized_type not in {"labels", "delivery", "both"}:
@@ -3726,14 +3488,6 @@ def build_daily_output_bundle(
             "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
             "items": manifest_items,
         }
-        if include_weight_workbook:
-            return _zip_daily_bundle_with_weight_workbook(
-                bundle_path,
-                target_date=target_date,
-                normalized_type=normalized_type,
-                status=status,
-                summary=summary,
-            )
         return bundle_path, summary
 
     success_count = 0
@@ -3825,36 +3579,7 @@ def build_daily_output_bundle(
         "file_format": "xlsx",
     }
 
-    if include_weight_workbook:
-        return _zip_daily_bundle_with_weight_workbook(
-            bundle_path,
-            target_date=target_date,
-            normalized_type=normalized_type,
-            status=status,
-            summary=manifest,
-        )
     return bundle_path, manifest
-
-
-def _zip_daily_bundle_with_weight_workbook(
-    bundle_path: Path,
-    *,
-    target_date: dt_date,
-    normalized_type: str,
-    status: str | None,
-    summary: dict,
-) -> tuple[Path, dict]:
-    weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
-    if weight_path is None:
-        return bundle_path, summary
-    zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_with_weight_{uuid4().hex}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(bundle_path, arcname=bundle_path.name)
-        zf.write(weight_path, arcname=f"{_weight_sheet_title(_weight_week_start(target_date))} Weight.xlsx")
-    next_summary = dict(summary)
-    next_summary["file_format"] = "zip"
-    next_summary["weight_workbook"] = weight_path.name
-    return zip_path, next_summary
 
 
 def _prepare_output_context(
