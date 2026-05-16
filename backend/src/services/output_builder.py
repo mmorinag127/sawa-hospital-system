@@ -30,6 +30,28 @@ from src.services.storage_service import load_bytes_from_uri
 OUTPUT_DIR = Path("/tmp/orders-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
+
+DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
+    "FAC00001": "大和なでしこ",
+    "FAC00002": "なごみ",
+    "FAC00003": "春日苑",
+    "FAC00004": "ふれあいの丘",
+    "FAC00005": "池袋病院",
+    "FAC00006": "アイテラス",
+    "FAC00007": "百々家",
+    "FAC00008": "佐古",
+    "FAC00009": "そよかぜ",
+    "FAC00010": "山城",
+    "FAC00011": "四万十ピア",
+    "FAC00012": "グランフォレスト",
+    "FAC00013": "いこいの森",
+    "FAC00014": "さくら",
+    "FAC00015": "四万十ピア",
+    "FAC00016": "いこいの森",
+}
+
 DEFAULT_LABEL_FIELDS = [
     "呼び出し番号",
     "発行枚数",
@@ -218,6 +240,56 @@ def _normalize_diet_key(value: str | None) -> str | None:
     if "禁" in raw and "魚" in raw:
         return "no_fish"
     return lowered
+
+
+def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str, str], str]:
+    if not isinstance(facility_config, dict):
+        return {}
+    override = facility_config.get("fax_template_override")
+    if not isinstance(override, dict):
+        return {}
+    columns = override.get("columns")
+    if not isinstance(columns, list):
+        return {}
+    result: dict[tuple[str, str], str] = {}
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        if str(column.get("role") or "").strip() != "quantity":
+            continue
+        source_diet = _normalize_diet_key(column.get("diet_type"))
+        source_area = str(column.get("area_id") or "X").strip().upper() or "X"
+        output_diet = _normalize_diet_key(
+            column.get("output_diet_type")
+            or column.get("aggregation_diet_type")
+            or column.get("daily_output_diet_type")
+        )
+        if not source_diet or not output_diet or output_diet == source_diet:
+            continue
+        result[(source_diet, source_area)] = output_diet
+    return result
+
+
+def _apply_output_diet_type_overrides(
+    lines: list[dict],
+    facility_config: dict | None,
+) -> list[dict]:
+    overrides = _build_output_diet_type_map(facility_config)
+    if not overrides:
+        return lines
+    updated_lines: list[dict] = []
+    for line in lines:
+        diet_key = _normalize_diet_key(line.get("diet_type"))
+        area_key = str(line.get("area_id") or "X").strip().upper() or "X"
+        output_diet = overrides.get((diet_key or "", area_key)) or overrides.get((diet_key or "", "X"))
+        if not output_diet:
+            updated_lines.append(line)
+            continue
+        updated = dict(line)
+        updated.setdefault("source_diet_type", line.get("diet_type"))
+        updated["diet_type"] = output_diet
+        updated_lines.append(updated)
+    return updated_lines
 
 
 def _normalize_area_id(value: str | None) -> str | None:
@@ -868,6 +940,7 @@ def build_order_lines_for_outputs(order: dict) -> list[dict]:
         order_lines = _apply_menu_snapshot(raw_lines, snapshot_items)
     else:
         order_lines = raw_lines
+    order_lines = _apply_output_diet_type_overrides(order_lines, facility_config)
     # Current monthly/menu-master settings must win over stale confirmed snapshots.
     order_lines = _apply_menu_overrides(order_lines, menu_items)
     order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
@@ -2578,6 +2651,221 @@ def _copy_sheet_contents(source_ws, target_ws) -> None:
     target_ws.page_setup = copy(source_ws.page_setup)
 
 
+def _cell_text_from_merged(ws, row: int, column: int) -> str:
+    cell = _resolve_merged_cell(ws, row, column)
+    return _normalize_cell_text(cell.value)
+
+
+def _daily_delivery_header_text(ws, column: int) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for row in range(8, min(ws.max_row, 11) + 1):
+        text = _cell_text_from_merged(ws, row, column)
+        if text and text not in seen:
+            parts.append(text)
+            seen.add(text)
+    return "".join(parts)
+
+
+def _daily_delivery_column_meta(ws) -> list[dict]:
+    columns: list[dict] = [
+        {"name": "日付", "source": "date", "column_index": 1},
+        {"name": "区分", "source": "daypart", "column_index": 2},
+        {"name": "献立区分", "source": "menu_category", "column_index": 3},
+        {"name": "メニュー名", "source": "menu_display", "column_index": 4},
+    ]
+    used_names = {str(col["name"]) for col in columns}
+    for col_idx in range(5, ws.max_column + 1):
+        header = _daily_delivery_header_text(ws, col_idx)
+        if not header:
+            continue
+        if "保管温度" in header or "賞味期限" in header:
+            continue
+        if "備考" in header:
+            name = "備考"
+            suffix = 2
+            while name in used_names:
+                name = f"備考{suffix}"
+                suffix += 1
+            used_names.add(name)
+            columns.append({"name": name, "source": "note", "column_index": col_idx})
+            continue
+        diet_type = None
+        area_id = "X"
+        if "2F" in header:
+            area_id = "2F"
+        elif "3F" in header:
+            area_id = "3F"
+        if "常食" in header:
+            diet_type = "regular"
+        elif "小口" in header:
+            diet_type = "小口"
+        elif "通所" in header:
+            diet_type = "daycare"
+        elif "職員" in header:
+            diet_type = "staff"
+        elif "軟菜" in header:
+            diet_type = "soft"
+        elif "ミキサ" in header:
+            diet_type = "mixer"
+        elif "肉禁" in header:
+            diet_type = "no_meat"
+        elif "魚禁" in header:
+            diet_type = "no_fish"
+        elif "揚げ物" in header:
+            diet_type = "no_fried"
+        elif "その他" in header:
+            diet_type = "forbidden_other"
+        elif "禁食" in header:
+            diet_type = "禁食"
+        if not diet_type:
+            continue
+        name = header
+        suffix = 2
+        while name in used_names:
+            name = f"{header}_{suffix}"
+            suffix += 1
+        used_names.add(name)
+        columns.append(
+            {
+                "name": name,
+                "source": "quantity",
+                "diet_type": diet_type,
+                "area_id": area_id,
+                "column_index": col_idx,
+            }
+        )
+    return columns
+
+
+def _clear_daily_delivery_sheet_data(ws) -> None:
+    for row_idx in range(12, min(ws.max_row, 19) + 1):
+        for col_idx in range(5, ws.max_column + 1):
+            cell = _resolve_merged_cell(ws, row_idx, col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                continue
+            cell.value = None
+        if ws.title == "山城":
+            for col_idx in range(1, 5):
+                cell = _resolve_merged_cell(ws, row_idx, col_idx)
+                if isinstance(cell, MergedCell):
+                    continue
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    continue
+                cell.value = None
+
+
+def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
+    code = str(facility_code or "").strip()
+    if code in DAILY_DELIVERY_SHEET_BY_FACILITY_ID:
+        return DAILY_DELIVERY_SHEET_BY_FACILITY_ID[code]
+    if code:
+        return None
+    name = str(facility_name or "").strip()
+    normalized = _normalize_cell_text(name)
+    for sheet_name in DAILY_DELIVERY_SHEET_BY_FACILITY_ID.values():
+        if _normalize_cell_text(sheet_name) and _normalize_cell_text(sheet_name) in normalized:
+            return sheet_name
+    return None
+
+
+def _write_reference_daily_delivery_sheet(
+    ws,
+    *,
+    rows: list[dict],
+    target_date: dt_date,
+) -> None:
+    columns = _daily_delivery_column_meta(ws)
+    column_map = {
+        str(col.get("name")): int(col.get("column_index"))
+        for col in columns
+        if col.get("name") and isinstance(col.get("column_index"), int)
+    }
+    slot_rows = list(range(12, min(ws.max_row, 19) + 1))
+    menu_col_idx = 3
+    daypart_col_idx = 2
+    slot_map = _build_delivery_slot_map(ws, slot_rows, menu_col_idx, daypart_col_idx)
+    slot_label_map = _build_delivery_slot_label_map(ws, slot_rows, menu_col_idx)
+    slot_label_map_by_daypart = _build_delivery_slot_label_map_by_daypart(ws, slot_rows, menu_col_idx, daypart_col_idx)
+    slot_rows_by_daypart: dict[str, list[int]] = {"朝": [], "昼": [], "夕": []}
+    current_daypart = ""
+    for row_idx in slot_rows:
+        daypart_text = _normalize_cell_text(ws.cell(row=row_idx, column=daypart_col_idx).value)
+        if daypart_text:
+            current_daypart = _normalize_delivery_daypart(daypart_text)
+        if current_daypart:
+            slot_rows_by_daypart.setdefault(current_daypart, []).append(row_idx)
+    assignments = _assign_delivery_rows_to_slots(
+        [dict(row) for row in rows if _ensure_date(row.get("date")) == target_date],
+        slot_rows,
+        slot_map,
+        slot_label_map,
+        slot_label_map_by_daypart,
+        slot_rows_by_daypart,
+    )
+    for row_idx in slot_rows:
+        row_payload = assignments.get(row_idx)
+        if ws.title == "山城" and row_payload:
+            if row_idx == 12:
+                ws.cell(row=row_idx, column=1).value = target_date
+            ws.cell(row=row_idx, column=2).value = _normalize_delivery_daypart(row_payload.get("daypart"))
+            ws.cell(row=row_idx, column=3).value = row_payload.get("menu_category") or ""
+            ws.cell(row=row_idx, column=4).value = row_payload.get("menu_name") or ""
+        for col in columns:
+            source = col.get("source")
+            if source not in {"quantity", "note"}:
+                continue
+            name = str(col.get("name") or "")
+            col_idx = column_map.get(name)
+            if not col_idx:
+                continue
+            cell = _resolve_merged_cell(ws, row_idx, col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            if not row_payload:
+                cell.value = None
+                continue
+            value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
+            cell.value = "" if value is None else value
+
+
+def _create_reference_daily_delivery_workbook(
+    *,
+    target_date: dt_date,
+    grouped_outputs: dict[str, dict[str, Any]],
+) -> Workbook:
+    if not DAILY_DELIVERY_REFERENCE_TEMPLATE.exists():
+        raise ValueError(f"daily delivery reference template not found: {DAILY_DELIVERY_REFERENCE_TEMPLATE}")
+    workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE)
+    for ws in workbook.worksheets:
+        _clear_daily_delivery_sheet_data(ws)
+    for group in grouped_outputs.values():
+        sheet_name = _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
+        if not sheet_name or sheet_name not in workbook.sheetnames:
+            continue
+        ws = workbook[sheet_name]
+        sheet_template = {
+            "columns": _daily_delivery_column_meta(ws),
+            "prefer_ocr_raw_rows": bool((group.get("invoice_template") or {}).get("prefer_ocr_raw_rows", False)),
+        }
+        rows: list[dict] = []
+        for ctx in group.get("contexts", []):
+            rows.extend(
+                _build_delivery_rows(
+                    ctx["order_for_outputs"],
+                    sheet_template,
+                    ctx["quantity_rules"],
+                    ctx["facility_config"],
+                    ctx.get("ocr_menu_meta"),
+                )
+            )
+        merged_rows = _merge_delivery_bundle_rows(rows, sheet_template)
+        _write_reference_daily_delivery_sheet(ws, rows=merged_rows, target_date=target_date)
+    return workbook
+
+
 def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
     ws.append(fieldnames)
     for row in rows:
@@ -2734,12 +3022,14 @@ def build_daily_output_bundle(
                     "quantity_rules": ctx["quantity_rules"],
                     "facility_config": facility_config,
                     "ocr_menu_meta": ctx.get("ocr_menu_meta"),
+                    "contexts": [],
                     "bags": [],
                     "delivery_rows": [],
                 }
                 grouped_outputs[group_key] = group
 
             group["order_ids"].append(order_id)
+            group["contexts"].append(ctx)
             if normalized_type in {"labels", "both"}:
                 filtered_bags = [
                     bag for bag in ctx["bags"] if _ensure_date(bag.get("date")) == target_date
@@ -2768,6 +3058,38 @@ def build_daily_output_bundle(
                     "files": [],
                 }
             )
+
+    use_reference_daily_delivery = normalized_type == "delivery" and any(
+        _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
+        for group in grouped_outputs.values()
+    )
+    if use_reference_daily_delivery:
+        workbook = _create_reference_daily_delivery_workbook(
+            target_date=target_date,
+            grouped_outputs=grouped_outputs,
+        )
+        workbook.save(bundle_path)
+        manifest_items.extend(
+            {
+                "order_ids": list(group["order_ids"]),
+                "facility_code": group["facility_code"],
+                "facility_name": group["facility_name"],
+                "status": "ok",
+                "files": [
+                    _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
+                ],
+            }
+            for group in grouped_outputs.values()
+        )
+        summary = {
+            "target_date": target_date.isoformat(),
+            "bundle_type": normalized_type,
+            "total_orders": len(orders),
+            "success_orders": len(grouped_outputs),
+            "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
+            "items": manifest_items,
+        }
+        return bundle_path, summary
 
     success_count = 0
     for group in grouped_outputs.values():

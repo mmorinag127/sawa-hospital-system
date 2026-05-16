@@ -1846,6 +1846,7 @@
             "role": "quantity",
             "header": "糖尿",
             "diet_type": "diabetes",
+            "output_diet_type": "regular",
             "area_id": "X"
           },
           {
