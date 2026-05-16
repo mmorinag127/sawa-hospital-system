@@ -2905,7 +2905,18 @@ def _create_reference_daily_delivery_workbook(
             "columns": _daily_delivery_column_meta(ws),
             "prefer_ocr_raw_rows": bool((group.get("invoice_template") or {}).get("prefer_ocr_raw_rows", False)),
         }
-        rows = list(group.get("delivery_rows") or [])
+        rows: list[dict] = []
+        for ctx in group.get("contexts", []):
+            rows.extend(
+                _build_delivery_rows(
+                    ctx["order_for_outputs"],
+                    sheet_template,
+                    ctx["quantity_rules"],
+                    ctx["facility_config"],
+                    ctx.get("ocr_menu_meta"),
+                    allow_ocr_menu_meta=False,
+                )
+            )
         merged_rows = _merge_delivery_bundle_rows(rows, sheet_template)
         _write_reference_daily_delivery_sheet(ws, rows=merged_rows, target_date=target_date)
     return workbook
