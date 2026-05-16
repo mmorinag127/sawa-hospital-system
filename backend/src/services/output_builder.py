@@ -2871,6 +2871,7 @@ def _write_reference_daily_delivery_sheet(
     *,
     rows: list[dict],
     target_date: dt_date,
+    display_ws=None,
 ) -> None:
     columns = _daily_delivery_column_meta(ws)
     column_map = {
@@ -2881,10 +2882,13 @@ def _write_reference_daily_delivery_sheet(
     slot_rows = list(range(12, min(ws.max_row, 19) + 1))
     menu_col_idx = 3
     daypart_col_idx = 2
-    slot_map = _build_delivery_slot_map(ws, slot_rows, menu_col_idx, daypart_col_idx)
-    slot_label_map = _build_delivery_slot_label_map(ws, slot_rows, menu_col_idx)
-    slot_label_map_by_daypart = _build_delivery_slot_label_map_by_daypart(ws, slot_rows, menu_col_idx, daypart_col_idx)
-    slot_menu_map_by_daypart = _build_delivery_slot_menu_map_by_daypart(ws, slot_rows, 4, daypart_col_idx)
+    slot_source_ws = display_ws or ws
+    slot_map = _build_delivery_slot_map(slot_source_ws, slot_rows, menu_col_idx, daypart_col_idx)
+    slot_label_map = _build_delivery_slot_label_map(slot_source_ws, slot_rows, menu_col_idx)
+    slot_label_map_by_daypart = _build_delivery_slot_label_map_by_daypart(
+        slot_source_ws, slot_rows, menu_col_idx, daypart_col_idx
+    )
+    slot_menu_map_by_daypart = _build_delivery_slot_menu_map_by_daypart(slot_source_ws, slot_rows, 4, daypart_col_idx)
     slot_rows_by_daypart: dict[str, list[int]] = {"朝": [], "昼": [], "夕": []}
     current_daypart = ""
     for row_idx in slot_rows:
@@ -2930,6 +2934,7 @@ def _create_reference_daily_delivery_workbook(
     if not DAILY_DELIVERY_REFERENCE_TEMPLATE.exists():
         raise ValueError(f"daily delivery reference template not found: {DAILY_DELIVERY_REFERENCE_TEMPLATE}")
     workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE)
+    display_workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=True)
     for ws in workbook.worksheets:
         _clear_daily_delivery_sheet_data(ws)
     for group in grouped_outputs.values():
@@ -2954,7 +2959,8 @@ def _create_reference_daily_delivery_workbook(
                 )
             )
         merged_rows = _merge_delivery_bundle_rows(rows, sheet_template)
-        _write_reference_daily_delivery_sheet(ws, rows=merged_rows, target_date=target_date)
+        display_ws = display_workbook[sheet_name] if sheet_name in display_workbook.sheetnames else None
+        _write_reference_daily_delivery_sheet(ws, rows=merged_rows, target_date=target_date, display_ws=display_ws)
     return workbook
 
 
