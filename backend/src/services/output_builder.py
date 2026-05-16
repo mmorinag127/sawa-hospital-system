@@ -1128,6 +1128,19 @@ def build_order_lines_for_outputs(
         or "draft_newer_than_lines" in workflow_warnings
         or "draft_newer_than_lines" in workflow_blockers
     )
+    materialization_candidate_cache: dict[str, Any] | None = None
+
+    def _materialization_candidate() -> dict[str, Any] | None:
+        nonlocal materialization_candidate_cache
+        if materialization_candidate_cache is None and order_id:
+            materialization_candidate_cache = _build_nonwriting_draft_materialization_candidate(
+                str(order_id),
+                facility_id=facility_id,
+                week_value=week_value,
+                received_at=order.get("received_at"),
+            )
+        return materialization_candidate_cache
+
     if order_id and draft_newer_than_lines:
         if allow_stale_draft_lines and isinstance(raw_lines, list) and raw_lines:
             logger.warning(
@@ -1137,12 +1150,7 @@ def build_order_lines_for_outputs(
                 workflow_state=workflow_state.get("state"),
             )
         else:
-            materialization_candidate = _build_nonwriting_draft_materialization_candidate(
-                str(order_id),
-                facility_id=facility_id,
-                week_value=week_value,
-                received_at=order.get("received_at"),
-            )
+            materialization_candidate = _materialization_candidate()
             candidate_lines = (
                 materialization_candidate.get("lines")
                 if isinstance(materialization_candidate, dict)
@@ -1179,12 +1187,7 @@ def build_order_lines_for_outputs(
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
         if order_id:
-            materialization_candidate = _build_nonwriting_draft_materialization_candidate(
-                str(order_id),
-                facility_id=facility_id,
-                week_value=week_value,
-                received_at=order.get("received_at"),
-            )
+            materialization_candidate = _materialization_candidate()
             candidate_lines = (
                 materialization_candidate.get("lines")
                 if isinstance(materialization_candidate, dict)
