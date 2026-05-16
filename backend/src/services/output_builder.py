@@ -52,6 +52,8 @@ DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC00016": "いこいの森",
 }
 
+_EXPANDED_CELL_COPY_ENABLED_CACHE: dict[tuple[str, str], bool] = {}
+
 DEFAULT_LABEL_FIELDS = [
     "呼び出し番号",
     "発行枚数",
@@ -913,10 +915,17 @@ def build_order_lines_for_outputs(order: dict) -> list[dict]:
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
-    if order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
-        facility_config,
-        week_sheet_name=order_service._week_sheet_name_from_week_value(week_value),  # noqa: SLF001
-    ):
+    week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
+    facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
+    if facility_cache_key in _EXPANDED_CELL_COPY_ENABLED_CACHE:
+        expanded_copy_enabled = _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key]
+    else:
+        expanded_copy_enabled = order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+            facility_config,
+            week_sheet_name=week_sheet_name,
+        )
+        _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
+    if expanded_copy_enabled:
         order_id = order.get("id")
         if order_id:
             materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
