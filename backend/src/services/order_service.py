@@ -27711,6 +27711,33 @@ def get_ocr_sheet(
     position_fallback_partial = position_column_mapping_service.payload_uses_partial_position_fallback(
         ocr_payload
     )
+    current_sheet_context = (
+        get_current_sheet_context(
+            order_id,
+            refresh_draft_from_semantic=True,
+            upgrade_generic_from_sheet=True,
+            backfill_from_revision=False,
+        )
+        if use_saved_draft
+        else None
+    )
+    current_surface_payload, context_sheet_record = _authoritative_surface_payload_from_current_sheet_context(
+        order_id,
+        current_sheet_context,
+    )
+    if isinstance(current_surface_payload, dict):
+        return (
+            _augment_sheet_review_payload(
+                order_id=order_id,
+                payload=current_surface_payload,
+                lines_updated_at=lines_updated_at,
+                ocr_payload=ocr_payload,
+                ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
+                draft_sheet=context_sheet_record if isinstance(context_sheet_record, dict) else None,
+                position_fallback_semantics_ready=position_fallback_semantics_ready,
+            ),
+            None,
+        )
     if use_saved_draft and evidence_run_override is None:
         hakodate_current_draft, hakodate_draft_error = ensure_hakodate_evidence_draft_current(
             order_id,
@@ -27743,33 +27770,6 @@ def get_ocr_sheet(
                 ),
                 None,
             )
-    current_sheet_context = (
-        get_current_sheet_context(
-            order_id,
-            refresh_draft_from_semantic=True,
-            upgrade_generic_from_sheet=True,
-            backfill_from_revision=False,
-        )
-        if use_saved_draft
-        else None
-    )
-    current_surface_payload, context_sheet_record = _authoritative_surface_payload_from_current_sheet_context(
-        order_id,
-        current_sheet_context,
-    )
-    if isinstance(current_surface_payload, dict):
-        return (
-            _augment_sheet_review_payload(
-                order_id=order_id,
-                payload=current_surface_payload,
-                lines_updated_at=lines_updated_at,
-                ocr_payload=ocr_payload,
-                ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
-                draft_sheet=context_sheet_record if isinstance(context_sheet_record, dict) else None,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
-            ),
-            None,
-        )
     if not isinstance(ocr_payload, dict):
         return build_recoverable_ocr_sheet_payload(
             order_id,
