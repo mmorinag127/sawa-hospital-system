@@ -1020,6 +1020,27 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
     return enriched
 
 
+def _build_nonwriting_draft_materialization_candidate(
+    order_id: str,
+    *,
+    facility_id: Any,
+    week_value: Any,
+    received_at: Any,
+) -> dict[str, Any] | None:
+    latest_draft = order_service.get_latest_sheet_draft(
+        order_id,
+        backfill_from_revision=False,
+        upgrade_generic_from_sheet=False,
+    )
+    return order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+        order_id,
+        draft_record=latest_draft,
+        facility_id=str(facility_id or "").strip() or None,
+        existing_week_code=str(week_value or "").strip() or None,
+        received_at=received_at or datetime.utcnow(),
+    )
+
+
 def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = True) -> list[dict]:
     facility_id = order.get("facility")
     week_value = (
@@ -1034,7 +1055,7 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     order_id = order.get("id")
     workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
     if order_id and not workflow_state:
-        resolved_workflow_state = order_service.get_order_workflow_state(str(order_id), refresh=True)
+        resolved_workflow_state = order_service.get_order_workflow_state(str(order_id), refresh=False)
         workflow_state = resolved_workflow_state if isinstance(resolved_workflow_state, dict) else {}
     workflow_warnings = set(str(item).strip() for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or []) if str(item).strip())
     workflow_blockers = set(str(item).strip() for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or []) if str(item).strip())
@@ -1046,7 +1067,12 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
         or str(workflow_state.get("state") or "").strip() == "apply_ready"
     )
     if order_id and draft_newer_than_lines:
-        materialization_candidate = order_service.build_confirm_materialization_candidate(str(order_id))
+        materialization_candidate = _build_nonwriting_draft_materialization_candidate(
+            str(order_id),
+            facility_id=facility_id,
+            week_value=week_value,
+            received_at=order.get("received_at"),
+        )
         candidate_lines = (
             materialization_candidate.get("lines")
             if isinstance(materialization_candidate, dict)
@@ -1083,7 +1109,12 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
         if order_id:
-            materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
+            materialization_candidate = _build_nonwriting_draft_materialization_candidate(
+                str(order_id),
+                facility_id=facility_id,
+                week_value=week_value,
+                received_at=order.get("received_at"),
+            )
             candidate_lines = (
                 materialization_candidate.get("lines")
                 if isinstance(materialization_candidate, dict)

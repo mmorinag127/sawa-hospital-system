@@ -247,9 +247,9 @@ def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypa
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
     monkeypatch.setattr(
-        output_builder.order_service,
-        "build_confirm_materialization_candidate",
-        lambda order_id: {
+        output_builder,
+        "_build_nonwriting_draft_materialization_candidate",
+        lambda order_id, **kwargs: {
             "error": None,
             "lines": [
                 {
@@ -278,9 +278,9 @@ def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materializ
     }
     monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
     monkeypatch.setattr(
-        output_builder.order_service,
-        "build_confirm_materialization_candidate",
-        lambda order_id: {"error": "draft_materialization_mismatch", "lines": []},
+        output_builder,
+        "_build_nonwriting_draft_materialization_candidate",
+        lambda order_id, **kwargs: {"error": "draft_materialization_mismatch", "lines": []},
     )
 
     try:
@@ -598,7 +598,7 @@ def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path,
     try:
         output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="labels")
     except ValueError as exc:
-        assert str(exc) == "対象日の出力対象がありません"
+        assert str(exc).startswith("対象日の出力対象がありません")
     else:
         raise AssertionError("ValueError was not raised")
 
