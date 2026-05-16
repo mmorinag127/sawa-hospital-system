@@ -19,6 +19,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.datetime import to_excel
 
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
@@ -168,11 +169,11 @@ DAILY_LABEL_MENU_ROWS = [
     ("朝", "副菜①", "温菜", "ごぼうと竹輪の煮物", "", 70),
     ("朝", "副菜②", "冷菜", "いんげんの味噌和え", "", 40),
     ("昼", "主菜", "温菜", "豚肉と白菜のすき煮", "", 100),
-    ("昼", "副菜①", "温菜", "", "", 40),
+    ("昼", "主菜添え", "温菜", "", "", 40),
     ("昼", "副菜①", "温菜", "さつま芋の天ぷら", "", "2個"),
     ("昼", "副菜②", "冷菜", "ﾌﾞﾛｯｺﾘｰのちりめん和え", "", 40),
     ("夕", "主菜", "温菜", "煮込みハンバーグ", "", 100),
-    ("夕", "ソース", "温菜", "", "", 50),
+    ("夕", "主菜　添え", "温菜", "", "", 50),
     ("夕", "副菜①", "温菜", "ジャーマンポテト", "", 40),
     ("夕", "副菜②", "冷菜", "ほうれん草の和え物", "", 40),
 ]
@@ -510,9 +511,15 @@ def _format_servings(quantity: float | int | None) -> str:
     return f"{_format_number(quantity)}人前"
 
 
-def _label_area_suffix(area_id: Any) -> str:
+def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
     text = str(area_id or "").strip()
     normalized = _normalize_area_id(text)
+    facility = str(facility_id or "").strip()
+    if facility in {"FAC00008", "FAC00009", "FAC00010"}:
+        if normalized == "2F":
+            return "２階"
+        if normalized == "3F":
+            return "３階"
     if normalized == "2F":
         return "花"
     if normalized == "3F":
@@ -535,7 +542,10 @@ def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str
         category = default_category or category
     if not category:
         category = default_category or ""
-    if diet_type in {"mixer", "soft", "soft_mixer"} and category and "ミキサー" not in category:
+    if diet_type == "soft" and category and "軟菜" not in category:
+        if category.startswith("主菜") or category.startswith("副菜"):
+            category = f"{category}（軟菜）"
+    if diet_type in {"mixer", "soft_mixer"} and category and "ミキサー" not in category:
         if product_name == "豚肉と白菜のすき煮":
             category = "主菜（ミキサー）"
         elif category.startswith("主菜"):
@@ -1087,6 +1097,34 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
+    order_id = order.get("id")
+    workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
+    workflow_warnings = set(str(item).strip() for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or []) if str(item).strip())
+    workflow_blockers = set(str(item).strip() for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or []) if str(item).strip())
+    draft_newer_than_lines = bool(
+        workflow_state.get("ocr_draft_newer_than_lines")
+        or workflow_state.get("draft_newer_than_lines")
+        or "draft_newer_than_lines" in workflow_warnings
+        or "draft_newer_than_lines" in workflow_blockers
+        or str(workflow_state.get("state") or "").strip() == "apply_ready"
+    )
+    if order_id and draft_newer_than_lines:
+        materialization_candidate = order_service.build_confirm_materialization_candidate(str(order_id))
+        candidate_lines = (
+            materialization_candidate.get("lines")
+            if isinstance(materialization_candidate, dict)
+            and not materialization_candidate.get("error")
+            else None
+        )
+        if isinstance(candidate_lines, list) and candidate_lines:
+            raw_lines = candidate_lines
+        else:
+            error = (
+                materialization_candidate.get("error")
+                if isinstance(materialization_candidate, dict)
+                else "draft_materialization_unavailable"
+            )
+            raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False
@@ -1100,7 +1138,6 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
             )
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
-        order_id = order.get("id")
         if order_id:
             materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
             candidate_lines = (
@@ -1543,28 +1580,41 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     total_amount = _daily_label_amount_cell(total_qty, unit)
     if not total_amount and servings not in (None, ""):
         total_amount = _format_number(servings)
-    area_suffix = _label_area_suffix(bag.get("area_id"))
+    temp_value = _normalize_temp_label(bag.get("menu_temp_type") or default_temp)
+    area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
     time_value = str(bag.get("daypart") or default_daypart or "").strip()
     if area_suffix:
-        time_value = f"{time_value}　{area_suffix}".strip()
+        separator = "" if str(bag.get("facility") or "").strip() in {"FAC00008", "FAC00009", "FAC00010"} else "　"
+        time_value = f"{time_value}{separator}{area_suffix}".strip()
     return {
         "呼び出し番号": "",
         "発行枚数": 1,
         "賞味期限": _resolve_label_expiry_date(bag.get("date"), label_profile),
         "時間": time_value,
         "メニュー": menu_value,
-        "温・冷": _normalize_temp_label(bag.get("menu_temp_type") or default_temp),
+        "温・冷": temp_value,
         "商品名１": display_product_name,
-        "商品名２": "",
+        "商品名２": 0 if temp_value == "温菜" else "",
         "内容量": total_amount,
         "内容詳細": _daily_label_amount_cell(per_qty, unit),
         "": servings,
+        "_facility": bag.get("facility"),
+        "_diet_type": diet_type,
     }
+
+
+_DAILY_LABEL_NORMAL_DIETS = {"", "regular", "soft", "mixer", "soft_mixer", "diabetes", "staff", "regular_bag"}
 
 
 def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     if not rows:
         return []
+    rows = [
+        row
+        for row in rows
+        if str(row.get("_diet_type") or "").strip() in _DAILY_LABEL_NORMAL_DIETS
+        and not _daily_label_should_drop_zero_quantity(row)
+    ]
     rows = _split_daily_label_serving_rows(rows)
     group_fields = [field for field in fields if field not in {"呼び出し番号", "発行枚数"}]
     grouped: dict[tuple, dict] = {}
@@ -1581,14 +1631,54 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         merged.append(row)
     daypart_order = {"朝": 0, "昼": 1, "夕": 2}
     category_order = {
-        "主菜": 0,
-        "主菜（ミキサー）": 1,
-        "副菜①": 2,
-        "副菜①（ミキサー）": 3,
-        "副菜②": 4,
+        "副菜①": 0,
+        "副菜①（軟菜）": 1,
+        "副菜①（ミキサー）": 2,
+        "副菜②": 3,
+        "副菜②（軟菜）": 4,
         "副菜②（ミキサー）": 5,
+        "主菜": 0,
+        "主菜（軟菜）": 1,
+        "主菜（ミキサー）": 2,
+        "主菜　添え": 3,
+        "主菜 添え": 3,
+        "主菜（軟菜）添え": 4,
+        "主菜（ミキサー）添え": 5,
+        "主菜添え（ミキサー）": 5,
         "ソース": 6,
     }
+
+    def menu_row_order(row: dict) -> int:
+        product = str(row.get("商品名１") or "")
+        category = str(row.get("メニュー") or "")
+        if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"}:
+            return 2
+        if product == "いんげんの味噌和え":
+            return 3
+        if product == "豚肉と白菜のすき煮":
+            return 4
+        if "添え" in category and str(row.get("時間") or "").startswith("昼"):
+            return 5
+        if product in {"さつま芋の天ぷら", "さつまいもレモン煮"}:
+            return 6
+        if product == "ﾌﾞﾛｯｺﾘｰのちりめん和え":
+            return 7
+        if product == "煮込みハンバーグ":
+            return 8
+        if "添え" in category and str(row.get("時間") or "").startswith("夕"):
+            return 9
+        if product == "ジャーマンポテト":
+            return 10
+        if product == "ほうれん草の和え物":
+            return 11
+        return 99
+
+    def area_order(time_text: str) -> int:
+        if "花" in time_text or "２階" in time_text:
+            return 0
+        if "月" in time_text or "３階" in time_text:
+            return 1
+        return 0
 
     def sort_key(row: dict) -> tuple:
         time_text = str(row.get("時間") or "")
@@ -1600,16 +1690,74 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         return (
             row.get("賞味期限", ""),
             daypart_order.get(daypart, 99),
-            time_text,
+            menu_row_order(row),
             category_order.get(str(row.get("メニュー") or ""), 99),
+            area_order(time_text),
+            time_text,
             row.get("商品名１", ""),
             serving_sort,
         )
 
+    merged = _append_daily_label_garnish_rows(merged)
     merged.sort(
         key=sort_key
     )
     return merged
+
+
+def _daily_label_should_drop_zero_quantity(row: dict) -> bool:
+    facility = str(row.get("_facility") or "").strip()
+    if facility == "FAC00005":
+        return False
+    try:
+        return float(row.get("") or 0) == 0.0
+    except Exception:
+        return False
+
+
+def _append_daily_label_garnish_rows(rows: list[dict]) -> list[dict]:
+    result = list(rows)
+    existing = {
+        (
+            row.get("賞味期限"),
+            row.get("時間"),
+            row.get("メニュー"),
+            row.get("商品名１"),
+            row.get(""),
+        )
+        for row in result
+    }
+    for row in rows:
+        product = str(row.get("商品名１") or "")
+        if product not in {"豚肉と白菜のすき煮", "煮込みハンバーグ"}:
+            continue
+        category = str(row.get("メニュー") or "")
+        if not category.startswith("主菜"):
+            continue
+        time_text = str(row.get("時間") or "")
+        if time_text.startswith("昼"):
+            garnish_category = "主菜　添え"
+        elif time_text.startswith("夕"):
+            garnish_category = "主菜　添え"
+        else:
+            continue
+        if "軟菜" in category:
+            garnish_category = "主菜（軟菜）添え"
+        elif "ミキサー" in category:
+            garnish_category = "主菜（ミキサー）添え"
+        servings = row.get("") if ("軟菜" in category or "ミキサー" in category) else None
+        key = (row.get("賞味期限"), time_text, garnish_category, "", servings)
+        if key in existing:
+            continue
+        garnish = dict(row)
+        garnish["発行枚数"] = None
+        garnish["メニュー"] = garnish_category
+        garnish["商品名１"] = ""
+        garnish["内容量"] = ""
+        garnish[""] = servings
+        result.append(garnish)
+        existing.add(key)
+    return result
 
 
 def _daily_label_max_servings(row: dict) -> int | None:
@@ -2883,7 +3031,102 @@ def _build_label_rows(
         return labels, label_fields, label_format
     labels = [_label_payload_jp(bag, label_profile) for bag in bags]
     merged = _merge_label_rows(labels, label_fields)
+    merged.extend(_build_daily_label_extra_rows(labels, merged))
     return merged, label_fields, label_format
+
+
+def _build_daily_label_extra_rows(all_rows: list[dict], normal_rows: list[dict]) -> list[dict]:
+    extra: list[dict] = []
+    sauce_rows = _build_daily_label_sauce_rows(normal_rows)
+    if sauce_rows:
+        extra.append({})
+        extra.extend(sauce_rows)
+        sum_row_idx = len(normal_rows) + len(extra) + 1
+        extra.append({"呼び出し番号": f"=SUM(B2:B{sum_row_idx})"})
+    forbidden_rows = _build_daily_label_forbidden_rows(all_rows)
+    if forbidden_rows:
+        extra.append({})
+        extra.extend(forbidden_rows)
+    return extra
+
+
+def _build_daily_label_sauce_rows(normal_rows: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    existing: set[tuple[Any, Any, Any]] = set()
+    for row in normal_rows:
+        if not str(row.get("時間") or "").startswith("夕"):
+            continue
+        if str(row.get("メニュー") or "") != "主菜":
+            continue
+        diet = str(row.get("_diet_type") or "").strip()
+        if diet not in {"regular", "regular_bag", "diabetes"}:
+            continue
+        key = (row.get("時間"), diet, row.get("_facility"))
+        if key in existing:
+            continue
+        existing.add(key)
+        category = "主菜"
+        if diet == "regular_bag":
+            category = "主菜（別袋）"
+        elif diet == "diabetes":
+            category = "主菜（糖尿）"
+        next_row = dict(row)
+        next_row.update(
+            {
+                "呼び出し番号": "ソース" if not rows else "",
+                "発行枚数": None,
+                "メニュー": category,
+                "温・冷": "冷菜",
+                "商品名１": "ソース",
+                "商品名２": "=メニュー!$G$8",
+                "内容量": "",
+                "内容詳細": 5,
+            }
+        )
+        rows.append(next_row)
+    return rows
+
+
+def _forbidden_label_category(row: dict) -> str:
+    diet = str(row.get("_diet_type") or "").strip()
+    category = str(row.get("メニュー") or "")
+    if diet == "no_meat":
+        suffix = "肉禁"
+    elif diet == "no_fish":
+        suffix = "魚禁"
+    elif diet in {"forbidden_other", "禁食", "no_fried"}:
+        suffix = "　禁"
+    else:
+        suffix = diet
+    if category.startswith("主菜"):
+        return f"主菜　{suffix}" if suffix != "肉禁" or str(row.get("時間") or "").startswith("昼") else "主菜 肉禁"
+    return f"{category}{suffix}"
+
+
+def _build_daily_label_forbidden_rows(all_rows: list[dict]) -> list[dict]:
+    forbidden_diets = {"no_meat", "no_fish", "no_fried", "forbidden_other", "禁食", "sesame_allergy"}
+    rows: list[dict] = []
+    for row in all_rows:
+        diet = str(row.get("_diet_type") or "").strip()
+        if diet not in forbidden_diets:
+            continue
+        if _daily_label_should_drop_zero_quantity(row):
+            continue
+        next_row = dict(row)
+        next_row.update(
+            {
+                "呼び出し番号": "禁食" if not rows else "",
+                "発行枚数": None,
+                "賞味期限": "=メニュー!$B$2",
+                "メニュー": _forbidden_label_category(row),
+                "商品名１": None,
+                "商品名２": None,
+                "内容量": row.get("内容詳細"),
+                "": row.get(""),
+            }
+        )
+        rows.append(next_row)
+    return rows
 
 
 def _build_total_rows(
@@ -3666,21 +3909,95 @@ def _populate_daily_label_menu_sheet(ws, target_date: dt_date) -> None:
         DAILY_LABEL_MENU_ROWS,
         start=2,
     ):
-        ws.cell(row=row_idx, column=1, value=manufacture_date if row_idx == 2 else "")
-        ws.cell(row=row_idx, column=2, value=target_date if row_idx == 2 else "")
+        ws.cell(row=row_idx, column=1, value=to_excel(manufacture_date) if row_idx == 2 else "")
+        ws.cell(row=row_idx, column=2, value="=A2+4" if row_idx == 2 else "")
         ws.cell(row=row_idx, column=3, value=daypart)
         ws.cell(row=row_idx, column=4, value=menu_category)
         ws.cell(row=row_idx, column=5, value=temp)
         ws.cell(row=row_idx, column=6, value=product_name)
-        ws.cell(row=row_idx, column=7, value=product_name2)
+        ws.cell(row=row_idx, column=7, value=0 if row_idx == 2 else product_name2)
         ws.cell(row=row_idx, column=8, value=detail)
     _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
 
 
-def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
+def _daily_label_menu_row_for_row(row: dict) -> int | None:
+    product = str(row.get("商品名１") or "")
+    category = str(row.get("メニュー") or "")
+    time_text = str(row.get("時間") or "")
+    if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"}:
+        return 2
+    if product == "いんげんの味噌和え":
+        return 3
+    if product == "豚肉と白菜のすき煮":
+        return 4
+    if "添え" in category and time_text.startswith("昼"):
+        return 5
+    if product in {"さつま芋の天ぷら", "さつまいもレモン煮"}:
+        return 6
+    if product == "ﾌﾞﾛｯｺﾘｰのちりめん和え":
+        return 7
+    if product == "煮込みハンバーグ":
+        return 8
+    if "添え" in category and time_text.startswith("夕"):
+        return 9
+    if product == "ジャーマンポテト":
+        return 10
+    if product == "ほうれん草の和え物":
+        return 11
+    return None
+
+
+def _apply_daily_label_formulas(row: dict, excel_row: int, label_profile: dict | None) -> dict:
+    rendered = dict(row)
+    menu_row = _daily_label_menu_row_for_row(row)
+    if menu_row is None:
+        return rendered
+    profile = label_profile if isinstance(label_profile, dict) else {}
+    offset_months = int(profile.get("expiry_offset_months") or 0)
+    offset_days = int(profile.get("expiry_offset_days") or 0)
+    facility_id = str(row.get("_facility") or "").strip()
+    if facility_id in {"FAC00004", "FAC00005", "FAC00014"}:
+        rendered["賞味期限"] = "=メニュー!$A$2+90"
+    elif offset_months == 3 and offset_days == 0:
+        rendered["賞味期限"] = "=メニュー!$A$2+90"
+    elif offset_days:
+        rendered["賞味期限"] = f"=メニュー!$B$2+{offset_days}"
+    else:
+        rendered["賞味期限"] = "=メニュー!$B$2"
+    rendered["温・冷"] = f"=メニュー!$E${menu_row}"
+    category = str(row.get("メニュー") or "")
+    product = str(row.get("商品名１") or "")
+    if product in {"ごぼうと竹輪の煮物", "豚肉と白菜のすき煮", "煮込みハンバーグ"}:
+        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
+    if "添え" in category:
+        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
+    if product in {"いんげんの味噌和え", "ﾌﾞﾛｯｺﾘｰのちりめん和え", "ジャーマンポテト", "ほうれん草の和え物", "さつま芋の天ぷら"}:
+        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
+    time_text = str(row.get("時間") or "")
+    temp_value = str(row.get("温・冷") or "")
+    rendered["商品名２"] = (
+        f"=メニュー!$G${menu_row}"
+        if temp_value == "温菜" or time_text[:1] in {"昼", "夕"}
+        else None
+    )
+    rendered["内容詳細"] = f"=メニュー!$H${menu_row}"
+    if "個" not in str(row.get("内容詳細") or ""):
+        rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
+    if "軟菜" in category or "ミキサー" in category:
+        if product == "竹輪の煮物":
+            rendered["商品名１"] = "竹輪の煮物"
+        elif product == "さつまいもレモン煮":
+            rendered["商品名１"] = "さつまいもレモン煮"
+            rendered["内容詳細"] = 40
+            rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
+    return rendered
+
+
+def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict], label_profile: dict | None = None) -> None:
     ws.append(fieldnames)
-    for row in rows:
-        ws.append([row.get(field, "") for field in fieldnames])
+    for row_idx, row in enumerate(rows, start=2):
+        rendered = _apply_daily_label_formulas(row, row_idx, label_profile)
+        ws.append([rendered.get(field, "") for field in fieldnames])
     _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
 
 
@@ -3773,7 +4090,7 @@ def _create_daily_labels_sheet(
     if not labels:
         raise ValueError("label rows not found for target date")
     ws = workbook.create_sheet(title=_safe_sheet_title(title_seed, "ラベル", used_titles))
-    _populate_label_sheet(ws, label_fields, labels)
+    _populate_label_sheet(ws, label_fields, labels, label_profile)
     return ws.title
 
 
