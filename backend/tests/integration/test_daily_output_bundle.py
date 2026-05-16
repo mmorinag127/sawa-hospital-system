@@ -305,10 +305,38 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
             for col_idx in range(1, max(expected_ws.max_column, actual_ws.max_column) + 1):
                 actual_border = actual_ws.cell(row=row_idx, column=col_idx).border
                 expected_border = expected_ws.cell(row=row_idx, column=col_idx).border
+                if row_idx == 19 and actual_border.bottom.style == "medium" and expected_border.bottom.style is None:
+                    continue
                 assert _border_signature(actual_border) == _border_signature(expected_border), (
                     f"{sheet_name}!{actual_ws.cell(row=row_idx, column=col_idx).coordinate} "
                     "border differs from reference template"
                 )
+
+
+def test_reference_daily_delivery_enforces_evening_bottom_border(tmp_path):
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 10),
+        grouped_outputs={},
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
+        workbook,
+        output_path,
+    )
+
+    actual = load_workbook(output_path, data_only=False)
+    for sheet_name in actual.sheetnames:
+        ws = actual[sheet_name]
+        table_columns = [
+            col_idx
+            for col_idx in range(1, ws.max_column + 1)
+            if any(ws.cell(row=row_idx, column=col_idx).border.left.style for row_idx in range(12, 20))
+        ]
+        for col_idx in range(min(table_columns), max(table_columns) + 1):
+            assert ws.cell(row=19, column=col_idx).border.bottom.style is not None, (
+                f"{sheet_name}!{ws.cell(row=19, column=col_idx).coordinate} "
+                "must keep the evening block bottom border"
+            )
 
 
 def test_reference_daily_delivery_preserves_template_package_parts(tmp_path):

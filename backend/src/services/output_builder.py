@@ -16,6 +16,7 @@ import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Side
 from openpyxl.utils import get_column_letter
 
 from src.db import session_scope
@@ -2928,6 +2929,32 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
             target.border = copy(source.border)
 
 
+def _has_any_border(cell) -> bool:
+    border = cell.border
+    return any(side.style for side in (border.left, border.right, border.top, border.bottom))
+
+
+def _ensure_daily_delivery_evening_bottom_border(ws) -> None:
+    bottom_row = 19
+    if ws.max_row < bottom_row:
+        return
+    table_columns = [
+        col_idx
+        for col_idx in range(1, ws.max_column + 1)
+        if any(_has_any_border(ws.cell(row=row_idx, column=col_idx)) for row_idx in range(12, bottom_row + 1))
+    ]
+    if not table_columns:
+        return
+    bottom_side = Side(style="medium", color="000000")
+    for col_idx in range(min(table_columns), max(table_columns) + 1):
+        cell = ws.cell(row=bottom_row, column=col_idx)
+        if isinstance(cell, MergedCell):
+            continue
+        if cell.border.bottom.style:
+            continue
+        cell.border = copy(cell.border).copy(bottom=bottom_side)
+
+
 def _xlsx_tag(name: str) -> str:
     return f"{{{_XLSX_MAIN_NS}}}{name}"
 
@@ -3216,6 +3243,7 @@ def _write_reference_daily_delivery_sheet(
                 continue
             cell.value = "" if value is None else value
     _restore_daily_delivery_table_borders(ws, display_ws)
+    _ensure_daily_delivery_evening_bottom_border(ws)
 
 
 def _create_reference_daily_delivery_workbook(
