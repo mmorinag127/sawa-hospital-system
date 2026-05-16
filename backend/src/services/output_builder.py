@@ -3004,7 +3004,10 @@ def build_daily_output_bundle(
             except Exception:
                 facility_name = ""
         try:
-            ctx = _prepare_output_context(order_id)
+            ctx = _prepare_output_context_for_bundle(
+                order_id,
+                include_bags=normalized_type in {"labels", "both"},
+            )
             facility_config = ctx.get("facility_config") or {}
             facility_name = str(facility_config.get("facility_name") or facility_name or "").strip()
             facility_code = str(ctx.get("order_for_outputs", {}).get("facility") or facility_code or "").strip()
@@ -3183,7 +3186,7 @@ def build_daily_output_bundle(
     return bundle_path, manifest
 
 
-def _prepare_output_context(order_id: str) -> dict:
+def _prepare_output_context(order_id: str, *, include_bags: bool = True) -> dict:
     order = get_order_by_id(order_id)
     if not order:
         raise ValueError("order not found")
@@ -3203,9 +3206,11 @@ def _prepare_output_context(order_id: str) -> dict:
     order_for_outputs = {**order, "lines": order_lines}
     ocr_menu_meta = _build_ocr_menu_meta(order, facility_config)
 
-    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
-    bag_types = _resolve_bag_types(facility_config)
-    bags = _assign_bag_type_for_bags(bags, bag_types)
+    bags = []
+    if include_bags:
+        bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+        bag_types = _resolve_bag_types(facility_config)
+        bags = _assign_bag_type_for_bags(bags, bag_types)
     return {
         "order": order,
         "facility_config": facility_config,
@@ -3219,8 +3224,17 @@ def _prepare_output_context(order_id: str) -> dict:
     }
 
 
+def _prepare_output_context_for_bundle(order_id: str, *, include_bags: bool) -> dict:
+    try:
+        return _prepare_output_context(order_id, include_bags=include_bags)
+    except TypeError as exc:
+        if "include_bags" not in str(exc):
+            raise
+        return _prepare_output_context(order_id)
+
+
 def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
-    ctx = _prepare_output_context(order_id)
+    ctx = _prepare_output_context(order_id, include_bags=output_type in {"labels", "aggregate"})
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
