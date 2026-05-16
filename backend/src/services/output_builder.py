@@ -2789,8 +2789,10 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
             diet_type = "diabetes"
         elif "軟菜" in header:
             diet_type = "soft"
-        elif "ミキサ" in header:
+        elif "ミキサ" in header or "ﾐｷｻ" in header:
             diet_type = "mixer"
+        elif header == "袋分け":
+            diet_type = "regular_bag"
         if not diet_type:
             continue
         name = header
@@ -2820,14 +2822,6 @@ def _clear_daily_delivery_sheet_data(ws) -> None:
             if isinstance(cell.value, str) and cell.value.startswith("="):
                 continue
             cell.value = None
-        if ws.title == "山城":
-            for col_idx in range(1, 5):
-                cell = _resolve_merged_cell(ws, row_idx, col_idx)
-                if isinstance(cell, MergedCell):
-                    continue
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    continue
-                cell.value = None
 
 
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
@@ -2880,12 +2874,6 @@ def _write_reference_daily_delivery_sheet(
     )
     for row_idx in slot_rows:
         row_payload = assignments.get(row_idx)
-        if ws.title == "山城" and row_payload:
-            if row_idx == 12:
-                _resolve_merged_cell(ws, row_idx, 1).value = target_date
-            _resolve_merged_cell(ws, row_idx, 2).value = _normalize_delivery_daypart(row_payload.get("daypart"))
-            _resolve_merged_cell(ws, row_idx, 3).value = row_payload.get("menu_category") or ""
-            _resolve_merged_cell(ws, row_idx, 4).value = row_payload.get("menu_name") or ""
         for col in columns:
             source = col.get("source")
             if source not in {"quantity", "note"}:
