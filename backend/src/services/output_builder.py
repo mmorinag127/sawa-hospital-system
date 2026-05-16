@@ -2168,6 +2168,25 @@ def _build_delivery_slot_label_map_by_daypart(
     return label_map
 
 
+def _build_delivery_slot_menu_map_by_daypart(
+    ws,
+    slot_rows: list[int],
+    menu_name_col_idx: int,
+    daypart_col_idx: int | None,
+) -> dict[str, dict[str, list[int]]]:
+    menu_map: dict[str, dict[str, list[int]]] = {}
+    current_daypart = ""
+    for row_idx in slot_rows:
+        if daypart_col_idx:
+            daypart_text = _normalize_cell_text(ws.cell(row=row_idx, column=daypart_col_idx).value)
+            if daypart_text:
+                current_daypart = _normalize_delivery_daypart(daypart_text)
+        menu_key = _normalize_menu_key(ws.cell(row=row_idx, column=menu_name_col_idx).value)
+        if current_daypart and menu_key:
+            menu_map.setdefault(current_daypart, {}).setdefault(menu_key, []).append(row_idx)
+    return menu_map
+
+
 def _write_delivery_slot_row(
     ws,
     row_idx: int,
@@ -2232,6 +2251,7 @@ def _assign_delivery_rows_to_slots(
     slot_label_map: dict[str, list[int]],
     slot_label_map_by_daypart: dict[str, dict[str, list[int]]],
     slot_rows_by_daypart: dict[str, list[int]],
+    slot_menu_map_by_daypart: dict[str, dict[str, list[int]]] | None = None,
 ) -> dict[int, dict]:
     assignments: dict[int, dict] = {}
     used_rows: set[int] = set()
@@ -2244,8 +2264,16 @@ def _assign_delivery_rows_to_slots(
     )
     for row in rows_for_date:
         daypart = _normalize_delivery_daypart(row.get("daypart"))
+        menu_key = _normalize_menu_key(row.get("menu_name"))
+        target_row = None
+        if daypart and menu_key and slot_menu_map_by_daypart:
+            for candidate in slot_menu_map_by_daypart.get(daypart, {}).get(menu_key, []):
+                if candidate not in used_rows:
+                    target_row = candidate
+                    break
         slot_label = _normalize_slot_label(row.get("menu_category"))
-        target_row = slot_map.get((daypart, slot_label)) if daypart and slot_label else None
+        if not target_row:
+            target_row = slot_map.get((daypart, slot_label)) if daypart and slot_label else None
         if not target_row and slot_label:
             candidates = slot_label_map_by_daypart.get(daypart, {}).get(slot_label, []) if daypart else []
             if not candidates:
@@ -2856,6 +2884,7 @@ def _write_reference_daily_delivery_sheet(
     slot_map = _build_delivery_slot_map(ws, slot_rows, menu_col_idx, daypart_col_idx)
     slot_label_map = _build_delivery_slot_label_map(ws, slot_rows, menu_col_idx)
     slot_label_map_by_daypart = _build_delivery_slot_label_map_by_daypart(ws, slot_rows, menu_col_idx, daypart_col_idx)
+    slot_menu_map_by_daypart = _build_delivery_slot_menu_map_by_daypart(ws, slot_rows, 4, daypart_col_idx)
     slot_rows_by_daypart: dict[str, list[int]] = {"朝": [], "昼": [], "夕": []}
     current_daypart = ""
     for row_idx in slot_rows:
@@ -2871,6 +2900,7 @@ def _write_reference_daily_delivery_sheet(
         slot_label_map,
         slot_label_map_by_daypart,
         slot_rows_by_daypart,
+        slot_menu_map_by_daypart,
     )
     for row_idx in slot_rows:
         row_payload = assignments.get(row_idx)
@@ -2917,7 +2947,7 @@ def _create_reference_daily_delivery_workbook(
                 _build_delivery_rows(
                     ctx["order_for_outputs"],
                     sheet_template,
-                    ctx["quantity_rules"],
+                    {**ctx["quantity_rules"], "zero_as_empty": False},
                     ctx["facility_config"],
                     ctx.get("ocr_menu_meta"),
                     allow_ocr_menu_meta=False,
