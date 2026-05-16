@@ -1963,6 +1963,12 @@ def test_daily_bag_audit_gemini_retries_truncated_json(monkeypatch):
     assert result["items"][0]["summary"] == "数量確認"
     assert len(calls) == 2
     assert calls[1]["generationConfig"]["maxOutputTokens"] > calls[0]["generationConfig"]["maxOutputTokens"]
+    assert calls[0]["generationConfig"]["maxOutputTokens"] == 1024
+    assert "responseSchema" not in calls[0]["generationConfig"]
+    request_text = calls[0]["contents"][0]["parts"][0]["text"]
+    assert '"findings":[{"id":"daily-audit-1"' in request_text
+    assert "source_refs" not in request_text
+    assert "reference_values" not in request_text
 
 
 def test_daily_bag_audit_gemini_default_timeout_allows_long_live_response(monkeypatch):

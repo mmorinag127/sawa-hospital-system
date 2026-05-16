@@ -7612,6 +7612,27 @@ def _daily_audit_fallback_ai_items(findings: list[dict[str, Any]]) -> list[dict[
     return items
 
 
+def _daily_audit_compact_gemini_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for finding in findings[:16]:
+        target = finding.get("target") if isinstance(finding.get("target"), dict) else {}
+        compact.append(
+            {
+                "id": str(finding.get("finding_id") or "").strip(),
+                "severity": str(finding.get("severity") or "").strip(),
+                "rule": str(finding.get("rule_code") or "").strip(),
+                "message": str(finding.get("message") or finding.get("title") or "").strip()[:160],
+                "action": str(finding.get("suggested_action") or "").strip()[:120],
+                "target": {
+                    key: target.get(key)
+                    for key in ("daypart", "menu_name", "diet_type", "quantity", "facility_label", "order_id")
+                    if target.get(key) not in (None, "")
+                },
+            }
+        )
+    return compact
+
+
 def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date) -> dict[str, Any]:
     api_key = _daily_audit_gemini_key()
     if not api_key:
@@ -7628,22 +7649,22 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
     model = str(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
     timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 120.0
     clipped_findings = findings[:16]
-    max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 6000)
-    retry_max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 12000)
+    max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 1024)
+    retry_max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 2048)
     if retry_max_tokens < max_tokens:
         retry_max_tokens = max_tokens
     system_prompt = (
         "You are a quantity audit assistant for Japanese meal order daily output.\n"
         "Use only the provided rule-based findings and daily-output quantities.\n"
         "Do not invent hidden source data. Do not treat OCR as ground truth.\n"
-        "Keep each summary and operator_action under 80 Japanese characters.\n"
-        "Return strict JSON only with shape "
-        '{"items":[{"finding_id":"","priority":"","summary":"","operator_action":""}],"notes":""}.'
+        "Return exactly one minified JSON object. Do not repeat the schema. Do not use markdown.\n"
+        "For every input finding, return exactly one item with the same finding_id.\n"
+        "Keep summary and operator_action under 35 Japanese characters each.\n"
+        'JSON shape: {"items":[{"finding_id":"id","priority":"high|medium|low","summary":"短文","operator_action":"短文"}],"notes":""}.'
     )
     user_payload = {
         "date": target_date.isoformat(),
-        "findings": clipped_findings,
-        "priority_rule": "Prioritize cells that can change daily totals materially, then low-confidence unedited OCR-adopted cells.",
+        "findings": _daily_audit_compact_gemini_findings(clipped_findings),
     }
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -7652,8 +7673,9 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
                 "parts": [
                     {
                         "text": (
-                            "Rank and explain these daily-output audit findings for an operator.\n"
-                            f"{json.dumps(user_payload, ensure_ascii=False)}"
+                            "Create concise operator guidance for these findings. "
+                            "Output JSON only.\n"
+                            f"{json.dumps(user_payload, ensure_ascii=False, separators=(',', ':'))}"
                         )
                     }
                 ]
@@ -7661,26 +7683,8 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
         ],
         "generationConfig": {
             "temperature": 0,
-            "maxOutputTokens": 3000,
+            "maxOutputTokens": max_tokens,
             "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "finding_id": {"type": "string"},
-                                "priority": {"type": "string"},
-                                "summary": {"type": "string"},
-                                "operator_action": {"type": "string"},
-                            },
-                        },
-                    },
-                    "notes": {"type": "string"},
-                },
-            },
         },
     }
     parse_errors: list[str] = []
