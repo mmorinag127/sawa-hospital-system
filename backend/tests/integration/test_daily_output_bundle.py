@@ -239,3 +239,28 @@ def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path,
         assert str(exc) == "対象日の出力対象がありません"
     else:
         raise AssertionError("ValueError was not raised")
+
+
+def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
+    grouped_outputs = {
+        "FAC00013": {
+            "facility_code": "FAC00013",
+            "facility_name": "いこいの森",
+            "invoice_template": {},
+            "contexts": [],
+        }
+    }
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 10),
+        grouped_outputs=grouped_outputs,
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    workbook.save(output_path)
+
+    saved = load_workbook(output_path, data_only=True)
+    ws = saved["いこいの森"]
+
+    assert ws["A17"].value == "(日)"
+    assert ws["D17"].value == "煮込みハンバーグ"
+    assert ws["D18"].value == "ジャーマンポテト"
+    assert ws["D19"].value == "ほうれん草の和え物"

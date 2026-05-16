@@ -2879,6 +2879,23 @@ def _clear_daily_delivery_sheet_data(ws) -> None:
             cell.value = None
 
 
+def _materialize_daily_delivery_static_cells(ws, display_ws) -> None:
+    if display_ws is None:
+        return
+    # openpyxl drops cached formula values on save. The reference daily delivery
+    # workbook uses formulas for static date/menu labels, so materialize those
+    # display values before writing quantities.
+    for row_idx in range(12, min(ws.max_row, 19) + 1):
+        for col_idx in range(1, 5):
+            display_value = display_ws.cell(row=row_idx, column=col_idx).value
+            if display_value is None:
+                continue
+            cell = _resolve_merged_cell(ws, row_idx, col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.value = display_value
+
+
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
     code = str(facility_code or "").strip()
     if code in DAILY_DELIVERY_SHEET_BY_FACILITY_ID:
@@ -2900,6 +2917,7 @@ def _write_reference_daily_delivery_sheet(
     target_date: dt_date,
     display_ws=None,
 ) -> None:
+    _materialize_daily_delivery_static_cells(ws, display_ws)
     columns = _daily_delivery_column_meta(ws)
     column_map = {
         str(col.get("name")): int(col.get("column_index"))
