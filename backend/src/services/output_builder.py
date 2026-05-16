@@ -2953,8 +2953,8 @@ def _write_reference_daily_delivery_sheet(
             value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
             if source == "quantity":
                 value = _format_reference_quantity_value(value, original_value)
-            elif _is_blank_cell_value(value) and not _is_blank_cell_value(original_value):
-                value = original_value
+            elif _is_blank_cell_value(value):
+                continue
             cell.value = "" if value is None else value
 
 
