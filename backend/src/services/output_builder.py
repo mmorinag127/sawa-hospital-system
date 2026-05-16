@@ -2022,6 +2022,8 @@ def _is_blank_cell_value(value: Any) -> bool:
 
 def _format_reference_quantity_value(value: Any, original_value: Any) -> Any:
     if _is_blank_cell_value(value):
+        if original_value == 0:
+            return 0
         return value
     if not isinstance(value, (int, float)):
         return value
@@ -2860,8 +2862,15 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
 
 
 def _clear_daily_delivery_sheet_data(ws) -> None:
+    note_columns = {
+        int(col.get("column_index"))
+        for col in _daily_delivery_column_meta(ws)
+        if col.get("source") == "note" and isinstance(col.get("column_index"), int)
+    }
     for row_idx in range(12, min(ws.max_row, 19) + 1):
         for col_idx in range(5, ws.max_column + 1):
+            if col_idx in note_columns:
+                continue
             cell = _resolve_merged_cell(ws, row_idx, col_idx)
             if isinstance(cell, MergedCell):
                 continue
