@@ -147,22 +147,22 @@ _DAILY_LABEL_MENU_DEFAULTS = {
 }
 
 DAILY_LABEL_SHEET_MAX_ROWS = {
-    "メニュー": 603,
-    "藍TERRACE": 627,
-    "百々家": 622,
-    "池袋病院": 619,
-    "大和なでしこ": 623,
-    "春日苑": 620,
-    "四万十ピア": 623,
-    "山城グループホーム": 622,
-    "佐古グループホーム": 607,
-    "なごみ": 623,
-    "いこいの森": 619,
-    "そよかぜ": 637,
-    "グランフォレスト": 622,
-    "ふれあいの丘": 629,
-    "湘南さくら病院": 627,
-    "ケアホーム長生苑": 621,
+    "メニュー": 13,
+    "藍TERRACE": 181,
+    "百々家": 176,
+    "池袋病院": 173,
+    "大和なでしこ": 177,
+    "春日苑": 174,
+    "四万十ピア": 177,
+    "山城グループホーム": 176,
+    "佐古グループホーム": 161,
+    "なごみ": 177,
+    "いこいの森": 173,
+    "そよかぜ": 191,
+    "グランフォレスト": 176,
+    "ふれあいの丘": 183,
+    "湘南さくら病院": 181,
+    "ケアホーム長生苑": 175,
 }
 
 DAILY_LABEL_MENU_ROWS = [
@@ -537,7 +537,7 @@ def _label_menu_defaults(menu_name: Any) -> tuple[str | None, str | None, str | 
 
 def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
     _daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(product_name)
-    category = str(bag.get("menu_category") or default_category or "").strip()
+    category = str(default_category or bag.get("menu_category") or "").strip()
     if category == "副菜":
         category = default_category or category
     if not category:
