@@ -342,11 +342,26 @@ def _infer_delivery_column_meta(name: str | None) -> tuple[str | None, str | Non
     if not name:
         return None, None
     raw = str(name)
-    diet = _normalize_diet_key(raw)
+    if "揚げ物" in raw or "揚物" in raw:
+        diet = "no_fried"
+    elif "肉禁" in raw:
+        diet = "no_meat"
+    elif "魚禁" in raw:
+        diet = "no_fish"
+    elif "その他" in raw:
+        diet = "forbidden_other"
+    elif "禁食" in raw:
+        diet = "禁食"
+    else:
+        diet = _normalize_diet_key(raw)
     area = None
     match = re.search(r"(\\d)\\s*(?:f|ｆ|Ｆ|階)", raw, re.IGNORECASE)
     if match:
         area = f"{match.group(1)}F"
+    elif "月" in raw:
+        area = "月"
+    elif "花" in raw:
+        area = "花"
     return diet, area
 
 
@@ -2727,12 +2742,26 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
             columns.append({"name": name, "source": "note", "column_index": col_idx})
             continue
         diet_type = None
-        area_id = "X"
+        area_id = None
         if "2F" in header:
             area_id = "2F"
         elif "3F" in header:
             area_id = "3F"
-        if "常食" in header:
+        elif "月" in header:
+            area_id = "月"
+        elif "花" in header:
+            area_id = "花"
+        if "肉禁" in header:
+            diet_type = "no_meat"
+        elif "魚禁" in header:
+            diet_type = "no_fish"
+        elif "揚げ物" in header:
+            diet_type = "no_fried"
+        elif "その他" in header:
+            diet_type = "forbidden_other"
+        elif "禁食" in header:
+            diet_type = "禁食"
+        elif "常食" in header:
             diet_type = "regular"
         elif "小口" in header:
             diet_type = "小口"
@@ -2744,16 +2773,6 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
             diet_type = "soft"
         elif "ミキサ" in header:
             diet_type = "mixer"
-        elif "肉禁" in header:
-            diet_type = "no_meat"
-        elif "魚禁" in header:
-            diet_type = "no_fish"
-        elif "揚げ物" in header:
-            diet_type = "no_fried"
-        elif "その他" in header:
-            diet_type = "forbidden_other"
-        elif "禁食" in header:
-            diet_type = "禁食"
         if not diet_type:
             continue
         name = header
