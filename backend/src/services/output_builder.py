@@ -18,6 +18,7 @@ from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles.borders import Side as BorderSide
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.datetime import to_excel
 
@@ -2791,6 +2792,51 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
                 continue
             source = template_ws.cell(row=row_idx, column=col_idx)
             target.border = copy(source.border)
+    _apply_daily_delivery_evening_bottom_border(ws, template_ws)
+
+
+def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
+    max_col = max(ws.max_column, template_ws.max_column if template_ws is not None else 0)
+    source_side: BorderSide | None = None
+    if template_ws is not None:
+        for col_idx in range(1, max_col + 1):
+            side = template_ws.cell(row=19, column=col_idx).border.bottom
+            if side is not None and side.style == "medium":
+                source_side = copy(side)
+                break
+    if source_side is None:
+        source_side = Side(style="medium", color="000000")
+    for col_idx in range(1, max_col + 1):
+        cell = ws.cell(row=19, column=col_idx)
+        if isinstance(cell, MergedCell):
+            for merged_range in ws.merged_cells.ranges:
+                if merged_range.min_row <= 19 <= merged_range.max_row and merged_range.min_col <= col_idx <= merged_range.max_col:
+                    cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+                    break
+            if isinstance(cell, MergedCell):
+                continue
+        border = cell.border
+        cell.border = Border(
+            left=copy(border.left),
+            right=copy(border.right),
+            top=copy(border.top),
+            bottom=copy(source_side),
+            diagonal=copy(border.diagonal),
+            diagonal_direction=border.diagonal_direction,
+            diagonalUp=border.diagonalUp,
+            diagonalDown=border.diagonalDown,
+            outline=border.outline,
+            vertical=copy(border.vertical),
+            horizontal=copy(border.horizontal),
+        )
+
+
+def _clear_daily_delivery_post_table_artifacts(ws) -> None:
+    for col_idx in range(1, ws.max_column + 1):
+        cell = ws.cell(row=20, column=col_idx)
+        if isinstance(cell, MergedCell):
+            continue
+        cell.value = None
 
 
 def _xlsx_tag(name: str) -> str:
@@ -3147,6 +3193,9 @@ def _save_reference_daily_delivery_workbook_preserving_template_package(
     workbook: Workbook,
     output_path: Path,
 ) -> None:
+    for ws in workbook.worksheets:
+        _apply_daily_delivery_evening_bottom_border(ws, None)
+        _clear_daily_delivery_post_table_artifacts(ws)
     workbook.save(output_path)
 
 
