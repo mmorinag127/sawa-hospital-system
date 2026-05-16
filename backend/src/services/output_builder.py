@@ -1052,7 +1052,12 @@ def _build_nonwriting_draft_materialization_candidate(
     )
 
 
-def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = True) -> list[dict]:
+def build_order_lines_for_outputs(
+    order: dict,
+    *,
+    include_expanded_copy: bool = True,
+    allow_stale_draft_lines: bool = False,
+) -> list[dict]:
     facility_id = order.get("facility")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
@@ -1104,7 +1109,16 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
                 workflow_state=workflow_state.get("state"),
                 materialization_error=error,
             )
-            raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
+            if allow_stale_draft_lines and isinstance(raw_lines, list) and raw_lines:
+                logger.warning(
+                    "Daily output audit continued with existing order lines after draft materialization blocker",
+                    order_id=order_id,
+                    facility_id=facility_id,
+                    workflow_state=workflow_state.get("state"),
+                    materialization_error=error,
+                )
+            else:
+                raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False

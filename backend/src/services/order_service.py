@@ -7320,6 +7320,8 @@ def get_daily_bag_summary(
     target_date: date,
     facility_id: Optional[str] = None,
     status: Optional[str] = None,
+    *,
+    allow_stale_draft_lines: bool = False,
 ) -> dict[str, Any]:
     orders = list_orders_by_line_date(target_date, facility_id=facility_id, status=status)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -7333,7 +7335,10 @@ def get_daily_bag_summary(
         order_payload = get_order_by_id(order_id)
         if not isinstance(order_payload, dict):
             continue
-        order_lines = build_order_lines_for_outputs(order_payload)
+        order_lines = build_order_lines_for_outputs(
+            order_payload,
+            allow_stale_draft_lines=allow_stale_draft_lines,
+        )
         amount_stats = _build_daily_bag_amount_stats(order_lines)
         bag_rows = build_bag_payload_for_outputs(order_payload, order_lines=order_lines)
         if not bag_rows:
@@ -7762,7 +7767,12 @@ def get_daily_bag_audit(
     use_ai: bool = False,
 ) -> dict[str, Any]:
     try:
-        summary = get_daily_bag_summary(target_date, facility_id=facility_id, status=status)
+        summary = get_daily_bag_summary(
+            target_date,
+            facility_id=facility_id,
+            status=status,
+            allow_stale_draft_lines=True,
+        )
     except ValueError as exc:
         detail = str(exc)
         return {
