@@ -7604,7 +7604,7 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
             "items": [],
         }
     model = str(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
-    timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 20.0
+    timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 120.0
     clipped_findings = findings[:16]
     max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 6000)
     retry_max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 12000)
@@ -7674,7 +7674,7 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read().decode("utf-8")
-        except (TimeoutError, socket.timeout) as exc:
+        except (TimeoutError, socket.timeout):
             return {"status": "failed", "error": f"gemini_timeout_after_{timeout:.0f}s", "items": []}
         except urllib.error.HTTPError as exc:
             try:

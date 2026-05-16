@@ -1965,6 +1965,55 @@ def test_daily_bag_audit_gemini_retries_truncated_json(monkeypatch):
     assert calls[1]["generationConfig"]["maxOutputTokens"] > calls[0]["generationConfig"]["maxOutputTokens"]
 
 
+def test_daily_bag_audit_gemini_default_timeout_allows_long_live_response(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    monkeypatch.delenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS", raising=False)
+    observed: dict[str, float] = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": json.dumps(
+                                            {"items": [], "notes": "ok"},
+                                            ensure_ascii=False,
+                                        )
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    def _fake_urlopen(request, timeout):  # noqa: ARG001
+        observed["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(order_service.urllib.request, "urlopen", _fake_urlopen)
+
+    result = order_service._daily_audit_run_gemini(  # noqa: SLF001
+        findings=[{"finding_id": "daily-audit-1", "severity": "high", "message": "x"}],
+        target_date=datetime(2026, 5, 16).date(),
+    )
+
+    assert result["status"] == "completed"
+    assert observed["timeout"] == 120.0
+
+
 def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-003")
