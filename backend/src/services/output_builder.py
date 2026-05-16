@@ -1099,6 +1099,9 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     raw_lines = order.get("lines", [])
     order_id = order.get("id")
     workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
+    if order_id and not workflow_state:
+        resolved_workflow_state = order_service.get_order_workflow_state(str(order_id), refresh=True)
+        workflow_state = resolved_workflow_state if isinstance(resolved_workflow_state, dict) else {}
     workflow_warnings = set(str(item).strip() for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or []) if str(item).strip())
     workflow_blockers = set(str(item).strip() for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or []) if str(item).strip())
     draft_newer_than_lines = bool(
