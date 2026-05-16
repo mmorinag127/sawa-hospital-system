@@ -904,7 +904,7 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
     return enriched
 
 
-def build_order_lines_for_outputs(order: dict) -> list[dict]:
+def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = True) -> list[dict]:
     facility_id = order.get("facility")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
@@ -917,14 +917,16 @@ def build_order_lines_for_outputs(order: dict) -> list[dict]:
     raw_lines = order.get("lines", [])
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
-    if facility_cache_key in _EXPANDED_CELL_COPY_ENABLED_CACHE:
-        expanded_copy_enabled = _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key]
-    else:
-        expanded_copy_enabled = order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
-            facility_config,
-            week_sheet_name=week_sheet_name,
-        )
-        _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
+    expanded_copy_enabled = False
+    if include_expanded_copy:
+        if facility_cache_key in _EXPANDED_CELL_COPY_ENABLED_CACHE:
+            expanded_copy_enabled = _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key]
+        else:
+            expanded_copy_enabled = order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
+                facility_config,
+                week_sheet_name=week_sheet_name,
+            )
+            _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
         order_id = order.get("id")
         if order_id:
@@ -3042,6 +3044,7 @@ def build_daily_output_bundle(
                 order_id,
                 include_bags=normalized_type in {"labels", "both"},
                 include_ocr_menu_meta=normalized_type != "delivery",
+                include_expanded_copy=normalized_type != "delivery",
             )
             facility_config = ctx.get("facility_config") or {}
             facility_name = str(facility_config.get("facility_name") or facility_name or "").strip()
@@ -3227,6 +3230,7 @@ def _prepare_output_context(
     *,
     include_bags: bool = True,
     include_ocr_menu_meta: bool = True,
+    include_expanded_copy: bool = True,
 ) -> dict:
     order = get_order_by_id(order_id)
     if not order:
@@ -3243,7 +3247,7 @@ def _prepare_output_context(
     invoice_template = facility_config.get("invoice_template", {})
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
 
-    order_lines = build_order_lines_for_outputs(order)
+    order_lines = build_order_lines_for_outputs(order, include_expanded_copy=include_expanded_copy)
     order_for_outputs = {**order, "lines": order_lines}
     ocr_menu_meta = _build_ocr_menu_meta(order, facility_config) if include_ocr_menu_meta else {}
 
@@ -3270,15 +3274,21 @@ def _prepare_output_context_for_bundle(
     *,
     include_bags: bool,
     include_ocr_menu_meta: bool,
+    include_expanded_copy: bool,
 ) -> dict:
     try:
         return _prepare_output_context(
             order_id,
             include_bags=include_bags,
             include_ocr_menu_meta=include_ocr_menu_meta,
+            include_expanded_copy=include_expanded_copy,
         )
     except TypeError as exc:
-        if "include_bags" not in str(exc) and "include_ocr_menu_meta" not in str(exc):
+        if (
+            "include_bags" not in str(exc)
+            and "include_ocr_menu_meta" not in str(exc)
+            and "include_expanded_copy" not in str(exc)
+        ):
             raise
         return _prepare_output_context(order_id)
 
