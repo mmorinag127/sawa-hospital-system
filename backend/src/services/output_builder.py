@@ -1028,10 +1028,20 @@ def _build_nonwriting_draft_materialization_candidate(
     week_value: Any,
     received_at: Any,
 ) -> dict[str, Any] | None:
-    latest_draft = order_service.get_latest_sheet_draft(
+    current_sheet_context = order_service.get_current_sheet_context(
         order_id,
+        refresh_draft_from_semantic=True,
+        upgrade_generic_from_sheet=True,
         backfill_from_revision=False,
-        upgrade_generic_from_sheet=False,
+    )
+    latest_draft = (
+        current_sheet_context.get("draft_record")
+        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("draft_record"), dict)
+        else order_service.get_latest_sheet_draft(
+            order_id,
+            backfill_from_revision=False,
+            upgrade_generic_from_sheet=False,
+        )
     )
     return order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
         order_id,
