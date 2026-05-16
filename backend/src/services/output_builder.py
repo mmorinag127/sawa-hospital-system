@@ -4147,7 +4147,13 @@ def build_daily_output_bundle(
         manifest_items.append(item_payload)
 
     if normalized_type == "labels" and success_count == 0:
-        raise ValueError("対象日の出力対象がありません")
+        errors = [
+            f"{item.get('order_id') or ','.join(item.get('order_ids') or [])}:{item.get('error')}"
+            for item in manifest_items
+            if item.get("status") in {"error", "empty"}
+        ]
+        detail = "; ".join(errors[:8])
+        raise ValueError(f"対象日の出力対象がありません: {detail}" if detail else "対象日の出力対象がありません")
     if not workbook.sheetnames:
         raise ValueError("対象日の出力対象がありません")
 
