@@ -71,6 +71,19 @@ type TrackingFacilityDisplayGroup = {
   facilityNames: string[];
 };
 
+type CalendarDayCell = {
+  key: string;
+  dateKey: string | null;
+  dayOfMonth: number | null;
+  inMonth: boolean;
+  group: TrackingDateGroup | null;
+};
+
+type CalendarMonth = {
+  label: string;
+  weeks: CalendarDayCell[][];
+};
+
 const TRACKING_FACILITY_DISPLAY_GROUPS: TrackingFacilityDisplayGroup[] = [
   {
     key: "FAC-GRP-IKOI",
@@ -473,6 +486,63 @@ const buildHistoryDateGroups = (items: ShippingHistoryItem[]): TrackingDateGroup
   return buildTrackingDateGroups(response, 24);
 };
 
+const parseDateKey = (value?: string | null) => {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00+09:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatCalendarMonthLabel = (date: Date) =>
+  date.toLocaleDateString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+  });
+
+const addDays = (date: Date, days: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const buildCalendarMonth = (params: {
+  groups: TrackingDateGroup[];
+  fallbackDate: string;
+}): CalendarMonth => {
+  const groupByDate = new Map(
+    params.groups
+      .filter((group) => parseDateKey(group.key))
+      .map((group) => [group.key, group] as const),
+  );
+  const firstGroupDate = params.groups.map((group) => parseDateKey(group.key)).find(Boolean);
+  const fallback = parseDateKey(params.fallbackDate) || new Date();
+  const anchor = firstGroupDate || fallback;
+  const monthStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+  const monthEnd = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+  const gridStart = addDays(monthStart, -monthStart.getDay());
+  const gridEnd = addDays(monthEnd, 6 - monthEnd.getDay());
+  const cells: CalendarDayCell[] = [];
+  for (let cursor = new Date(gridStart); cursor <= gridEnd; cursor = addDays(cursor, 1)) {
+    const dateKey = toDateInput(cursor);
+    const inMonth = cursor.getMonth() === monthStart.getMonth();
+    cells.push({
+      key: dateKey,
+      dateKey,
+      dayOfMonth: cursor.getDate(),
+      inMonth,
+      group: groupByDate.get(dateKey) || null,
+    });
+  }
+  const weeks: CalendarDayCell[][] = [];
+  for (let index = 0; index < cells.length; index += 7) {
+    weeks.push(cells.slice(index, index + 7));
+  }
+  return {
+    label: formatCalendarMonthLabel(monthStart),
+    weeks,
+  };
+};
+
 export default function ShippingHistoryPage() {
   const { isAdmin } = useCurrentUserRole();
   const defaultRange = buildDefaultRange();
@@ -620,6 +690,14 @@ export default function ShippingHistoryPage() {
   const nonLogDateCopy = "日付にはショートサマリーだけを表示し、クリックで詳細を確認します。";
   const visibleDateGroups = activeTab === "logs" ? historyDateGroups : trackingDateGroups;
   const selectedDateGroup = visibleDateGroups.find((group) => group.key === selectedDateGroupKey) || null;
+  const calendarMonth = useMemo(
+    () =>
+      buildCalendarMonth({
+        groups: visibleDateGroups,
+        fallbackDate: activeTab === "logs" ? dateTo || dateFrom : baseDate,
+      }),
+    [activeTab, baseDate, dateFrom, dateTo, visibleDateGroups],
+  );
 
   const renderTrackingNumberRow = (item: TrackingNumberCard) => {
     const reasons = describeAttentionReasons(item, attentionStaleHours);
@@ -967,39 +1045,101 @@ export default function ShippingHistoryPage() {
             </div>
           </header>
 
-          {visibleDateGroups.length ? (
-            <div className="calendar-grid" data-testid="shipping-calendar">
-              {visibleDateGroups.map((group) => {
-                const notFoundCount = group.notFoundFacilityGroups.reduce(
-                  (sum, facilityGroup) => sum + facilityGroup.total,
-                  0,
-                );
-                return (
-                  <button
-                    key={group.key}
-                    type="button"
-                    className="calendar-day"
-                    data-testid="shipping-date-group"
-                    onClick={() => setSelectedDateGroupKey(group.key)}
-                  >
-                    <span className="calendar-day-label">{group.label}</span>
-                    <span className="calendar-day-main">{group.total}件</span>
-                    <span className="calendar-day-summary">
-                      完了 {group.delivered} / 未完了 {group.pending}
-                    </span>
-                    {group.notShipped > 0 ? (
-                      <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
-                    ) : null}
-                    {group.attention > 0 || notFoundCount > 0 ? (
-                      <span className="calendar-day-alert">
-                        {group.attention > 0 ? `要確認 ${group.attention}` : ""}
-                        {group.attention > 0 && notFoundCount > 0 ? " / " : ""}
-                        {notFoundCount > 0 ? `該当無し ${notFoundCount}` : ""}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
+          {calendarMonth.weeks.length ? (
+            <div className="calendar-shell" data-testid="shipping-calendar">
+              <div className="calendar-month-header">
+                <h3>{calendarMonth.label}</h3>
+              </div>
+              <div className="calendar-weekdays" aria-hidden="true">
+                {["日", "月", "火", "水", "木", "金", "土"].map((weekday) => (
+                  <span key={weekday}>{weekday}</span>
+                ))}
+              </div>
+              <div className="calendar-grid">
+                {calendarMonth.weeks.flatMap((week) =>
+                  week.map((cell) => {
+                    const group = cell.group;
+                    const notFoundCount =
+                      group?.notFoundFacilityGroups.reduce(
+                        (sum, facilityGroup) => sum + facilityGroup.total,
+                        0,
+                      ) || 0;
+                    return (
+                      <button
+                        key={cell.key}
+                        type="button"
+                        className={`calendar-day${cell.inMonth ? "" : " outside-month"}${
+                          group ? " has-items" : ""
+                        }`}
+                        data-testid={group ? "shipping-date-group" : "shipping-empty-day"}
+                        onClick={() => {
+                          if (group) setSelectedDateGroupKey(group.key);
+                        }}
+                        disabled={!group}
+                      >
+                        <span className="calendar-day-number">{cell.dayOfMonth}</span>
+                        {group ? (
+                          <>
+                            <span className="calendar-day-main">{group.total}件</span>
+                            <span className="calendar-day-summary">
+                              完了 {group.delivered} / 未完了 {group.pending}
+                            </span>
+                            {group.notShipped > 0 ? (
+                              <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
+                            ) : null}
+                            {group.attention > 0 || notFoundCount > 0 ? (
+                              <span className="calendar-day-alert">
+                                {group.attention > 0 ? `要確認 ${group.attention}` : ""}
+                                {group.attention > 0 && notFoundCount > 0 ? " / " : ""}
+                                {notFoundCount > 0 ? `該当無し ${notFoundCount}` : ""}
+                              </span>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="calendar-day-empty">-</span>
+                        )}
+                      </button>
+                    );
+                  }),
+                )}
+              </div>
+              {visibleDateGroups.some((group) => !parseDateKey(group.key)) ? (
+                <div className="calendar-undated">
+                  {visibleDateGroups
+                    .filter((group) => !parseDateKey(group.key))
+                    .map((group) => {
+                      const notFoundCount = group.notFoundFacilityGroups.reduce(
+                        (sum, facilityGroup) => sum + facilityGroup.total,
+                        0,
+                      );
+                      return (
+                        <button
+                          key={group.key}
+                          type="button"
+                          className="calendar-day has-items"
+                          data-testid="shipping-date-group"
+                          onClick={() => setSelectedDateGroupKey(group.key)}
+                        >
+                          <span className="calendar-day-number">{group.label}</span>
+                          <span className="calendar-day-main">{group.total}件</span>
+                          <span className="calendar-day-summary">
+                            完了 {group.delivered} / 未完了 {group.pending}
+                          </span>
+                          {group.notShipped > 0 ? (
+                            <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
+                          ) : null}
+                          {group.attention > 0 || notFoundCount > 0 ? (
+                            <span className="calendar-day-alert">
+                              {group.attention > 0 ? `要確認 ${group.attention}` : ""}
+                              {group.attention > 0 && notFoundCount > 0 ? " / " : ""}
+                              {notFoundCount > 0 ? `該当無し ${notFoundCount}` : ""}
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                </div>
+              ) : null}
             </div>
           ) : (
             <p className="empty">{activeTab === "logs" ? "監査ログがありません。" : "条件に一致する伝票はありません。"}</p>
@@ -1461,6 +1601,41 @@ export default function ShippingHistoryPage() {
           gap: 18px;
         }
 
+        .calendar-shell {
+          display: grid;
+          gap: 10px;
+        }
+
+        .calendar-month-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          min-height: 32px;
+        }
+
+        .calendar-month-header h3 {
+          font-size: 20px;
+          line-height: 1.25;
+        }
+
+        .calendar-weekdays {
+          display: grid;
+          grid-template-columns: repeat(7, minmax(120px, 1fr));
+          gap: 10px;
+        }
+
+        .calendar-weekdays span {
+          min-height: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 10px;
+          background: #eef2f0;
+          color: #4f625d;
+          font-size: 12px;
+          font-weight: 800;
+        }
+
         .calendar-grid {
           display: grid;
           grid-template-columns: repeat(7, minmax(120px, 1fr));
@@ -1481,6 +1656,10 @@ export default function ShippingHistoryPage() {
           cursor: pointer;
         }
 
+        .calendar-day:disabled {
+          cursor: default;
+        }
+
         .calendar-day:hover,
         .calendar-day:focus-visible {
           border-color: rgba(36, 51, 48, 0.28);
@@ -1488,7 +1667,22 @@ export default function ShippingHistoryPage() {
           outline: none;
         }
 
-        .calendar-day-label {
+        .calendar-day:disabled:hover {
+          border-color: rgba(25, 32, 30, 0.08);
+          background: #f7f7f4;
+        }
+
+        .calendar-day.outside-month {
+          background: #f1f2ef;
+          color: #8a938e;
+        }
+
+        .calendar-day.has-items {
+          background: #fbfbf9;
+          border-color: rgba(36, 51, 48, 0.18);
+        }
+
+        .calendar-day-number {
           font-size: 13px;
           font-weight: 800;
         }
@@ -1514,6 +1708,21 @@ export default function ShippingHistoryPage() {
           margin-top: auto;
           color: #7a3d2d;
           font-weight: 700;
+        }
+
+        .calendar-day-empty {
+          margin-top: auto;
+          color: #a2aaa6;
+          font-size: 13px;
+        }
+
+        .calendar-undated {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 10px;
+          margin-top: 10px;
+          padding-top: 10px;
+          border-top: 1px solid rgba(25, 32, 30, 0.08);
         }
 
         .modal-backdrop {
@@ -1572,6 +1781,7 @@ export default function ShippingHistoryPage() {
         }
 
         @media (max-width: 980px) {
+          .calendar-weekdays,
           .calendar-grid {
             grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
           }

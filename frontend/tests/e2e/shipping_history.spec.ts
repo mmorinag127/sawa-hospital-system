@@ -135,10 +135,12 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
 
   await page.goto(`${baseUrl}/shipping-history`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "日付ごとの出荷状況" })).toBeVisible();
-  await expect(page.getByText("2026/03/30")).toBeVisible();
-  await expect(page.getByText("2026/03/29")).toBeVisible();
-  const firstDateGroup = page.getByTestId("shipping-date-group").first();
+  await expect(page.getByRole("heading", { name: "2026年3月" })).toBeVisible();
   await expect(page.getByTestId("shipping-calendar")).toBeVisible();
+  await expect(page.locator(".calendar-weekdays")).toContainText("日月火水木金土");
+  await expect(page.getByTestId("shipping-empty-day").first()).toBeVisible();
+  const firstDateGroup = page.getByTestId("shipping-date-group").filter({ hasText: "3件" }).first();
+  await expect(page.getByTestId("shipping-date-group").filter({ hasText: "1件" })).toBeVisible();
   await expect(firstDateGroup).toContainText("3件");
   await expect(firstDateGroup).toContainText("完了 1 / 未完了 1");
   await expect(firstDateGroup).toContainText("発送なし 1");
@@ -199,9 +201,9 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
 
   await page.getByRole("button", { name: "監査ログ" }).click();
   await expect(page.getByRole("heading", { name: "監査ログカレンダー" })).toBeVisible();
-  await expect(page.getByText("2026/03/28")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "2026年3月" })).toBeVisible();
   await expect(page.locator("table")).toHaveCount(0);
   await expect(page.getByText("4444-4444-4444")).toHaveCount(0);
-  await page.getByTestId("shipping-date-group").filter({ hasText: "2026/03/28" }).click();
+  await page.getByTestId("shipping-date-group").filter({ hasText: "2件" }).click();
   await expect(page.getByRole("dialog").getByText("4444-4444-4444")).toBeVisible();
 });
