@@ -313,13 +313,7 @@ const formatBagOrderRef = (value: NonNullable<DailyBagBreakdown["order_refs"]>[n
 };
 
 const formatTotalFacilityBreakdown = (refs: NonNullable<TotalRow["order_refs"]>) => {
-  const items = buildTotalFacilityBreakdownItems(refs);
-  if (!items.length) return "-";
-  return items.map((item) => `${item.label}: ${formatQuantity(item.quantity)}`).join(" / ");
-};
-
-const buildTotalFacilityBreakdownItems = (refs: NonNullable<TotalRow["order_refs"]>) => {
-  if (!refs.length) return [];
+  if (!refs.length) return "-";
   const buckets = new Map<string, { label: string; quantity: number }>();
   refs.forEach((ref) => {
     const facilityId = String(ref.facility_id || "").trim();
@@ -335,7 +329,10 @@ const buildTotalFacilityBreakdownItems = (refs: NonNullable<TotalRow["order_refs
     }
     buckets.set(key, current);
   });
-  return Array.from(buckets.values()).sort((left, right) => left.label.localeCompare(right.label, "ja"));
+  return Array.from(buckets.values())
+    .sort((left, right) => left.label.localeCompare(right.label, "ja"))
+    .map((item) => `${item.label}: ${formatQuantity(item.quantity)}`)
+    .join(" / ");
 };
 
 const extractFilename = (value?: string | null) => {
@@ -1458,7 +1455,6 @@ export default function DailyDeliveryNotesPage() {
                 totalsSummaryRows.map((row, index) => {
                   const rowKey = buildTotalRowKey(row, index);
                   const refs = Array.isArray(row.order_refs) ? row.order_refs : [];
-                  const facilityTotals = buildTotalFacilityBreakdownItems(refs);
                   const expanded = expandedTotalRows.has(rowKey);
                   return (
                     <Fragment key={rowKey}>
@@ -1469,6 +1465,7 @@ export default function DailyDeliveryNotesPage() {
                         <td>{formatDietType(row.diet_type)}</td>
                         <td className="numeric">{formatQuantity(row.quantity)}</td>
                         <td>
+                          <span className="total-facility-summary">{formatTotalFacilityBreakdown(refs)}</span>
                           <button
                             className="btn ghost total-breakdown-toggle"
                             type="button"
@@ -1478,25 +1475,6 @@ export default function DailyDeliveryNotesPage() {
                           >
                             {expanded ? "閉じる" : "施設別"}
                           </button>
-                        </td>
-                      </tr>
-                      <tr key={`${rowKey}__facility_totals`} className="total-facility-row">
-                        <td colSpan={6}>
-                          <div className="total-facility-panel">
-                            <strong>施設別合計</strong>
-                            {facilityTotals.length ? (
-                              <div className="total-facility-grid">
-                                {facilityTotals.map((item) => (
-                                  <span className="total-facility-chip" key={item.label}>
-                                    <span>{item.label}</span>
-                                    <b>{formatQuantity(item.quantity)}</b>
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="subtle">-</span>
-                            )}
-                          </div>
                         </td>
                       </tr>
                       {expanded ? (
@@ -2147,54 +2125,17 @@ export default function DailyDeliveryNotesPage() {
         }
 
         .total-breakdown-toggle {
+          margin-top: 6px;
           padding: 6px 10px;
           font-size: 12px;
         }
 
-        .total-facility-row {
-          background: #fbfdfc !important;
-        }
-
-        .total-facility-row td {
-          padding-top: 0;
-        }
-
-        .total-facility-panel {
-          display: grid;
-          gap: 8px;
-          border: 1px solid rgba(25, 32, 30, 0.08);
-          border-radius: 12px;
-          background: #ffffff;
-          padding: 10px 12px;
-        }
-
-        .total-facility-panel strong {
+        .total-facility-summary {
+          display: block;
+          max-width: 420px;
           font-size: 12px;
-          color: #243330;
-        }
-
-        .total-facility-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 6px;
-        }
-
-        .total-facility-chip {
-          display: flex;
-          justify-content: space-between;
-          gap: 10px;
-          border-radius: 8px;
-          background: #f2f6f4;
+          line-height: 1.55;
           color: #3f4d48;
-          padding: 7px 9px;
-          font-size: 12px;
-          line-height: 1.35;
-        }
-
-        .total-facility-chip b {
-          color: #172420;
-          font-weight: 800;
-          white-space: nowrap;
         }
 
         .total-breakdown-row {
