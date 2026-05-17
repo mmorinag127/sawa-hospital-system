@@ -767,6 +767,17 @@ def _workflow_v2_meta_exists(row: OrderWorkflowState) -> bool:
     return isinstance(row.secondary_actions_json.get(WORKFLOW_V2_META_KEY), dict)
 
 
+def _workflow_v2_meta_or_recovered_lineage_exists(row: OrderWorkflowState, meta: dict[str, Any]) -> bool:
+    return bool(
+        _workflow_v2_meta_exists(row)
+        or row.confirmed_snapshot_id
+        or _normalize_id(meta.get("bagging_result_id"))
+        or _normalize_id(meta.get("output_bundle_id"))
+        or isinstance(meta.get("bagging_result"), dict)
+        or isinstance(meta.get("output_bundle"), dict)
+    )
+
+
 def _canonical_workflow_v2_state(row: OrderWorkflowState, meta: dict[str, Any] | None = None) -> str:
     state = _normalize_id(row.state)
     if state in _WORKFLOW_V2_CANONICAL_STATES:
@@ -774,7 +785,7 @@ def _canonical_workflow_v2_state(row: OrderWorkflowState, meta: dict[str, Any] |
     if state and state not in _WORKFLOW_V2_LEGACY_STATES:
         return state
     workflow_meta = meta if isinstance(meta, dict) else _workflow_meta(row)
-    if not _workflow_v2_meta_exists(row):
+    if not _workflow_v2_meta_or_recovered_lineage_exists(row, workflow_meta):
         return state
     if row.confirmed_snapshot_id:
         return "confirmed"
@@ -795,10 +806,11 @@ def _apply_canonical_workflow_state_projection(
     payload: dict[str, Any],
     *,
     row: OrderWorkflowState,
+    meta: dict[str, Any],
     state: str,
 ) -> dict[str, Any]:
     current_state = _normalize_id(payload.get("state"))
-    if not _workflow_v2_meta_exists(row) or not state or state == current_state:
+    if not _workflow_v2_meta_or_recovered_lineage_exists(row, meta) or not state or state == current_state:
         return payload
     projected = dict(payload)
     projected["state"] = state
@@ -1052,6 +1064,7 @@ def _serialize_workflow_checked(
     serialized = _apply_canonical_workflow_state_projection(
         serialized,
         row=workflow,
+        meta=meta,
         state=canonical_state,
     )
     return serialized

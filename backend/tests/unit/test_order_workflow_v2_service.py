@@ -2278,6 +2278,51 @@ def test_confirmed_workflow_recovers_bagging_artifacts_from_snapshot(monkeypatch
     assert inspection["output_bundle"]["source_bagging_result_id"] == workflow_payload["bagging_result_id"]
 
 
+def test_confirmed_legacy_apply_ready_projects_to_confirmed_without_meta(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "白身魚のフライ", "regular": "4"}]},
+        edited_by="test",
+    )
+    order_workflow_v2_service.run_bagging(order_id)
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert error is None
+
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        workflow.state = "apply_ready"
+        workflow.headline = "下書きを明細へ反映できます"
+        workflow.primary_action = "apply_draft"
+        workflow.secondary_actions_json = {}
+        workflow.blockers_json = ["draft_newer_than_lines"]
+        workflow.warnings_json = ["draft_newer_than_lines"]
+
+    projected, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert projected["state"] == "confirmed"
+    assert projected["headline"] in {"確定済み", "注文が確定されました"}
+    assert projected["primary_action"] in {None, "none"}
+    assert projected["confirmed_snapshot_id"] == confirmed["confirmed_snapshot_id"]
+    assert projected["bagging_result_id"]
+    assert projected["output_bundle_id"]
+    assert projected["blockers"] == []
+    assert projected["warnings"] == []
+    assert projected["legacy_state"] == "apply_ready"
+
+
 def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
