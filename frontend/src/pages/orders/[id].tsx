@@ -1,5 +1,4 @@
 import Link from "next/link";
-import type { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
 import TopNav from "../../components/TopNav";
@@ -331,6 +330,8 @@ type OcrSheetPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string;
   quantity_assignment_strategy?: string | null;
   quantity_column_count?: number;
@@ -361,6 +362,8 @@ type DraftSheetJsonPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string | null;
   warnings?: string[] | null;
   quantity_assignment_strategy?: string | null;
@@ -388,6 +391,8 @@ type DraftSheetPayload = {
   cell_provenance_rows?: string[][] | null;
   ocr_numeric_cell_items?: OcrNumericCellItem[] | null;
   ocr_numeric_cell_summary?: OcrNumericCellSummary | null;
+  ocr_numeric_review_items?: OcrNumericReviewItem[] | null;
+  ocr_numeric_review_summary?: OcrNumericReviewSummary | null;
   source?: string | null;
   warnings?: string[] | null;
   review_state?: string | null;
@@ -412,9 +417,10 @@ type NormalizedEditorSheetPayload = {
   cellProvenanceRows: string[][];
   ocrNumericCellItems: OcrNumericCellItem[];
   ocrNumericCellSummary: OcrNumericCellSummary;
+  ocrNumericReviewItems: OcrNumericReviewItem[];
+  ocrNumericReviewSummary: OcrNumericReviewSummary;
   source: string;
   warnings: string[];
-  bodyMergeFields: string[];
 };
 
 type OcrCellConfidenceTier = "high" | "medium" | "low";
@@ -441,6 +447,45 @@ type OcrNumericCellSummary = {
   deterministic_candidate_count?: number | null;
   weak_candidate_count?: number | null;
   unresolved_count?: number | null;
+};
+type OcrNumericReviewCandidate = {
+  value?: string | null;
+  classification?: OcrNumericCellClassification | string | null;
+  confidence_tier?: OcrCellConfidenceTier | string | null;
+  placement_basis?: string | null;
+  sources?: string[] | null;
+  reasons?: string[] | null;
+  raw_texts?: string[] | null;
+};
+type OcrNumericReviewFinding = {
+  code?: string | null;
+  severity?: string | null;
+  summary?: string | null;
+  reference_label?: string | null;
+  reference_values?: string[] | null;
+  same_day_menu_total?: string | null;
+};
+type OcrNumericReviewItem = {
+  row_index?: number | null;
+  col_index?: number | null;
+  field?: string | null;
+  field_label?: string | null;
+  date_key?: string | null;
+  daypart_key?: string | null;
+  menu_key?: string | null;
+  menu_label?: string | null;
+  current_value?: string | null;
+  fax_values?: string[] | null;
+  same_day_values?: string[] | null;
+  other_day_values?: string[] | null;
+  same_day_menu_total?: string | null;
+  suggested_values?: OcrNumericReviewCandidate[] | null;
+  findings?: OcrNumericReviewFinding[] | null;
+};
+type OcrNumericReviewSummary = {
+  review_item_count?: number | null;
+  suggestion_count?: number | null;
+  finding_count?: number | null;
 };
 type OcrSheetTouchedCell = {
   rowIndex: number;
@@ -658,8 +703,6 @@ type DetailLine = OrderDetail["lines"][number];
 
 const EXPANDED_CELL_COPY_FACILITY_KEY = "expanded_cell_same_daypart_copy_enabled";
 
-const normalizeExpandedCellFieldToken = (value: unknown) => String(value ?? "").trim().toLowerCase();
-
 const canonicalizeExpandedCellDaypart = (value: string) => {
   const normalized = String(value || "").trim();
   if (!normalized) return "";
@@ -719,23 +762,14 @@ const applyExpandedCellSameDaypartCopyToRows = ({
   fields,
   header,
   rows,
-  targetFields,
 }: {
   fields: string[];
   header: string[];
   rows: string[][];
-  targetFields?: string[];
 }) => {
   if (!rows.length) return rows;
   const { dateIndex, daypartIndex, quantityIndexes } = resolveExpandedCellSheetIndexes(fields, header);
   if (dateIndex < 0 || daypartIndex < 0 || quantityIndexes.length === 0) {
-    return rows;
-  }
-  const normalizedTargetFields = new Set((targetFields || []).map((field) => normalizeExpandedCellFieldToken(field)).filter(Boolean));
-  const targetQuantityIndexes = normalizedTargetFields.size
-    ? quantityIndexes.filter((columnIndex) => normalizedTargetFields.has(normalizeExpandedCellFieldToken(fields[columnIndex] || "")))
-    : quantityIndexes;
-  if (!targetQuantityIndexes.length) {
     return rows;
   }
   const nextRows = rows.map((row) => [...row]);
@@ -747,7 +781,7 @@ const applyExpandedCellSameDaypartCopyToRows = ({
     if (clusterLength < 2 || clusterLength > 3) {
       return;
     }
-    targetQuantityIndexes.forEach((columnIndex) => {
+    quantityIndexes.forEach((columnIndex) => {
       const observed: Array<{ text: string; value: number }> = [];
       for (let rowIndex = start; rowIndex < endExclusive; rowIndex += 1) {
         const text = String(nextRows[rowIndex]?.[columnIndex] || "").trim();
@@ -1142,6 +1176,38 @@ const swapFacilityTemplateColumns = (
 
 const removeFacilityTemplateColumn = (columns: FacilityTemplateColumn[], rowIndex: number) =>
   reindexFacilityTemplateColumns(columns.filter((_, idx) => idx !== rowIndex));
+
+const buildFacilityTemplateColumnsPayload = (columns: FacilityTemplateColumn[]) =>
+  columns.map((column, idx) => {
+    const role = String(column.role || "").trim().toLowerCase() || "quantity";
+    const header = String(column.header || "").trim();
+    const name = String(column.name || "").trim();
+    const payload: Record<string, unknown> = {
+      index: idx,
+      role,
+    };
+    if (typeof column.source_index === "number" && Number.isFinite(column.source_index)) {
+      payload.source_index = Number(column.source_index);
+    }
+    if (header) payload.header = header;
+    if (name) payload.name = name;
+    if (role === "quantity") {
+      const explicitDietType = String(column.diet_type || "").trim();
+      const explicitAreaId = String(column.area_id || "").trim();
+      const dietType = explicitDietType
+        ? normalizeDietTypeToken(explicitDietType) || explicitDietType
+        : normalizeDietTypeToken(header || name) || "unknown";
+      const areaId = explicitAreaId
+        ? normalizeFacilityAreaToken(explicitAreaId)
+        : normalizeFacilityAreaToken(header || name);
+      payload.diet_type = dietType;
+      payload.area_id = areaId;
+      payload.diet_type_locked = true;
+      payload.area_id_locked = true;
+      payload.name_locked = true;
+    }
+    return payload;
+  });
 
 const columnRoleOptions = [
   { value: "date", label: "日付" },
@@ -2817,20 +2883,12 @@ const isGsUri = (value?: string | null) =>
 const toFixedOrEmpty = (value: number | null, decimals: number) =>
   value == null || Number.isNaN(value) ? "" : value.toFixed(decimals);
 
-export const getServerSideProps: GetServerSideProps = async ({ params }) => {
-  const id = typeof params?.id === "string" ? params.id : "";
-  return {
-    redirect: {
-      destination: id ? `/orders/${encodeURIComponent(id)}/workflow-v2` : "/orders",
-      permanent: false,
-    },
-  };
-};
-
 export default function OrderDetailPage() {
   const router = useRouter();
   const { id } = router.query;
   const [order, setOrder] = useState<OrderDetail | null>(null);
+  const [orderDetailLoading, setOrderDetailLoading] = useState<boolean>(false);
+  const [orderDetailError, setOrderDetailError] = useState<string>("");
   const [facility, setFacility] = useState<string>("");
   const [weekDraft, setWeekDraft] = useState<string>("");
   const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
@@ -3042,29 +3100,52 @@ export default function OrderDetailPage() {
     const { preserveSelections = false } = options;
     const requestSeq = orderDetailRequestSeqRef.current + 1;
     orderDetailRequestSeqRef.current = requestSeq;
-    const res = await apiClient.get(`/orders/${orderId}`);
-    const nextOrder = (res.data || {}) as OrderDetail;
-    if (requestSeq < orderDetailAppliedSeqRef.current) {
+    setOrderDetailLoading(true);
+    setOrderDetailError("");
+    try {
+      const res = await apiClient.get(`/orders/${orderId}`, { timeout: 20000 });
+      const nextOrder = (res.data || {}) as OrderDetail;
+      if (requestSeq < orderDetailAppliedSeqRef.current) {
+        return authoritativeOrderRef.current;
+      }
+      orderDetailAppliedSeqRef.current = requestSeq;
+      authoritativeOrderRef.current = nextOrder;
+      const currentPersistedFacility = (order?.facility || "").trim();
+      const currentPersistedWeek = getCanonicalWeekSelectionSource(order);
+      const selectedFacility = facility.trim();
+      const selectedWeek = normalizeConcreteWeekValue(weekDraft);
+      const preserveFacilitySelection =
+        preserveSelections && Boolean(selectedFacility && selectedFacility !== currentPersistedFacility);
+      const preserveWeekSelection =
+        preserveSelections && Boolean(selectedWeek && selectedWeek !== currentPersistedWeek);
+      setOrder(nextOrder);
+      if (!preserveFacilitySelection) {
+        setFacility(nextOrder.facility || "");
+      }
+      if (!preserveWeekSelection) {
+        setWeekDraft(getCanonicalWeekSelectionSource(nextOrder));
+      }
+      return nextOrder;
+    } catch (err: any) {
+      if (requestSeq < orderDetailRequestSeqRef.current) {
+        return authoritativeOrderRef.current;
+      }
+      const status = err?.response?.status;
+      const nextMessage =
+        status === 404
+          ? "注文が見つかりません。"
+          : status === 401
+            ? "認証が必要です。ログインしてください。"
+            : err?.code === "ECONNABORTED"
+              ? "注文詳細の取得がタイムアウトしました。"
+              : "注文詳細の取得に失敗しました。";
+      setOrderDetailError(nextMessage);
       return authoritativeOrderRef.current;
+    } finally {
+      if (requestSeq === orderDetailRequestSeqRef.current) {
+        setOrderDetailLoading(false);
+      }
     }
-    orderDetailAppliedSeqRef.current = requestSeq;
-    authoritativeOrderRef.current = nextOrder;
-    const currentPersistedFacility = (order?.facility || "").trim();
-    const currentPersistedWeek = getCanonicalWeekSelectionSource(order);
-    const selectedFacility = facility.trim();
-    const selectedWeek = normalizeConcreteWeekValue(weekDraft);
-    const preserveFacilitySelection =
-      preserveSelections && Boolean(selectedFacility && selectedFacility !== currentPersistedFacility);
-    const preserveWeekSelection =
-      preserveSelections && Boolean(selectedWeek && selectedWeek !== currentPersistedWeek);
-    setOrder(nextOrder);
-    if (!preserveFacilitySelection) {
-      setFacility(nextOrder.facility || "");
-    }
-    if (!preserveWeekSelection) {
-      setWeekDraft(getCanonicalWeekSelectionSource(nextOrder));
-    }
-    return nextOrder;
   };
 
   const replaceAuthoritativeOrder = (nextOrder?: OrderDetail | null) => {
@@ -3500,6 +3581,12 @@ export default function OrderDetailPage() {
     unresolved_count: 0,
   });
 
+  const blankOcrNumericReviewSummary = (): OcrNumericReviewSummary => ({
+    review_item_count: 0,
+    suggestion_count: 0,
+    finding_count: 0,
+  });
+
   const normalizeOcrNumericCellSummary = (value: unknown): OcrNumericCellSummary => {
     const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
     const readCount = (key: string) => {
@@ -3517,6 +3604,24 @@ export default function OrderDetailPage() {
       deterministic_candidate_count: readCount("deterministic_candidate_count"),
       weak_candidate_count: readCount("weak_candidate_count"),
       unresolved_count: readCount("unresolved_count"),
+    };
+  };
+
+  const normalizeOcrNumericReviewSummary = (value: unknown): OcrNumericReviewSummary => {
+    const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const readCount = (key: string) => {
+      const raw = source[key];
+      if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+      if (typeof raw === "string") {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+    return {
+      review_item_count: readCount("review_item_count"),
+      suggestion_count: readCount("suggestion_count"),
+      finding_count: readCount("finding_count"),
     };
   };
 
@@ -3554,6 +3659,81 @@ export default function OrderDetailPage() {
         };
       })
       .filter((item): item is OcrNumericCellItem => Boolean(item));
+  };
+
+  const normalizeOcrNumericReviewItems = (value: unknown): OcrNumericReviewItem[] => {
+    if (!Array.isArray(value)) return [];
+    const parseIndex = (candidate: unknown) => {
+      if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate;
+      if (typeof candidate === "string" && candidate.trim()) {
+        const parsed = Number(candidate);
+        if (Number.isInteger(parsed)) return parsed;
+      }
+      return null;
+    };
+    const readStrings = (candidate: unknown): string[] =>
+      Array.isArray(candidate) ? candidate.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+    return value
+      .map((raw): OcrNumericReviewItem | null => {
+        if (!raw || typeof raw !== "object") return null;
+        const item = raw as Record<string, unknown>;
+        const suggestedValues = Array.isArray(item.suggested_values)
+          ? item.suggested_values
+              .map((candidate): OcrNumericReviewCandidate | null => {
+                if (!candidate || typeof candidate !== "object") return null;
+                const source = candidate as Record<string, unknown>;
+                const valueText = String(source.value ?? "").trim();
+                if (!valueText) return null;
+                return {
+                  value: valueText,
+                  classification: normalizeOcrNumericCellClassification(source.classification),
+                  confidence_tier: normalizeOcrCellConfidenceTier(source.confidence_tier),
+                  placement_basis: String(source.placement_basis ?? "").trim(),
+                  sources: readStrings(source.sources),
+                  reasons: readStrings(source.reasons),
+                  raw_texts: readStrings(source.raw_texts),
+                };
+              })
+              .filter((candidate): candidate is OcrNumericReviewCandidate => Boolean(candidate))
+          : [];
+        const findings = Array.isArray(item.findings)
+          ? item.findings
+              .map((candidate): OcrNumericReviewFinding | null => {
+                if (!candidate || typeof candidate !== "object") return null;
+                const source = candidate as Record<string, unknown>;
+                const summary = String(source.summary ?? "").trim();
+                const code = String(source.code ?? "").trim();
+                if (!summary && !code) return null;
+                return {
+                  code,
+                  severity: String(source.severity ?? "").trim(),
+                  summary,
+                  reference_label: String(source.reference_label ?? "").trim(),
+                  reference_values: readStrings(source.reference_values),
+                  same_day_menu_total: String(source.same_day_menu_total ?? "").trim(),
+                };
+              })
+              .filter((candidate): candidate is OcrNumericReviewFinding => Boolean(candidate))
+          : [];
+        return {
+          row_index: parseIndex(item.row_index),
+          col_index: parseIndex(item.col_index),
+          field: String(item.field ?? "").trim(),
+          field_label: String(item.field_label ?? "").trim(),
+          date_key: String(item.date_key ?? "").trim(),
+          daypart_key: String(item.daypart_key ?? "").trim(),
+          menu_key: String(item.menu_key ?? "").trim(),
+          menu_label: String(item.menu_label ?? "").trim(),
+          current_value: String(item.current_value ?? "").trim(),
+          fax_values: readStrings(item.fax_values),
+          same_day_values: readStrings(item.same_day_values),
+          other_day_values: readStrings(item.other_day_values),
+          same_day_menu_total: String(item.same_day_menu_total ?? "").trim(),
+          suggested_values: suggestedValues,
+          findings,
+        };
+      })
+      .filter((item): item is OcrNumericReviewItem => Boolean(item));
   };
 
   const dedupeOcrSheetTouchedCells = (cells: OcrSheetTouchedCell[]): OcrSheetTouchedCell[] => {
@@ -3684,9 +3864,10 @@ export default function OrderDetailPage() {
       cellProvenanceRows,
       ocrNumericCellItems: [],
       ocrNumericCellSummary: blankOcrNumericCellSummary(),
+      ocrNumericReviewItems: [],
+      ocrNumericReviewSummary: blankOcrNumericReviewSummary(),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
-      bodyMergeFields: [],
     };
   };
 
@@ -3724,9 +3905,10 @@ export default function OrderDetailPage() {
         cellProvenanceRows: [],
         ocrNumericCellItems: [],
         ocrNumericCellSummary: blankOcrNumericCellSummary(),
+        ocrNumericReviewItems: [],
+        ocrNumericReviewSummary: blankOcrNumericReviewSummary(),
         source: typeof payload.source === "string" ? payload.source : "",
         warnings: rowValues.length ? Array.from(new Set([...warnings, "sheet_contract_invalid"])) : warnings,
-        bodyMergeFields: [],
       };
     }
     const normalizedHeader = Array.from({ length: columnCount }, (_, idx) => headerCells[idx] || fields[idx] || "");
@@ -3757,9 +3939,12 @@ export default function OrderDetailPage() {
       cellProvenanceRows,
       ocrNumericCellItems: normalizeOcrNumericCellItems((payload as Record<string, unknown>).ocrNumericCellItems),
       ocrNumericCellSummary: normalizeOcrNumericCellSummary((payload as Record<string, unknown>).ocrNumericCellSummary),
+      ocrNumericReviewItems: normalizeOcrNumericReviewItems((payload as Record<string, unknown>).ocrNumericReviewItems),
+      ocrNumericReviewSummary: normalizeOcrNumericReviewSummary(
+        (payload as Record<string, unknown>).ocrNumericReviewSummary,
+      ),
       source: typeof payload.source === "string" ? payload.source : "",
       warnings,
-      bodyMergeFields: [],
     };
   };
 
@@ -3881,24 +4066,17 @@ export default function OrderDetailPage() {
     if (!shouldCopy) {
       return payload;
     }
-    const rawPolicy = facilityResolvedConfig?.fax_template?.body_merge_policy ?? facilityResolvedConfig?.body_merge_policy;
-    const rawTargets = rawPolicy && typeof rawPolicy === "object" ? (rawPolicy as Record<string, unknown>).columns : null;
-    const targetFields = Array.isArray(rawTargets)
-      ? rawTargets.map((field) => String(field || "").trim()).filter(Boolean)
-      : [];
     return {
       ...payload,
       rows: applyExpandedCellSameDaypartCopyToRows({
         fields: payload.fields,
         header: payload.header,
         rows: payload.rows,
-        targetFields,
       }),
       cellConfidenceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
       cellProvenanceRows: blankSheetCellMetadataRows(payload.rows.length, payload.header.length),
       ocrNumericCellItems: [],
       ocrNumericCellSummary: blankOcrNumericCellSummary(),
-      bodyMergeFields: targetFields,
     };
   };
 
@@ -3934,7 +4112,7 @@ export default function OrderDetailPage() {
     setOcrSheetNumericCellSummary(effectivePayload.ocrNumericCellSummary);
     setOcrSheetSource(effectivePayload.source);
     setOcrSheetWarnings(effectivePayload.warnings);
-  }, [expandedCellCopyMode, facilityResolvedConfig]);
+  }, [expandedCellCopyMode]);
 
   const normalizeDraftSheetPayload = (payload?: DraftSheetPayload | null): NormalizedEditorSheetPayload => {
     const draftSheetJson =
@@ -6994,6 +7172,15 @@ export default function OrderDetailPage() {
       );
       return false;
     }
+    if (!effectiveCanConfirm) {
+      const reasonText = reviewBlockerText || reviewWarningText;
+      setActionMessage(
+        reasonText
+          ? `まだ確定できません。先に下書きを明細へ反映してください: ${reasonText}`
+          : "まだ確定できません。先に下書きを明細へ反映してください。",
+      );
+      return false;
+    }
     setConfirmSaving(true);
     try {
       const refreshWorkspaceAfterSuccess = options?.refreshWorkspaceAfterSuccess !== false;
@@ -7581,11 +7768,44 @@ export default function OrderDetailPage() {
       return;
     }
     setFacilityTemplateSaving(true);
-    setFacilityTemplateMessage("施設区分列の編集は workflow-v2 に移行しました。workflow-v2 へ移動します。");
+    setFacilityTemplateMessage("施設テンプレートを保存中...");
     try {
-      await router.push(`/orders/${order.id}/workflow-v2`);
+      const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
+      const res = await apiClient.put(`/orders/${order.id}/facility-template-columns`, { columns });
+      const resolvedConfig = res.data?.resolved_config || null;
+      const resolvedColumns = normalizeFacilityTemplateColumns(
+        resolvedConfig?.fax_template?.columns ?? columns,
+      );
+      const nextConfig = {
+        ...(facilityConfig || {}),
+        fax_template_override: {
+          ...((facilityConfig || {}).fax_template_override || {}),
+          columns,
+        },
+      };
+      delete nextConfig.fax_template_override.main_ocr_row_fields;
+      setFacilityConfig(nextConfig);
+      setFacilityTemplateColumns(resolvedColumns);
+      setFacilityTemplateColumnDraft(resolvedColumns);
+      const refreshedDraftPayload = res.data?.draft_payload || res.data?.draft || null;
+      if (refreshedDraftPayload) {
+        const normalizedDraftPayload = normalizeDraftSheetPayload(refreshedDraftPayload);
+        applyNormalizedSheetEditorPayload(normalizedDraftPayload);
+        applySheetReviewMeta(buildSheetReviewMetaFromOrderState(order, refreshedDraftPayload));
+      }
+      setFacilityTemplateMessage(
+        res.data?.draft_refreshed
+          ? "施設テンプレートに保存し、現在のシートにも反映しました。"
+          : "施設テンプレートに保存しました。シートを再読込して確認してください。",
+      );
+      if (order?.id && normalizeConcreteWeekValue(order.persisted_week_value || order.week_value || order.week || "")) {
+        await refreshOrderWorkspace({ reloadSheet: true, preserveSelections: true });
+      }
     } catch (err: any) {
-      setFacilityTemplateMessage(err?.message || "workflow-v2 への移動に失敗しました。");
+      const status = err?.response?.status;
+      setFacilityTemplateMessage(
+        status === 403 ? "権限がありません。" : "施設テンプレートの保存に失敗しました。"
+      );
     } finally {
       setFacilityTemplateSaving(false);
     }
@@ -9981,7 +10201,22 @@ export default function OrderDetailPage() {
       </header>
 
       {!order ? (
-        <p className="subtle">Loading...</p>
+        <section className="panel">
+          {orderDetailLoading ? (
+            <p className="subtle">Loading...</p>
+          ) : orderDetailError ? (
+            <div className="stack">
+              <p className="error-text">{orderDetailError}</p>
+              {id ? (
+                <button className="btn ghost" type="button" onClick={() => void loadOrderDetail(String(id))}>
+                  再読み込み
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <p className="subtle">注文詳細を読み込みます。</p>
+          )}
+        </section>
       ) : (
         <>
           <section className="panel">
@@ -9994,9 +10229,6 @@ export default function OrderDetailPage() {
               </div>
               <div className="panel-actions">
                 <span className="status-pill">{order.status}</span>
-                <Link className="btn ghost" href={`/orders/${order.id}/workflow-v2`}>
-                  新ワークフローで開く
-                </Link>
                 {order.is_archived ? (
                   <button
                     className="btn ghost"

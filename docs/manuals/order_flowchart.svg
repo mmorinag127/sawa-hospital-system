@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .box{fill:#f8fafc;stroke:#0f172a;stroke-width:3;rx:14}
+      .warn{fill:#fff7ed;stroke:#ea580c;stroke-width:3;rx:14}
+      .ok{fill:#ecfdf5;stroke:#059669;stroke-width:3;rx:14}
+      .stop{fill:#fef2f2;stroke:#dc2626;stroke-width:3;rx:14}
+      .t{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:24px;fill:#111827;font-weight:700}
+      .s{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:18px;fill:#374151}
+      .a{stroke:#1f2937;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <text x="48" y="54" class="t" font-size="34">注文登録から最終確定までの分岐フロー</text>
+  <rect x="60" y="100" width="210" height="92" class="box"/><text x="85" y="138" class="t">PDF登録</text><text x="85" y="166" class="s">注文書アップロード</text>
+  <rect x="330" y="100" width="210" height="92" class="box"/><text x="355" y="138" class="t">注文一覧</text><text x="355" y="166" class="s">検索・状態で絞込</text>
+  <rect x="600" y="100" width="230" height="92" class="box"/><text x="625" y="138" class="t">注文詳細</text><text x="625" y="166" class="s">workflow-v2 を開く</text>
+  <rect x="895" y="100" width="260" height="92" class="warn"/><text x="920" y="138" class="t">STEP1</text><text x="920" y="166" class="s">施設・対象週・原本確認</text>
+  <path d="M270 146 H330" class="a"/><path d="M540 146 H600" class="a"/><path d="M830 146 H895" class="a"/>
+  <rect x="895" y="245" width="260" height="92" class="warn"/><text x="920" y="283" class="t">STEP2</text><text x="920" y="311" class="s">OCR候補を採否判断</text>
+  <rect x="895" y="390" width="260" height="92" class="warn"/><text x="920" y="428" class="t">STEP3</text><text x="920" y="456" class="s">明細生成・修正・保存</text>
+  <rect x="895" y="535" width="260" height="92" class="ok"/><text x="920" y="573" class="t">STEP4</text><text x="920" y="601" class="s">袋分け・出力・最終確定</text>
+  <path d="M1025 192 V245" class="a"/><path d="M1025 337 V390" class="a"/><path d="M1025 482 V535" class="a"/>
+  <rect x="585" y="245" width="240" height="92" class="stop"/><text x="610" y="283" class="t">例外: 前提不明</text><text x="610" y="311" class="s">施設/週/OCRを止めて確認</text>
+  <rect x="585" y="390" width="240" height="92" class="stop"/><text x="610" y="428" class="t">例外: 数量異常</text><text x="610" y="456" class="s">STEP2/3へ戻って修正</text>
+  <path d="M895 291 H825" class="a"/><path d="M895 436 H825" class="a"/>
+  <path d="M585 291 C470 291 470 146 600 146" class="a"/>
+  <path d="M585 436 C470 436 470 291 895 291" class="a"/>
+</svg>

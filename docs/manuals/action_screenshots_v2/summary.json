@@ -1,0 +1,205 @@
+{
+  "count": 40,
+  "captures": [
+    {
+      "file": "action_screenshots_v2/login_basic_auth_submit.png",
+      "annotated": true,
+      "name": "login_basic_auth_submit"
+    },
+    {
+      "file": "action_screenshots_v2/dashboard_orders.png",
+      "annotated": true,
+      "name": "dashboard_orders"
+    },
+    {
+      "file": "action_screenshots_v2/dashboard_daily.png",
+      "annotated": true,
+      "name": "dashboard_daily"
+    },
+    {
+      "file": "action_screenshots_v2/dashboard_manual_order.png",
+      "annotated": false,
+      "name": "dashboard_manual_order"
+    },
+    {
+      "file": "action_screenshots_v2/dashboard_manual_daily.png",
+      "annotated": false,
+      "name": "dashboard_manual_daily"
+    },
+    {
+      "file": "action_screenshots_v2/orders_search.png",
+      "annotated": true,
+      "name": "orders_search"
+    },
+    {
+      "file": "action_screenshots_v2/orders_status_select.png",
+      "annotated": true,
+      "name": "orders_status_select"
+    },
+    {
+      "file": "action_screenshots_v2/orders_archive_toggle.png",
+      "annotated": true,
+      "name": "orders_archive_toggle"
+    },
+    {
+      "file": "action_screenshots_v2/orders_open_detail.png",
+      "annotated": false,
+      "name": "orders_open_detail"
+    },
+    {
+      "file": "action_screenshots_v2/order_reload.png",
+      "annotated": true,
+      "name": "order_reload"
+    },
+    {
+      "file": "action_screenshots_v2/order_inspection.png",
+      "annotated": true,
+      "name": "order_inspection"
+    },
+    {
+      "file": "action_screenshots_v2/order_back_list.png",
+      "annotated": true,
+      "name": "order_back_list"
+    },
+    {
+      "file": "action_screenshots_v2/order_step1_tab.png",
+      "annotated": true,
+      "name": "order_step1_tab"
+    },
+    {
+      "file": "action_screenshots_v2/order_step2_tab.png",
+      "annotated": true,
+      "name": "order_step2_tab"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_tab.png",
+      "annotated": true,
+      "name": "order_step3_tab"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_tab.png",
+      "annotated": true,
+      "name": "order_step4_tab"
+    },
+    {
+      "file": "action_screenshots_v2/order_step1_open_original.png",
+      "annotated": false,
+      "name": "order_step1_open_original"
+    },
+    {
+      "file": "action_screenshots_v2/order_step2_fix_header.png",
+      "annotated": true,
+      "name": "order_step2_fix_header"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_generate_sheet.png",
+      "annotated": true,
+      "name": "order_step3_generate_sheet"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_ai_suggest.png",
+      "annotated": true,
+      "name": "order_step3_ai_suggest"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_apply_ai.png",
+      "annotated": true,
+      "name": "order_step3_apply_ai"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_anomaly_check.png",
+      "annotated": true,
+      "name": "order_step3_anomaly_check"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_fix_anomaly.png",
+      "annotated": true,
+      "name": "order_step3_fix_anomaly"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_sheet_confirm.png",
+      "annotated": true,
+      "name": "order_step3_sheet_confirm"
+    },
+    {
+      "file": "action_screenshots_v2/order_step3_save_sheet.png",
+      "annotated": true,
+      "name": "order_step3_save_sheet"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_calc_bags.png",
+      "annotated": true,
+      "name": "order_step4_calc_bags"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_confirm_bags.png",
+      "annotated": true,
+      "name": "order_step4_confirm_bags"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_label_download.png",
+      "annotated": true,
+      "name": "order_step4_label_download"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_label_preview.png",
+      "annotated": true,
+      "name": "order_step4_label_preview"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_delivery_download.png",
+      "annotated": true,
+      "name": "order_step4_delivery_download"
+    },
+    {
+      "file": "action_screenshots_v2/order_step4_confirm_order.png",
+      "annotated": true,
+      "name": "order_step4_confirm_order"
+    },
+    {
+      "file": "action_screenshots_v2/daily_date_input.png",
+      "annotated": true,
+      "name": "daily_date_input"
+    },
+    {
+      "file": "action_screenshots_v2/daily_status_select.png",
+      "annotated": true,
+      "name": "daily_status_select"
+    },
+    {
+      "file": "action_screenshots_v2/daily_fetch.png",
+      "annotated": true,
+      "name": "daily_fetch"
+    },
+    {
+      "file": "action_screenshots_v2/daily_labels_excel.png",
+      "annotated": true,
+      "name": "daily_labels_excel"
+    },
+    {
+      "file": "action_screenshots_v2/daily_delivery_excel.png",
+      "annotated": true,
+      "name": "daily_delivery_excel"
+    },
+    {
+      "file": "action_screenshots_v2/daily_bundle_excel.png",
+      "annotated": true,
+      "name": "daily_bundle_excel"
+    },
+    {
+      "file": "action_screenshots_v2/daily_order_label.png",
+      "annotated": true,
+      "name": "daily_order_label"
+    },
+    {
+      "file": "action_screenshots_v2/daily_order_delivery.png",
+      "annotated": true,
+      "name": "daily_order_delivery"
+    },
+    {
+      "file": "action_screenshots_v2/daily_gemini.png",
+      "annotated": true,
+      "name": "daily_gemini"
+    }
+  ]
+}

@@ -1,0 +1,235 @@
+{
+  "orderId": "ORDe09c9c3b",
+  "targetDate": "2026-05-13",
+  "count": 38,
+  "captures": [
+    {
+      "name": "login_basic_submit",
+      "label": "Basic認証でログイン",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/login_basic_submit.png",
+      "annotated": true
+    },
+    {
+      "name": "dashboard_nav_orders",
+      "label": "注文一覧を開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/dashboard_nav_orders.png",
+      "annotated": true
+    },
+    {
+      "name": "dashboard_nav_daily_output",
+      "label": "日別出力を開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/dashboard_nav_daily_output.png",
+      "annotated": true
+    },
+    {
+      "name": "dashboard_manual_order_pdf",
+      "label": "注文確定マニュアルを開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/dashboard_manual_order_pdf.png",
+      "annotated": false
+    },
+    {
+      "name": "dashboard_manual_daily_pdf",
+      "label": "日別出力マニュアルを開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/dashboard_manual_daily_pdf.png",
+      "annotated": false
+    },
+    {
+      "name": "orders_search_box",
+      "label": "注文を検索",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/orders_search_box.png",
+      "annotated": true
+    },
+    {
+      "name": "orders_status_filter",
+      "label": "ステータスで絞り込み",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/orders_status_filter.png",
+      "annotated": true
+    },
+    {
+      "name": "orders_open_detail_link",
+      "label": "詳細を開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/orders_open_detail_link.png",
+      "annotated": true
+    },
+    {
+      "name": "order_step1_next_to_ocr",
+      "label": "次へ: OCR修正",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step1_next_to_ocr.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step1_facility_week_set",
+      "label": "施設・週を確認/保存",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step1_facility_week_set.png",
+      "annotated": true
+    },
+    {
+      "name": "order_step2_choose_correct",
+      "label": "このシートで正しい",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_choose_correct.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step2_choose_incorrect",
+      "label": "正しくない場合",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_choose_incorrect.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step2_save_sheet",
+      "label": "シートだけ保存",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_save_sheet.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step2_apply_to_details",
+      "label": "OCR反映して明細へ",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_apply_to_details.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step2_reparse_button",
+      "label": "再解析/LLM補完再解析",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_reparse_button.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step2_restore_foundation",
+      "label": "基盤復旧ボタン",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step2_restore_foundation.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step3_save_lines",
+      "label": "明細を保存",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step3_save_lines.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step3_next_bagging",
+      "label": "次へ: 袋分け",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step3_next_bagging.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step4_refresh_bags",
+      "label": "袋分けを更新",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step4_refresh_bags.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step4_rebuild_bags",
+      "label": "袋分けを再計算",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step4_rebuild_bags.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step4_next_outputs",
+      "label": "次へ: 出力",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step4_next_outputs.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step5_label_download",
+      "label": "ラベルCSVをダウンロード",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step5_label_download.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step5_delivery_download",
+      "label": "納品書Excelをダウンロード",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step5_delivery_download.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step5_total_download",
+      "label": "総量CSVをダウンロード",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step5_total_download.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step5_confirm_button",
+      "label": "確定ボタン",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step5_confirm_button.png",
+      "annotated": false
+    },
+    {
+      "name": "order_step5_confirm_and_return",
+      "label": "確定して注文一覧へ戻る",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/order_step5_confirm_and_return.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_filter_date",
+      "label": "日付を選ぶ",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_filter_date.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_filter_status",
+      "label": "ステータスを選ぶ",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_filter_status.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_filter_fetch",
+      "label": "取得",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_filter_fetch.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_download_labels_excel",
+      "label": "当日ラベルExcel",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_download_labels_excel.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_download_delivery_excel",
+      "label": "当日納品書Excel",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_download_delivery_excel.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_download_bundle_excel",
+      "label": "当日一括Excel",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_download_bundle_excel.png",
+      "annotated": true
+    },
+    {
+      "name": "daily_order_detail_link",
+      "label": "注文詳細を開く",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_order_detail_link.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_order_label_button",
+      "label": "個別ラベル",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_order_label_button.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_order_delivery_button",
+      "label": "個別納品書",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_order_delivery_button.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_order_total_button",
+      "label": "個別総量CSV",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_order_total_button.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_override_open_button",
+      "label": "施設別単位設定",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_override_open_button.png",
+      "annotated": false
+    },
+    {
+      "name": "daily_audit_gemini_button",
+      "label": "Gemini補助",
+      "path": "/Users/mmorinag/Sawa/2025.12/workspace/docs/manuals/action_screenshots/daily_audit_gemini_button.png",
+      "annotated": true
+    }
+  ]
+}

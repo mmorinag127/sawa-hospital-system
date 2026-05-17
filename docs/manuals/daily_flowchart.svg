@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .box{fill:#f8fafc;stroke:#0f172a;stroke-width:3;rx:14}
+      .out{fill:#eff6ff;stroke:#2563eb;stroke-width:3;rx:14}
+      .warn{fill:#fff7ed;stroke:#ea580c;stroke-width:3;rx:14}
+      .stop{fill:#fef2f2;stroke:#dc2626;stroke-width:3;rx:14}
+      .t{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:24px;fill:#111827;font-weight:700}
+      .s{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:18px;fill:#374151}
+      .a{stroke:#1f2937;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <text x="48" y="54" class="t" font-size="34">日別出力の分岐フロー</text>
+  <rect x="60" y="105" width="220" height="92" class="box"/><text x="90" y="143" class="t">日別出力を開く</text><text x="90" y="171" class="s">ダッシュボード/ナビ</text>
+  <rect x="350" y="105" width="220" height="92" class="box"/><text x="380" y="143" class="t">日付を選ぶ</text><text x="380" y="171" class="s">発送対象日</text>
+  <rect x="640" y="105" width="220" height="92" class="box"/><text x="670" y="143" class="t">状態を選ぶ</text><text x="670" y="171" class="s">全て/確定/要確認</text>
+  <rect x="930" y="105" width="220" height="92" class="box"/><text x="960" y="143" class="t">取得</text><text x="960" y="171" class="s">一覧を更新</text>
+  <path d="M280 151 H350" class="a"/><path d="M570 151 H640" class="a"/><path d="M860 151 H930" class="a"/>
+  <rect x="180" y="290" width="260" height="92" class="out"/><text x="210" y="328" class="t">一括出力</text><text x="210" y="356" class="s">ラベル/納品書/一括Excel</text>
+  <rect x="510" y="290" width="260" height="92" class="out"/><text x="540" y="328" class="t">個別出力</text><text x="540" y="356" class="s">注文行の各ボタン</text>
+  <rect x="840" y="290" width="260" height="92" class="warn"/><text x="870" y="328" class="t">数量監査</text><text x="870" y="356" class="s">候補確認/Gemini補助</text>
+  <path d="M1040 197 C1040 250 310 250 310 290" class="a"/><path d="M1040 197 C1040 250 640 250 640 290" class="a"/><path d="M1040 197 V290" class="a"/>
+  <rect x="180" y="500" width="260" height="92" class="stop"/><text x="210" y="538" class="t">例外: 出力失敗</text><text x="210" y="566" class="s">注文詳細で原因確認</text>
+  <rect x="510" y="500" width="260" height="92" class="stop"/><text x="540" y="538" class="t">例外: 数量違和感</text><text x="540" y="566" class="s">詳細へ戻りSTEP3/4修正</text>
+  <rect x="840" y="500" width="260" height="92" class="stop"/><text x="870" y="538" class="t">例外: 単位違い</text><text x="870" y="566" class="s">施設別単位設定を確認</text>
+  <path d="M310 382 V500" class="a"/><path d="M640 382 V500" class="a"/><path d="M970 382 V500" class="a"/>
+</svg>
