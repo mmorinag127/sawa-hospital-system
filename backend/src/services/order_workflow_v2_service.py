@@ -733,6 +733,10 @@ def _serialize_workflow(
     effective_template_id = _effective_workflow_template_id(meta)
     template_version_id = _effective_workflow_template_version_id(row, meta)
     quad_override = meta.get("quad_override")
+    output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+    confirmed_snapshot_id = row.confirmed_snapshot_id or (
+        _normalize_id(output_bundle.get("confirmed_snapshot_id")) if output_bundle else None
+    )
     return {
         "order_id": row.order_id,
         "state": row.state,
@@ -740,7 +744,7 @@ def _serialize_workflow(
         "primary_action": row.primary_action,
         "selected_ocr_result_id": row.evidence_run_id,
         "saved_sheet_id": row.draft_id,
-        "confirmed_snapshot_id": row.confirmed_snapshot_id,
+        "confirmed_snapshot_id": confirmed_snapshot_id,
         "facility_id": meta.get("facility_id"),
         "week_start": meta.get("week_start"),
         "week_end": meta.get("week_end"),
@@ -767,10 +771,22 @@ def _workflow_v2_meta_exists(row: OrderWorkflowState) -> bool:
     return isinstance(row.secondary_actions_json.get(WORKFLOW_V2_META_KEY), dict)
 
 
+def _confirmed_snapshot_id_from_meta(meta: dict[str, Any]) -> str | None:
+    output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+    return _normalize_id(meta.get("confirmed_snapshot_id")) or (
+        _normalize_id(output_bundle.get("confirmed_snapshot_id")) if output_bundle else None
+    )
+
+
+def _has_confirmed_output_lineage(meta: dict[str, Any]) -> bool:
+    return bool(_normalize_id(meta.get("bagging_result_id")) and _normalize_id(meta.get("output_bundle_id")))
+
+
 def _workflow_v2_meta_or_recovered_lineage_exists(row: OrderWorkflowState, meta: dict[str, Any]) -> bool:
     return bool(
         _workflow_v2_meta_exists(row)
         or row.confirmed_snapshot_id
+        or _confirmed_snapshot_id_from_meta(meta)
         or _normalize_id(meta.get("bagging_result_id"))
         or _normalize_id(meta.get("output_bundle_id"))
         or isinstance(meta.get("bagging_result"), dict)
@@ -788,6 +804,8 @@ def _canonical_workflow_v2_state(row: OrderWorkflowState, meta: dict[str, Any] |
     if not _workflow_v2_meta_or_recovered_lineage_exists(row, workflow_meta):
         return state
     if row.confirmed_snapshot_id:
+        return "confirmed"
+    if _confirmed_snapshot_id_from_meta(workflow_meta):
         return "confirmed"
     if _normalize_id(workflow_meta.get("output_bundle_id")) and isinstance(workflow_meta.get("output_bundle"), dict):
         return "output_review"
@@ -1027,12 +1045,22 @@ def _workflow_lineage_error(
             return "output_bundle_source_mismatch"
 
     if state == "confirmed":
-        if not workflow.confirmed_snapshot_id:
+        confirmed_snapshot_id = workflow.confirmed_snapshot_id or _confirmed_snapshot_id_from_meta(meta)
+        if not confirmed_snapshot_id:
             return "confirmed_snapshot_required"
-        snapshot = session.get(OrderConfirmedSnapshot, workflow.confirmed_snapshot_id)
+        snapshot = session.get(OrderConfirmedSnapshot, confirmed_snapshot_id)
+        output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
+        if snapshot is None and output_bundle and _normalize_id(output_bundle.get("confirmed_snapshot_id")) == confirmed_snapshot_id:
+            return None
+        if snapshot is None and _has_confirmed_output_lineage(meta):
+            return None
         if snapshot is None or snapshot.order_id != order.id:
             return "confirmed_snapshot_required"
-        if workflow.draft_id and _normalize_id(snapshot.draft_id) != _normalize_id(workflow.draft_id):
+        if (
+            workflow.draft_id
+            and _normalize_id(snapshot.draft_id) != _normalize_id(workflow.draft_id)
+            and not _has_confirmed_output_lineage(meta)
+        ):
             return "confirmed_snapshot_required"
         if template_version_id and _normalize_id(snapshot.template_version_id) != template_version_id:
             return "confirmed_snapshot_template_mismatch"

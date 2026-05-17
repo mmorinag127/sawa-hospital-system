@@ -2326,6 +2326,147 @@ def test_confirmed_legacy_apply_ready_projects_to_confirmed_without_meta(monkeyp
     assert projected["legacy_state"] == "apply_ready"
 
 
+def test_confirmed_legacy_projects_from_output_bundle_when_snapshot_row_is_missing(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    template_version_id = _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"fields": ["date", "menu_name", "qty.regular_x"], "rows": [["04/26", "A", "1"]]},
+        edited_by="test",
+    )
+    assert error is None
+    snapshot_id = _id("OCSlegacy")
+
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        row.state = "apply_ready"
+        row.confirmed_snapshot_id = None
+        row.blockers_json = ["draft_newer_than_lines"]
+        row.warnings_json = ["draft_newer_than_lines"]
+        meta = dict(row.secondary_actions_json[order_workflow_v2_service.WORKFLOW_V2_META_KEY])
+        meta["output_bundle_id"] = _id("OOBlegacy")
+        meta["output_bundle"] = {
+            "output_bundle_id": meta["output_bundle_id"],
+            "confirmed_snapshot_id": snapshot_id,
+            "template_version_id": template_version_id,
+            "source_saved_sheet_id": saved["saved_sheet"]["saved_sheet_id"],
+        }
+        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
+        draft = session.get(OrderSheetDraft, saved["saved_sheet"]["saved_sheet_id"])
+        assert draft is not None
+        draft.template_version_id = None
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "confirmed"
+    assert workflow["confirmed_snapshot_id"] == snapshot_id
+    assert workflow["blockers"] == []
+
+
+def test_confirmed_legacy_allows_missing_snapshot_row_when_output_ids_exist(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"fields": ["date", "menu_name", "qty.regular_x"], "rows": [["04/26", "A", "1"]]},
+        edited_by="test",
+    )
+    assert error is None
+
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        row.state = "apply_ready"
+        row.confirmed_snapshot_id = _id("OCSmissing")
+        row.blockers_json = ["draft_newer_than_lines"]
+        row.warnings_json = ["draft_newer_than_lines"]
+        meta = dict(row.secondary_actions_json[order_workflow_v2_service.WORKFLOW_V2_META_KEY])
+        meta["bagging_result_id"] = _id("OBGlegacy")
+        meta["output_bundle_id"] = _id("OOBlegacy")
+        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
+        draft = session.get(OrderSheetDraft, saved["saved_sheet"]["saved_sheet_id"])
+        assert draft is not None
+        draft.template_version_id = None
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "confirmed"
+    assert workflow["blockers"] == []
+
+
+def test_confirmed_legacy_allows_stale_workflow_draft_when_output_ids_exist(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    template_version_id = _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"fields": ["date", "menu_name", "qty.regular_x"], "rows": [["04/26", "A", "1"]]},
+        edited_by="test",
+    )
+    assert error is None
+    snapshot_id = _id("OCSlegacy")
+
+    with session_scope() as session:
+        session.add(
+            OrderConfirmedSnapshot(
+                id=snapshot_id,
+                order_id=order_id,
+                template_version_id=template_version_id,
+                draft_id=_id("ODRstale"),
+                snapshot_digest="digest",
+                snapshot_json={},
+                confirmed_by="test",
+                confirmed_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        row = session.get(OrderWorkflowState, order_id)
+        assert row is not None
+        row.state = "apply_ready"
+        row.confirmed_snapshot_id = snapshot_id
+        row.blockers_json = ["draft_newer_than_lines"]
+        row.warnings_json = ["draft_newer_than_lines"]
+        meta = dict(row.secondary_actions_json[order_workflow_v2_service.WORKFLOW_V2_META_KEY])
+        meta["bagging_result_id"] = _id("OBGlegacy")
+        meta["output_bundle_id"] = _id("OOBlegacy")
+        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
+        draft = session.get(OrderSheetDraft, saved["saved_sheet"]["saved_sheet_id"])
+        assert draft is not None
+        draft.template_version_id = None
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "confirmed"
+    assert workflow["blockers"] == []
+
+
 def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
