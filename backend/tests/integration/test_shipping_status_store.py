@@ -7,7 +7,7 @@ from sqlalchemy import delete
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.db import session_scope  # noqa: E402
+from src.db import engine, session_scope  # noqa: E402
 from src.models.shipping_tracking import (  # noqa: E402
     ShippingTrackingCurrent,
     ShippingTrackingEvent,
@@ -17,6 +17,9 @@ from src.services import shipping_status_store  # noqa: E402
 
 
 def _reset_tracking_state():
+    ShippingTrackingLog.__table__.create(bind=engine, checkfirst=True)
+    ShippingTrackingCurrent.__table__.create(bind=engine, checkfirst=True)
+    ShippingTrackingEvent.__table__.create(bind=engine, checkfirst=True)
     with session_scope() as session:
         session.execute(delete(ShippingTrackingEvent))
         session.execute(delete(ShippingTrackingCurrent))
