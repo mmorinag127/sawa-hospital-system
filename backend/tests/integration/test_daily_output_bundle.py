@@ -8,7 +8,7 @@ from openpyxl import Workbook, load_workbook
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import output_builder  # noqa: E402
+from src.services import order_service, output_builder  # noqa: E402
 
 
 TARGET_DATE = dt_date(2026, 3, 22)
@@ -724,6 +724,59 @@ def test_weekly_weight_amount_rules_convert_piece_and_hidden_garnish_units():
             quantity,
         )
         assert output_builder._weekly_weight_format_amount(amounts) == expected  # noqa: SLF001
+
+
+def test_daily_bag_amount_rules_convert_piece_and_hidden_garnish_units():
+    lines = [
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "夕",
+            "menu_name": "煮込みハンバーグ",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_corrected": 430,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "昼",
+            "menu_name": "アジのちゃんちゃん焼き",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "area_id": "X",
+            "quantity_corrected": 49,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "夕",
+            "menu_name": "チキンカツ",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_corrected": 437,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+    ]
+    stats = order_service._build_daily_bag_amount_stats(lines)  # noqa: SLF001
+
+    def per_serving(menu_name: str, diet_type: str) -> dict:
+        key = order_service._build_non_condiment_amount_key(  # noqa: SLF001
+            dt_date(2026, 5, 10),
+            "夕" if menu_name != "アジのちゃんちゃん焼き" else "昼",
+            menu_name,
+            diet_type,
+            "X",
+        )
+        return stats["per_serving_by_group"][key]
+
+    assert per_serving("煮込みハンバーグ", "regular") == {"個": 1.0, "g": 40.0}
+    assert per_serving("アジのちゃんちゃん焼き", "soft") == {"切": 2.0, "g": 40.0}
+    assert per_serving("チキンカツ", "regular") == {"個": 1.0, "g": 30.0}
 
 
 def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path, monkeypatch):
