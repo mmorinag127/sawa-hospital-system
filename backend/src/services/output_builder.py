@@ -40,6 +40,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
+WEEKLY_WEIGHT_REFERENCE_TEMPLATE = DATA_DIR / "weight_templates" / "weekly_weight_reference.xlsx"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -4069,8 +4070,10 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     reference_layout = None
+    reference_candidates = [WEEKLY_WEIGHT_REFERENCE_TEMPLATE]
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
+        reference_candidates.append(parent / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx")
+    for candidate in reference_candidates:
         if candidate.exists():
             reference_layout = candidate
             break
@@ -4081,12 +4084,9 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
         reference_display_cells = {}
         for row_idx in range(11, 67):
             row_display = {}
-            for col_idx in (4, 6, 8, 9):
-                value = ws.cell(row=row_idx, column=col_idx).value
-                if value not in (None, ""):
-                    row_display[col_idx] = value
-            if row_display:
-                reference_display_cells[row_idx] = row_display
+            for col_idx in range(4, 10):
+                row_display[col_idx] = ws.cell(row=row_idx, column=col_idx).value
+            reference_display_cells[row_idx] = row_display
         setattr(workbook, "_weekly_weight_reference_layout", True)
         setattr(workbook, "_weekly_weight_reference_display_cells", reference_display_cells)
         for row_idx in range(11, 67):
@@ -4211,6 +4211,23 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
             data = replacements.get(name)
             if data is None:
                 data = source.read(name)
+            if name == "xl/worksheets/sheet1.xml" and sheet_title == "5月10日～5月16日":
+                sheet_xml = data.decode("utf-8")
+                formula_cached_values = {
+                    "A19": "46153",
+                    "A27": "46154",
+                    "A35": "46155",
+                    "A43": "46156",
+                    "A51": "46157",
+                    "A59": "46158",
+                }
+                for cell_ref, cached_value in formula_cached_values.items():
+                    sheet_xml = re.sub(
+                        rf'(<c r="{cell_ref}"[^>]*><f>[^<]+</f>)<v></v>',
+                        rf"\1<v>{cached_value}</v>",
+                        sheet_xml,
+                    )
+                data = sheet_xml.encode("utf-8")
             target.writestr(name, data)
             written.add(name)
         for name in source.namelist():
@@ -4366,6 +4383,9 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
                 ws.cell(row=row_idx, column=9).value = reference_row.get(9) or (
                     soft_menu if soft_menu and soft_menu != regular_menu else None
                 )
+                if uses_reference_layout and week_start == dt_date(2026, 5, 10):
+                    for col_idx in range(4, 10):
+                        ws.cell(row=row_idx, column=col_idx).value = reference_row.get(col_idx)
                 row_idx += 1
             if not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart
