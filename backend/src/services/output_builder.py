@@ -3694,6 +3694,114 @@ def _create_daily_labels_sheet(
     return ws.title
 
 
+def _cell_ref_to_indexes(ref: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\$?([A-Z]+)\$?([0-9]+)", str(ref or "").strip())
+    if not match:
+        return None
+    return int(match.group(2)), column_index_from_string(match.group(1))
+
+
+def _formula_cache_value(workbook, sheet_name: str, formula: str) -> Any:
+    text = str(formula or "").strip()
+    if text.startswith("="):
+        text = text[1:]
+    menu_match = re.fullmatch(r"'?メニュー'?!\$?([A-Z]+)\$?([0-9]+)", text)
+    if menu_match and "メニュー" in workbook.sheetnames:
+        return workbook["メニュー"].cell(
+            row=int(menu_match.group(2)),
+            column=column_index_from_string(menu_match.group(1)),
+        ).value
+    sum_match = re.fullmatch(r"SUM\((\$?[A-Z]+\$?[0-9]+):(\$?[A-Z]+\$?[0-9]+)\)", text, flags=re.IGNORECASE)
+    if sum_match and sheet_name in workbook.sheetnames:
+        start = _cell_ref_to_indexes(sum_match.group(1))
+        end = _cell_ref_to_indexes(sum_match.group(2))
+        if start and end:
+            ws = workbook[sheet_name]
+            total = 0
+            for row_idx in range(min(start[0], end[0]), max(start[0], end[0]) + 1):
+                for col_idx in range(min(start[1], end[1]), max(start[1], end[1]) + 1):
+                    value = ws.cell(row=row_idx, column=col_idx).value
+                    try:
+                        total += float(value or 0)
+                    except (TypeError, ValueError):
+                        continue
+            return int(total) if float(total).is_integer() else total
+    product_match = re.fullmatch(r"([A-Z]+)([0-9]+)\*([A-Z]+)([0-9]+)", text)
+    if product_match and sheet_name in workbook.sheetnames and product_match.group(2) == product_match.group(4):
+        ws = workbook[sheet_name]
+        left = ws.cell(row=int(product_match.group(2)), column=column_index_from_string(product_match.group(1))).value
+        right = ws.cell(row=int(product_match.group(4)), column=column_index_from_string(product_match.group(3))).value
+        try:
+            product = float(left or 0) * float(right or 0)
+        except (TypeError, ValueError):
+            return None
+        return int(product) if float(product).is_integer() else product
+    plus_match = re.fullmatch(r"([A-Z]+)([0-9]+)\+([0-9]+)", text)
+    if plus_match and sheet_name in workbook.sheetnames:
+        value = workbook[sheet_name].cell(
+            row=int(plus_match.group(2)),
+            column=column_index_from_string(plus_match.group(1)),
+        ).value
+        try:
+            return float(value or 0) + float(plus_match.group(3))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _inject_daily_label_formula_caches(path: Path, workbook) -> None:
+    formula_cache: dict[tuple[str, str], Any] = {}
+    for ws in workbook.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    value = _formula_cache_value(workbook, ws.title, cell.value)
+                    if value is not None:
+                        formula_cache[(ws.title, cell.coordinate)] = value
+    if not formula_cache:
+        return
+    with zipfile.ZipFile(path, "r") as source:
+        entries = {name: source.read(name) for name in source.namelist()}
+    workbook_root = ET.fromstring(entries["xl/workbook.xml"])
+    rels_root = ET.fromstring(entries["xl/_rels/workbook.xml.rels"])
+    rel_targets = {
+        rel.attrib.get("Id"): rel.attrib.get("Target")
+        for rel in rels_root.findall(f"{{{_XLSX_PACKAGE_REL_NS}}}Relationship")
+    }
+    sheet_paths: dict[str, str] = {}
+    for sheet in workbook_root.findall(f"{{{_XLSX_MAIN_NS}}}sheets/{{{_XLSX_MAIN_NS}}}sheet"):
+        rid = sheet.attrib.get(f"{{{_XLSX_REL_NS}}}id")
+        target = str(rel_targets.get(rid) or "").lstrip("/")
+        if target and not target.startswith("xl/"):
+            target = f"xl/{target}"
+        sheet_paths[str(sheet.attrib.get("name") or "")] = target
+    for sheet_name, sheet_path in sheet_paths.items():
+        if not sheet_path or sheet_path not in entries:
+            continue
+        root = ET.fromstring(entries[sheet_path])
+        changed = False
+        for cell in root.findall(f".//{{{_XLSX_MAIN_NS}}}c"):
+            ref = cell.attrib.get("r")
+            if not ref or (sheet_name, ref) not in formula_cache:
+                continue
+            value = formula_cache[(sheet_name, ref)]
+            value_node = cell.find(f"{{{_XLSX_MAIN_NS}}}v")
+            if value_node is None:
+                value_node = ET.SubElement(cell, f"{{{_XLSX_MAIN_NS}}}v")
+            if isinstance(value, str):
+                cell.attrib["t"] = "str"
+                value_node.text = value
+            else:
+                cell.attrib.pop("t", None)
+                value_node.text = str(int(value) if isinstance(value, float) and value.is_integer() else value)
+            changed = True
+        if changed:
+            entries[sheet_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target:
+        for name, data in entries.items():
+            target.writestr(name, data)
+
+
 def _create_daily_delivery_sheet(
     workbook,
     used_titles: set[str],
@@ -4384,6 +4492,8 @@ def build_daily_output_bundle(
         raise ValueError("対象日の出力対象がありません")
 
     workbook.save(bundle_path)
+    if normalized_type == "labels":
+        _inject_daily_label_formula_caches(bundle_path, workbook)
     error_count = sum(1 for item in manifest_items if item.get("status") == "error")
     empty_count = sum(1 for item in manifest_items if item.get("status") == "empty")
     manifest = {
