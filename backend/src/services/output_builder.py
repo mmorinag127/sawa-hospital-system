@@ -4183,55 +4183,58 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
 
 def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = None) -> dict[tuple[dt_date, str, str], dict]:
     week_start = _weekly_weight_start(target_date)
+    week_dates = {week_start + timedelta(days=offset) for offset in range(7)}
     rows: dict[tuple[dt_date, str, str], dict] = {}
-    for offset in range(7):
-        current_date = week_start + timedelta(days=offset)
+    order_ids: dict[str, None] = {}
+    for current_date in week_dates:
         for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
             order_id = str(order_summary.get("id") or "").strip()
-            if not order_id:
+            if order_id:
+                order_ids.setdefault(order_id, None)
+    for order_id in order_ids:
+        ctx = _prepare_output_context_for_bundle(
+            order_id,
+            include_bags=False,
+            include_ocr_menu_meta=False,
+            include_expanded_copy=False,
+            allow_stale_draft_lines=True,
+        )
+        for line in ctx.get("order_lines") or []:
+            current_date = _ensure_date(line.get("date"))
+            if current_date not in week_dates:
                 continue
-            ctx = _prepare_output_context_for_bundle(
-                order_id,
-                include_bags=False,
-                include_ocr_menu_meta=False,
-                include_expanded_copy=False,
-                allow_stale_draft_lines=True,
+            quantity = _safe_qty(line, True)
+            try:
+                quantity_value = float(quantity)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(quantity_value) or quantity_value <= 0:
+                continue
+            daypart = _normalize_output_daypart(line.get("daypart"))
+            slot = _weekly_weight_slot_for_line(line)
+            if not daypart or not slot:
+                continue
+            row = rows.setdefault(
+                (current_date, daypart, slot),
+                {
+                    "regular_menu": "",
+                    "regular_quantity": 0.0,
+                    "regular_amounts": {},
+                    "soft_mixer_menu": "",
+                    "soft_mixer_quantity": 0.0,
+                    "soft_mixer_amounts": {},
+                },
             )
-            for line in ctx.get("order_lines") or []:
-                if _ensure_date(line.get("date")) != current_date:
-                    continue
-                quantity = _safe_qty(line, True)
-                try:
-                    quantity_value = float(quantity)
-                except (TypeError, ValueError):
-                    continue
-                if not math.isfinite(quantity_value) or quantity_value <= 0:
-                    continue
-                daypart = _normalize_output_daypart(line.get("daypart"))
-                slot = _weekly_weight_slot_for_line(line)
-                if not daypart or not slot:
-                    continue
-                row = rows.setdefault(
-                    (current_date, daypart, slot),
-                    {
-                        "regular_menu": "",
-                        "regular_quantity": 0.0,
-                        "regular_amounts": {},
-                        "soft_mixer_menu": "",
-                        "soft_mixer_quantity": 0.0,
-                        "soft_mixer_amounts": {},
-                    },
-                )
-                diet = _normalize_diet_key(line.get("diet_type")) or ""
-                menu_name = str(line.get("menu_name") or "").strip()
-                if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
-                    row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
-                    row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
-                    _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
-                elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
-                    row["regular_menu"] = row["regular_menu"] or menu_name
-                    row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
-                    _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
+            diet = _normalize_diet_key(line.get("diet_type")) or ""
+            menu_name = str(line.get("menu_name") or "").strip()
+            if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
+                row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
+                row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
+                _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
+            elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
+                row["regular_menu"] = row["regular_menu"] or menu_name
+                row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
+                _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
     return rows
 
 
