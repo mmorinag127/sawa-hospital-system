@@ -24,6 +24,7 @@ from src.models.order_workflow_state import OrderWorkflowState  # noqa: F401
 from src.models.order_current_state import OrderCurrentState  # noqa: F401
 from src.models.order_critical_decision import OrderCriticalDecision  # noqa: F401
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot  # noqa: F401
+from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle  # noqa: F401
 from src.models.output import (  # noqa: F401
     Bag,
     LabelRow,

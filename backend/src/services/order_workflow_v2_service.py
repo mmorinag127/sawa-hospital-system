@@ -23,6 +23,7 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, sheet_week_service, workflow_v2_sheet_review_service
+from src.services import order_output_artifact_service
 from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.storage_service import load_bytes_from_uri
 
@@ -186,6 +187,21 @@ def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
     existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
     existing[WORKFLOW_V2_META_KEY] = dict(meta)
     row.secondary_actions_json = existing
+
+
+def _workflow_meta_with_step4_artifacts(session: Any, row: OrderWorkflowState | None) -> dict[str, Any]:
+    meta = _workflow_meta(row)
+    if row is None:
+        return meta
+    return order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, meta)
+
+
+def _clear_step4_meta_references(meta: dict[str, Any]) -> None:
+    meta["confirmed_snapshot_id"] = None
+    meta["bagging_result_id"] = None
+    meta["bagging_result"] = None
+    meta["output_bundle_id"] = None
+    meta["output_bundle"] = None
 
 
 def _normalize_quad_px(value: object) -> list[list[float]] | None:
@@ -903,10 +919,22 @@ def _workflow_blocker_projection(serialized: dict[str, Any], error: str) -> dict
         projected["state"] = "bagging_result_required"
         projected["headline"] = "袋分け結果がありません。Step4で袋分けを作成してください"
         projected["primary_action"] = "run_bagging"
+    elif normalized_error == "bagging_result_artifact_missing":
+        projected["state"] = "bagging_result_artifact_missing"
+        projected["headline"] = "袋分け成果物が見つかりません。出力確認を再作成してください"
+        projected["primary_action"] = "run_bagging"
     elif normalized_error == "output_review_required":
         projected["state"] = "output_review_required"
-        projected["headline"] = "出力確認がありません。Step5の出力確認を作成してください"
+        projected["headline"] = "出力確認がありません。Step4の出力確認を作成してください"
         projected["primary_action"] = "final_confirm"
+    elif normalized_error == "output_bundle_artifact_missing":
+        projected["state"] = "output_bundle_artifact_missing"
+        projected["headline"] = "出力確認成果物が見つかりません。出力確認を再作成してください"
+        projected["primary_action"] = "run_bagging"
+    elif normalized_error == "output_bundle_materialization_missing":
+        projected["state"] = "output_bundle_materialization_missing"
+        projected["headline"] = "出力確認成果物に確定対象がありません。出力確認を再作成してください"
+        projected["primary_action"] = "run_bagging"
     elif normalized_error == "confirmed_snapshot_required":
         projected["state"] = "confirmed_snapshot_required"
         projected["headline"] = "確定snapshotがありません。出力確認から確定し直してください"
@@ -1026,6 +1054,8 @@ def _workflow_lineage_error(
     bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
     if _workflow_state_requires_bagging(state):
         if not bagging_result:
+            if _normalize_id(meta.get("bagging_result_id")):
+                return "bagging_result_artifact_missing"
             return "bagging_result_required"
         if template_version_id and _normalize_id(bagging_result.get("template_version_id")) != template_version_id:
             return "bagging_result_template_mismatch"
@@ -1035,6 +1065,8 @@ def _workflow_lineage_error(
     output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
     if _workflow_state_requires_output_review(state):
         if not output_bundle:
+            if _normalize_id(meta.get("output_bundle_id")):
+                return "output_bundle_artifact_missing"
             return "output_review_required"
         if template_version_id and _normalize_id(output_bundle.get("template_version_id")) != template_version_id:
             return "output_bundle_template_mismatch"
@@ -1074,7 +1106,7 @@ def _serialize_workflow_checked(
     workflow: OrderWorkflowState,
     ocr_job: OcrJob | None = None,
 ) -> dict[str, Any]:
-    meta = _workflow_meta(workflow)
+    meta = _workflow_meta_with_step4_artifacts(session, workflow)
     recovered_meta, recovered = _recover_workflow_context_meta_from_order(order, workflow, meta)
     meta = recovered_meta if recovered else meta
     meta = _recover_confirmed_artifacts_from_snapshot(
@@ -1203,7 +1235,9 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
         meta = _workflow_meta(workflow)
         document_uri = _normalize_id(order.document_uri)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
@@ -1307,6 +1341,12 @@ def save_quad_review_decision(
 
 
 def get_header_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        if _get_workflow(session, order.id) is None:
+            return None, "workflow_not_initialized"
     try:
         return _get_order_service_module().build_hakodate_header_axis_review(order_id), None
     except ValueError as exc:
@@ -1849,6 +1889,9 @@ def _clear_downstream_references_before_delete(
             workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
+        meta = _workflow_meta(workflow)
+        _clear_step4_meta_references(meta)
+        _write_workflow_meta(workflow, meta)
     current_state = session.get(OrderCurrentState, order_id)
     if current_state is not None:
         current_state.draft_id = None
@@ -1898,6 +1941,7 @@ def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
     _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
@@ -2410,6 +2454,7 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
     _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=False)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
+    order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
     session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
@@ -2561,6 +2606,10 @@ def _build_materialization_candidate_for_saved_sheet(
     )
 
 
+def _canonical_payload_digest(payload: object) -> str:
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _build_order_payload_for_outputs(*, order: Order, lines: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": order.id,
@@ -2655,6 +2704,7 @@ def _build_bagging_result_payload(
             }
         )
     bag_rows = _build_bag_rows_for_candidate(order=order, lines=lines)
+    materialization_digest = _canonical_payload_digest(materialization_candidate)
     return {
         "bagging_result_id": _new_id("OBG"),
         "order_id": order.id,
@@ -2663,6 +2713,7 @@ def _build_bagging_result_payload(
         "template_version_id": saved_sheet.template_version_id,
         "status": "ready",
         "materialization_candidate": materialization_candidate,
+        "materialization_digest": materialization_digest,
         "summary": {
             "line_count": len(lines),
             "quantity_line_count": len(quantity_cells),
@@ -2696,6 +2747,14 @@ def _bagging_result_has_excluded_materialization_lines(bagging_result: object) -
 
 
 def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]) -> dict[str, Any]:
+    materialization_candidate = (
+        bagging_result.get("materialization_candidate")
+        if isinstance(bagging_result.get("materialization_candidate"), dict)
+        else None
+    )
+    materialization_digest = _normalize_id(bagging_result.get("materialization_digest")) or (
+        _canonical_payload_digest(materialization_candidate) if materialization_candidate is not None else None
+    )
     return {
         "output_bundle_id": _new_id("OOB"),
         "order_id": order.id,
@@ -2703,6 +2762,7 @@ def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]
         "source_saved_sheet_id": bagging_result.get("source_saved_sheet_id"),
         "source_ocr_result_id": bagging_result.get("source_ocr_result_id"),
         "template_version_id": bagging_result.get("template_version_id"),
+        "materialization_digest": materialization_digest,
         "status": "review_ready",
         "artifacts": [],
         "created_at": _now().isoformat(),
@@ -2741,8 +2801,8 @@ def _serialize_materialized_order_line(line: OrderLine) -> dict[str, Any]:
     }
 
 
-def _current_bagging_result(row: OrderWorkflowState) -> dict[str, Any] | None:
-    meta = _workflow_meta(row)
+def _current_bagging_result(session: Any, row: OrderWorkflowState) -> dict[str, Any] | None:
+    meta = _workflow_meta_with_step4_artifacts(session, row)
     result = meta.get("bagging_result")
     return dict(result) if isinstance(result, dict) else None
 
@@ -2956,13 +3016,15 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             materialization_candidate=materialization_candidate,
         )
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        order_output_artifact_service.save_bagging_result_artifact(session, payload=bagging_result)
+        order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
         meta = _workflow_meta(workflow)
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
-        meta["bagging_result"] = bagging_result
+        meta["bagging_result"] = None
         meta["anomaly_review_id"] = None
         meta["anomaly_review"] = None
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
-        meta["output_bundle"] = output_bundle
+        meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
         workflow.state = "output_review"
         workflow.headline = "袋分け結果と出力内容を確認してください"
@@ -3031,7 +3093,7 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
-        bagging_result = _current_bagging_result(workflow)
+        bagging_result = _current_bagging_result(session, workflow)
         if not bagging_result:
             return None, "bagging_result_required"
         if _bagging_result_has_excluded_materialization_lines(bagging_result):
@@ -3041,9 +3103,10 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
             return None, "bagging_result_template_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
-        meta["output_bundle"] = output_bundle
+        meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
         workflow.state = "output_review"
         workflow.headline = "出力内容を確認してください"
@@ -3064,7 +3127,7 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
-        bagging_result = _current_bagging_result(workflow)
+        bagging_result = _current_bagging_result(session, workflow)
         if not bagging_result:
             return None, "bagging_result_required"
         if _bagging_result_has_excluded_materialization_lines(bagging_result):
@@ -3074,9 +3137,10 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
             return None, "bagging_result_template_mismatch"
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
         meta = _workflow_meta(workflow)
         meta["output_bundle_id"] = output_bundle["output_bundle_id"]
-        meta["output_bundle"] = output_bundle
+        meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
         workflow.state = "output_review"
         workflow.headline = "出力内容を確認してください"
@@ -3097,7 +3161,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
-        meta = _workflow_meta(workflow)
+        meta = _workflow_meta_with_step4_artifacts(session, workflow)
         output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
         bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
         if not output_bundle:
@@ -3129,13 +3193,14 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             return None, "output_bundle_source_mismatch"
         if bagging_source_saved_sheet_id and bagging_source_saved_sheet_id != draft.id:
             return None, "bagging_result_source_mismatch"
-        materialization_candidate = (
-            bagging_result.get("materialization_candidate")
-            if isinstance(bagging_result.get("materialization_candidate"), dict)
-            else _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
-        )
+        materialization_candidate = bagging_result.get("materialization_candidate") if isinstance(bagging_result, dict) else None
         if not isinstance(materialization_candidate, dict):
-            return None, "saved_sheet_materialization_failed"
+            return None, "output_bundle_materialization_missing"
+        output_materialization_digest = _normalize_id(output_bundle.get("materialization_digest"))
+        if output_materialization_digest:
+            actual_materialization_digest = _canonical_payload_digest(materialization_candidate)
+            if actual_materialization_digest != output_materialization_digest:
+                return None, "output_bundle_materialization_mismatch"
         materialization_error = _normalize_id(materialization_candidate.get("error"))
         if materialization_error:
             return None, materialization_error
@@ -3182,6 +3247,9 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             order_id=order.id,
             template_version_id=draft_template_version_id or workflow_template_version_id or None,
             draft_id=draft.id,
+            saved_sheet_id=draft.id,
+            bagging_result_id=bagging_result_id,
+            output_bundle_id=_normalize_id(output_bundle.get("output_bundle_id")),
             snapshot_digest=digest,
             snapshot_json=snapshot_json,
             confirmed_by=_normalize_id(confirmed_by) or None,
@@ -3193,7 +3261,12 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         for line in materialized_lines:
             line.confirmed_snapshot_id = snapshot.id
         output_bundle = {**output_bundle, "confirmed_snapshot_id": snapshot.id}
-        meta["output_bundle"] = output_bundle
+        order_output_artifact_service.replace_output_bundle_payload(
+            session,
+            artifact_id=_normalize_id(output_bundle.get("output_bundle_id")) or "",
+            payload=output_bundle,
+        )
+        meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
         workflow.confirmed_snapshot_id = snapshot.id
         workflow.state = "confirmed"
@@ -3241,7 +3314,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             _recover_confirmed_artifacts_from_snapshot(
                 order=order,
                 workflow=workflow,
-                meta=_workflow_meta(workflow),
+                meta=_workflow_meta_with_step4_artifacts(session, workflow),
                 session=session,
                 saved_sheet=draft if workflow is not None and workflow.draft_id else None,
             )

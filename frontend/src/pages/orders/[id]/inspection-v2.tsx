@@ -66,9 +66,9 @@ const stateLabel = (state?: string | null) => {
     ocr_completed: "Step2: OCR選択待ち",
     ocr_selected: "Step3: 正解OCR選択済み",
     sheet_saved: "Step3完了: シート保存済み",
-    bagging_ready: "Step4: 袋分け確認",
-    bagging_confirmed: "Step4完了: 出力確認待ち",
-    output_review: "Step5: 出力確認",
+    bagging_ready: "Step4: 出力確認",
+    bagging_confirmed: "Step4: 出力確認",
+    output_review: "Step4: 出力確認",
     confirmed: "確定済み",
   };
   return labels[normalized] || normalized || "未開始";

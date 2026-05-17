@@ -653,8 +653,8 @@ const stateLabel = (state?: string | null) => {
     ocr_failed: "Step1要対応: OCR失敗",
     ocr_selected: "Step2完了: 正解OCR選択済み",
     sheet_saved: "Step3完了: シート保存済み",
-    bagging_ready: "Step4: 袋分け確認",
-    bagging_confirmed: "Step4: 出力確認待ち",
+    bagging_ready: "Step4: 出力確認",
+    bagging_confirmed: "Step4: 出力確認",
     output_review: "Step4: 出力確認",
     confirmed: "確定済み",
   };
@@ -693,7 +693,7 @@ const baseStepLabels = [
   { step: 1, label: "PDF/施設/週次" },
   { step: 2, label: "OCR選択" },
   { step: 3, label: "シート編集" },
-  { step: 4, label: "袋分け・出力確認" },
+  { step: 4, label: "出力確認" },
 ];
 
 const formatFacilityLabel = (facility: FacilityOption) => {
@@ -2746,7 +2746,7 @@ export default function OrderWorkflowV2Page() {
     runAction("Step4 bagging", async () => {
       await apiClient.post(`/orders/${orderId}/workflow-v2/bagging`);
     }, {
-      successMessage: "袋分け結果と出力確認を作成しました",
+      successMessage: "出力確認を作成しました",
     });
 
   const runAnomalyReview = () =>
@@ -2774,33 +2774,9 @@ export default function OrderWorkflowV2Page() {
     setSheetReviewConfirmed(true);
   };
 
-  const confirmBagging = () =>
-    runAction(
-      "Step4 bagging confirm",
-      async () => {
-        await apiClient.post(`/orders/${orderId}/workflow-v2/bagging/confirm`);
-      },
-      {
-        successMessage: "袋分けを確定しました",
-        nextStep: 4,
-      },
-    );
-
-  const prepareOutputReview = () =>
-    runAction(
-      "Step5 output review",
-      async () => {
-        await apiClient.post(`/orders/${orderId}/workflow-v2/outputs/review`);
-      },
-      {
-        successMessage: "出力確認を作成しました",
-        nextStep: 4,
-      },
-    );
-
   const finalConfirm = () =>
     runAction(
-      "Step5 final confirm",
+      "Step4 final confirm",
       async () => {
         await apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
           confirmed_by: "operator",
@@ -4360,20 +4336,21 @@ export default function OrderWorkflowV2Page() {
           <p className="step-tag">Step4</p>
           <header className="panel-header">
             <div>
-              <h2>袋分け結果</h2>
-              <p className="subtle">保存済みシートから作成した袋分け対象を、日付ごとに確認します。</p>
+              <h2>出力確認</h2>
+              <p className="subtle">袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。</p>
             </div>
             <div className="row-actions">
               <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
-                袋分けを計算
+                出力確認を作成
               </button>
-              <button className="btn" type="button" onClick={confirmBagging} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
-                袋分けを確定
+              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || !workflow?.output_bundle_id)}>
+                確定して一覧にもどる
               </button>
             </div>
           </header>
           {inspection?.bagging_result ? (
             <div className="result-summary">
+              <h3>袋分け結果</h3>
               <div className="summary-grid summary-grid--compact">
                 <div className="summary-primary-card">
                   <span className="field-label">対象行</span>
@@ -4447,31 +4424,12 @@ export default function OrderWorkflowV2Page() {
             </div>
           ) : (
             <div className="empty-result-panel">
-              <p className="subtle">袋分け結果はまだありません。保存済みシートから袋分けを計算してください。</p>
+              <p className="subtle">出力確認はまだ作成されていません。保存済みシートから出力確認を作成してください。</p>
             </div>
           )}
-        </section>
-        ) : null}
-
-        {visibleStep === 4 ? (
-        <section className="panel">
-          <p className="step-tag">Step4</p>
-          <header className="panel-header">
-            <div>
-              <h2>出力確認</h2>
-              <p className="subtle">出力対象を確認して、問題なければ注文を確定します。</p>
-            </div>
-            <div className="row-actions">
-              <button className="btn" type="button" onClick={prepareOutputReview} disabled={Boolean(busy || !workflow?.bagging_result_id)}>
-                出力確認を作成
-              </button>
-              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || !workflow?.output_bundle_id)}>
-                確定して一覧にもどる
-              </button>
-            </div>
-          </header>
           {inspection?.output_bundle ? (
             <div className="result-summary">
+              <h3>出力</h3>
               <div className="summary-grid summary-grid--compact">
                 <div className="summary-primary-card">
                   <span className="field-label">出力状態</span>
@@ -4552,7 +4510,7 @@ export default function OrderWorkflowV2Page() {
             </div>
           ) : (
             <div className="empty-result-panel">
-              <p className="subtle">出力確認はまだ作成されていません。袋分けを確定してから、出力確認を作成してください。</p>
+              <p className="subtle">出力確認はまだ作成されていません。保存済みシートから出力確認を作成してください。</p>
             </div>
           )}
         </section>

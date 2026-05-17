@@ -163,3 +163,15 @@ def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
         detail = response.json()["detail"]
         assert detail["error"] == "legacy_order_workflow_disabled"
         assert detail["replacement"] == "workflow-v2"
+
+
+def test_workflow_v2_split_step4_endpoints_are_retired() -> None:
+    client = TestClient(app)
+
+    for path in (
+        "/orders/ORDcontract/workflow-v2/bagging/confirm",
+        "/orders/ORDcontract/workflow-v2/outputs/review",
+    ):
+        response = client.post(path, json={})
+        assert response.status_code == 410
+        assert response.json()["detail"] == "workflow_v2_step4_unified_use_bagging"

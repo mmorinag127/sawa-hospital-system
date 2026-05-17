@@ -12,6 +12,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.facility import Facility
 from src.models.ocr_job import OcrJob
@@ -307,6 +308,14 @@ def test_workflow_v2_get_endpoints_do_not_create_workflow_rows() -> None:
 
     sheet_source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
     assert sheet_source is None
+    assert error == "workflow_not_initialized"
+
+    quad_review, error = order_workflow_v2_service.get_quad_review(order_id)
+    assert quad_review is None
+    assert error == "workflow_not_initialized"
+
+    header_axis_review, error = order_workflow_v2_service.get_header_axis_review(order_id)
+    assert header_axis_review is None
     assert error == "workflow_not_initialized"
 
     inspection, error = order_workflow_v2_service.get_inspection(order_id)
@@ -1763,11 +1772,23 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
     assert bagging["workflow"]["state"] == "output_review"
     assert bagging["bagging_result"]["source_saved_sheet_id"] == saved_sheet_id
     assert bagging["output_bundle"]["source_bagging_result_id"] == bagging["bagging_result"]["bagging_result_id"]
+    assert bagging["bagging_result"]["materialization_digest"]
+    assert bagging["output_bundle"]["materialization_digest"] == bagging["bagging_result"]["materialization_digest"]
     assert bagging["bagging_result"]["summary"]["total_quantity"] == 75.0
     assert bagging["bagging_result"]["summary"]["quantity_line_count"] == 2
     assert bagging["bagging_result"]["summary"]["bag_row_count"] >= 1
     assert bagging["bagging_result"]["bag_rows"]
     assert "anomaly_review" not in bagging["bagging_result"]
+    with session_scope() as session:
+        bagging_artifact = session.get(OrderBaggingResult, bagging["bagging_result"]["bagging_result_id"])
+        output_artifact = session.get(OrderOutputBundle, bagging["output_bundle"]["output_bundle_id"])
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert bagging_artifact is not None
+        assert output_artifact is not None
+        assert bagging_artifact.payload_json["source_saved_sheet_id"] == saved_sheet_id
+        assert output_artifact.source_bagging_result_id == bagging_artifact.id
+        assert workflow.secondary_actions_json["workflow_v2"]["bagging_result"] is None
+        assert workflow.secondary_actions_json["workflow_v2"]["output_bundle"] is None
 
 
 def test_workflow_v2_sheet_auto_edit_ignores_ocr_values() -> None:
@@ -2217,12 +2238,52 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert snapshot is not None
         assert snapshot.snapshot_json["source"] == "workflow_v2"
         assert snapshot.snapshot_json["bagging_result"]["bagging_result_id"] == bagging_result_id
+        assert snapshot.saved_sheet_id == snapshot.draft_id
+        assert snapshot.bagging_result_id == bagging_result_id
+        assert snapshot.output_bundle_id == snapshot.snapshot_json["output_bundle"]["output_bundle_id"]
+        output_artifact = session.get(OrderOutputBundle, snapshot.snapshot_json["output_bundle"]["output_bundle_id"])
+        assert output_artifact is not None
+        assert output_artifact.payload_json["confirmed_snapshot_id"] == snapshot.id
         lines = session.query(OrderLine).filter(OrderLine.order_id == order_id).all()
         assert len(lines) == 1
         assert lines[0].confirmed_snapshot_id == snapshot.id
         assert isinstance(lines[0].line_digest, str) and len(lines[0].line_digest) == 64
         assert snapshot.snapshot_json["order_lines"][0]["line_digest"] == lines[0].line_digest
         assert session.get(Order, order_id).status == "確定"
+
+
+def test_step4_final_confirm_blocks_materialization_digest_drift(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    assert error is None
+    assert bagging["output_bundle"]["materialization_digest"]
+
+    with session_scope() as session:
+        output_artifact = session.get(OrderOutputBundle, bagging["output_bundle"]["output_bundle_id"])
+        assert output_artifact is not None
+        output_bundle = dict(output_artifact.payload_json)
+        output_bundle["materialization_digest"] = "stale-digest"
+        output_artifact.payload_json = output_bundle
+
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+
+    assert confirmed is None
+    assert error == "output_bundle_materialization_mismatch"
 
 
 def test_confirmed_workflow_recovers_bagging_artifacts_from_snapshot(monkeypatch) -> None:
@@ -2491,10 +2552,11 @@ def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
         row = session.get(OrderWorkflowState, order_id)
         assert row is not None
         meta = order_workflow_v2_service._workflow_meta(row)
-        output_bundle = dict(meta["output_bundle"])
+        output_artifact = session.get(OrderOutputBundle, meta["output_bundle_id"])
+        assert output_artifact is not None
+        output_bundle = dict(output_artifact.payload_json)
         output_bundle["source_saved_sheet_id"] = _id("ODSstale")
-        meta["output_bundle"] = output_bundle
-        row.secondary_actions_json = {order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta}
+        output_artifact.payload_json = output_bundle
 
     workflow, error = order_workflow_v2_service.get_workflow(order_id)
 
@@ -2502,6 +2564,39 @@ def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
     assert workflow["state"] == "output_bundle_source_mismatch"
     assert workflow["primary_action"] == "final_confirm"
     assert workflow["blockers"] == ["output_bundle_source_mismatch"]
+
+
+def test_output_review_blocks_when_output_bundle_artifact_row_is_missing(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    assert error is None
+
+    with session_scope() as session:
+        output_artifact = session.get(OrderOutputBundle, bagging["output_bundle"]["output_bundle_id"])
+        assert output_artifact is not None
+        session.delete(output_artifact)
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "output_bundle_artifact_missing"
+    assert workflow["primary_action"] == "run_bagging"
+    assert workflow["blockers"] == ["output_bundle_artifact_missing"]
 
 
 def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeypatch) -> None:

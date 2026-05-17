@@ -1883,12 +1883,12 @@ def run_order_workflow_v2_sheet_anomaly_review(order_id: str, body: WorkflowV2Sh
 
 @router.post("/{order_id}/workflow-v2/bagging/confirm", dependencies=[Depends(require_role("operator"))])
 def confirm_order_workflow_v2_bagging(order_id: str):
-    return _workflow_v2_or_404(order_workflow_v2_service.confirm_bagging(order_id))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="workflow_v2_step4_unified_use_bagging")
 
 
 @router.post("/{order_id}/workflow-v2/outputs/review", dependencies=[Depends(require_role("operator"))])
 def prepare_order_workflow_v2_output_review(order_id: str):
-    return _workflow_v2_or_404(order_workflow_v2_service.prepare_output_review(order_id))
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail="workflow_v2_step4_unified_use_bagging")
 
 
 @router.post("/{order_id}/workflow-v2/confirm", dependencies=[Depends(require_role("operator"))])
