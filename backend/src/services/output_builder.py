@@ -4625,8 +4625,10 @@ def _prepare_output_context(
     )
     order_for_outputs = {**order, "lines": order_lines}
 
-    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+    raw_bags = _build_bags(order_for_outputs, packaging_policy, quantity_rules)
     bag_types = _resolve_bag_types(facility_config)
+    label_bags = _assign_bag_type_for_bags(raw_bags, bag_types)
+    bags = _split_bags_by_max(raw_bags)
     bags = _assign_bag_type_for_bags(bags, bag_types)
     delivery_source_for_outputs = {**order, "lines": bags}
     return {
@@ -4638,7 +4640,8 @@ def _prepare_output_context(
         "order_lines": order_lines,
         "order_for_outputs": order_for_outputs,
         "delivery_source_for_outputs": delivery_source_for_outputs,
-        "bags": bags,
+        "bags": label_bags,
+        "delivery_bags": bags,
     }
 
 
