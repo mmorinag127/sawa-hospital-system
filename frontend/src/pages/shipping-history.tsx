@@ -1096,7 +1096,10 @@ export default function ShippingHistoryPage() {
                             ) : null}
                           </>
                         ) : (
-                          <span className="calendar-day-empty">-</span>
+                          <>
+                            <span className="calendar-day-main empty-count">0件</span>
+                            <span className="calendar-day-summary muted">完了 0 / 未完了 0</span>
+                          </>
                         )}
                       </button>
                     );
@@ -1693,6 +1696,10 @@ export default function ShippingHistoryPage() {
           line-height: 1.15;
         }
 
+        .calendar-day-main.empty-count {
+          color: #8b9590;
+        }
+
         .calendar-day-summary,
         .calendar-day-alert {
           font-size: 12px;
@@ -1708,12 +1715,6 @@ export default function ShippingHistoryPage() {
           margin-top: auto;
           color: #7a3d2d;
           font-weight: 700;
-        }
-
-        .calendar-day-empty {
-          margin-top: auto;
-          color: #a2aaa6;
-          font-size: 13px;
         }
 
         .calendar-undated {

@@ -138,7 +138,8 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
   await expect(page.getByRole("heading", { name: "2026年3月" })).toBeVisible();
   await expect(page.getByTestId("shipping-calendar")).toBeVisible();
   await expect(page.locator(".calendar-weekdays")).toContainText("日月火水木金土");
-  await expect(page.getByTestId("shipping-empty-day").first()).toBeVisible();
+  await expect(page.getByTestId("shipping-empty-day").first()).toContainText("0件");
+  await expect(page.getByTestId("shipping-empty-day").first()).toContainText("完了 0 / 未完了 0");
   const firstDateGroup = page.getByTestId("shipping-date-group").filter({ hasText: "3件" }).first();
   await expect(page.getByTestId("shipping-date-group").filter({ hasText: "1件" })).toBeVisible();
   await expect(firstDateGroup).toContainText("3件");
