@@ -4156,7 +4156,8 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
                 order_id,
                 include_bags=False,
                 include_ocr_menu_meta=False,
-                include_expanded_copy=True,
+                include_expanded_copy=False,
+                allow_stale_draft_lines=True,
             )
             for line in ctx.get("order_lines") or []:
                 if _ensure_date(line.get("date")) != current_date:
@@ -4559,6 +4560,7 @@ def _prepare_output_context(
     include_bags: bool = True,
     include_ocr_menu_meta: bool = True,
     include_expanded_copy: bool = True,
+    allow_stale_draft_lines: bool = False,
 ) -> dict:
     order = get_order_by_id(order_id)
     if not order:
@@ -4575,7 +4577,11 @@ def _prepare_output_context(
     invoice_template = facility_config.get("invoice_template", {})
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
 
-    order_lines = build_order_lines_for_outputs(order)
+    order_lines = build_order_lines_for_outputs(
+        order,
+        include_expanded_copy=include_expanded_copy,
+        allow_stale_draft_lines=allow_stale_draft_lines,
+    )
     order_for_outputs = {**order, "lines": order_lines}
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
@@ -4601,12 +4607,14 @@ def _prepare_output_context_for_bundle(
     include_bags: bool = True,
     include_ocr_menu_meta: bool = True,
     include_expanded_copy: bool = True,
+    allow_stale_draft_lines: bool = False,
 ) -> dict:
     return _prepare_output_context(
         order_id,
         include_bags=include_bags,
         include_ocr_menu_meta=include_ocr_menu_meta,
         include_expanded_copy=include_expanded_copy,
+        allow_stale_draft_lines=allow_stale_draft_lines,
     )
 
 
