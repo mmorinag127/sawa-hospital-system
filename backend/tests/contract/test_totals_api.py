@@ -348,6 +348,57 @@ def test_totals_can_include_order_refs_for_debug():
     assert all("facility_name" in item for item in refs)
 
 
+def test_totals_splits_main_garnish_menu_and_keeps_facility_refs():
+    order_service.clear_all()
+    month_id = "2026-03"
+    menu_csv = "menu\n鶏唐揚げ 添)ブロッコリー\n".encode("utf-8")
+    menu_service.create_menu(month_id, menu_csv, "menu.csv")
+    menu_item = menu_service.create_item_stub(month_id, "鶏唐揚げ 添)ブロッコリー")
+    menu_service.update_item(
+        month_id,
+        menu_item["id"],
+        {"qty_per_serving": 2, "unit_type": "個", "daypart": "夕食", "category": "主菜"},
+    )
+    order = order_service.create_order_from_ingest(
+        IngestEmailPayload(
+            message_id=f"msg-totals-garnish-{uuid4().hex[:8]}",
+            pdf_uri="file://dummy-totals-garnish.pdf",
+            received_at=datetime(2026, 3, 24, 9, 0, 0),
+            facility_hint="FAC00001",
+            week_hint=month_id,
+        ),
+        lines=[
+            {
+                "date": "2026-03-24",
+                "daypart": "夕",
+                "menu_name": "鶏唐揚げ 添)ブロッコリー",
+                "diet_type": "regular",
+                "area_id": "X",
+                "bag_type": "standard",
+                "quantity_original": 31,
+            }
+        ],
+    )
+    order_service.set_status(order["id"], "確定")
+
+    client = TestClient(app)
+    res = client.get("/totals?date=2026-03-24&include_order_refs=true")
+
+    assert res.status_code == 200
+    rows = res.json()["rows"]
+    assert not any(item.get("menu_name") == "鶏唐揚げ 添)ブロッコリー" for item in rows)
+    main = next(item for item in rows if item.get("menu_name") == "鶏唐揚げ")
+    garnish = next(item for item in rows if item.get("menu_name") == "ブロッコリー")
+    assert main["menu_category"] == "主菜"
+    assert main["quantity"] == 31.0
+    assert garnish["menu_category"] == "添え"
+    assert garnish["quantity"] == 31.0
+    assert [
+        (item["facility_id"], item["source_diet_type"], item["quantity"])
+        for item in garnish["order_refs"]
+    ] == [("FAC00001", "regular", 31.0)]
+
+
 def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
     order_service.clear_all()
     _reset_facilities_from_master()

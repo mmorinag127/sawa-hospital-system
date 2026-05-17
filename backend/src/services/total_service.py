@@ -52,8 +52,15 @@ def _resolve_facility_name(facility_id: object) -> str:
     try:
         facility_config = config_service.get_facility_config(facility_code) or {}
     except Exception:
+        facility_config = {}
+    name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
+    if name:
+        return name
+    try:
+        facility = config_service.get_facility_by_id(facility_code) or {}
+    except Exception:
         return ""
-    return str(facility_config.get("facility_name") or "").strip()
+    return str(facility.get("facility_name") or facility.get("name") or "").strip()
 
 
 def _serialize_order_refs(order_refs: dict[tuple[str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:

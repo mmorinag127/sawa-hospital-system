@@ -108,6 +108,17 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
               menu_name: "ホイコーロー",
               diet_type: "regular",
               quantity: 220,
+              order_refs: [
+                {
+                  order_id: "ORD-DAILY-001",
+                  facility_id: "FAC-001",
+                  facility_name: "施設A",
+                  source_diet_type: "regular",
+                  aggregated_diet_type: "regular",
+                  area_id: "2F",
+                  quantity: 220,
+                },
+              ],
             },
           ],
         },
@@ -132,6 +143,7 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
   await expect(bagTable.getByRole("cell", { name: "100g/人" })).toBeVisible();
   await expect(page.locator(".bag-breakdown-ref").first()).toContainText("施設A (FAC-001) / 2F / 220食");
   await expect(page.locator(".bag-breakdown-ref .link").first()).toHaveAttribute("href", "/orders/ORD-DAILY-001");
+  await expect(page.locator(".total-facility-summary").first()).toContainText("施設A (FAC-001): 220");
 });
 
 test("daily delivery notes can save facility-level portion overrides and reflect them in the list", async ({ page }) => {

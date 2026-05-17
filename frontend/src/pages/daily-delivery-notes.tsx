@@ -312,6 +312,29 @@ const formatBagOrderRef = (value: NonNullable<DailyBagBreakdown["order_refs"]>[n
   return parts.join(" / ");
 };
 
+const formatTotalFacilityBreakdown = (refs: NonNullable<TotalRow["order_refs"]>) => {
+  if (!refs.length) return "-";
+  const buckets = new Map<string, { label: string; quantity: number }>();
+  refs.forEach((ref) => {
+    const facilityId = String(ref.facility_id || "").trim();
+    const facilityName = String(ref.facility_name || "").trim();
+    const label = facilityName
+      ? `${facilityName}${facilityId ? ` (${facilityId})` : ""}`
+      : facilityId || String(ref.order_id || "未確定");
+    const key = facilityId || facilityName || String(ref.order_id || "");
+    const current = buckets.get(key) || { label, quantity: 0 };
+    const quantity = Number(ref.quantity);
+    if (Number.isFinite(quantity)) {
+      current.quantity += quantity;
+    }
+    buckets.set(key, current);
+  });
+  return Array.from(buckets.values())
+    .sort((left, right) => left.label.localeCompare(right.label, "ja"))
+    .map((item) => `${item.label}: ${formatQuantity(item.quantity)}`)
+    .join(" / ");
+};
+
 const extractFilename = (value?: string | null) => {
   if (!value) return "";
   const match = value.match(/filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i);
@@ -1442,6 +1465,7 @@ export default function DailyDeliveryNotesPage() {
                         <td>{formatDietType(row.diet_type)}</td>
                         <td className="numeric">{formatQuantity(row.quantity)}</td>
                         <td>
+                          <span className="total-facility-summary">{formatTotalFacilityBreakdown(refs)}</span>
                           <button
                             className="btn ghost total-breakdown-toggle"
                             type="button"
@@ -2101,8 +2125,17 @@ export default function DailyDeliveryNotesPage() {
         }
 
         .total-breakdown-toggle {
+          margin-top: 6px;
           padding: 6px 10px;
           font-size: 12px;
+        }
+
+        .total-facility-summary {
+          display: block;
+          max-width: 420px;
+          font-size: 12px;
+          line-height: 1.55;
+          color: #3f4d48;
         }
 
         .total-breakdown-row {
