@@ -7337,6 +7337,7 @@ def get_daily_bag_summary(
             continue
         order_lines = build_order_lines_for_outputs(
             order_payload,
+            include_expanded_copy=not allow_stale_draft_lines,
             allow_stale_draft_lines=allow_stale_draft_lines,
         )
         amount_stats = _build_daily_bag_amount_stats(order_lines)
@@ -10787,6 +10788,7 @@ def _build_canonical_bootstrap_sheet(
     evidence_run_override: dict[str, Any] | None = None,
     include_menu_diagnostics: bool = True,
     augment_candidate_resolution: bool = True,
+    prefer_ocr_payload_quantities: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     order_payload = get_order_by_id(order_id)
     if not isinstance(order_payload, dict):
@@ -10881,7 +10883,7 @@ def _build_canonical_bootstrap_sheet(
         if include_menu_diagnostics
         else {}
     )
-    order_lines = _load_sheet_order_lines(order_id)
+    order_lines = [] if prefer_ocr_payload_quantities else _load_sheet_order_lines(order_id)
     entries, source = _build_sheet_menu_entries(
         order_id=order_id,
         week_id=resolved_week_id,

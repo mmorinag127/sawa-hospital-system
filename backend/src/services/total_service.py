@@ -77,6 +77,7 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
         order_payload = serialize_order(order)
         order_lines = output_builder.build_order_lines_for_outputs(
             order_payload,
+            include_expanded_copy=False,
             allow_stale_draft_lines=True,
         )
         order_id = str(order_payload.get("id") or order.id or "").strip()
