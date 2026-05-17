@@ -125,7 +125,7 @@ def download_daily_bundle(
             target_date,
             bundle_type=normalized_bundle_type,
             status=status,
-            include_weight_workbook=include_weight_workbook,
+            include_weight_workbook=False,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

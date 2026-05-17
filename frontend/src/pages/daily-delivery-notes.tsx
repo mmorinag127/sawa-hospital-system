@@ -942,14 +942,14 @@ export default function DailyDeliveryNotesPage() {
     }
     const label =
       bundleType === "labels"
-        ? "当日ラベルExcel＋重量表"
+        ? "当日ラベルExcel"
         : bundleType === "delivery"
-          ? "当日納品書Excel＋重量表"
-          : "当日一括Excel（ラベル+納品書+重量表）";
+          ? "当日納品書Excel"
+          : "当日一括Excel（ラベル+納品書）";
     setMessage(`${label}を作成中です...`);
     try {
       const res = await apiClient.get("/outputs/daily-bundle", {
-        params: { date, bundle_type: bundleType, status: status || undefined, include_weight_workbook: true },
+        params: { date, bundle_type: bundleType, status: status || undefined },
         responseType: "blob",
         timeout: 0,
       });
