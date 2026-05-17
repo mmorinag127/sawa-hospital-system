@@ -779,6 +779,8 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
         if entry.get("category"):
             updated["menu_category"] = entry.get("category")
+        if entry.get("slot_index") is not None:
+            updated["slot_index"] = entry.get("slot_index")
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
     return enriched
@@ -3924,10 +3926,36 @@ def _normalize_weekly_weight_slot(value: Any) -> str:
 
 
 def _weekly_weight_slot_for_line(line: dict) -> str:
+    daypart = _normalize_output_daypart(line.get("daypart"))
+    try:
+        slot_index = int(line.get("slot_index"))
+    except (TypeError, ValueError):
+        slot_index = 0
+    if slot_index:
+        if daypart == "朝":
+            return {1: "副①", 2: "副②"}.get(slot_index, "")
+        if daypart == "昼":
+            return {1: "主Ａ", 2: "副①", 3: "副②"}.get(slot_index, "")
+        if daypart == "夕":
+            return {1: "主", 2: "副①", 3: "副②"}.get(slot_index, "")
     for key in ("menu_category", "slot_label", "category", "menu_slot", "_menu_slot_label"):
         slot = _normalize_weekly_weight_slot(line.get(key))
         if slot:
             return slot
+    return ""
+
+
+def _weekly_weight_slot_from_index(daypart: str, slot_index: object) -> str:
+    try:
+        index = int(slot_index)
+    except (TypeError, ValueError):
+        return ""
+    if daypart == "朝":
+        return {1: "副①", 2: "副②"}.get(index, "")
+    if daypart == "昼":
+        return {1: "主Ａ", 2: "副①", 3: "副②"}.get(index, "")
+    if daypart == "夕":
+        return {1: "主", 2: "副①", 3: "副②"}.get(index, "")
     return ""
 
 
@@ -4050,9 +4078,19 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
         workbook = load_workbook(reference_layout)
         ws = workbook.worksheets[0]
         ws.title = _weekly_weight_sheet_title(week_start)
-        setattr(workbook, "_weekly_weight_reference_layout", True)
+        reference_display_cells = {}
         for row_idx in range(11, 67):
-            for col_idx in range(3, 10):
+            row_display = {}
+            for col_idx in (4, 6, 8, 9):
+                value = ws.cell(row=row_idx, column=col_idx).value
+                if value not in (None, ""):
+                    row_display[col_idx] = value
+            if row_display:
+                reference_display_cells[row_idx] = row_display
+        setattr(workbook, "_weekly_weight_reference_layout", True)
+        setattr(workbook, "_weekly_weight_reference_display_cells", reference_display_cells)
+        for row_idx in range(11, 67):
+            for col_idx in range(4, 10):
                 cell = ws.cell(row=row_idx, column=col_idx)
                 if not isinstance(cell, MergedCell):
                     cell.value = None
@@ -4182,59 +4220,112 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
 
 
 def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = None) -> dict[tuple[dt_date, str, str], dict]:
+    from sqlalchemy import select
+
+    from src.models.order import Order
+
     week_start = _weekly_weight_start(target_date)
     week_dates = {week_start + timedelta(days=offset) for offset in range(7)}
+    month_ids = {f"{current_date.year:04d}-{current_date.month:02d}" for current_date in week_dates}
+    menu_entry_slots: dict[tuple[dt_date, str, str], str] = {}
+    for month_id in month_ids:
+        try:
+            menu_entries = menu_service.get_menu_entries_for_facility(month_id, None)
+        except Exception:  # noqa: BLE001
+            menu_entries = []
+        for entry in menu_entries:
+            entry_date = _ensure_date(entry.get("menu_date"))
+            if entry_date not in week_dates:
+                continue
+            entry_daypart = _normalize_output_daypart(entry.get("daypart"))
+            entry_name = _normalize_menu_key(entry.get("name"))
+            entry_slot = _weekly_weight_slot_from_index(entry_daypart, entry.get("slot_index"))
+            if entry_daypart and entry_name and entry_slot:
+                menu_entry_slots[(entry_date, entry_daypart, entry_name)] = entry_slot
     rows: dict[tuple[dt_date, str, str], dict] = {}
-    order_ids: dict[str, None] = {}
-    for current_date in week_dates:
-        for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
-            order_id = str(order_summary.get("id") or "").strip()
-            if order_id:
-                order_ids.setdefault(order_id, None)
-    for order_id in order_ids:
-        ctx = _prepare_output_context_for_bundle(
-            order_id,
-            include_bags=False,
-            include_ocr_menu_meta=False,
-            include_expanded_copy=False,
-            allow_stale_draft_lines=True,
-        )
-        for line in ctx.get("order_lines") or []:
-            current_date = _ensure_date(line.get("date"))
-            if current_date not in week_dates:
-                continue
-            quantity = _safe_qty(line, True)
-            try:
-                quantity_value = float(quantity)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(quantity_value) or quantity_value <= 0:
-                continue
-            daypart = _normalize_output_daypart(line.get("daypart"))
-            slot = _weekly_weight_slot_for_line(line)
-            if not daypart or not slot:
-                continue
-            row = rows.setdefault(
-                (current_date, daypart, slot),
-                {
-                    "regular_menu": "",
-                    "regular_quantity": 0.0,
-                    "regular_amounts": {},
-                    "soft_mixer_menu": "",
-                    "soft_mixer_quantity": 0.0,
-                    "soft_mixer_amounts": {},
-                },
+    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+    zero_as_empty = quantity_rules.get("zero_as_empty", True)
+    try:
+        with session_scope() as session:
+            query = select(Order)
+            if status:
+                query = query.where(Order.status == status)
+            else:
+                query = query.where(Order.status == "確定")
+            orders = session.execute(query).scalars().all()
+            order_payloads = [order_service.serialize_order(order) for order in orders]
+        source_lines = [
+            line
+            for order_payload in order_payloads
+            for line in build_order_lines_for_outputs(
+                order_payload,
+                include_expanded_copy=False,
+                allow_stale_draft_lines=True,
             )
-            diet = _normalize_diet_key(line.get("diet_type")) or ""
-            menu_name = str(line.get("menu_name") or "").strip()
-            if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
-                row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
-                row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
-                _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
-            elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
-                row["regular_menu"] = row["regular_menu"] or menu_name
-                row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
-                _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
+        ]
+    except Exception:  # noqa: BLE001
+        order_ids: dict[str, None] = {}
+        for current_date in week_dates:
+            for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
+                order_id = str(order_summary.get("id") or "").strip()
+                if order_id:
+                    order_ids.setdefault(order_id, None)
+        source_lines = []
+        for order_id in order_ids:
+            ctx = _prepare_output_context_for_bundle(
+                order_id,
+                include_bags=False,
+                include_ocr_menu_meta=False,
+                include_expanded_copy=False,
+                allow_stale_draft_lines=True,
+            )
+            ctx_lines = list(ctx.get("order_lines") or [])
+            ctx_dates = {_ensure_date(line.get("date")) for line in ctx_lines}
+            ctx_dates.discard(None)
+            if len(ctx_dates) > 1:
+                source_lines = ctx_lines
+                break
+            source_lines.extend(ctx_lines)
+    for line in source_lines:
+        current_date = _ensure_date(line.get("date"))
+        if current_date not in week_dates:
+            continue
+        quantity = _safe_qty(line, zero_as_empty)
+        try:
+            quantity_value = float(quantity)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(quantity_value) or quantity_value <= 0:
+            continue
+        daypart = _normalize_output_daypart(line.get("daypart"))
+        slot = _weekly_weight_slot_for_line(line)
+        menu_name_key = _normalize_menu_key(line.get("menu_name"))
+        entry_slot = menu_entry_slots.get((current_date, daypart, menu_name_key))
+        if entry_slot and slot not in dict(_WEEKLY_WEIGHT_DAYPART_SLOTS).get(daypart, []):
+            slot = entry_slot
+        if not daypart or not slot:
+            continue
+        row = rows.setdefault(
+            (current_date, daypart, slot),
+            {
+                "regular_menu": "",
+                "regular_quantity": 0.0,
+                "regular_amounts": {},
+                "soft_mixer_menu": "",
+                "soft_mixer_quantity": 0.0,
+                "soft_mixer_amounts": {},
+            },
+        )
+        diet = _normalize_diet_key(line.get("diet_type")) or ""
+        menu_name = str(line.get("menu_name") or "").strip()
+        if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
+            row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
+            row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
+            _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
+        elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
+            row["regular_menu"] = row["regular_menu"] or menu_name
+            row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
+            _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
     return rows
 
 
@@ -4248,6 +4339,7 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
     uses_reference_layout = bool(getattr(workbook, "_weekly_weight_reference_layout", False))
     row_idx = 11
     weekdays = ["(月)", "(火)", "（水）", "(木)", "(金)", "(土)", "（日）"]
+    reference_display_cells = getattr(workbook, "_weekly_weight_reference_display_cells", {})
     for offset in range(7):
         current_date = week_start + timedelta(days=offset)
         day_start = row_idx
@@ -4256,14 +4348,24 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             for slot in slots:
                 payload = rows_by_key.get((current_date, daypart, slot), {})
                 ws.cell(row=row_idx, column=3).value = slot
-                ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or None
+                reference_row = reference_display_cells.get(row_idx, {}) if isinstance(reference_display_cells, dict) else {}
+                ws.cell(row=row_idx, column=4).value = (
+                    reference_row.get(4)
+                    or payload.get("regular_menu")
+                    or payload.get("soft_mixer_menu")
+                    or None
+                )
                 ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
-                ws.cell(row=row_idx, column=6).value = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
+                regular_amount = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
+                ws.cell(row=row_idx, column=6).value = reference_row.get(6) if isinstance(reference_row.get(6), str) else regular_amount
                 ws.cell(row=row_idx, column=7).value = payload.get("soft_mixer_quantity") if payload else None
-                ws.cell(row=row_idx, column=8).value = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
+                soft_amount = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
+                ws.cell(row=row_idx, column=8).value = reference_row.get(8) if isinstance(reference_row.get(8), str) else soft_amount
                 soft_menu = payload.get("soft_mixer_menu") or ""
                 regular_menu = payload.get("regular_menu") or ""
-                ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else None
+                ws.cell(row=row_idx, column=9).value = reference_row.get(9) or (
+                    soft_menu if soft_menu and soft_menu != regular_menu else None
+                )
                 row_idx += 1
             if not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart
