@@ -150,6 +150,13 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}{uuid4().hex[:16]}"
 
 
+def _derived_id(prefix: str, *parts: object) -> str:
+    digest = hashlib.sha256(
+        json.dumps([str(part or "") for part in parts], ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return f"{prefix}{digest[:16]}"
+
+
 def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
     try:
         start_date = date.fromisoformat(week_start)
@@ -1031,6 +1038,12 @@ def _serialize_workflow_checked(
     meta = _workflow_meta(workflow)
     recovered_meta, recovered = _recover_workflow_context_meta_from_order(order, workflow, meta)
     meta = recovered_meta if recovered else meta
+    meta = _recover_confirmed_artifacts_from_snapshot(
+        order=order,
+        workflow=workflow,
+        meta=meta,
+        session=session,
+    )
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta)
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
     lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta)
@@ -2694,6 +2707,71 @@ def _current_bagging_result(row: OrderWorkflowState) -> dict[str, Any] | None:
     return dict(result) if isinstance(result, dict) else None
 
 
+def _recover_confirmed_artifacts_from_snapshot(
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    meta: dict[str, Any],
+    session: Any,
+    saved_sheet: OrderSheetDraft | None = None,
+) -> dict[str, Any]:
+    if not workflow.confirmed_snapshot_id:
+        return meta
+    if isinstance(meta.get("bagging_result"), dict) and isinstance(meta.get("output_bundle"), dict):
+        return meta
+    snapshot = session.get(OrderConfirmedSnapshot, workflow.confirmed_snapshot_id)
+    if snapshot is None or snapshot.order_id != order.id:
+        return meta
+    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
+    next_meta = dict(meta)
+    snapshot_bagging = snapshot_json.get("bagging_result") if isinstance(snapshot_json.get("bagging_result"), dict) else None
+    snapshot_output = snapshot_json.get("output_bundle") if isinstance(snapshot_json.get("output_bundle"), dict) else None
+    if snapshot_bagging:
+        next_meta["bagging_result"] = dict(snapshot_bagging)
+        next_meta["bagging_result_id"] = _normalize_id(snapshot_bagging.get("bagging_result_id"))
+    if snapshot_output:
+        next_meta["output_bundle"] = dict(snapshot_output)
+        next_meta["output_bundle_id"] = _normalize_id(snapshot_output.get("output_bundle_id"))
+    if isinstance(next_meta.get("bagging_result"), dict) and isinstance(next_meta.get("output_bundle"), dict):
+        return next_meta
+
+    draft = saved_sheet
+    if draft is None and workflow.draft_id:
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+    materialization_candidate = (
+        snapshot_json.get("materialization_candidate")
+        if isinstance(snapshot_json.get("materialization_candidate"), dict)
+        else None
+    )
+    if draft is None or draft.order_id != order.id:
+        return next_meta
+    if not isinstance(materialization_candidate, dict):
+        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+    if not isinstance(materialization_candidate, dict):
+        return next_meta
+    materialization_error = _normalize_id(materialization_candidate.get("error"))
+    if materialization_error:
+        return next_meta
+
+    bagging_result = _build_bagging_result_payload(
+        order=order,
+        saved_sheet=draft,
+        materialization_candidate=materialization_candidate,
+    )
+    bagging_result["bagging_result_id"] = _derived_id("OBG", snapshot.id, draft.id, "recovered")
+    bagging_result["source"] = "confirmed_snapshot_recovered"
+    output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+    output_bundle["output_bundle_id"] = _derived_id("OOB", snapshot.id, bagging_result["bagging_result_id"], "recovered")
+    output_bundle["source_bagging_result_id"] = bagging_result["bagging_result_id"]
+    output_bundle["confirmed_snapshot_id"] = snapshot.id
+    output_bundle["source"] = "confirmed_snapshot_recovered"
+    next_meta["bagging_result_id"] = bagging_result["bagging_result_id"]
+    next_meta["bagging_result"] = bagging_result
+    next_meta["output_bundle_id"] = output_bundle["output_bundle_id"]
+    next_meta["output_bundle"] = output_bundle
+    return next_meta
+
+
 def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -3119,6 +3197,17 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                     saved_sheet=draft,
                     evidence_payload=evidence_payload,
                 )
+        inspection_meta = (
+            _recover_confirmed_artifacts_from_snapshot(
+                order=order,
+                workflow=workflow,
+                meta=_workflow_meta(workflow),
+                session=session,
+                saved_sheet=draft if workflow is not None and workflow.draft_id else None,
+            )
+            if workflow is not None
+            else {}
+        )
         return {
             "order_id": order.id,
             "source": "workflow_v2_inspection",
@@ -3140,16 +3229,16 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 "saved_sheet_id": workflow.draft_id if workflow is not None else None,
                 "confirmed_snapshot_id": workflow.confirmed_snapshot_id if workflow is not None else None,
                 "bagging_result_id": (
-                    _workflow_meta(workflow).get("bagging_result_id") if workflow is not None else None
+                    inspection_meta.get("bagging_result_id") if workflow is not None else None
                 ),
                 "anomaly_review_id": (
                     _workflow_meta(workflow).get("anomaly_review_id") if workflow is not None else None
                 ),
                 "output_bundle_id": (
-                    _workflow_meta(workflow).get("output_bundle_id") if workflow is not None else None
+                    inspection_meta.get("output_bundle_id") if workflow is not None else None
                 ),
             },
-            "bagging_result": _workflow_meta(workflow).get("bagging_result") if workflow is not None else None,
+            "bagging_result": inspection_meta.get("bagging_result") if workflow is not None else None,
             "anomaly_review": _workflow_meta(workflow).get("anomaly_review") if workflow is not None else None,
-            "output_bundle": _workflow_meta(workflow).get("output_bundle") if workflow is not None else None,
+            "output_bundle": inspection_meta.get("output_bundle") if workflow is not None else None,
         }, None

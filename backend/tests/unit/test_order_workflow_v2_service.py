@@ -2225,6 +2225,59 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         assert session.get(Order, order_id).status == "確定"
 
 
+def test_confirmed_workflow_recovers_bagging_artifacts_from_snapshot(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
+        edited_by="test",
+    )
+    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    assert error is None
+    original_bagging_result_id = bagging["bagging_result"]["bagging_result_id"]
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert error is None
+
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        meta = dict(workflow.secondary_actions_json.get(order_workflow_v2_service.WORKFLOW_V2_META_KEY) or {})
+        for key in ["bagging_result_id", "bagging_result", "output_bundle_id", "output_bundle"]:
+            meta.pop(key, None)
+        workflow.secondary_actions_json = {
+            **dict(workflow.secondary_actions_json or {}),
+            order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta,
+        }
+        snapshot = session.get(OrderConfirmedSnapshot, confirmed["confirmed_snapshot_id"])
+        assert snapshot is not None
+        snapshot.snapshot_json = {
+            key: value
+            for key, value in dict(snapshot.snapshot_json or {}).items()
+            if key not in {"bagging_result", "output_bundle", "materialization_candidate"}
+        }
+
+    workflow_payload, error = order_workflow_v2_service.get_workflow(order_id)
+    assert error is None
+    assert workflow_payload["state"] == "confirmed"
+    assert workflow_payload["bagging_result_id"] != original_bagging_result_id
+    assert workflow_payload["bagging_result_id"].startswith("OBG")
+    assert workflow_payload["output_bundle_id"]
+    inspection, error = order_workflow_v2_service.get_inspection(order_id)
+    assert error is None
+    assert inspection["bagging_result"]["bagging_result_id"] == workflow_payload["bagging_result_id"]
+    assert inspection["output_bundle"]["source_bagging_result_id"] == workflow_payload["bagging_result_id"]
+
+
 def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
