@@ -413,6 +413,82 @@ def test_select_ocr_result_requires_confirmed_context() -> None:
         assert row is None or row.evidence_run_id is None
 
 
+def test_get_workflow_recovers_missing_context_meta_from_order_ingest_context() -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    template_version_id = _install_active_template_version("FAC00001", "template-fac00001")
+    draft_id = _id("ODS")
+    snapshot_id = _id("OCS")
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        order.facility_code = "FAC00001"
+        order.week_code = "2026-04@2026-04-26~2026-04-30"
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id_1)
+        evidence.template_version_id = template_version_id
+        session.add(
+            OrderSheetDraft(
+                id=draft_id,
+                order_id=order_id,
+                template_version_id=template_version_id,
+                base_evidence_run_id=evidence_id_1,
+                draft_sheet_json={
+                    "facility_id": "FAC00001",
+                    "week_id": "2026-04@2026-04-26~2026-04-30",
+                    "fields": ["date", "daypart", "menu", "qty.regular"],
+                    "rows": [["04/26", "朝", "A", "1"]],
+                },
+                draft_state="saved",
+                edited_by="test",
+                edited_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderConfirmedSnapshot(
+                id=snapshot_id,
+                order_id=order_id,
+                template_version_id=template_version_id,
+                draft_id=draft_id,
+                snapshot_digest="digest",
+                snapshot_json={"draft_id": draft_id},
+                confirmed_by="test",
+                confirmed_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                template_version_id=template_version_id,
+                evidence_run_id=evidence_id_1,
+                draft_id=draft_id,
+                confirmed_snapshot_id=snapshot_id,
+                state="review_required",
+                headline="legacy workflow without context",
+                primary_action="review",
+                secondary_actions_json={order_workflow_v2_service.WORKFLOW_V2_META_KEY: {"template_version_id": template_version_id}},
+                blockers_json=[],
+                warnings_json=[],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+
+    assert error is None
+    assert workflow["state"] == "confirmed"
+    assert workflow["headline"] != "context_not_confirmed"
+    assert workflow["facility_id"] == "FAC00001"
+    assert workflow["week_start"] == "2026-04-26"
+    assert workflow["week_end"] == "2026-04-30"
+    assert "context_not_confirmed" not in workflow["blockers"]
+    with session_scope() as session:
+        row = session.get(OrderWorkflowState, order_id)
+        meta = row.secondary_actions_json[order_workflow_v2_service.WORKFLOW_V2_META_KEY]
+        assert "facility_id" not in meta
+        assert "week_start" not in meta
+        assert "week_end" not in meta
+
+
 def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(

@@ -324,6 +324,39 @@ def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
     return bool(_normalize_id(meta.get("template_version_id")))
 
 
+def _workflow_state_needs_context_projection(row: OrderWorkflowState, meta: dict[str, Any]) -> bool:
+    state = _canonical_workflow_v2_state(row, meta)
+    return _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state)
+
+
+def _recover_workflow_context_meta_from_order(
+    order: Order,
+    row: OrderWorkflowState,
+    meta: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    if _workflow_meta_has_confirmed_context(meta) or not _workflow_state_needs_context_projection(row, meta):
+        return meta, False
+    suggestion = _order_context_suggestion(order)
+    if not isinstance(suggestion, dict):
+        return meta, False
+    facility_id = _normalize_id(suggestion.get("facility_id"))
+    week_start = _normalize_id(suggestion.get("week_start"))
+    week_end = _normalize_id(suggestion.get("week_end"))
+    if not facility_id or not week_start or not week_end:
+        return meta, False
+    recovered = dict(meta)
+    recovered["facility_id"] = facility_id
+    recovered["week_start"] = week_start
+    recovered["week_end"] = week_end
+    recovered["week_code"] = (
+        sheet_week_service.normalize_sheet_week_value(suggestion.get("week_code"))
+        or _format_week_code_from_range(week_start, week_end)
+    )
+    recovered["context_recovered_from"] = "order_ingest_context"
+    recovered["context_suggestion"] = _normalize_context_suggestion(recovered.get("context_suggestion")) or suggestion
+    return recovered, True
+
+
 def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
     if not _workflow_meta_has_confirmed_context(meta):
         return "context_not_confirmed"
@@ -683,8 +716,13 @@ def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | N
     workflow.last_transition_at = _now()
 
 
-def _serialize_workflow(row: OrderWorkflowState, *, ocr_job: OcrJob | None = None) -> dict[str, Any]:
-    meta = _workflow_meta(row)
+def _serialize_workflow(
+    row: OrderWorkflowState,
+    *,
+    ocr_job: OcrJob | None = None,
+    meta_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
     template_version_id = _effective_workflow_template_version_id(row, meta)
     quad_override = meta.get("quad_override")
@@ -808,6 +846,10 @@ def _workflow_blocker_projection(serialized: dict[str, Any], error: str) -> dict
         projected["state"] = "facility_template_unresolved"
         projected["headline"] = "施設テンプレートが未解決です。施設区分列を確認してください"
         projected["primary_action"] = "register_facility_template"
+    elif normalized_error == "context_not_confirmed":
+        projected["state"] = "context_not_confirmed"
+        projected["headline"] = "施設と週が未確定です。Step1で施設と週を保存してください"
+        projected["primary_action"] = "confirm_context"
     elif normalized_error == "legacy_ocr_evidence_not_selectable":
         projected["state"] = "legacy_ocr_evidence_not_selectable"
         projected["headline"] = "旧キャッシュ由来のOCR結果は正解にできません。OCRを再実行してください"
@@ -859,11 +901,11 @@ def _workflow_state_requires_saved_sheet(state: str) -> bool:
 
 
 def _workflow_state_requires_bagging(state: str) -> bool:
-    return state in {"bagging_ready", "output_review", "confirmed"}
+    return state in {"bagging_ready", "output_review"}
 
 
 def _workflow_state_requires_output_review(state: str) -> bool:
-    return state in {"output_review", "confirmed"}
+    return state in {"output_review"}
 
 
 def _workflow_has_downstream_lineage(row: OrderWorkflowState) -> bool:
@@ -882,8 +924,14 @@ def _workflow_has_downstream_lineage(row: OrderWorkflowState) -> bool:
     )
 
 
-def _workflow_lineage_error(session: Any, *, order: Order, workflow: OrderWorkflowState) -> str | None:
-    meta = _workflow_meta(workflow)
+def _workflow_lineage_error(
+    session: Any,
+    *,
+    order: Order,
+    workflow: OrderWorkflowState,
+    meta_override: dict[str, Any] | None = None,
+) -> str | None:
+    meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(workflow)
     state = _canonical_workflow_v2_state(workflow, meta)
     if not state or state in {
         "uploaded",
@@ -980,10 +1028,12 @@ def _serialize_workflow_checked(
     workflow: OrderWorkflowState,
     ocr_job: OcrJob | None = None,
 ) -> dict[str, Any]:
-    serialized = _serialize_workflow(workflow, ocr_job=ocr_job)
     meta = _workflow_meta(workflow)
+    recovered_meta, recovered = _recover_workflow_context_meta_from_order(order, workflow, meta)
+    meta = recovered_meta if recovered else meta
+    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta)
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
-    lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow)
+    lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta)
     if lineage_error:
         return _workflow_blocker_projection(serialized, lineage_error)
     serialized = _apply_canonical_workflow_state_projection(
