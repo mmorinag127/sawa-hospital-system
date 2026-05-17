@@ -41,6 +41,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
 DAILY_LABEL_REFERENCE_20260510_ROWS = DATA_DIR / "daily_label_reference_20260510_rows.json"
+WEEKLY_WEIGHT_REFERENCE_TEMPLATE = DATA_DIR / "weight_templates" / "weekly_weight_reference.xlsx"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -143,7 +144,7 @@ _DAILY_LABEL_MENU_DEFAULTS = {
     "さつま芋の天ぷら": ("昼", "副菜①", "温菜", 2, "個"),
     "さつまいもレモン煮": ("昼", "副菜①", "温菜", 40, "g"),
     "ﾌﾞﾛｯｺﾘｰのちりめん和え": ("昼", "副菜②", "冷菜", 40, "g"),
-    "煮込みハンバーグ": ("夕", "主菜", "温菜", 100, "g"),
+    "煮込みハンバーグ": ("夕", "主菜", "温菜", 1, "個"),
     "ジャーマンポテト": ("夕", "副菜①", "温菜", 40, "g"),
     "ほうれん草の和え物": ("夕", "副菜②", "冷菜", 40, "g"),
     "ソース": ("夕", "ソース", "冷菜", 5, "g"),
@@ -190,7 +191,7 @@ DAILY_LABEL_MENU_ROWS = [
     ("昼", "主菜添えソ", "温菜", "", "", 40),
     ("昼", "副菜①", "温菜", "さつま芋の天ぷらテン", "", "2個コ"),
     ("昼", "副菜②", "冷菜", "ﾌﾞﾛｯｺﾘｰのちりめん和えア", "", 40),
-    ("夕", "主菜", "温菜", "煮込みハンバーグニコ", "", 100),
+    ("夕", "主菜", "温菜", "煮込みハンバーグニコ", "", "1個コ"),
     ("夕", "主菜　添え", "温菜", "", "", 50),
     ("夕", "副菜①", "温菜", "ジャーマンポテト", "", 40),
     ("夕", "副菜②", "冷菜", "ほうれん草の和え物ソウアモノ", "", 40),
@@ -983,6 +984,8 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
         if entry.get("category"):
             updated["menu_category"] = entry.get("category")
+        if entry.get("slot_index") is not None:
+            updated["slot_index"] = entry.get("slot_index")
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
     return enriched
@@ -4719,6 +4722,74 @@ _WEEKLY_WEIGHT_DAYPART_SLOTS = [
 ]
 _WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
 _WEEKLY_WEIGHT_SOFT_MIXER_DIETS = {"soft", "mixer", "soft_mixer"}
+_WEEKLY_WEIGHT_UNIT_RULES = [
+    {
+        "names": ("さつま芋の天ぷら",),
+        "unit": "個",
+        "regular_per_serving": 2.0,
+        "soft_per_serving": None,
+    },
+    {
+        "names": ("煮込みハンバーグ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 40.0,
+        "regular_garnish_label": "ソース",
+        "soft_garnish_label": "",
+        "regular_separator": "＋",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("アジのちゃんちゃん焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 40.0,
+        "regular_garnish_label": "野菜",
+        "soft_garnish_label": "野菜",
+        "regular_separator": "＋",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("鶏唐揚げ",),
+        "unit": "個",
+        "regular_per_serving": 3.0,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("サバの塩焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("チキンカツ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+]
 
 
 def _weekly_weight_start(target_date: dt_date) -> dt_date:
@@ -4766,10 +4837,38 @@ def _weekly_weight_slot_for_line(line: dict) -> str:
     return ""
 
 
+def _weekly_weight_slot_from_index(daypart: str, slot_index: object) -> str:
+    try:
+        index = int(slot_index)
+    except (TypeError, ValueError):
+        return ""
+    if daypart == "朝":
+        return {1: "副①", 2: "副②"}.get(index, "")
+    if daypart == "昼":
+        return {1: "主Ａ", 2: "副①", 3: "副②"}.get(index, "")
+    if daypart == "夕":
+        return {1: "主", 2: "副①", 3: "副②"}.get(index, "")
+    return ""
+
+
 def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
     literal = amounts.get("__literal__") if isinstance(amounts, dict) else None
     if literal not in (None, ""):
         return literal
+    main_unit = amounts.get("__main_unit__") if isinstance(amounts, dict) else None
+    if main_unit:
+        main_count = _format_number(amounts.get("__main_count__", 0))
+        text = f"{main_count}{main_unit}"
+        garnish_amount = amounts.get("__garnish_amount__")
+        if garnish_amount not in (None, ""):
+            garnish_unit = amounts.get("__garnish_unit__") or "g"
+            garnish_value = float(garnish_amount)
+            if garnish_unit == "g":
+                garnish_value = round(garnish_value / 1000, 1)
+            garnish_label = str(amounts.get("__garnish_label__") or "")
+            separator = str(amounts.get("__garnish_separator__") or "、")
+            text = f"{text}{separator}{garnish_label}{_format_number(garnish_value)}"
+        return text
     if not amounts:
         return None
     parts: list[str] = []
@@ -4795,6 +4894,28 @@ def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: fl
     literal = line.get("actual_amount_label") or line.get("weekly_weight_amount_label")
     if literal not in (None, ""):
         target["__literal__"] = str(literal)
+        return
+    menu_name = str(line.get("menu_name") or "").strip()
+    diet = _normalize_diet_key(line.get("diet_type")) or ""
+    for rule in _WEEKLY_WEIGHT_UNIT_RULES:
+        if not any(name in menu_name for name in rule["names"]):
+            continue
+        per_serving_key = "soft_per_serving" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular_per_serving"
+        per_serving = rule.get(per_serving_key)
+        if per_serving is None:
+            break
+        target["__main_unit__"] = rule["unit"]
+        target["__main_count__"] = round(target.get("__main_count__", 0.0) + quantity * float(per_serving), 4)
+        garnish_per_serving = rule.get("garnish_per_serving")
+        if garnish_per_serving is not None:
+            target["__garnish_unit__"] = rule.get("garnish_unit") or "g"
+            target["__garnish_amount__"] = round(
+                target.get("__garnish_amount__", 0.0) + quantity * float(garnish_per_serving),
+                4,
+            )
+            prefix = "soft" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular"
+            target["__garnish_label__"] = rule.get(f"{prefix}_garnish_label") or ""
+            target["__garnish_separator__"] = rule.get(f"{prefix}_separator") or "、"
         return
     unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
     if not unit:
@@ -4875,19 +4996,14 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
     from openpyxl.cell.cell import MergedCell
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-    reference_layout = None
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
-        if candidate.exists():
-            reference_layout = candidate
-            break
+    reference_layout = WEEKLY_WEIGHT_REFERENCE_TEMPLATE if WEEKLY_WEIGHT_REFERENCE_TEMPLATE.exists() else None
     if reference_layout is not None:
         workbook = load_workbook(reference_layout)
         ws = workbook.worksheets[0]
         ws.title = _weekly_weight_sheet_title(week_start)
         setattr(workbook, "_weekly_weight_reference_layout", True)
         for row_idx in range(11, 67):
-            for col_idx in range(3, 10):
+            for col_idx in range(4, 10):
                 cell = ws.cell(row=row_idx, column=col_idx)
                 if not isinstance(cell, MergedCell):
                     cell.value = None
@@ -5023,6 +5139,22 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
 
     week_start = _weekly_weight_start(target_date)
     week_dates = {week_start + timedelta(days=offset) for offset in range(7)}
+    month_ids = {f"{current_date.year:04d}-{current_date.month:02d}" for current_date in week_dates}
+    menu_entry_slots: dict[tuple[dt_date, str, str], str] = {}
+    for month_id in month_ids:
+        try:
+            menu_entries = menu_service.get_menu_entries_for_facility(month_id, None)
+        except Exception:  # noqa: BLE001
+            menu_entries = []
+        for entry in menu_entries:
+            entry_date = _ensure_date(entry.get("menu_date"))
+            if entry_date not in week_dates:
+                continue
+            entry_daypart = _normalize_output_daypart(entry.get("daypart"))
+            entry_name = _normalize_menu_key(entry.get("name"))
+            entry_slot = _weekly_weight_slot_from_index(entry_daypart, entry.get("slot_index"))
+            if entry_daypart and entry_name and entry_slot:
+                menu_entry_slots[(entry_date, entry_daypart, entry_name)] = entry_slot
     rows: dict[tuple[dt_date, str, str], dict] = {}
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
@@ -5080,6 +5212,10 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
             continue
         daypart = _normalize_output_daypart(line.get("daypart"))
         slot = _weekly_weight_slot_for_line(line)
+        menu_name_key = _normalize_menu_key(line.get("menu_name"))
+        entry_slot = menu_entry_slots.get((current_date, daypart, menu_name_key))
+        if entry_slot and slot not in dict(_WEEKLY_WEIGHT_DAYPART_SLOTS).get(daypart, []):
+            slot = entry_slot
         if not daypart or not slot:
             continue
         row = rows.setdefault(
@@ -5124,14 +5260,22 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             for slot in slots:
                 payload = rows_by_key.get((current_date, daypart, slot), {})
                 ws.cell(row=row_idx, column=3).value = slot
-                ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or None
+                ws.cell(row=row_idx, column=4).value = (
+                    payload.get("regular_menu")
+                    or payload.get("soft_mixer_menu")
+                    or None
+                )
                 ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
-                ws.cell(row=row_idx, column=6).value = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
+                regular_amount = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
+                ws.cell(row=row_idx, column=6).value = regular_amount
                 ws.cell(row=row_idx, column=7).value = payload.get("soft_mixer_quantity") if payload else None
-                ws.cell(row=row_idx, column=8).value = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
+                soft_amount = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
+                ws.cell(row=row_idx, column=8).value = soft_amount
                 soft_menu = payload.get("soft_mixer_menu") or ""
                 regular_menu = payload.get("regular_menu") or ""
-                ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else None
+                ws.cell(row=row_idx, column=9).value = (
+                    soft_menu if soft_menu and soft_menu != regular_menu else None
+                )
                 row_idx += 1
             if not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart

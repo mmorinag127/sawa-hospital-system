@@ -6637,6 +6637,75 @@ def _format_amount_number(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+_DAILY_BAG_UNIT_RULES = [
+    {
+        "names": ("さつま芋の天ぷら",),
+        "unit": "個",
+        "regular_per_serving": 2.0,
+        "soft_per_serving": None,
+    },
+    {
+        "names": ("煮込みハンバーグ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "hidden_unit": "g",
+        "hidden_per_serving": 40.0,
+    },
+    {
+        "names": ("アジのちゃんちゃん焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "hidden_unit": "g",
+        "hidden_per_serving": 40.0,
+    },
+    {
+        "names": ("鶏唐揚げ",),
+        "unit": "個",
+        "regular_per_serving": 3.0,
+        "soft_per_serving": 2.0,
+        "hidden_unit": "g",
+        "hidden_per_serving": 30.0,
+    },
+    {
+        "names": ("サバの塩焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "hidden_unit": "g",
+        "hidden_per_serving": 30.0,
+    },
+    {
+        "names": ("チキンカツ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "hidden_unit": "g",
+        "hidden_per_serving": 30.0,
+    },
+]
+
+
+def _daily_bag_rule_amounts(line: dict[str, Any], quantity: float) -> dict[str, float] | None:
+    menu_name = str(line.get("menu_name") or "").strip()
+    diet = bucket_diet_type_for_aggregation(line.get("diet_type")) or ""
+    for rule in _DAILY_BAG_UNIT_RULES:
+        if not any(name in menu_name for name in rule["names"]):
+            continue
+        per_serving_key = "soft_per_serving" if diet in {"soft", "mixer"} else "regular_per_serving"
+        per_serving = rule.get(per_serving_key)
+        if per_serving is None:
+            return None
+        amounts = {str(rule["unit"]): round(quantity * float(per_serving), 4)}
+        hidden_per_serving = rule.get("hidden_per_serving")
+        if hidden_per_serving is not None:
+            hidden_unit = str(rule.get("hidden_unit") or "g")
+            amounts[hidden_unit] = round(amounts.get(hidden_unit, 0.0) + quantity * float(hidden_per_serving), 4)
+        return amounts
+    return None
+
+
 def _format_amount_label(totals: dict[str, float] | None) -> str | None:
     if not isinstance(totals, dict):
         return None
@@ -6729,30 +6798,36 @@ def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]
             continue
         if not math.isfinite(quantity) or quantity <= 0:
             continue
-        unit = _normalize_output_unit(line.get("menu_unit_type") or line.get("actual_unit_type"))
-        if not unit:
-            continue
-        amount_raw = None
-        per_serving = line.get("menu_qty_per_serving")
-        try:
-            if per_serving is not None:
-                per_serving_value = float(per_serving)
-                if math.isfinite(per_serving_value) and per_serving_value >= 0:
-                    amount_raw = per_serving_value * quantity
-        except (TypeError, ValueError):
+        rule_amounts = _daily_bag_rule_amounts(line, quantity)
+        if rule_amounts:
+            amount_by_unit = rule_amounts
+        else:
+            unit = _normalize_output_unit(line.get("menu_unit_type") or line.get("actual_unit_type"))
+            if not unit:
+                continue
             amount_raw = None
-        if amount_raw is None:
-            amount_raw = line.get("actual_amount")
-        try:
-            amount = float(amount_raw)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(amount) or amount < 0:
-            continue
+            per_serving = line.get("menu_qty_per_serving")
+            try:
+                if per_serving is not None:
+                    per_serving_value = float(per_serving)
+                    if math.isfinite(per_serving_value) and per_serving_value >= 0:
+                        amount_raw = per_serving_value * quantity
+            except (TypeError, ValueError):
+                amount_raw = None
+            if amount_raw is None:
+                amount_raw = line.get("actual_amount")
+            try:
+                amount = float(amount_raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(amount) or amount < 0:
+                continue
+            amount_by_unit = {unit: amount}
         if _normalize_sheet_text(line.get("bag_type")).lower() == "condiment":
             key = _build_condiment_amount_key(line.get("date"), line.get("daypart"))
             totals = condiment_totals.get(key, {})
-            totals[unit] = round(totals.get(unit, 0.0) + amount, 4)
+            for unit, amount in amount_by_unit.items():
+                totals[unit] = round(totals.get(unit, 0.0) + amount, 4)
             condiment_totals[key] = totals
             continue
         key = _build_non_condiment_amount_key(
@@ -6766,10 +6841,11 @@ def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]
         if menu_category and key not in menu_category_by_group:
             menu_category_by_group[key] = menu_category
         unit_stats = non_condiment_stats.get(key, {})
-        current = unit_stats.get(unit, {"amount": 0.0, "quantity": 0.0})
-        current["amount"] = round(current.get("amount", 0.0) + amount, 4)
-        current["quantity"] = round(current.get("quantity", 0.0) + quantity, 4)
-        unit_stats[unit] = current
+        for unit, amount in amount_by_unit.items():
+            current = unit_stats.get(unit, {"amount": 0.0, "quantity": 0.0})
+            current["amount"] = round(current.get("amount", 0.0) + amount, 4)
+            current["quantity"] = round(current.get("quantity", 0.0) + quantity, 4)
+            unit_stats[unit] = current
         non_condiment_stats[key] = unit_stats
     per_serving_by_group: dict[str, dict[str, float]] = {}
     for key, unit_stats in non_condiment_stats.items():

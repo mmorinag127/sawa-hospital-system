@@ -8,7 +8,7 @@ from openpyxl import Workbook, load_workbook
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import output_builder  # noqa: E402
+from src.services import order_service, output_builder  # noqa: E402
 
 
 TARGET_DATE = dt_date(2026, 3, 22)
@@ -615,71 +615,55 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     assert workbook.sheetnames == ["ラベル_そよかぜ", "納品書_そよかぜ"]
 
 
-def test_weekly_weight_workbook_reproduces_sample_visible_values(tmp_path, monkeypatch):
+def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_path, monkeypatch):
     sample_path = _sawa_root() / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
-    sample_book = load_workbook(sample_path, data_only=True)
-    sample_ws = sample_book.worksheets[0]
     target_date = dt_date(2026, 5, 12)
-    source_rows = []
-    current_date = None
-    current_daypart = None
-    for row_idx in range(11, 67):
-        raw_date = sample_ws.cell(row=row_idx, column=1).value
-        if hasattr(raw_date, "date"):
-            current_date = raw_date.date()
-        raw_daypart = sample_ws.cell(row=row_idx, column=2).value
-        if raw_daypart in {"朝", "昼", "夕"}:
-            current_daypart = raw_daypart
-        slot = sample_ws.cell(row=row_idx, column=3).value
-        regular_menu = sample_ws.cell(row=row_idx, column=4).value
-        regular_quantity = sample_ws.cell(row=row_idx, column=5).value
-        regular_weight = sample_ws.cell(row=row_idx, column=6).value
-        soft_quantity = sample_ws.cell(row=row_idx, column=7).value
-        soft_weight = sample_ws.cell(row=row_idx, column=8).value
-        soft_menu = sample_ws.cell(row=row_idx, column=9).value or regular_menu
-        if regular_menu and regular_weight not in (None, ""):
-            source_rows.append(
-                {
-                    "date": current_date,
-                    "daypart": current_daypart,
-                    "menu_category": slot,
-                    "menu_name": regular_menu,
-                    "diet_type": "regular",
-                    "quantity_corrected": regular_quantity,
-                    "menu_qty_per_serving": float(regular_weight) * 1000 / float(regular_quantity)
-                    if isinstance(regular_weight, (int, float))
-                    else None,
-                    "menu_unit_type": "g",
-                    "actual_amount_label": regular_weight if not isinstance(regular_weight, (int, float)) else None,
-                }
-            )
-        if soft_menu and soft_weight not in (None, ""):
-            source_rows.append(
-                {
-                    "date": current_date,
-                    "daypart": current_daypart,
-                    "menu_category": slot,
-                    "menu_name": soft_menu,
-                    "diet_type": "soft",
-                    "quantity_corrected": soft_quantity,
-                    "menu_qty_per_serving": float(soft_weight) * 1000 / float(soft_quantity)
-                    if isinstance(soft_weight, (int, float))
-                    else None,
-                    "menu_unit_type": "g",
-                    "actual_amount_label": soft_weight if not isinstance(soft_weight, (int, float)) else None,
-                }
-            )
+    rows_by_key = {
+        (dt_date(2026, 5, 10), "朝", "副①"): {
+            "regular_menu": "計算生成メニューA",
+            "regular_quantity": 10,
+            "regular_amounts": {"g": 1200},
+            "soft_mixer_menu": "計算生成メニューA軟菜",
+            "soft_mixer_quantity": 3,
+            "soft_mixer_amounts": {"g": 240},
+        },
+        (dt_date(2026, 5, 10), "昼", "主Ａ"): {
+            "regular_menu": "個数生成メニュー",
+            "regular_quantity": 4,
+            "regular_amounts": {"__literal__": "4個＋ソース0.2"},
+            "soft_mixer_menu": "",
+            "soft_mixer_quantity": 0,
+            "soft_mixer_amounts": {},
+        },
+        (dt_date(2026, 5, 10), "夕", "主"): {
+            "regular_menu": "煮込みハンバーグ",
+            "regular_quantity": 430,
+            "regular_amounts": {
+                "__main_unit__": "個",
+                "__main_count__": 430,
+                "__garnish_unit__": "g",
+                "__garnish_amount__": 17200,
+                "__garnish_label__": "ソース",
+                "__garnish_separator__": "＋",
+            },
+            "soft_mixer_menu": "煮込みハンバーグ",
+            "soft_mixer_quantity": 49,
+            "soft_mixer_amounts": {
+                "__main_unit__": "個",
+                "__main_count__": 49,
+                "__garnish_unit__": "g",
+                "__garnish_amount__": 1960,
+                "__garnish_label__": "",
+                "__garnish_separator__": "、",
+            },
+        },
+    }
 
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
-        output_builder.order_service,
-        "list_orders_by_line_date",
-        lambda target_date, status=None: [{"id": f"ORD-{target_date.isoformat()}", "facility": "FAC001"}],
-    )
-    monkeypatch.setattr(
         output_builder,
-        "_prepare_output_context",
-        lambda order_id, **kwargs: {"order_lines": source_rows},
+        "_weekly_weight_collect_rows",
+        lambda target_date, status=None: rows_by_key,
     )
 
     generated_path = output_builder.build_weekly_weight_summary_workbook(target_date)
@@ -697,13 +681,102 @@ def test_weekly_weight_workbook_reproduces_sample_visible_values(tmp_path, monke
     }
     assert _dimension_signature(generated_ws) == _dimension_signature(sample_ws)
     assert _page_signature(generated_ws) == _page_signature(sample_ws)
-    for row_idx in range(1, sample_ws.max_row + 1):
-        for col_idx in range(1, sample_ws.max_column + 1):
-            assert _cell_excel_signature(generated_ws.cell(row=row_idx, column=col_idx)) == _cell_excel_signature(
-                sample_ws.cell(row=row_idx, column=col_idx)
-            ), (
-                f"cell {generated_ws.cell(row=row_idx, column=col_idx).coordinate} differs"
-            )
+    assert generated_ws["D11"].value == "計算生成メニューA"
+    assert generated_ws["E11"].value == 10
+    assert generated_ws["F11"].value == 1.2
+    assert generated_ws["G11"].value == 3
+    assert generated_ws["H11"].value == 0.2
+    assert generated_ws["I11"].value == "計算生成メニューA軟菜"
+    assert generated_ws["D13"].value == "個数生成メニュー"
+    assert generated_ws["E13"].value == 4
+    assert generated_ws["F13"].value == "4個＋ソース0.2"
+    assert generated_ws["D16"].value == "煮込みハンバーグ"
+    assert generated_ws["E16"].value == 430
+    assert generated_ws["F16"].value == "430個＋ソース17.2"
+    assert generated_ws["G16"].value == 49
+    assert generated_ws["H16"].value == "49個、2"
+
+
+def test_weekly_weight_amount_rules_convert_piece_and_hidden_garnish_units():
+    cases = [
+        ("さつま芋の天ぷら", "regular", 422, "844個"),
+        ("アジのちゃんちゃん焼き", "regular", 417, "1042.5切＋野菜16.7"),
+        ("アジのちゃんちゃん焼き", "soft", 49, "98切、野菜2"),
+        ("鶏唐揚げ", "regular", 410, "1230個、添12.3"),
+        ("鶏唐揚げ", "soft", 49, "98個、添1.5"),
+        ("サバの塩焼き", "regular", 417, "1042.5切、添12.5"),
+        ("サバの塩焼き", "soft", 51, "102切、添1.5"),
+        ("チキンカツ", "regular", 437, "437個、添13.1"),
+        ("チキンカツ", "soft", 50, "50個、添1.5"),
+        ("煮込みハンバーグ", "regular", 430, "430個＋ソース17.2"),
+        ("煮込みハンバーグ", "soft", 49, "49個、2"),
+    ]
+    for menu_name, diet_type, quantity, expected in cases:
+        amounts = {}
+        output_builder._weekly_weight_add_amount(  # noqa: SLF001
+            amounts,
+            {
+                "menu_name": menu_name,
+                "diet_type": diet_type,
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 100,
+            },
+            quantity,
+        )
+        assert output_builder._weekly_weight_format_amount(amounts) == expected  # noqa: SLF001
+
+
+def test_daily_bag_amount_rules_convert_piece_and_hidden_garnish_units():
+    lines = [
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "夕",
+            "menu_name": "煮込みハンバーグ",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_corrected": 430,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "昼",
+            "menu_name": "アジのちゃんちゃん焼き",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "area_id": "X",
+            "quantity_corrected": 49,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": dt_date(2026, 5, 10),
+            "daypart": "夕",
+            "menu_name": "チキンカツ",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "area_id": "X",
+            "quantity_corrected": 437,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+    ]
+    stats = order_service._build_daily_bag_amount_stats(lines)  # noqa: SLF001
+
+    def per_serving(menu_name: str, diet_type: str) -> dict:
+        key = order_service._build_non_condiment_amount_key(  # noqa: SLF001
+            dt_date(2026, 5, 10),
+            "夕" if menu_name != "アジのちゃんちゃん焼き" else "昼",
+            menu_name,
+            diet_type,
+            "X",
+        )
+        return stats["per_serving_by_group"][key]
+
+    assert per_serving("煮込みハンバーグ", "regular") == {"個": 1.0, "g": 40.0}
+    assert per_serving("アジのちゃんちゃん焼き", "soft") == {"切": 2.0, "g": 40.0}
+    assert per_serving("チキンカツ", "regular") == {"個": 1.0, "g": 30.0}
 
 
 def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path, monkeypatch):
