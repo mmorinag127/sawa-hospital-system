@@ -4069,26 +4069,12 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
     from openpyxl.cell.cell import MergedCell
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-    reference_layout = None
-    reference_candidates = [WEEKLY_WEIGHT_REFERENCE_TEMPLATE]
-    for parent in Path(__file__).resolve().parents:
-        reference_candidates.append(parent / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx")
-    for candidate in reference_candidates:
-        if candidate.exists():
-            reference_layout = candidate
-            break
+    reference_layout = WEEKLY_WEIGHT_REFERENCE_TEMPLATE if WEEKLY_WEIGHT_REFERENCE_TEMPLATE.exists() else None
     if reference_layout is not None:
         workbook = load_workbook(reference_layout)
         ws = workbook.worksheets[0]
         ws.title = _weekly_weight_sheet_title(week_start)
-        reference_display_cells = {}
-        for row_idx in range(11, 67):
-            row_display = {}
-            for col_idx in range(4, 10):
-                row_display[col_idx] = ws.cell(row=row_idx, column=col_idx).value
-            reference_display_cells[row_idx] = row_display
         setattr(workbook, "_weekly_weight_reference_layout", True)
-        setattr(workbook, "_weekly_weight_reference_display_cells", reference_display_cells)
         for row_idx in range(11, 67):
             for col_idx in range(4, 10):
                 cell = ws.cell(row=row_idx, column=col_idx)
@@ -4211,23 +4197,6 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
             data = replacements.get(name)
             if data is None:
                 data = source.read(name)
-            if name == "xl/worksheets/sheet1.xml" and sheet_title == "5月10日～5月16日":
-                sheet_xml = data.decode("utf-8")
-                formula_cached_values = {
-                    "A19": "46153",
-                    "A27": "46154",
-                    "A35": "46155",
-                    "A43": "46156",
-                    "A51": "46157",
-                    "A59": "46158",
-                }
-                for cell_ref, cached_value in formula_cached_values.items():
-                    sheet_xml = re.sub(
-                        rf'(<c r="{cell_ref}"[^>]*><f>[^<]+</f>)<v></v>',
-                        rf"\1<v>{cached_value}</v>",
-                        sheet_xml,
-                    )
-                data = sheet_xml.encode("utf-8")
             target.writestr(name, data)
             written.add(name)
         for name in source.namelist():
@@ -4356,7 +4325,6 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
     uses_reference_layout = bool(getattr(workbook, "_weekly_weight_reference_layout", False))
     row_idx = 11
     weekdays = ["(月)", "(火)", "（水）", "(木)", "(金)", "(土)", "（日）"]
-    reference_display_cells = getattr(workbook, "_weekly_weight_reference_display_cells", {})
     for offset in range(7):
         current_date = week_start + timedelta(days=offset)
         day_start = row_idx
@@ -4365,27 +4333,22 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             for slot in slots:
                 payload = rows_by_key.get((current_date, daypart, slot), {})
                 ws.cell(row=row_idx, column=3).value = slot
-                reference_row = reference_display_cells.get(row_idx, {}) if isinstance(reference_display_cells, dict) else {}
                 ws.cell(row=row_idx, column=4).value = (
-                    reference_row.get(4)
-                    or payload.get("regular_menu")
+                    payload.get("regular_menu")
                     or payload.get("soft_mixer_menu")
                     or None
                 )
                 ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
                 regular_amount = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
-                ws.cell(row=row_idx, column=6).value = reference_row.get(6) if isinstance(reference_row.get(6), str) else regular_amount
+                ws.cell(row=row_idx, column=6).value = regular_amount
                 ws.cell(row=row_idx, column=7).value = payload.get("soft_mixer_quantity") if payload else None
                 soft_amount = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
-                ws.cell(row=row_idx, column=8).value = reference_row.get(8) if isinstance(reference_row.get(8), str) else soft_amount
+                ws.cell(row=row_idx, column=8).value = soft_amount
                 soft_menu = payload.get("soft_mixer_menu") or ""
                 regular_menu = payload.get("regular_menu") or ""
-                ws.cell(row=row_idx, column=9).value = reference_row.get(9) or (
+                ws.cell(row=row_idx, column=9).value = (
                     soft_menu if soft_menu and soft_menu != regular_menu else None
                 )
-                if uses_reference_layout and week_start == dt_date(2026, 5, 10):
-                    for col_idx in range(4, 10):
-                        ws.cell(row=row_idx, column=col_idx).value = reference_row.get(col_idx)
                 row_idx += 1
             if not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart
