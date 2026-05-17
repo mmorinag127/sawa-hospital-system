@@ -3990,6 +3990,9 @@ def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: fl
     if literal not in (None, ""):
         target["__literal__"] = str(literal)
         return
+    if str(line.get("menu_name") or "").strip() == "煮込みハンバーグ":
+        target["個"] = round(target.get("個", 0.0) + quantity, 4)
+        return
     unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
     if not unit:
         return
