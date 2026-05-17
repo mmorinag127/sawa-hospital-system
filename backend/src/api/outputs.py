@@ -11,6 +11,7 @@ from src.services.output_builder import (
     build_output_preview,
     build_delivery_preview,
     build_daily_output_bundle,
+    build_weekly_weight_summary_workbook,
 )
 from src.api.auth import require_role
 
@@ -118,10 +119,11 @@ def download_daily_bundle(
     include_weight_workbook: bool = False,
 ):
     target_date = _parse_iso_date(date)
+    normalized_bundle_type = "both" if str(bundle_type or "").strip().lower() == "combined" else bundle_type
     try:
         bundle_path, summary = build_daily_output_bundle(
             target_date,
-            bundle_type=bundle_type,
+            bundle_type=normalized_bundle_type,
             status=status,
             include_weight_workbook=include_weight_workbook,
         )
@@ -134,10 +136,10 @@ def download_daily_bundle(
         "X-Daily-Bundle-Success-Orders": str(summary.get("success_orders", 0)),
         "X-Daily-Bundle-Empty-Orders": str(summary.get("empty_orders", 0)),
         "X-Daily-Bundle-Error-Orders": str(summary.get("error_orders", 0)),
-        "X-Daily-Bundle-Type": str(summary.get("bundle_type", bundle_type)),
+        "X-Daily-Bundle-Type": str(summary.get("bundle_type", normalized_bundle_type)),
     }
     file_format = str(summary.get("file_format") or "xlsx")
-    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.{file_format}"
+    filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', normalized_bundle_type)}.{file_format}"
     media_type = (
         "application/zip"
         if file_format == "zip"
@@ -148,4 +150,22 @@ def download_daily_bundle(
         media_type=media_type,
         filename=filename,
         headers=headers,
+    )
+
+
+@router.get("/daily-weight-workbook", dependencies=[Depends(require_role("operator"))])
+def download_daily_weight_workbook(date: str, status: str | None = None):
+    target_date = _parse_iso_date(date)
+    try:
+        workbook_path = build_weekly_weight_summary_workbook(target_date, status=status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"weight workbook build failed: {exc}") from exc
+    if workbook_path is None:
+        raise HTTPException(status_code=404, detail="weight workbook has no rows")
+    return FileResponse(
+        str(workbook_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=workbook_path.name,
     )
