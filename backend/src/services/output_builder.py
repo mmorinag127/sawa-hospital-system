@@ -3899,6 +3899,74 @@ _WEEKLY_WEIGHT_DAYPART_SLOTS = [
 ]
 _WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
 _WEEKLY_WEIGHT_SOFT_MIXER_DIETS = {"soft", "mixer", "soft_mixer"}
+_WEEKLY_WEIGHT_UNIT_RULES = [
+    {
+        "names": ("さつま芋の天ぷら",),
+        "unit": "個",
+        "regular_per_serving": 2.0,
+        "soft_per_serving": None,
+    },
+    {
+        "names": ("煮込みハンバーグ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 40.0,
+        "regular_garnish_label": "ソース",
+        "soft_garnish_label": "",
+        "regular_separator": "＋",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("アジのちゃんちゃん焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 40.0,
+        "regular_garnish_label": "野菜",
+        "soft_garnish_label": "野菜",
+        "regular_separator": "＋",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("鶏唐揚げ",),
+        "unit": "個",
+        "regular_per_serving": 3.0,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("サバの塩焼き",),
+        "unit": "切",
+        "regular_per_serving": 2.5,
+        "soft_per_serving": 2.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+    {
+        "names": ("チキンカツ",),
+        "unit": "個",
+        "regular_per_serving": 1.0,
+        "soft_per_serving": 1.0,
+        "garnish_unit": "g",
+        "garnish_per_serving": 30.0,
+        "regular_garnish_label": "添",
+        "soft_garnish_label": "添",
+        "regular_separator": "、",
+        "soft_separator": "、",
+    },
+]
 
 
 def _weekly_weight_start(target_date: dt_date) -> dt_date:
@@ -3964,6 +4032,20 @@ def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
     literal = amounts.get("__literal__") if isinstance(amounts, dict) else None
     if literal not in (None, ""):
         return literal
+    main_unit = amounts.get("__main_unit__") if isinstance(amounts, dict) else None
+    if main_unit:
+        main_count = _format_number(amounts.get("__main_count__", 0))
+        text = f"{main_count}{main_unit}"
+        garnish_amount = amounts.get("__garnish_amount__")
+        if garnish_amount not in (None, ""):
+            garnish_unit = amounts.get("__garnish_unit__") or "g"
+            garnish_value = float(garnish_amount)
+            if garnish_unit == "g":
+                garnish_value = round(garnish_value / 1000, 1)
+            garnish_label = str(amounts.get("__garnish_label__") or "")
+            separator = str(amounts.get("__garnish_separator__") or "、")
+            text = f"{text}{separator}{garnish_label}{_format_number(garnish_value)}"
+        return text
     if not amounts:
         return None
     parts: list[str] = []
@@ -3990,8 +4072,27 @@ def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: fl
     if literal not in (None, ""):
         target["__literal__"] = str(literal)
         return
-    if str(line.get("menu_name") or "").strip() == "煮込みハンバーグ":
-        target["個"] = round(target.get("個", 0.0) + quantity, 4)
+    menu_name = str(line.get("menu_name") or "").strip()
+    diet = _normalize_diet_key(line.get("diet_type")) or ""
+    for rule in _WEEKLY_WEIGHT_UNIT_RULES:
+        if not any(name in menu_name for name in rule["names"]):
+            continue
+        per_serving_key = "soft_per_serving" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular_per_serving"
+        per_serving = rule.get(per_serving_key)
+        if per_serving is None:
+            break
+        target["__main_unit__"] = rule["unit"]
+        target["__main_count__"] = round(target.get("__main_count__", 0.0) + quantity * float(per_serving), 4)
+        garnish_per_serving = rule.get("garnish_per_serving")
+        if garnish_per_serving is not None:
+            target["__garnish_unit__"] = rule.get("garnish_unit") or "g"
+            target["__garnish_amount__"] = round(
+                target.get("__garnish_amount__", 0.0) + quantity * float(garnish_per_serving),
+                4,
+            )
+            prefix = "soft" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular"
+            target["__garnish_label__"] = rule.get(f"{prefix}_garnish_label") or ""
+            target["__garnish_separator__"] = rule.get(f"{prefix}_separator") or "、"
         return
     unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
     if not unit:

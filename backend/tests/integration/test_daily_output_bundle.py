@@ -638,10 +638,24 @@ def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_
         (dt_date(2026, 5, 10), "夕", "主"): {
             "regular_menu": "煮込みハンバーグ",
             "regular_quantity": 430,
-            "regular_amounts": {"個": 430},
+            "regular_amounts": {
+                "__main_unit__": "個",
+                "__main_count__": 430,
+                "__garnish_unit__": "g",
+                "__garnish_amount__": 17200,
+                "__garnish_label__": "ソース",
+                "__garnish_separator__": "＋",
+            },
             "soft_mixer_menu": "煮込みハンバーグ",
             "soft_mixer_quantity": 49,
-            "soft_mixer_amounts": {"個": 49},
+            "soft_mixer_amounts": {
+                "__main_unit__": "個",
+                "__main_count__": 49,
+                "__garnish_unit__": "g",
+                "__garnish_amount__": 1960,
+                "__garnish_label__": "",
+                "__garnish_separator__": "、",
+            },
         },
     }
 
@@ -678,9 +692,38 @@ def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_
     assert generated_ws["F13"].value == "4個＋ソース0.2"
     assert generated_ws["D16"].value == "煮込みハンバーグ"
     assert generated_ws["E16"].value == 430
-    assert generated_ws["F16"].value == "430個"
+    assert generated_ws["F16"].value == "430個＋ソース17.2"
     assert generated_ws["G16"].value == 49
-    assert generated_ws["H16"].value == "49個"
+    assert generated_ws["H16"].value == "49個、2"
+
+
+def test_weekly_weight_amount_rules_convert_piece_and_hidden_garnish_units():
+    cases = [
+        ("さつま芋の天ぷら", "regular", 422, "844個"),
+        ("アジのちゃんちゃん焼き", "regular", 417, "1042.5切＋野菜16.7"),
+        ("アジのちゃんちゃん焼き", "soft", 49, "98切、野菜2"),
+        ("鶏唐揚げ", "regular", 410, "1230個、添12.3"),
+        ("鶏唐揚げ", "soft", 49, "98個、添1.5"),
+        ("サバの塩焼き", "regular", 417, "1042.5切、添12.5"),
+        ("サバの塩焼き", "soft", 51, "102切、添1.5"),
+        ("チキンカツ", "regular", 437, "437個、添13.1"),
+        ("チキンカツ", "soft", 50, "50個、添1.5"),
+        ("煮込みハンバーグ", "regular", 430, "430個＋ソース17.2"),
+        ("煮込みハンバーグ", "soft", 49, "49個、2"),
+    ]
+    for menu_name, diet_type, quantity, expected in cases:
+        amounts = {}
+        output_builder._weekly_weight_add_amount(  # noqa: SLF001
+            amounts,
+            {
+                "menu_name": menu_name,
+                "diet_type": diet_type,
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 100,
+            },
+            quantity,
+        )
+        assert output_builder._weekly_weight_format_amount(amounts) == expected  # noqa: SLF001
 
 
 def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path, monkeypatch):
