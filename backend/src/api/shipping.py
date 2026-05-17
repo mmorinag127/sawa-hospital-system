@@ -78,6 +78,20 @@ def track_shipping_status(body: dict):
     }
 
 
+@router.post("/shipping/status/manual", dependencies=[Depends(require_role("operator"))])
+def mark_shipping_status(body: dict):
+    tracking_number = body.get("tracking_number") if isinstance(body, dict) else None
+    status = body.get("status") if isinstance(body, dict) else None
+    try:
+        item = shipping_status_store.mark_tracking_status(
+            str(tracking_number or "").strip(),
+            status=str(status or "").strip(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"item": item}
+
+
 @router.post("/shipping/enrich-excel", dependencies=[Depends(require_role("operator"))])
 async def enrich_shipping_excel(file: UploadFile = File(...)):
     content = await file.read()

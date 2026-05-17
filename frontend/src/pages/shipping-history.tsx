@@ -44,9 +44,12 @@ type TrackingDateGroup = {
   total: number;
   delivered: number;
   pending: number;
+  notShipped: number;
   errors: number;
   attention: number;
   facilityGroups: TrackingFacilityGroup[];
+  notFoundFacilityGroups: TrackingFacilityGroup[];
+  notShippedFacilityGroups: TrackingFacilityGroup[];
 };
 
 type TrackingFacilityGroup = {
@@ -305,6 +308,7 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
     TrackingDateGroup & {
       facilityGroupMap: Map<string, TrackingFacilityGroup>;
       notFoundFacilityGroupMap: Map<string, TrackingFacilityGroup>;
+      notShippedFacilityGroupMap: Map<string, TrackingFacilityGroup>;
     }
   >();
   response.date_groups.forEach((dateGroup: LatestShippingDateGroup) => {
@@ -317,12 +321,15 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
         total: 0,
         delivered: 0,
         pending: 0,
+        notShipped: 0,
         errors: 0,
         attention: 0,
         facilityGroups: [],
         notFoundFacilityGroups: [],
+        notShippedFacilityGroups: [],
         facilityGroupMap: new Map<string, TrackingFacilityGroup>(),
         notFoundFacilityGroupMap: new Map<string, TrackingFacilityGroup>(),
+        notShippedFacilityGroupMap: new Map<string, TrackingFacilityGroup>(),
       };
     dateGroup.facilities.forEach((facilityGroupSource: LatestShippingFacilityGroup) => {
       const displayGroup = normalizeTrackingFacilityDisplayGroup(facilityGroupSource.facility_name);
@@ -335,9 +342,11 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
         });
         const reasons = describeAttentionReasons(item, staleHours);
         const targetMap =
-          String(item.status || "").includes("該当") || reasons.includes("該当なし")
-            ? current.notFoundFacilityGroupMap
-            : current.facilityGroupMap;
+          item.status === "発送しなかった"
+            ? current.notShippedFacilityGroupMap
+            : String(item.status || "").includes("該当") || reasons.includes("該当なし")
+              ? current.notFoundFacilityGroupMap
+              : current.facilityGroupMap;
         const facilityGroup =
           targetMap.get(displayGroup.key) || {
             key: displayGroup.key,
@@ -353,12 +362,13 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
           };
         current.total += 1;
         if (item.delivered) current.delivered += 1;
+        else if (item.status === "発送しなかった") current.notShipped += 1;
         else current.pending += 1;
         if (item.error) current.errors += 1;
         if (reasons.length > 0) current.attention += 1;
         facilityGroup.total += 1;
         if (item.delivered) facilityGroup.delivered += 1;
-        else facilityGroup.pending += 1;
+        else if (item.status !== "発送しなかった") facilityGroup.pending += 1;
         if (item.error) facilityGroup.errors += 1;
         if (reasons.length > 0) facilityGroup.attention += 1;
         facilityGroup.statusCounts[item.status || "不明"] =
@@ -401,12 +411,66 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
           ),
         }))
         .sort((left, right) => left.facilityName.localeCompare(right.facilityName, "ja")),
+      notShippedFacilityGroups: Array.from(group.notShippedFacilityGroupMap.values())
+        .map((facilityGroup) => ({
+          ...facilityGroup,
+          items: [...facilityGroup.items].sort((left, right) =>
+            (left.tracking_key || left.tracking_number).localeCompare(
+              right.tracking_key || right.tracking_number,
+              "ja",
+            ),
+          ),
+        }))
+        .sort((left, right) => left.facilityName.localeCompare(right.facilityName, "ja")),
     }))
     .sort((left, right) => {
       if (left.key === "unknown" && right.key !== "unknown") return 1;
       if (right.key === "unknown" && left.key !== "unknown") return -1;
       return right.sortKey - left.sortKey;
     });
+};
+
+const buildHistoryDateGroups = (items: ShippingHistoryItem[]): TrackingDateGroup[] => {
+  const groupedItems = new Map<string, ShippingHistoryItem[]>();
+  items.forEach((item) => {
+    const key = item.ship_date || lookedUpDateKey(item.looked_up_at);
+    groupedItems.set(key, [...(groupedItems.get(key) || []), item]);
+  });
+  const response: ShippingLatestResponse = {
+    view: "all",
+    window_days: 0,
+    summary: {
+      total: items.length,
+      delivered: items.filter((item) => item.delivered).length,
+      pending: items.filter((item) => !item.delivered && item.status !== "発送しなかった").length,
+      errors: items.filter((item) => item.error).length,
+    },
+    date_groups: Array.from(groupedItems.entries()).map(([dateKey, dateItems]) => ({
+      ship_date: dateKey === "unknown" ? null : dateKey,
+      item_count: dateItems.length,
+      pending_count: dateItems.filter((item) => !item.delivered && item.status !== "発送しなかった").length,
+      delivered_count: dateItems.filter((item) => item.delivered).length,
+      latest_looked_up_at: dateItems[0]?.looked_up_at || null,
+      facilities: [
+        {
+          ship_date: dateKey === "unknown" ? null : dateKey,
+          facility_name: "監査ログ",
+          item_count: dateItems.length,
+          pending_count: dateItems.filter((item) => !item.delivered && item.status !== "発送しなかった").length,
+          delivered_count: dateItems.filter((item) => item.delivered).length,
+          latest_looked_up_at: dateItems[0]?.looked_up_at || null,
+          items: dateItems.map((item) => ({
+            ...item,
+            ship_date: item.ship_date || (dateKey === "unknown" ? null : dateKey),
+            events: [],
+            attention_reasons: item.error ? ["照会失敗"] : [],
+          })),
+        },
+      ],
+    })),
+    quota: null,
+  };
+  return buildTrackingDateGroups(response, 24);
 };
 
 export default function ShippingHistoryPage() {
@@ -427,11 +491,12 @@ export default function ShippingHistoryPage() {
   const [historyItems, setHistoryItems] = useState<ShippingHistoryItem[]>([]);
   const [historySummary, setHistorySummary] = useState<ShippingHistorySummary | null>(null);
   const [historyQuota, setHistoryQuota] = useState<QuotaStatus | null>(null);
-  const [expandedDateGroups, setExpandedDateGroups] = useState<Record<string, boolean>>({});
+  const [selectedDateGroupKey, setSelectedDateGroupKey] = useState<string | null>(null);
   const trackingDateGroups = useMemo(
     () => buildTrackingDateGroups(latest, attentionStaleHours),
     [attentionStaleHours, latest],
   );
+  const historyDateGroups = useMemo(() => buildHistoryDateGroups(historyItems), [historyItems]);
 
   const loadLatest = async (viewOverride?: ShippingLatestView) => {
     const view = viewOverride || (activeTab === "logs" ? "active" : activeTab);
@@ -552,14 +617,9 @@ export default function ShippingHistoryPage() {
   const currentSummary = activeTab === "logs" ? historySummary : latest?.summary || null;
   const currentQuota = activeTab === "logs" ? historyQuota : latest?.quota || null;
   const nonLogDateHeading = "日付ごとの出荷状況";
-  const nonLogDateCopy = "PDF由来の日付を優先して束ね、日付未設定のものだけ最終取得日で補完しています。";
-
-  const toggleDateGroup = (groupKey: string) => {
-    setExpandedDateGroups((current) => ({
-      ...current,
-      [groupKey]: !current[groupKey],
-    }));
-  };
+  const nonLogDateCopy = "日付にはショートサマリーだけを表示し、クリックで詳細を確認します。";
+  const visibleDateGroups = activeTab === "logs" ? historyDateGroups : trackingDateGroups;
+  const selectedDateGroup = visibleDateGroups.find((group) => group.key === selectedDateGroupKey) || null;
 
   const renderTrackingNumberRow = (item: TrackingNumberCard) => {
     const reasons = describeAttentionReasons(item, attentionStaleHours);
@@ -894,127 +954,109 @@ export default function ShippingHistoryPage() {
         </section>
       ) : null}
 
-      {activeTab === "logs" ? (
+      {(
         <section className="panel">
           <header className="panel-header">
             <div>
-              <h2>監査ログ</h2>
-              <p className="panel-copy">補助として照会ログを時系列で表示します。</p>
-            </div>
-          </header>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>発送日</th>
-                  <th>照会日時</th>
-                  <th>伝票番号</th>
-                  <th>施設名</th>
-                  <th>状態</th>
-                  <th>到着日時</th>
-                  <th>取得元</th>
-                  <th>エラー</th>
-                </tr>
-              </thead>
-              <tbody>
-                {historyItems.length === 0 ? (
-                  <tr>
-                    <td colSpan={8}>監査ログがありません。</td>
-                  </tr>
-                ) : (
-                  historyItems.map((item) => (
-                    <tr key={item.id}>
-                      <td>{formatDateOnly(item.ship_date)}</td>
-                      <td>{formatLocalDate(item.looked_up_at)}</td>
-                      <td>{item.tracking_number || item.tracking_key}</td>
-                      <td>{item.facility_name || "-"}</td>
-                      <td>{item.status || "-"}</td>
-                      <td>{item.arrival_text || "-"}</td>
-                      <td>{item.source || "-"}</td>
-                      <td>{item.error || "-"}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : (
-        <section className="panel">
-          <header className="panel-header">
-            <div>
-              <h2>{nonLogDateHeading}</h2>
-              <p className="panel-copy">{nonLogDateCopy}</p>
+              <h2>{activeTab === "logs" ? "監査ログカレンダー" : nonLogDateHeading}</h2>
+              <p className="panel-copy">
+                {activeTab === "logs"
+                  ? "照会ログも日付ごとのショートサマリーに集約し、詳細はポップアップで表示します。"
+                  : nonLogDateCopy}
+              </p>
             </div>
           </header>
 
-          {trackingDateGroups.length ? (
-            <div className="date-stack">
-              {trackingDateGroups.map((group) => {
+          {visibleDateGroups.length ? (
+            <div className="calendar-grid" data-testid="shipping-calendar">
+              {visibleDateGroups.map((group) => {
                 const notFoundCount = group.notFoundFacilityGroups.reduce(
                   (sum, facilityGroup) => sum + facilityGroup.total,
                   0,
                 );
-                const summaryParts = [
-                  `件数 ${group.total}件`,
-                  `完了 ${group.delivered}件`,
-                  `未完了 ${group.pending}件`,
-                  group.attention > 0 ? `要確認 ${group.attention}件` : null,
-                  notFoundCount > 0 ? `該当無し ${notFoundCount}件` : null,
-                ].filter(Boolean) as string[];
-                const expanded = Boolean(expandedDateGroups[group.key]);
                 return (
-                  <section
+                  <button
                     key={group.key}
-                    className="week-group"
+                    type="button"
+                    className="calendar-day"
                     data-testid="shipping-date-group"
+                    onClick={() => setSelectedDateGroupKey(group.key)}
                   >
-                    <div className="week-group-header">
-                      <div>
-                        <p className="week-group-kicker">取得日</p>
-                        <h3>{group.label}</h3>
-                      </div>
-                      <div className="week-group-header-actions">
-                        <div className="week-counts">
-                          <span className="week-count">{group.total}件</span>
-                          <span className="week-count">完了 {group.delivered}件</span>
-                          <span className="week-count">未完了 {group.pending}件</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="week-group-toggle"
-                          onClick={() => toggleDateGroup(group.key)}
-                        >
-                          {expanded ? "閉じる" : "開く"}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="week-group-summary">
-                      {summaryParts.map((item) => (
-                        <span className="week-group-summary-item" key={`${group.key}-${item}`}>
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                    {expanded ? (
-                      <div className="week-group-body">
-                        <div className="facility-slot-grid">
-                          {group.notFoundFacilityGroups.map((facilityGroup) =>
-                            renderFacilityGroupCard(facilityGroup, { unmatched: true }),
-                          )}
-                          {group.facilityGroups.map((facilityGroup) => renderFacilityGroupCard(facilityGroup))}
-                        </div>
-                      </div>
+                    <span className="calendar-day-label">{group.label}</span>
+                    <span className="calendar-day-main">{group.total}件</span>
+                    <span className="calendar-day-summary">
+                      完了 {group.delivered} / 未完了 {group.pending}
+                    </span>
+                    {group.notShipped > 0 ? (
+                      <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
                     ) : null}
-                  </section>
+                    {group.attention > 0 || notFoundCount > 0 ? (
+                      <span className="calendar-day-alert">
+                        {group.attention > 0 ? `要確認 ${group.attention}` : ""}
+                        {group.attention > 0 && notFoundCount > 0 ? " / " : ""}
+                        {notFoundCount > 0 ? `該当無し ${notFoundCount}` : ""}
+                      </span>
+                    ) : null}
+                  </button>
                 );
               })}
             </div>
           ) : (
-            <p className="empty">条件に一致する伝票はありません。</p>
+            <p className="empty">{activeTab === "logs" ? "監査ログがありません。" : "条件に一致する伝票はありません。"}</p>
           )}
         </section>
       )}
+
+      {selectedDateGroup ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setSelectedDateGroupKey(null)}>
+          <section
+            className="detail-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shipping-detail-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="modal-header">
+              <div>
+                <p className="week-group-kicker">取得日</p>
+                <h2 id="shipping-detail-title">{selectedDateGroup.label}</h2>
+              </div>
+              <button type="button" className="week-group-toggle" onClick={() => setSelectedDateGroupKey(null)}>
+                閉じる
+              </button>
+            </header>
+            <div className="week-group-summary">
+              <span className="week-group-summary-item">件数 {selectedDateGroup.total}件</span>
+              <span className="week-group-summary-item">完了 {selectedDateGroup.delivered}件</span>
+              <span className="week-group-summary-item">未完了 {selectedDateGroup.pending}件</span>
+              {selectedDateGroup.notShipped > 0 ? (
+                <span className="week-group-summary-item">発送なし {selectedDateGroup.notShipped}件</span>
+              ) : null}
+              {selectedDateGroup.attention > 0 ? (
+                <span className="week-group-summary-item">要確認 {selectedDateGroup.attention}件</span>
+              ) : null}
+            </div>
+            <div className="facility-slot-grid modal-facility-grid">
+              {selectedDateGroup.notFoundFacilityGroups.map((facilityGroup) =>
+                renderFacilityGroupCard(facilityGroup, { unmatched: true }),
+              )}
+              {selectedDateGroup.facilityGroups.map((facilityGroup) => renderFacilityGroupCard(facilityGroup))}
+            </div>
+            {selectedDateGroup.notShippedFacilityGroups.length ? (
+              <details className="not-shipped-minimized" data-testid="not-shipped-minimized">
+                <summary>
+                  発送しなかった番号 {selectedDateGroup.notShipped}件
+                </summary>
+                <div className="facility-slot-grid modal-facility-grid">
+                  {selectedDateGroup.notShippedFacilityGroups.map((facilityGroup) =>
+                    renderFacilityGroupCard(facilityGroup),
+                  )}
+                </div>
+              </details>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
 
       <style jsx>{`
         :global(body) {
@@ -1419,11 +1461,131 @@ export default function ShippingHistoryPage() {
           gap: 18px;
         }
 
+        .calendar-grid {
+          display: grid;
+          grid-template-columns: repeat(7, minmax(120px, 1fr));
+          gap: 10px;
+        }
+
+        .calendar-day {
+          min-height: 132px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          padding: 12px;
+          background: #fbfbf9;
+          color: #1f2a2a;
+          text-align: left;
+          display: flex;
+          flex-direction: column;
+          gap: 7px;
+          cursor: pointer;
+        }
+
+        .calendar-day:hover,
+        .calendar-day:focus-visible {
+          border-color: rgba(36, 51, 48, 0.28);
+          background: #f2f6f4;
+          outline: none;
+        }
+
+        .calendar-day-label {
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .calendar-day-main {
+          font-size: 22px;
+          font-weight: 800;
+          line-height: 1.15;
+        }
+
+        .calendar-day-summary,
+        .calendar-day-alert {
+          font-size: 12px;
+          line-height: 1.35;
+          color: #41514d;
+        }
+
+        .calendar-day-summary.muted {
+          color: #6f6255;
+        }
+
+        .calendar-day-alert {
+          margin-top: auto;
+          color: #7a3d2d;
+          font-weight: 700;
+        }
+
+        .modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 40;
+          background: rgba(18, 24, 22, 0.46);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 28px;
+        }
+
+        .detail-modal {
+          width: min(1080px, 100%);
+          max-height: min(820px, calc(100vh - 56px));
+          overflow: auto;
+          border-radius: 16px;
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          box-shadow: 0 24px 80px rgba(12, 18, 16, 0.32);
+          padding: 20px;
+        }
+
+        .modal-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+        }
+
+        .modal-facility-grid {
+          margin-top: 16px;
+        }
+
+        .not-shipped-minimized {
+          margin-top: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          background: #faf8f2;
+          padding: 12px;
+        }
+
+        .not-shipped-minimized summary {
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 800;
+          color: #4d463c;
+        }
+
         .week-group {
           border: 1px solid rgba(25, 32, 30, 0.08);
           border-radius: 18px;
           background: linear-gradient(180deg, rgba(250, 247, 240, 0.65), rgba(255, 255, 255, 0.96));
           padding: 18px;
+        }
+
+        @media (max-width: 980px) {
+          .calendar-grid {
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          }
+        }
+
+        @media (max-width: 640px) {
+          .modal-backdrop {
+            padding: 12px;
+          }
+
+          .detail-modal {
+            max-height: calc(100vh - 24px);
+            padding: 16px;
+          }
         }
 
         .week-group-unresolved {

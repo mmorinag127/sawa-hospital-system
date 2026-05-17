@@ -218,6 +218,49 @@ def test_get_latest_status_view_can_skip_quota_payload():
     assert result["quota"] is None
 
 
+def test_manual_shipping_status_marks_shipped_and_not_shipped_in_shared_view():
+    _reset_tracking_state()
+    shipping_status_store.record_tracking_statuses(
+        [
+            {
+                "tracking_number": "1234-5678-9012",
+                "tracking_key": "123456789012",
+                "facility_name": "大和なでしこ",
+                "ship_date": date(2026, 3, 24),
+                "status": "配達中",
+                "delivered": False,
+                "arrival_text": None,
+            },
+            {
+                "tracking_number": "9999-0000-1111",
+                "tracking_key": "999900001111",
+                "facility_name": "春日苑 松茂",
+                "ship_date": date(2026, 3, 24),
+                "status": "配達中",
+                "delivered": False,
+                "arrival_text": None,
+            },
+        ],
+        source="shipping_pdf_parse",
+    )
+
+    shipped = shipping_status_store.mark_tracking_status("1234-5678-9012", status="発送済み")
+    not_shipped = shipping_status_store.mark_tracking_status("9999-0000-1111", status="発送しなかった")
+    active = shipping_status_store.get_latest_status_view(view="active", limit=10)
+    all_view = shipping_status_store.get_latest_status_view(view="all", limit=10)
+    pending_numbers = shipping_status_store.get_latest_pending_tracking_numbers(limit=10)
+
+    assert shipped["status"] == "発送済み"
+    assert shipped["delivered"] is True
+    assert not_shipped["status"] == "発送しなかった"
+    assert not_shipped["delivered"] is False
+    assert active["summary"]["total"] == 0
+    assert all_view["summary"]["delivered"] == 1
+    assert all_view["summary"]["not_shipped"] == 1
+    assert "1234-5678-9012" not in pending_numbers
+    assert "9999-0000-1111" not in pending_numbers
+
+
 def test_get_latest_status_view_rejects_invalid_view():
     _reset_tracking_state()
 

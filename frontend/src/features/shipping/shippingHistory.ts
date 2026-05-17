@@ -3,6 +3,7 @@ export type ShippingLatestView = "active" | "all" | "attention" | "recent";
 export type ShippingHistorySummary = {
   total: number;
   delivered: number;
+  not_shipped?: number;
   pending: number;
   errors: number;
   all_delivered?: boolean;
@@ -233,20 +234,23 @@ const describeAttentionReasonsFromShape = (item: ShippingLatestItem, staleHours 
 
 const summarizeItems = (items: ShippingLatestItem[]): ShippingHistorySummary => {
   let delivered = 0;
+  let notShipped = 0;
   let errors = 0;
   let facilityMissing = 0;
   let attention = 0;
   items.forEach((item) => {
     if (item.delivered) delivered += 1;
+    if (item.status === "発送しなかった") notShipped += 1;
     if (item.error) errors += 1;
     if (!item.facility_name) facilityMissing += 1;
     if (describeAttentionReasonsFromShape(item).length > 0) attention += 1;
   });
   const total = items.length;
-  const pending = Math.max(total - delivered, 0);
+  const pending = Math.max(total - delivered - notShipped, 0);
   return {
     total,
     delivered,
+    not_shipped: notShipped,
     pending,
     errors,
     all_delivered: total > 0 && pending === 0,
@@ -397,6 +401,7 @@ export const normalizeLatestResponse = (
     summary: {
       total: normalizeNumber(payload?.summary?.total, summary.total),
       delivered: normalizeNumber(payload?.summary?.delivered, summary.delivered),
+      not_shipped: normalizeNumber(payload?.summary?.not_shipped, summary.not_shipped),
       pending: normalizeNumber(payload?.summary?.pending, summary.pending),
       errors: normalizeNumber(payload?.summary?.errors, summary.errors),
       all_delivered:

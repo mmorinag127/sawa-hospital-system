@@ -42,6 +42,7 @@ export default function ShippingPage() {
   } | null>(null);
   const [trackingItems, setTrackingItems] = useState<
     {
+      tracking_key?: string;
       tracking_number: string;
       status: string;
       delivered: boolean;
@@ -49,6 +50,8 @@ export default function ShippingPage() {
       error?: string | null;
     }[]
   >([]);
+  const visibleTrackingItems = trackingItems.filter((item) => item.status !== "発送しなかった");
+  const notShippedTrackingItems = trackingItems.filter((item) => item.status === "発送しなかった");
 
   const handleUpload = async () => {
     if (!pdfFile) {
@@ -197,6 +200,43 @@ export default function ShippingPage() {
     }
   };
 
+  const markTrackingStatus = async (trackingNumber: string, status: "発送済み" | "発送しなかった") => {
+    const label = status === "発送済み" ? "発送完了" : "発送しなかった";
+    const ok = window.confirm(`${trackingNumber} を「${label}」として確定します。よろしいですか？`);
+    if (!ok) return;
+    setTrackingLoading(true);
+    setTrackingMessage(`${label}を確定中です...`);
+    try {
+      const res = await apiClient.post("/shipping/status/manual", {
+        tracking_number: trackingNumber,
+        status,
+      });
+      const updated = res.data?.item;
+      setTrackingItems((items) =>
+        items.map((item) => {
+          const key = item.tracking_key || item.tracking_number;
+          const updatedKey = updated?.tracking_key || updated?.tracking_number;
+          if (key !== updatedKey && item.tracking_number !== trackingNumber) return item;
+          return {
+            ...item,
+            tracking_key: updated?.tracking_key || item.tracking_key,
+            tracking_number: updated?.tracking_number || item.tracking_number,
+            status: updated?.status || status,
+            delivered: Boolean(updated?.delivered),
+            arrival_text: updated?.arrival_text ?? item.arrival_text,
+            error: updated?.error ?? null,
+          };
+        }),
+      );
+      setTrackingMessage(`${label}として確定しました。`);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setTrackingMessage(detail ? `確定に失敗しました: ${detail}` : "確定に失敗しました。");
+    } finally {
+      setTrackingLoading(false);
+    }
+  };
+
   return (
     <main className="page">
       <header className="hero">
@@ -305,19 +345,65 @@ export default function ShippingPage() {
                   <th>状態</th>
                   <th>到着日時</th>
                   <th>エラー</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {trackingItems.map((item, idx) => (
+                {visibleTrackingItems.map((item, idx) => (
                   <tr key={`${item.tracking_number}-${idx}`}>
                     <td>{item.tracking_number}</td>
                     <td>{item.status}</td>
                     <td>{item.arrival_text || "-"}</td>
                     <td>{item.error || "-"}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          onClick={() => markTrackingStatus(item.tracking_number, "発送済み")}
+                          disabled={trackingLoading || item.status === "発送済み"}
+                        >
+                          発送完了
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn muted"
+                          onClick={() => markTrackingStatus(item.tracking_number, "発送しなかった")}
+                          disabled={trackingLoading || item.status === "発送しなかった"}
+                        >
+                          発送しなかった
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {notShippedTrackingItems.length > 0 ? (
+              <details className="not-shipped-tracking" data-testid="shipping-not-shipped-minimized">
+                <summary>発送しなかった番号 {notShippedTrackingItems.length}件</summary>
+                <table className="track-table minimized-table">
+                  <thead>
+                    <tr>
+                      <th>伝票番号</th>
+                      <th>状態</th>
+                      <th>到着日時</th>
+                      <th>エラー</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {notShippedTrackingItems.map((item, idx) => (
+                      <tr key={`${item.tracking_number}-not-shipped-${idx}`}>
+                        <td>{item.tracking_number}</td>
+                        <td>{item.status}</td>
+                        <td>{item.arrival_text || "-"}</td>
+                        <td>{item.error || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -498,6 +584,52 @@ export default function ShippingPage() {
         .track-table thead th {
           background: #eef4f2;
           font-weight: 700;
+        }
+
+        .not-shipped-tracking {
+          margin-top: 12px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 10px;
+          background: #faf8f2;
+          padding: 10px 12px;
+        }
+
+        .not-shipped-tracking summary {
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 800;
+          color: #4d463c;
+        }
+
+        .minimized-table {
+          margin-top: 10px;
+        }
+
+        .row-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+
+        .mini-btn {
+          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-radius: 999px;
+          padding: 5px 9px;
+          background: #1f2a2a;
+          color: #f7f2e7;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .mini-btn.muted {
+          background: #eef3f1;
+          color: #243330;
+        }
+
+        .mini-btn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
         }
 
         .file-name {

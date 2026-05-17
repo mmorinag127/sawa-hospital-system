@@ -24,6 +24,8 @@ _DEFAULT_TZ = "Asia/Tokyo"
 _EXPORT_DIR = Path(os.getenv("SHIPPING_EXPORT_DIR", "/tmp/shipping-exports"))
 _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 _EVENT_TEXT_RE = re.compile(r"(\d{2})/(\d{2})\s*(\d{2}):(\d{2})")
+STATUS_SHIPPED = "発送済み"
+STATUS_NOT_SHIPPED = "発送しなかった"
 
 
 def _status_to_dict(item: object) -> dict[str, Any]:
@@ -191,6 +193,7 @@ def _serialize_current_row(
 
 def _summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     delivered = 0
+    not_shipped = 0
     errors = 0
     facility_missing = 0
     attention = 0
@@ -199,15 +202,18 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, Any]:
             errors += 1
         if item.get("delivered"):
             delivered += 1
+        if _is_not_shipped(item):
+            not_shipped += 1
         if not item.get("facility_name"):
             facility_missing += 1
         if item.get("attention_reasons"):
             attention += 1
     total = len(items)
-    pending = max(total - delivered, 0)
+    pending = max(total - delivered - not_shipped, 0)
     return {
         "total": total,
         "delivered": delivered,
+        "not_shipped": not_shipped,
         "pending": pending,
         "errors": errors,
         "all_delivered": total > 0 and pending == 0,
@@ -232,6 +238,13 @@ def _latest_items_by_tracking(rows: Sequence[dict[str, Any]], *, limit: int) -> 
         if len(latest) >= limit:
             break
     return latest
+
+
+def _is_not_shipped(item: Mapping[str, Any] | None) -> bool:
+    if not item:
+        return False
+    status = str(item.get("status") or "").strip()
+    return status == STATUS_NOT_SHIPPED
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -688,6 +701,94 @@ def record_tracking_statuses(
     return processed
 
 
+def mark_tracking_status(
+    tracking_number: str,
+    *,
+    status: str,
+    source: str = "manual_status",
+) -> dict[str, Any]:
+    tracking_key = normalize_tracking_key(str(tracking_number or ""))
+    if not tracking_key:
+        raise ValueError("tracking_number is required")
+    normalized_status = _normalize_text(status)
+    if normalized_status not in {STATUS_SHIPPED, STATUS_NOT_SHIPPED}:
+        raise ValueError("status must be 発送済み or 発送しなかった")
+
+    now = datetime.utcnow()
+    delivered = normalized_status == STATUS_SHIPPED
+    with session_scope() as session:
+        current_row = session.get(ShippingTrackingCurrent, tracking_key)
+        fallback_row = (
+            session.execute(
+                select(ShippingTrackingLog)
+                .where(ShippingTrackingLog.tracking_key == tracking_key)
+                .order_by(ShippingTrackingLog.looked_up_at.desc(), ShippingTrackingLog.created_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        tracking_number_value = (
+            (current_row.tracking_number if current_row else None)
+            or (fallback_row.tracking_number if fallback_row else None)
+            or str(tracking_number).strip()
+        )
+        ship_date = (current_row.ship_date if current_row else None) or (
+            fallback_row.ship_date if fallback_row else None
+        )
+        facility_name = (current_row.facility_name if current_row else None) or (
+            fallback_row.facility_name if fallback_row else None
+        )
+        arrival_text = (
+            _normalize_text(current_row.arrival_text) if current_row else None
+        ) or (_normalize_text(fallback_row.arrival_text) if fallback_row else None)
+
+        if current_row is None:
+            current_row = ShippingTrackingCurrent(
+                tracking_key=tracking_key,
+                tracking_number=tracking_number_value,
+                ship_date=ship_date,
+                facility_name=facility_name,
+                status=normalized_status,
+                delivered=delivered,
+                arrival_text=arrival_text,
+                error=None,
+                source=source,
+                looked_up_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(current_row)
+        else:
+            current_row.tracking_number = tracking_number_value
+            current_row.ship_date = ship_date
+            current_row.facility_name = facility_name
+            current_row.status = normalized_status
+            current_row.delivered = delivered
+            current_row.arrival_text = arrival_text
+            current_row.error = None
+            current_row.source = source
+            current_row.looked_up_at = now
+            current_row.updated_at = now
+
+        log_row = ShippingTrackingLog(
+            id=f"STL{uuid4().hex[:10]}",
+            tracking_key=tracking_key,
+            tracking_number=tracking_number_value,
+            ship_date=ship_date,
+            facility_name=facility_name,
+            status=normalized_status,
+            delivered=delivered,
+            arrival_text=arrival_text,
+            error=None,
+            source=source,
+            looked_up_at=now,
+            created_at=now,
+        )
+        session.add(log_row)
+        session.flush()
+        return _serialize_current_row(current_row)
+
+
 def _query_history_rows(
     *,
     limit: int,
@@ -994,7 +1095,7 @@ def get_latest_status_view(
             item["attention_reasons"] = attention_reasons
 
         reference_date, _ = _reference_date_from_item(item, timezone_name=timezone_name)
-        if normalized_view == "active" and item.get("delivered"):
+        if normalized_view == "active" and (item.get("delivered") or _is_not_shipped(item)):
             continue
         if normalized_view == "attention" and not attention_reasons:
             continue
@@ -1084,7 +1185,7 @@ def get_latest_pending_tracking_numbers(
         reference_date, _ = _reference_date_from_item(item, timezone_name=timezone_name)
         if reference_date and reference_date < since:
             continue
-        if item.get("delivered"):
+        if item.get("delivered") or _is_not_shipped(item):
             continue
         if item.get("error"):
             continue
