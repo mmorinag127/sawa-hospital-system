@@ -147,7 +147,7 @@ def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch):
     assert (order_bags_after_delete.json().get("applied_portion_overrides") or []) == []
 
 
-def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
+def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     order_service.clear_all()
     cut_order = _create_daily_override_order(
@@ -161,6 +161,18 @@ def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
         menu_name="ハンバーグ",
         quantity=3,
     )
+    stick_order = _create_daily_override_order(
+        message_id="msg-daily-override-stick-001",
+        facility_hint="FAC00005",
+        menu_name="春巻き",
+        quantity=5,
+    )
+    sheet_order = _create_daily_override_order(
+        message_id="msg-daily-override-sheet-001",
+        facility_hint="FAC00006",
+        menu_name="焼き海苔",
+        quantity=6,
+    )
 
     client = TestClient(app)
 
@@ -172,7 +184,7 @@ def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
             "menu_name": "白身魚のフライ",
             "diet_type": "regular",
             "daypart": "昼",
-            "unit_type": "cut",
+            "unit_type": "切れ",
             "qty_per_serving": 2,
             "note": "魚は2切",
         },
@@ -196,6 +208,38 @@ def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
     assert count_res.status_code == 200
     assert count_res.json().get("override", {}).get("unit_type") == "個"
 
+    stick_res = client.post(
+        "/orders/daily-output-overrides/upsert",
+        json={
+            "date": "2026-04-18",
+            "facility_id": "FAC00005",
+            "menu_name": "春巻き",
+            "diet_type": "regular",
+            "daypart": "昼",
+            "unit_type": "本",
+            "qty_per_serving": 2,
+            "note": "春巻きは2本",
+        },
+    )
+    assert stick_res.status_code == 200
+    assert stick_res.json().get("override", {}).get("unit_type") == "本"
+
+    sheet_res = client.post(
+        "/orders/daily-output-overrides/upsert",
+        json={
+            "date": "2026-04-18",
+            "facility_id": "FAC00006",
+            "menu_name": "焼き海苔",
+            "diet_type": "regular",
+            "daypart": "昼",
+            "unit_type": "枚",
+            "qty_per_serving": 3,
+            "note": "焼き海苔は3枚",
+        },
+    )
+    assert sheet_res.status_code == 200
+    assert sheet_res.json().get("override", {}).get("unit_type") == "枚"
+
     cut_lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(cut_order["id"]))
     cut_line = next(line for line in cut_lines if str(line.get("menu_name") or "") == "白身魚のフライ")
     assert cut_line.get("menu_unit_type") == "切"
@@ -206,6 +250,16 @@ def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
     assert count_line.get("menu_unit_type") == "個"
     assert count_line.get("actual_amount") == 3
 
+    stick_lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(stick_order["id"]))
+    stick_line = next(line for line in stick_lines if str(line.get("menu_name") or "") == "春巻き")
+    assert stick_line.get("menu_unit_type") == "本"
+    assert stick_line.get("actual_amount") == 10
+
+    sheet_lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(sheet_order["id"]))
+    sheet_line = next(line for line in sheet_lines if str(line.get("menu_name") or "") == "焼き海苔")
+    assert sheet_line.get("menu_unit_type") == "枚"
+    assert sheet_line.get("actual_amount") == 18
+
     daily_bags_res = client.get("/orders/daily-bags", params={"date": "2026-04-18"})
     assert daily_bags_res.status_code == 200
     cut_group = _find_daily_bag_diet_group(daily_bags_res.json(), menu_name="白身魚のフライ", diet_type="regular")
@@ -214,6 +268,12 @@ def test_daily_output_override_normalizes_cut_and_count_units(monkeypatch):
     count_group = _find_daily_bag_diet_group(daily_bags_res.json(), menu_name="ハンバーグ", diet_type="regular")
     assert count_group.get("calculation_basis_label") == "1個/人"
     assert count_group.get("total_amount_label") == "3個"
+    stick_group = _find_daily_bag_diet_group(daily_bags_res.json(), menu_name="春巻き", diet_type="regular")
+    assert stick_group.get("calculation_basis_label") == "2本/人"
+    assert stick_group.get("total_amount_label") == "10本"
+    sheet_group = _find_daily_bag_diet_group(daily_bags_res.json(), menu_name="焼き海苔", diet_type="regular")
+    assert sheet_group.get("calculation_basis_label") == "3枚/人"
+    assert sheet_group.get("total_amount_label") == "18枚"
 
 
 def test_daily_output_override_bulk_updates_all_facilities(monkeypatch):

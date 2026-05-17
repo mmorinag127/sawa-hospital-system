@@ -372,6 +372,8 @@ const overrideUnitOptions = [
   { value: "g", label: "グラム" },
   { value: "切", label: "切れ" },
   { value: "個", label: "個" },
+  { value: "本", label: "本" },
+  { value: "枚", label: "枚" },
 ];
 
 const normalizeOverrideUnitValue = (value?: string | null) => {
@@ -380,8 +382,10 @@ const normalizeOverrideUnitValue = (value?: string | null) => {
   const compact = raw.toLowerCase().replace(/[　\s]+/g, "");
   if (compact === "g" || compact === "ｇ" || raw.includes("グラム")) return "g";
   if (raw.includes("切") || raw.includes("枚") || compact === "cut" || compact === "slice" || compact === "slices")
-    return "切";
-  if (raw.includes("個") || compact === "count" || compact === "piece" || compact === "pieces") return "個";
+    return raw.includes("枚") && !raw.includes("切") ? "枚" : "切";
+  if (raw.includes("個") || raw.includes("ヶ") || raw.includes("ケ") || compact === "count" || compact === "piece" || compact === "pieces")
+    return "個";
+  if (raw.includes("本")) return "本";
   return "g";
 };
 

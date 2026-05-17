@@ -6624,10 +6624,14 @@ def _normalize_output_unit(value: object) -> str:
         return "g"
     if token in {"ml"}:
         return "ml"
-    if "個" in raw or token in {"count", "piece", "pieces"}:
+    if "個" in raw or "ヶ" in raw or "ケ" in raw or token in {"count", "piece", "pieces", "こ", "コ".lower()}:
         return "個"
-    if "切" in raw or "枚" in raw or token in {"cut", "slice", "slices"}:
+    if "切" in raw or token in {"cut", "slice", "slices"}:
         return "切"
+    if "本" in raw:
+        return "本"
+    if "枚" in raw:
+        return "枚"
     return raw
 
 

@@ -397,13 +397,15 @@ def _normalize_unit_type(unit_type: str | None) -> str | None:
     if not unit_type:
         return None
     raw = str(unit_type).strip()
-    lowered = raw.lower()
+    lowered = raw.lower().replace(" ", "").replace("　", "")
     if "g" in lowered or "グラム" in raw:
         return "g"
     if "切" in raw or "枚" in raw or lowered in {"cut", "slice", "slices"}:
-        return "切"
-    if "個" in raw or lowered in {"count", "piece", "pieces"}:
+        return "枚" if "枚" in raw and "切" not in raw else "切"
+    if "個" in raw or "ヶ" in raw or "ケ" in raw or lowered in {"count", "piece", "pieces", "こ", "コ".lower()}:
         return "個"
+    if "本" in raw:
+        return "本"
     return raw
 
 
@@ -515,10 +517,14 @@ def _extract_qty_and_unit(value: Any, unit_type: str | None) -> tuple[float | No
     inferred_unit = None
     if "g" in text or "ｇ" in text or "グラム" in text:
         inferred_unit = "g"
-    elif "切" in text or "枚" in text:
+    elif "切" in text:
         inferred_unit = "切"
-    elif "個" in text:
+    elif "個" in text or "ヶ" in text or "ケ" in text:
         inferred_unit = "個"
+    elif "本" in text:
+        inferred_unit = "本"
+    elif "枚" in text:
+        inferred_unit = "枚"
     return qty, _normalize_unit_type(unit_type) or inferred_unit
 
 
@@ -743,7 +749,7 @@ def _format_menu_unit(qty: float | int | None, unit_type: str | None) -> str | N
     else:
         qty_str = str(qty_value)
     normalized = _normalize_unit_type(unit_type)
-    suffix = "g" if normalized == "g" else ("個" if normalized == "個" else ("切" if normalized == "切" else normalized))
+    suffix = normalized
     return f"{qty_str}{suffix}"
 
 

@@ -15,6 +15,12 @@ from src.services.menu_vocabulary import normalize_diet_type
 _GRAM_UNIT_ALIASES = {"g", "ｇ", "gram", "grams"}
 _CUT_UNIT_ALIASES = {"cut", "slice", "slices"}
 _COUNT_UNIT_ALIASES = {"count", "piece", "pieces"}
+_UNIT_TYPE_ALIASES = {
+    "切": {"切", "切れ", "きれ", "キレ"},
+    "個": {"個", "ヶ", "ケ", "こ", "コ"},
+    "本": {"本"},
+    "枚": {"枚"},
+}
 
 
 def normalize_override_menu_name(value: object) -> str:
@@ -53,10 +59,13 @@ def _coerce_override_unit_type(value: object) -> str | None:
     lowered = raw.lower().replace(" ", "").replace("　", "")
     if lowered in _GRAM_UNIT_ALIASES or "グラム" in raw:
         return "g"
-    if lowered in _CUT_UNIT_ALIASES or "切" in raw or "枚" in raw:
+    if lowered in _CUT_UNIT_ALIASES:
         return "切"
-    if lowered in _COUNT_UNIT_ALIASES or "個" in raw:
+    if lowered in _COUNT_UNIT_ALIASES:
         return "個"
+    for canonical, aliases in _UNIT_TYPE_ALIASES.items():
+        if lowered in {alias.lower() for alias in aliases} or any(alias in raw for alias in aliases):
+            return canonical
     return None
 
 
