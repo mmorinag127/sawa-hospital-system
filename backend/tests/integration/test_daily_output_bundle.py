@@ -785,15 +785,24 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     for sheet_name in actual.sheetnames:
         assert sheet_name in actual.sheetnames
         actual_ws = actual[sheet_name]
+        table_max_col = output_builder._daily_delivery_table_max_column(actual_ws)  # noqa: SLF001
         for col_idx in range(1, actual_ws.max_column + 1):
             actual_cell = actual_ws.cell(row=19, column=col_idx)
-            assert actual_cell.border.bottom.style == "medium", (
-                f"{sheet_name}!{actual_cell.coordinate} must have evening bottom border"
-            )
             row_after_table_cell = actual_ws.cell(row=20, column=col_idx)
-            assert row_after_table_cell.border.top.style == "medium", (
-                f"{sheet_name}!{row_after_table_cell.coordinate} must preserve evening bottom as visible top edge"
-            )
+            if col_idx <= table_max_col:
+                assert actual_cell.border.bottom.style == "medium", (
+                    f"{sheet_name}!{actual_cell.coordinate} must have evening bottom border"
+                )
+                assert row_after_table_cell.border.top.style == "medium", (
+                    f"{sheet_name}!{row_after_table_cell.coordinate} must preserve evening bottom as visible top edge"
+                )
+            else:
+                assert actual_cell.border.bottom.style != "medium", (
+                    f"{sheet_name}!{actual_cell.coordinate} must not extend evening bottom outside table"
+                )
+                assert row_after_table_cell.border.top.style != "medium", (
+                    f"{sheet_name}!{row_after_table_cell.coordinate} must not extend evening top edge outside table"
+                )
 
 
 def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
@@ -832,6 +841,11 @@ def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
 
     saved = load_workbook(output_path, data_only=True)
     assert saved["山城"]["C27"].value is None
+    for ws in saved.worksheets:
+        for col_idx in range(1, ws.max_column + 1):
+            assert ws.cell(row=20, column=col_idx).value in (None, ""), (
+                f"{ws.title}!{ws.cell(row=20, column=col_idx).coordinate} must not contain static artifacts"
+            )
     for row_idx in range(12, 20):
         assert saved["池袋病院"].cell(row=row_idx, column=5).value is None
         assert saved["池袋病院"].cell(row=row_idx, column=6).value is None

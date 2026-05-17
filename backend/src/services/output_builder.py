@@ -2841,6 +2841,15 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
     return columns
 
 
+def _daily_delivery_table_max_column(ws) -> int:
+    column_indices = [
+        int(col["column_index"])
+        for col in _daily_delivery_column_meta(ws)
+        if isinstance(col.get("column_index"), int)
+    ]
+    return max(column_indices) if column_indices else 4
+
+
 def _clear_daily_delivery_sheet_data(ws) -> None:
     note_columns = {
         int(col.get("column_index"))
@@ -2892,9 +2901,10 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
 
 def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
     max_col = max(ws.max_column, template_ws.max_column if template_ws is not None else 0)
+    table_max_col = _daily_delivery_table_max_column(ws)
     source_side: BorderSide | None = None
     if template_ws is not None:
-        for col_idx in range(1, max_col + 1):
+        for col_idx in range(1, table_max_col + 1):
             side = template_ws.cell(row=19, column=col_idx).border.bottom
             if side is not None and side.style == "medium":
                 source_side = copy(side)
@@ -2914,11 +2924,12 @@ def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
             if isinstance(bottom_cell, MergedCell):
                 continue
         bottom_border = bottom_cell.border
+        bottom_side = copy(source_side) if col_idx <= table_max_col else Side(style=None)
         bottom_cell.border = Border(
             left=copy(bottom_border.left),
             right=copy(bottom_border.right),
             top=copy(bottom_border.top),
-            bottom=copy(source_side),
+            bottom=bottom_side,
             diagonal=copy(bottom_border.diagonal),
             diagonal_direction=bottom_border.diagonal_direction,
             diagonalUp=bottom_border.diagonalUp,
@@ -2931,10 +2942,11 @@ def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
         if isinstance(top_cell, MergedCell):
             continue
         top_border = top_cell.border
+        top_side = copy(source_side) if col_idx <= table_max_col else Side(style=None)
         top_cell.border = Border(
             left=copy(top_border.left),
             right=copy(top_border.right),
-            top=copy(source_side),
+            top=top_side,
             bottom=copy(top_border.bottom),
             diagonal=copy(top_border.diagonal),
             diagonal_direction=top_border.diagonal_direction,
