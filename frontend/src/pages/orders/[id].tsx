@@ -15578,6 +15578,11 @@ export default function OrderDetailPage() {
           text-align: center;
         }
 
+        .ocr-sheet-col-qty .ocr-sheet-input {
+          padding-left: 4px;
+          padding-right: 12px;
+        }
+
         .ocr-sheet-col-menu .ocr-sheet-input,
         .ocr-sheet-col-note .ocr-sheet-input {
           text-align: left;
