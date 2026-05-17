@@ -635,6 +635,14 @@ def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_
             "soft_mixer_quantity": 0,
             "soft_mixer_amounts": {},
         },
+        (dt_date(2026, 5, 10), "夕", "主"): {
+            "regular_menu": "煮込みハンバーグ",
+            "regular_quantity": 430,
+            "regular_amounts": {"個": 430},
+            "soft_mixer_menu": "煮込みハンバーグ",
+            "soft_mixer_quantity": 49,
+            "soft_mixer_amounts": {"個": 49},
+        },
     }
 
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
@@ -668,6 +676,11 @@ def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_
     assert generated_ws["D13"].value == "個数生成メニュー"
     assert generated_ws["E13"].value == 4
     assert generated_ws["F13"].value == "4個＋ソース0.2"
+    assert generated_ws["D16"].value == "煮込みハンバーグ"
+    assert generated_ws["E16"].value == 430
+    assert generated_ws["F16"].value == "430個"
+    assert generated_ws["G16"].value == 49
+    assert generated_ws["H16"].value == "49個"
 
 
 def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path, monkeypatch):
