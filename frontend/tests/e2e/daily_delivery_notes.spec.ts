@@ -143,7 +143,9 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
   await expect(bagTable.getByRole("cell", { name: "100g/人" })).toBeVisible();
   await expect(page.locator(".bag-breakdown-ref").first()).toContainText("施設A (FAC-001) / 2F / 220食");
   await expect(page.locator(".bag-breakdown-ref .link").first()).toHaveAttribute("href", "/orders/ORD-DAILY-001");
-  await expect(page.locator(".total-facility-summary").first()).toContainText("施設A (FAC-001): 220");
+  await expect(page.locator(".total-facility-panel").first()).toContainText("施設別合計");
+  await expect(page.locator(".total-facility-chip").first()).toContainText("施設A (FAC-001)");
+  await expect(page.locator(".total-facility-chip").first()).toContainText("220");
 });
 
 test("daily delivery notes can save facility-level portion overrides and reflect them in the list", async ({ page }) => {
