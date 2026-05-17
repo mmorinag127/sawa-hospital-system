@@ -3713,16 +3713,39 @@ def _cell_ref_to_indexes(ref: str) -> tuple[int, int] | None:
     return int(match.group(2)), column_index_from_string(match.group(1))
 
 
-def _formula_cache_value(workbook, sheet_name: str, formula: str) -> Any:
+def _cell_cache_value(workbook, sheet_name: str, row_idx: int, col_idx: int, seen: set[tuple[str, int, int]] | None = None) -> Any:
+    key = (sheet_name, row_idx, col_idx)
+    if seen is None:
+        seen = set()
+    if key in seen:
+        return None
+    seen.add(key)
+    if sheet_name not in workbook.sheetnames:
+        return None
+    value = workbook[sheet_name].cell(row=row_idx, column=col_idx).value
+    if isinstance(value, str) and value.startswith("="):
+        return _formula_cache_value(workbook, sheet_name, value, seen)
+    return value
+
+
+def _formula_cache_value(
+    workbook,
+    sheet_name: str,
+    formula: str,
+    seen: set[tuple[str, int, int]] | None = None,
+) -> Any:
     text = str(formula or "").strip()
     if text.startswith("="):
         text = text[1:]
     menu_match = re.fullmatch(r"'?メニュー'?!\$?([A-Z]+)\$?([0-9]+)", text)
     if menu_match and "メニュー" in workbook.sheetnames:
-        return workbook["メニュー"].cell(
-            row=int(menu_match.group(2)),
-            column=column_index_from_string(menu_match.group(1)),
-        ).value
+        return _cell_cache_value(
+            workbook,
+            "メニュー",
+            int(menu_match.group(2)),
+            column_index_from_string(menu_match.group(1)),
+            seen,
+        )
     sum_match = re.fullmatch(r"SUM\((\$?[A-Z]+\$?[0-9]+):(\$?[A-Z]+\$?[0-9]+)\)", text, flags=re.IGNORECASE)
     if sum_match and sheet_name in workbook.sheetnames:
         start = _cell_ref_to_indexes(sum_match.group(1))
@@ -3741,8 +3764,20 @@ def _formula_cache_value(workbook, sheet_name: str, formula: str) -> Any:
     product_match = re.fullmatch(r"([A-Z]+)([0-9]+)\*([A-Z]+)([0-9]+)", text)
     if product_match and sheet_name in workbook.sheetnames and product_match.group(2) == product_match.group(4):
         ws = workbook[sheet_name]
-        left = ws.cell(row=int(product_match.group(2)), column=column_index_from_string(product_match.group(1))).value
-        right = ws.cell(row=int(product_match.group(4)), column=column_index_from_string(product_match.group(3))).value
+        left = _cell_cache_value(
+            workbook,
+            sheet_name,
+            int(product_match.group(2)),
+            column_index_from_string(product_match.group(1)),
+            seen,
+        )
+        right = _cell_cache_value(
+            workbook,
+            sheet_name,
+            int(product_match.group(4)),
+            column_index_from_string(product_match.group(3)),
+            seen,
+        )
         try:
             product = float(left or 0) * float(right or 0)
         except (TypeError, ValueError):
@@ -3750,10 +3785,13 @@ def _formula_cache_value(workbook, sheet_name: str, formula: str) -> Any:
         return int(product) if float(product).is_integer() else product
     plus_match = re.fullmatch(r"([A-Z]+)([0-9]+)\+([0-9]+)", text)
     if plus_match and sheet_name in workbook.sheetnames:
-        value = workbook[sheet_name].cell(
-            row=int(plus_match.group(2)),
-            column=column_index_from_string(plus_match.group(1)),
-        ).value
+        value = _cell_cache_value(
+            workbook,
+            sheet_name,
+            int(plus_match.group(2)),
+            column_index_from_string(plus_match.group(1)),
+            seen,
+        )
         try:
             return float(value or 0) + float(plus_match.group(3))
         except (TypeError, ValueError):
