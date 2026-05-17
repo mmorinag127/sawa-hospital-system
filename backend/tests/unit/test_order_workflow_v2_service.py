@@ -2308,6 +2308,9 @@ def test_confirmed_legacy_apply_ready_projects_to_confirmed_without_meta(monkeyp
         workflow.secondary_actions_json = {}
         workflow.blockers_json = ["draft_newer_than_lines"]
         workflow.warnings_json = ["draft_newer_than_lines"]
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        assert draft is not None
+        draft.template_version_id = None
 
     projected, error = order_workflow_v2_service.get_workflow(order_id)
 

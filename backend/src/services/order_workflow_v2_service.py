@@ -915,7 +915,6 @@ def _workflow_state_requires_saved_sheet(state: str) -> bool:
         "sheet_saved",
         "bagging_ready",
         "output_review",
-        "confirmed",
     }
 
 
