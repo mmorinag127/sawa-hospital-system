@@ -70,6 +70,13 @@ type PreSaveChecks = {
   sheet_review?: PreSaveCheckEntry | null;
 };
 
+type PreSaveStatus = {
+  sheet_hash?: string | null;
+  anomaly_review_confirmed?: boolean;
+  sheet_review_confirmed?: boolean;
+  ready?: boolean;
+};
+
 type QuadReviewPayload = {
   order_id: string;
   status?: string | null;
@@ -163,6 +170,7 @@ type InspectionPayload = {
   bagging_result?: Record<string, unknown> | null;
   anomaly_review?: Record<string, unknown> | null;
   pre_save_checks?: PreSaveChecks | null;
+  pre_save_status?: PreSaveStatus | null;
   output_bundle?: Record<string, unknown> | null;
 };
 
@@ -345,22 +353,6 @@ const defaultSheet = {
 };
 
 const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
-
-const stableStringify = (value: unknown): string => {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
-};
-
-const sha256Hex = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
-};
-
-const sheetPayloadHash = (sheet: SheetPayload | null): Promise<string> => (
-  sheet ? sha256Hex(stableStringify(sheet)) : Promise.resolve("")
-);
 
 const formatApiError = (err: any, fallback: string) => {
   const detail = err?.response?.data?.detail;
@@ -1167,10 +1159,8 @@ export default function OrderWorkflowV2Page() {
   const [error, setError] = useState<string>("");
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
   const [ocrPreviewMode, setOcrPreviewMode] = useState<OcrPreviewMode>("overlay");
-  const [sheetReviewConfirmed, setSheetReviewConfirmed] = useState(false);
-  const [anomalyReviewConfirmed, setAnomalyReviewConfirmed] = useState(false);
   const [preSaveChecks, setPreSaveChecks] = useState<PreSaveChecks>({});
-  const [currentSheetHash, setCurrentSheetHash] = useState("");
+  const [preSaveStatus, setPreSaveStatus] = useState<PreSaveStatus>({});
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
@@ -1199,22 +1189,16 @@ export default function OrderWorkflowV2Page() {
     [ocrResults, workflow?.selected_ocr_result_id],
   );
   const invalidateSheetPreSaveChecks = () => {
-    setSheetReviewConfirmed(false);
-    setAnomalyReviewConfirmed(false);
     setPreSaveChecks({});
-    setCurrentSheetHash("");
+    setPreSaveStatus({});
   };
-  const applyPreSaveChecks = (checks: PreSaveChecks | null | undefined) => {
+  const applyPreSaveState = (
+    checks: PreSaveChecks | null | undefined,
+    status?: PreSaveStatus | null,
+  ) => {
     const normalized = checks || {};
     setPreSaveChecks(normalized);
-    const serverSheetHash = String(
-      normalized.sheet_review?.sheet_hash
-      || normalized.anomaly_review?.sheet_hash
-      || "",
-    );
-    if (serverSheetHash) {
-      setCurrentSheetHash(serverSheetHash);
-    }
+    setPreSaveStatus(status || {});
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
@@ -1224,20 +1208,8 @@ export default function OrderWorkflowV2Page() {
     ? pdfUrl
     : "";
   const canRenderSheetReviewValues = ocrPreviewMode === "sheet" && Boolean(selectedOcrSheetReviewBaseUrl);
-  const anomalyCheckHash = String(preSaveChecks.anomaly_review?.sheet_hash || "");
-  const sheetReviewHash = String(preSaveChecks.sheet_review?.sheet_hash || "");
-  const persistedAnomalyReviewConfirmed = Boolean(
-    preSaveChecks.anomaly_review?.confirmed
-    && currentSheetHash
-    && anomalyCheckHash === currentSheetHash,
-  );
-  const persistedSheetReviewConfirmed = Boolean(
-    preSaveChecks.sheet_review?.confirmed
-    && currentSheetHash
-    && sheetReviewHash === currentSheetHash,
-  );
-  const effectiveAnomalyReviewConfirmed = persistedAnomalyReviewConfirmed;
-  const effectiveSheetReviewConfirmed = persistedSheetReviewConfirmed;
+  const effectiveAnomalyReviewConfirmed = Boolean(preSaveStatus.anomaly_review_confirmed);
+  const effectiveSheetReviewConfirmed = Boolean(preSaveStatus.sheet_review_confirmed);
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
@@ -1655,7 +1627,10 @@ export default function OrderWorkflowV2Page() {
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
     ]);
     setWorkflow(workflowRes.data);
-    applyPreSaveChecks(inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {});
+    applyPreSaveState(
+      inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
+      inspectionRes.data.pre_save_status || null,
+    );
     setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
     setOcrResults(Array.isArray(ocrRes.data.results) ? ocrRes.data.results : []);
     setInspection(inspectionRes.data);
@@ -1943,27 +1918,6 @@ export default function OrderWorkflowV2Page() {
       setVisibleStep(stepIndexForState(workflow.state));
     }
   }, [workflow?.state]);
-
-  useEffect(() => {
-    let active = true;
-    if (!sheetPayload || preSaveChecks.anomaly_review?.sheet_hash || preSaveChecks.sheet_review?.sheet_hash) {
-      if (!sheetPayload) setCurrentSheetHash("");
-      return () => {
-        active = false;
-      };
-    }
-    sheetPayloadHash(sheetPayload).then((hash) => {
-      if (active) setCurrentSheetHash(hash);
-    });
-    return () => {
-      active = false;
-    };
-  }, [preSaveChecks.anomaly_review?.sheet_hash, preSaveChecks.sheet_review?.sheet_hash, sheetPayload]);
-
-  useEffect(() => {
-    setSheetReviewConfirmed(false);
-    setAnomalyReviewConfirmed(false);
-  }, [workflow?.selected_ocr_result_id]);
 
   useEffect(() => {
     const syncOverlayImageSize = () => {
@@ -2824,15 +2778,14 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("異常候補の却下に使えるシートがありません");
       }
-      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks }>(
+      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review/dismiss`,
         { sheet: parsed, warning },
       );
       const nextAnomalyReview = anomalyReviewWithoutWarning(response.data.anomaly_review || anomalyReview, warning);
       setLocalAnomalyReview(nextAnomalyReview);
       setInspection((current) => current ? { ...current, anomaly_review: nextAnomalyReview } : current);
-      applyPreSaveChecks(response.data.pre_save_checks || {});
-      setAnomalyReviewConfirmed(false);
+      applyPreSaveState(response.data.pre_save_checks || {}, response.data.pre_save_status || null);
       setSelectedAnomalyIndex(null);
     }, {
       successMessage: "異常候補を却下しました",
@@ -2878,14 +2831,13 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("数量異常チェックに渡せるシートがありません");
       }
-      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks }>(
+      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review`,
         { sheet: parsed, use_llm: true },
         { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
       );
       setLocalAnomalyReview(response.data.anomaly_review || null);
-      applyPreSaveChecks(response.data.pre_save_checks || {});
-      setAnomalyReviewConfirmed(true);
+      applyPreSaveState(response.data.pre_save_checks || {}, response.data.pre_save_status || null);
       setSelectedAnomalyIndex(null);
       setSelectedAutoEditIndex(null);
     }, {
@@ -2899,13 +2851,12 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("シート確認に使えるシートがありません");
       }
-      const response = await apiClient.post<{ pre_save_checks?: PreSaveChecks }>(
+      const response = await apiClient.post<{ pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/review-confirm`,
         { sheet: parsed },
       );
-      applyPreSaveChecks(response.data.pre_save_checks || {});
+      applyPreSaveState(response.data.pre_save_checks || {}, response.data.pre_save_status || null);
       setOcrPreviewMode("sheet");
-      setSheetReviewConfirmed(true);
     }, {
       successMessage: "シート確認を記録しました",
       refreshAfter: false,

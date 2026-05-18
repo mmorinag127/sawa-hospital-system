@@ -2139,10 +2139,38 @@ def test_workflow_v2_save_sheet_requires_matching_pre_save_checks(monkeypatch) -
     sheet_hash = order_workflow_v2_service._stable_json_hash(sheet)
     assert anomaly["pre_save_checks"]["anomaly_review"]["sheet_hash"] == sheet_hash
     assert sheet_review["pre_save_checks"]["sheet_review"]["sheet_hash"] == sheet_hash
+    assert anomaly["pre_save_status"] == {
+        "sheet_hash": sheet_hash,
+        "anomaly_review_confirmed": True,
+        "sheet_review_confirmed": False,
+        "ready": False,
+    }
+    assert sheet_review["pre_save_status"] == {
+        "sheet_hash": sheet_hash,
+        "anomaly_review_confirmed": True,
+        "sheet_review_confirmed": True,
+        "ready": True,
+    }
+
+    status, error = order_workflow_v2_service.get_sheet_pre_save_status(
+        order_id=order_id,
+        sheet=sheet,
+    )
+    assert error is None
+    assert status["pre_save_status"]["ready"] is True
 
     changed_sheet = dict(sheet)
     changed_sheet["rows"] = [list(row) for row in sheet["rows"]]
     changed_sheet["rows"][0][3] = "111"
+    status, error = order_workflow_v2_service.get_sheet_pre_save_status(
+        order_id=order_id,
+        sheet=changed_sheet,
+    )
+    assert error is None
+    assert status["pre_save_status"]["ready"] is False
+    assert status["pre_save_status"]["anomaly_review_confirmed"] is False
+    assert status["pre_save_status"]["sheet_review_confirmed"] is False
+
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet=changed_sheet,
@@ -2162,6 +2190,7 @@ def test_workflow_v2_save_sheet_requires_matching_pre_save_checks(monkeypatch) -
     assert error is None
     assert saved["workflow"]["state"] == "sheet_saved"
     assert saved["workflow"]["pre_save_checks"] == {}
+    assert saved["pre_save_status"]["ready"] is False
 
 
 def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) -> None:
@@ -2203,6 +2232,9 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
     assert error is None
     assert dismissed["pre_save_checks"]["anomaly_review"]["confirmed"] is True
     assert dismissed["pre_save_checks"]["anomaly_review"]["sheet_hash"] == order_workflow_v2_service._stable_json_hash(sheet)
+    assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is True
+    assert dismissed["pre_save_status"]["sheet_review_confirmed"] is False
+    assert dismissed["pre_save_status"]["ready"] is False
     assert not any(
         item["row_index"] == warning["row_index"]
         and item["col_index"] == warning["col_index"]
@@ -2265,6 +2297,8 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_allows_sheet_hash_mismatch_wi
 
     assert error is None
     assert "anomaly_review" not in dismissed["pre_save_checks"]
+    assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is False
+    assert dismissed["pre_save_status"]["ready"] is False
     assert not any(
         item["row_index"] == warning["row_index"]
         and item["col_index"] == warning["col_index"]

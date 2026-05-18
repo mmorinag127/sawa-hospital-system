@@ -103,6 +103,10 @@ class WorkflowV2SheetReviewConfirmBody(BaseModel):
     sheet: dict
 
 
+class WorkflowV2SheetPreSaveStatusBody(BaseModel):
+    sheet: dict
+
+
 class WorkflowV2ExpandedCellCopyModeBody(BaseModel):
     mode: str
 
@@ -1837,6 +1841,16 @@ def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
 def confirm_order_workflow_v2_sheet_review(order_id: str, body: WorkflowV2SheetReviewConfirmBody):
     return _workflow_v2_or_404(
         order_workflow_v2_service.confirm_sheet_review(
+            order_id=order_id,
+            sheet=body.sheet,
+        )
+    )
+
+
+@router.post("/{order_id}/workflow-v2/sheet/pre-save-status", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_sheet_pre_save_status(order_id: str, body: WorkflowV2SheetPreSaveStatusBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.get_sheet_pre_save_status(
             order_id=order_id,
             sheet=body.sheet,
         )

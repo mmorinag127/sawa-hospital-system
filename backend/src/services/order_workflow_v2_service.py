@@ -170,6 +170,28 @@ def _pre_save_checks_match_sheet(meta: dict[str, Any], sheet_hash: str) -> bool:
     )
 
 
+def _pre_save_status_for_sheet(meta: dict[str, Any], sheet_hash: str) -> dict[str, Any]:
+    checks = _workflow_pre_save_checks(meta)
+    anomaly = checks.get("anomaly_review")
+    sheet_review = checks.get("sheet_review")
+    anomaly_confirmed = bool(
+        isinstance(anomaly, dict)
+        and anomaly.get("confirmed")
+        and _normalize_id(anomaly.get("sheet_hash")) == sheet_hash
+    )
+    sheet_review_confirmed = bool(
+        isinstance(sheet_review, dict)
+        and sheet_review.get("confirmed")
+        and _normalize_id(sheet_review.get("sheet_hash")) == sheet_hash
+    )
+    return {
+        "sheet_hash": sheet_hash,
+        "anomaly_review_confirmed": anomaly_confirmed,
+        "sheet_review_confirmed": sheet_review_confirmed,
+        "ready": anomaly_confirmed and sheet_review_confirmed,
+    }
+
+
 def _sheet_anomaly_warning_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
     row_left = left.get("row_index")
     row_right = right.get("row_index")
@@ -2339,6 +2361,7 @@ def save_sheet(
         return {
             "workflow": _serialize_workflow(workflow),
             "saved_sheet": _serialize_saved_sheet(draft),
+            "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
         }, None
 
 
@@ -2363,6 +2386,28 @@ def confirm_sheet_review(
         return {
             "workflow": _serialize_workflow(workflow),
             "pre_save_checks": _workflow_pre_save_checks(meta),
+            "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
+        }, None
+
+
+def get_sheet_pre_save_status(
+    *,
+    order_id: str,
+    sheet: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(sheet, dict):
+        return None, "sheet_required"
+    sheet_hash = _stable_json_hash(sheet)
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "pre_save_checks": _workflow_pre_save_checks(meta),
+            "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
         }, None
 
 
@@ -3213,6 +3258,7 @@ def run_sheet_anomaly_review(
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": anomaly_review,
             "pre_save_checks": _workflow_pre_save_checks(meta),
+            "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
         }, None
 
 
@@ -3280,6 +3326,7 @@ def dismiss_sheet_anomaly_warning(
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": next_review,
             "pre_save_checks": _workflow_pre_save_checks(meta),
+            "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
         }, None
 
 
@@ -3491,6 +3538,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             .all()
         )
         saved_sheet = None
+        saved_sheet_hash = ""
         if workflow is not None and workflow.draft_id:
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is not None and draft.order_id == order.id:
@@ -3506,6 +3554,8 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                     saved_sheet=draft,
                     evidence_payload=evidence_payload,
                 )
+                saved_sheet_payload = saved_sheet.get("sheet") if isinstance(saved_sheet, dict) else None
+                saved_sheet_hash = _stable_json_hash(saved_sheet_payload) if isinstance(saved_sheet_payload, dict) else ""
         inspection_meta = (
             _recover_confirmed_artifacts_from_snapshot(
                 order=order,
@@ -3550,5 +3600,10 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             "bagging_result": inspection_meta.get("bagging_result") if workflow is not None else None,
             "anomaly_review": _workflow_meta(workflow).get("anomaly_review") if workflow is not None else None,
             "pre_save_checks": _workflow_pre_save_checks(_workflow_meta(workflow)) if workflow is not None else {},
+            "pre_save_status": (
+                _pre_save_status_for_sheet(_workflow_meta(workflow), saved_sheet_hash)
+                if workflow is not None and saved_sheet_hash
+                else None
+            ),
             "output_bundle": inspection_meta.get("output_bundle") if workflow is not None else None,
         }, None
