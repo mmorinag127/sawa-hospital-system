@@ -94,6 +94,11 @@ class WorkflowV2SheetAnomalyBody(BaseModel):
     use_llm: bool | None = None
 
 
+class WorkflowV2SheetAnomalyDismissBody(BaseModel):
+    sheet: dict
+    warning: dict
+
+
 class WorkflowV2SheetReviewConfirmBody(BaseModel):
     sheet: dict
 
@@ -1892,6 +1897,17 @@ def run_order_workflow_v2_sheet_anomaly_review(order_id: str, body: WorkflowV2Sh
             sheet=body.sheet if body else None,
             model=body.model if body else None,
             use_llm=body.use_llm if body else None,
+        )
+    )
+
+
+@router.post("/{order_id}/workflow-v2/sheet/anomaly-review/dismiss", dependencies=[Depends(require_role("operator"))])
+def dismiss_order_workflow_v2_sheet_anomaly_warning(order_id: str, body: WorkflowV2SheetAnomalyDismissBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.dismiss_sheet_anomaly_warning(
+            order_id=order_id,
+            sheet=body.sheet,
+            warning=body.warning,
         )
     )
 

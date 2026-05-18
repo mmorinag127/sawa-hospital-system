@@ -2779,14 +2779,23 @@ export default function OrderWorkflowV2Page() {
     setSelectedAutoEditIndex(null);
   };
 
-  const dismissSingleAnomalyWarning = (warning: SheetAnomalyWarning) => {
-    const sourceReview = anomalyReview || {};
-    setLocalAnomalyReview({
-      ...sourceReview,
-      warnings: removeFirstMatchingItem(anomalyWarnings, (item) => sameSheetPatchTarget(item, warning)),
+  const dismissSingleAnomalyWarning = (warning: SheetAnomalyWarning) =>
+    runAction("Step3 anomaly warning dismiss", async () => {
+      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      if (!parsed) {
+        throw new Error("異常候補の却下に使えるシートがありません");
+      }
+      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks }>(
+        `/orders/${orderId}/workflow-v2/sheet/anomaly-review/dismiss`,
+        { sheet: parsed, warning },
+      );
+      setLocalAnomalyReview(response.data.anomaly_review || null);
+      setPreSaveChecks(response.data.pre_save_checks || {});
+      setSelectedAnomalyIndex(null);
+    }, {
+      successMessage: "異常候補を却下しました",
+      refreshAfter: false,
     });
-    setSelectedAnomalyIndex(null);
-  };
 
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {

@@ -163,6 +163,49 @@ def _pre_save_checks_match_sheet(meta: dict[str, Any], sheet_hash: str) -> bool:
     )
 
 
+def _sheet_anomaly_warning_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    row_left = left.get("row_index")
+    row_right = right.get("row_index")
+    col_left = left.get("col_index")
+    col_right = right.get("col_index")
+    try:
+        same_cell = int(row_left) == int(row_right) and int(col_left) == int(col_right)
+    except (TypeError, ValueError):
+        same_cell = False
+    if not same_cell:
+        return False
+    comparable_keys = (
+        "type",
+        "severity",
+        "field",
+        "label",
+        "value",
+        "suggested_value",
+        "message",
+        "date",
+        "daypart",
+        "menu",
+        "context_label",
+    )
+    return all(_normalize_id(left.get(key)) == _normalize_id(right.get(key)) for key in comparable_keys)
+
+
+def _remove_first_matching_sheet_anomaly_warning(
+    warnings: list[Any],
+    warning: dict[str, Any],
+) -> tuple[list[dict[str, Any]], bool]:
+    removed = False
+    next_warnings: list[dict[str, Any]] = []
+    for item in warnings:
+        if not isinstance(item, dict):
+            continue
+        if not removed and _sheet_anomaly_warning_matches(item, warning):
+            removed = True
+            continue
+        next_warnings.append(item)
+    return next_warnings, removed
+
+
 def _normalize_id(value: object) -> str:
     return str(value or "").strip()
 
@@ -3162,6 +3205,71 @@ def run_sheet_anomaly_review(
         return {
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": anomaly_review,
+            "pre_save_checks": _workflow_pre_save_checks(meta),
+        }, None
+
+
+def dismiss_sheet_anomaly_warning(
+    *,
+    order_id: str,
+    sheet: dict[str, Any],
+    warning: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(sheet, dict):
+        return None, "sheet_required"
+    if not isinstance(warning, dict):
+        return None, "anomaly_warning_required"
+    sheet_hash = _stable_json_hash(sheet)
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.evidence_run_id:
+            return None, "selected_ocr_required"
+        meta = _workflow_meta(workflow)
+        anomaly_review = meta.get("anomaly_review")
+        if not isinstance(anomaly_review, dict):
+            return None, "anomaly_review_required"
+        review_hash = _normalize_id(anomaly_review.get("sheet_hash"))
+        if review_hash and review_hash != sheet_hash:
+            return None, "anomaly_review_sheet_mismatch"
+        warnings = anomaly_review.get("warnings")
+        if not isinstance(warnings, list):
+            return None, "anomaly_review_warnings_missing"
+        next_warnings, removed = _remove_first_matching_sheet_anomaly_warning(warnings, warning)
+        if not removed:
+            return None, "anomaly_warning_not_found"
+        dismissed = anomaly_review.get("dismissed_warnings")
+        dismissed_warnings = [item for item in dismissed if isinstance(item, dict)] if isinstance(dismissed, list) else []
+        next_review = dict(anomaly_review)
+        next_review["warnings"] = next_warnings
+        next_review["dismissed_warnings"] = dismissed_warnings + [
+            {
+                "warning": dict(warning),
+                "dismissed_at": _now().isoformat(),
+            }
+        ]
+        next_review["summary"] = {
+            **(next_review.get("summary") if isinstance(next_review.get("summary"), dict) else {}),
+            "warning_count": len(next_warnings),
+            "dismissed_warning_count": len(next_review["dismissed_warnings"]),
+        }
+        next_review["sheet_hash"] = sheet_hash
+        anomaly_review_id = _normalize_id(next_review.get("anomaly_review_id")) or _new_id("OAR")
+        next_review["anomaly_review_id"] = anomaly_review_id
+        meta["anomaly_review_id"] = anomaly_review_id
+        meta["anomaly_review"] = next_review
+        _set_pre_save_check(
+            meta,
+            "anomaly_review",
+            sheet_hash=sheet_hash,
+            payload={"anomaly_review_id": anomaly_review_id},
+        )
+        _write_workflow_meta(workflow, meta)
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "anomaly_review": next_review,
             "pre_save_checks": _workflow_pre_save_checks(meta),
         }, None
 
