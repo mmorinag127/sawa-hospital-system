@@ -7,12 +7,14 @@ from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
+from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.user import AuditLog
 from src.services.order_pipeline_lineage_repair_service import (
     APPLY_CONFIRMATION_TOKEN,
     WORKFLOW_V2_META_KEY,
     backfill_step4_output_artifacts,
+    repair_confirmed_workflow_v2_lineage,
     repair_confirmed_snapshot_payloads,
 )
 
@@ -271,3 +273,119 @@ def test_backfill_step4_output_artifacts_moves_legacy_workflow_payloads_to_artif
         meta = workflow.secondary_actions_json[WORKFLOW_V2_META_KEY]
         assert meta["bagging_result"] is None
         assert meta["output_bundle"] is None
+
+
+def test_repair_confirmed_workflow_v2_lineage_restores_snapshot_source_of_truth() -> None:
+    order_id = _create_order()
+    saved_sheet_id = _id("ODS")
+    stale_latest_draft_id = _id("ODR")
+    snapshot_id = _id("OCS")
+    bagging_result_id = _id("OBG")
+    output_bundle_id = _id("OOB")
+    with session_scope() as session:
+        session.add(
+            OrderSheetDraft(
+                id=saved_sheet_id,
+                order_id=order_id,
+                template_version_id=None,
+                draft_sheet_json={"rows": [["05/10"]]},
+                draft_state="saved",
+                edited_by="test",
+                edited_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderSheetDraft(
+                id=stale_latest_draft_id,
+                order_id=order_id,
+                template_version_id=None,
+                draft_sheet_json={"rows": [["05/11"]]},
+                draft_state="draft_ready",
+                edited_by="test",
+                edited_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderConfirmedSnapshot(
+                id=snapshot_id,
+                order_id=order_id,
+                template_version_id="FTV_REPAIR",
+                draft_id=saved_sheet_id,
+                saved_sheet_id=None,
+                snapshot_digest="snapshot-digest",
+                snapshot_json={
+                    "source": "workflow_v2",
+                    "template_version_id": "FTV_REPAIR",
+                    "saved_sheet_id": saved_sheet_id,
+                    "bagging_result": {
+                        "bagging_result_id": bagging_result_id,
+                        "order_id": order_id,
+                        "source_saved_sheet_id": saved_sheet_id,
+                        "template_version_id": "FTV_REPAIR",
+                    },
+                    "output_bundle": {
+                        "output_bundle_id": output_bundle_id,
+                        "order_id": order_id,
+                        "source_bagging_result_id": bagging_result_id,
+                        "source_saved_sheet_id": saved_sheet_id,
+                        "confirmed_snapshot_id": snapshot_id,
+                        "template_version_id": "FTV_REPAIR",
+                    },
+                },
+                confirmed_by="test",
+                confirmed_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                template_version_id="FTV_REPAIR",
+                evidence_run_id=None,
+                draft_id=stale_latest_draft_id,
+                confirmed_snapshot_id=snapshot_id,
+                state="confirmed",
+                headline="confirmed",
+                primary_action=None,
+                secondary_actions_json=["rerun_yomitoku", "save_draft"],
+                blockers_json=["draft_newer_than_lines"],
+                warnings_json=["draft_newer_than_lines"],
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+
+    dry_run = repair_confirmed_workflow_v2_lineage(order_id=order_id)
+
+    assert dry_run["mode"] == "dry_run"
+    assert dry_run["applied"] is False
+    assert dry_run["summary"]["counts_by_status"]["repairable"] == 1
+
+    applied = repair_confirmed_workflow_v2_lineage(
+        order_id=order_id,
+        apply=True,
+        confirm=APPLY_CONFIRMATION_TOKEN,
+        actor="tester",
+        idempotency_key=f"confirmed-lineage-{order_id}",
+    )
+
+    assert applied["mode"] == "apply"
+    assert applied["applied"] is True
+    assert applied["summary"]["counts_by_status"]["repairable"] == 1
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        snapshot = session.get(OrderConfirmedSnapshot, snapshot_id)
+        draft = session.get(OrderSheetDraft, saved_sheet_id)
+        assert workflow.draft_id == saved_sheet_id
+        assert workflow.blockers_json == []
+        assert workflow.warnings_json == []
+        assert workflow.secondary_actions_json[WORKFLOW_V2_META_KEY]["saved_sheet_id"] == saved_sheet_id
+        assert workflow.secondary_actions_json[WORKFLOW_V2_META_KEY]["bagging_result_id"] == bagging_result_id
+        assert workflow.secondary_actions_json[WORKFLOW_V2_META_KEY]["output_bundle_id"] == output_bundle_id
+        assert snapshot.saved_sheet_id == saved_sheet_id
+        assert snapshot.bagging_result_id == bagging_result_id
+        assert snapshot.output_bundle_id == output_bundle_id
+        assert draft.template_version_id == "FTV_REPAIR"
+        assert session.get(OrderBaggingResult, bagging_result_id) is not None
+        assert session.get(OrderOutputBundle, output_bundle_id) is not None

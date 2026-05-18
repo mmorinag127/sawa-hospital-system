@@ -11630,16 +11630,23 @@ def _persist_sheet_draft_with_base_evidence(
 ) -> dict[str, Any] | None:
     base_evidence_run_id = str(base_evidence_run_id_override or "").strip() or None
     base_template_resolution_id = str(base_template_resolution_id_override or "").strip() or None
+    template_version_id = None
     if isinstance(evidence_run_override, dict):
         base_evidence_run_id = str(evidence_run_override.get("id") or "").strip() or base_evidence_run_id
+        template_version_id = str(evidence_run_override.get("template_version_id") or "").strip() or None
         base_template_resolution_id = (
             _resolve_evidence_run_template_resolution_id(evidence_run_override)
             or base_template_resolution_id
         )
+    if not template_version_id:
+        with session_scope() as session:
+            order = session.get(Order, order_id)
+            template_version_id = str(getattr(order, "template_version_id", "") or "").strip() or None
     return draft_sheet_service.persist_sheet_draft(
         order_id=order_id,
         draft_sheet_json=draft_sheet_json,
         base_evidence_run_id=base_evidence_run_id,
+        template_version_id=template_version_id,
         base_template_resolution_id=base_template_resolution_id,
         draft_state=draft_state,
         blockers=blockers,
