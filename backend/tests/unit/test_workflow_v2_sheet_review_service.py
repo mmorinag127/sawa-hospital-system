@@ -95,18 +95,8 @@ def test_auto_edit_proposes_ocr_mismatch_and_correction_alternatives() -> None:
         use_llm=False,
     )
 
-    patches = result["patches"]
-    assert any(
-        patch["row_index"] == 0
-        and patch["col_index"] == 3
-        and patch["suggested_value"] == "10"
-        and patch["reason"] == "sheet_value_differs_from_ocr"
-        for patch in patches
-    )
-    slash_patch = next(patch for patch in patches if patch["row_index"] == 1 and patch["col_index"] == 4)
-    assert slash_patch["suggested_value"] == "5"
-    assert "4" in slash_patch["alternatives"]
-    assert "5" in slash_patch["alternatives"]
+    assert result["patches"] == []
+    assert result["rule_patches"] == []
 
 
 def test_auto_edit_uses_hakodate_evidence_payload_when_sheet_has_no_embedded_items() -> None:
@@ -125,13 +115,8 @@ def test_auto_edit_uses_hakodate_evidence_payload_when_sheet_has_no_embedded_ite
         use_llm=False,
     )
 
-    assert any(
-        patch["row_index"] == 0
-        and patch["col_index"] == 3
-        and patch["suggested_value"] == "10"
-        and patch["reason"] == "sheet_value_differs_from_ocr"
-        for patch in result["patches"]
-    )
+    assert result["patches"] == []
+    assert result["rule_patches"] == []
 
 
 def test_anomaly_report_flags_sheet_only_outlier() -> None:
@@ -204,8 +189,13 @@ def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
 
     monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
 
+    sheet = _sheet([["04/28", "朝", "A", "", "5"]])
+    sheet["target_cell_map"] = [
+        {"target_row_index": 0, "target_col_index": 3, "field": "qty.regular", "bbox": [0, 0, 10, 10]}
+    ]
+
     result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
-        sheet=_sheet([["04/28", "朝", "A", "", "5"]]),
+        sheet=sheet,
         evidence_payload=_hakodate_evidence_payload(value="10"),
         use_llm=True,
         fax_image_png_base64="png-base64",
@@ -213,10 +203,91 @@ def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
     )
 
     assert captured["image_png_base64"] == "png-base64"
-    assert captured["user_payload"]["ocr_numeric_cell_items"]
+    assert captured["user_payload"]["ocr_numeric_cell_items"] == []
     assert captured["user_payload"]["target_cell_map"]
     assert result["llm"]["fax_image"]["status"] == "attached"
     assert any(patch["source"] == "llm" and patch["suggested_value"] == "10" for patch in result["patches"])
+
+
+def test_auto_edit_llm_scales_target_bboxes_to_attached_image_pixels(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {"patches": []}, {"status": "ok"}
+
+    sheet = _sheet([["04/28", "朝", "A", "", "5"]])
+    sheet["target_cell_map"] = [
+        {
+            "target_cell_id": "D11",
+            "sheet_cell": "D11",
+            "target_row_index": 0,
+            "target_col_index": 3,
+            "field": "qty.regular",
+            "bbox": [100, 200, 200, 300],
+            "center": [150, 250],
+        }
+    ]
+    png_2x2 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGNkYPjPwMDAwMDAAAAMAQABxLUxZQAAAABJRU5ErkJggg=="
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64=png_2x2,
+        fax_image_meta={"status": "attached"},
+    )
+
+    target = captured["user_payload"]["target_cell_map"][0]
+    transform = captured["user_payload"]["fax_image"]["coordinate_transform"]
+    assert transform["status"] == "scaled_to_attached_image"
+    assert transform["image_width"] == 2
+    assert transform["image_height"] == 2
+    assert target["bbox_coordinate_space"] == "attached_image_pixels"
+    assert target["bbox"] == [1.0, 1.33, 2.0, 2.0]
+    assert target["bbox_original"] == [100, 200, 200, 300]
+
+
+def test_auto_edit_retries_failed_chunks_as_single_cells(monkeypatch) -> None:
+    calls = []
+
+    def _fake_gemini_json_request(**kwargs):
+        target_count = len(kwargs["user_payload"]["target_cell_map"])
+        calls.append(target_count)
+        if target_count > 1:
+            return None, {"status": "failed", "error": "not-json"}
+        target = kwargs["user_payload"]["target_cell_map"][0]
+        return {
+            "patches": [
+                {
+                    "row_index": target["target_row_index"],
+                    "col_index": target["target_col_index"],
+                    "current_value": "",
+                    "suggested_value": "5",
+                    "reason": "visible_on_fax",
+                    "confidence": "high",
+                }
+            ]
+        }, {"status": "ok"}
+
+    sheet = _sheet([["04/28", "朝", "A", "", ""]])
+    sheet["target_cell_map"] = [
+        {"target_row_index": 0, "target_col_index": 3, "field": "qty.regular", "bbox": [0, 0, 10, 10]},
+        {"target_row_index": 0, "target_col_index": 4, "field": "qty.soft", "bbox": [10, 0, 20, 10]},
+    ]
+    monkeypatch.setenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "2")
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64="",
+        fax_image_meta={"status": "attached"},
+    )
+
+    assert calls == [2, 1, 1]
+    assert len(result["patches"]) == 2
+    assert any(item.get("retry_of_failed_chunk") for item in result["llm"]["chunks"])
 
 
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:

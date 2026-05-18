@@ -566,22 +566,164 @@ def _target_cells_from_sheet(sheet: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-def _target_cell_context_items(target_cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _float_pair(value: object) -> tuple[float, float] | None:
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    try:
+        return float(value[0]), float(value[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_bbox(value: object) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, list) or len(value) < 4:
+        return None
+    try:
+        return float(value[0]), float(value[1]), float(value[2]), float(value[3])
+    except (TypeError, ValueError):
+        return None
+
+
+def _png_dimensions_from_base64(value: str | None) -> tuple[int, int] | None:
+    if not _normalize_text(value):
+        return None
+    try:
+        import base64
+        import struct
+
+        raw = base64.b64decode(_normalize_text(value), validate=False)
+        if len(raw) < 24 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+            return None
+        width, height = struct.unpack(">II", raw[16:24])
+        if width <= 0 or height <= 0:
+            return None
+        return int(width), int(height)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _target_cell_coordinate_extent(target_cells: list[dict[str, Any]]) -> dict[str, float] | None:
+    xs: list[float] = []
+    ys: list[float] = []
+    for item in target_cells:
+        bbox = _float_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        xs.extend([bbox[0], bbox[2]])
+        ys.extend([bbox[1], bbox[3]])
+    if not xs or not ys:
+        return None
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs),
+        "height": max(ys),
+    }
+
+
+def _target_coordinate_transform(
+    *,
+    target_cells: list[dict[str, Any]],
+    fax_image_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    image_width = _coerce_int((fax_image_meta or {}).get("pixel_width"))
+    image_height = _coerce_int((fax_image_meta or {}).get("pixel_height"))
+    extent = _target_cell_coordinate_extent(target_cells)
+    if not image_width or not image_height or not extent:
+        return {
+            "status": "unavailable",
+            "reason": "image_dimensions_or_target_extent_missing",
+            "image_width": image_width,
+            "image_height": image_height,
+            "target_extent": extent,
+        }
+    coordinate_width = float(extent["width"])
+    coordinate_height = float(extent["height"])
+    if coordinate_width <= 0 or coordinate_height <= 0:
+        return {
+            "status": "unavailable",
+            "reason": "target_extent_invalid",
+            "image_width": image_width,
+            "image_height": image_height,
+            "target_extent": extent,
+        }
+    return {
+        "status": "scaled_to_attached_image",
+        "image_width": image_width,
+        "image_height": image_height,
+        "target_extent": extent,
+        "scale_x": image_width / coordinate_width,
+        "scale_y": image_height / coordinate_height,
+    }
+
+
+def _scale_bbox_for_image(
+    bbox: object,
+    transform: dict[str, Any] | None,
+) -> list[float] | None:
+    parsed = _float_bbox(bbox)
+    if parsed is None or not isinstance(transform, dict):
+        return None
+    if transform.get("status") != "scaled_to_attached_image":
+        return None
+    scale_x = float(transform.get("scale_x") or 0)
+    scale_y = float(transform.get("scale_y") or 0)
+    if scale_x <= 0 or scale_y <= 0:
+        return None
     return [
-        {
+        round(parsed[0] * scale_x, 2),
+        round(parsed[1] * scale_y, 2),
+        round(parsed[2] * scale_x, 2),
+        round(parsed[3] * scale_y, 2),
+    ]
+
+
+def _scale_center_for_image(
+    center: object,
+    transform: dict[str, Any] | None,
+) -> list[float] | None:
+    parsed = _float_pair(center)
+    if parsed is None or not isinstance(transform, dict):
+        return None
+    if transform.get("status") != "scaled_to_attached_image":
+        return None
+    scale_x = float(transform.get("scale_x") or 0)
+    scale_y = float(transform.get("scale_y") or 0)
+    if scale_x <= 0 or scale_y <= 0:
+        return None
+    return [round(parsed[0] * scale_x, 2), round(parsed[1] * scale_y, 2)]
+
+
+def _target_cell_context_items(
+    target_cells: list[dict[str, Any]],
+    *,
+    coordinate_transform: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in target_cells:
+        scaled_bbox = _scale_bbox_for_image(item.get("bbox"), coordinate_transform)
+        scaled_center = _scale_center_for_image(item.get("center"), coordinate_transform)
+        context = {
             "target_cell_id": item.get("target_cell_id") or item.get("sheet_cell"),
             "sheet_cell": item.get("sheet_cell"),
             "worksheet_row": item.get("worksheet_row"),
             "worksheet_col": item.get("worksheet_col"),
             "target_row_index": item.get("target_row_index"),
             "target_col_index": item.get("target_col_index"),
-            "bbox": item.get("bbox"),
+            "bbox": scaled_bbox or item.get("bbox"),
+            "bbox_original": item.get("bbox"),
+            "center": scaled_center or item.get("center"),
+            "center_original": item.get("center"),
             "field": item.get("field") or item.get("semantic_field"),
             "field_label": item.get("field_label") or item.get("label"),
             "logical_targets": item.get("logical_targets"),
         }
-        for item in target_cells
-    ]
+        if scaled_bbox is not None:
+            context["bbox_coordinate_space"] = "attached_image_pixels"
+        items.append(context)
+    return items
 
 
 def _chunk_items(items: list[dict[str, Any]], chunk_size: int) -> list[list[dict[str, Any]]]:
@@ -599,9 +741,19 @@ def _sheet_context_for_llm(
     include_ocr_context: bool = True,
     include_target_cell_map: bool | None = None,
     target_cells_override: list[dict[str, Any]] | None = None,
+    fax_image_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fields, header, _rows = _sheet_dimensions(sheet)
     include_target_cell_map = include_ocr_context if include_target_cell_map is None else include_target_cell_map
+    selected_target_cells = (
+        target_cells_override
+        if target_cells_override is not None
+        else _target_cells_from_sheet(sheet)[:_MAX_LLM_EVIDENCE]
+    )
+    coordinate_transform = _target_coordinate_transform(
+        target_cells=_target_cells_from_sheet(sheet),
+        fax_image_meta=fax_image_meta,
+    )
     payload = {
         "fields": fields,
         "header": header,
@@ -612,14 +764,16 @@ def _sheet_context_for_llm(
             else []
         ),
         "target_cell_map": _target_cell_context_items(
-            (
-                target_cells_override
-                if target_cells_override is not None
-                else _target_cells_from_sheet(sheet)[:_MAX_LLM_EVIDENCE]
-            )
-            if include_target_cell_map
-            else []
+            selected_target_cells if include_target_cell_map else [],
+            coordinate_transform=coordinate_transform,
         ),
+        "fax_image": {
+            "coordinate_transform": coordinate_transform,
+            "instruction": (
+                "target_cell_map.bbox is in attached_image_pixels when bbox_coordinate_space is attached_image_pixels. "
+                "Use bbox, not bbox_original, to inspect the attached image."
+            ),
+        },
         "computed_context": computed_context or {},
         "rule_patches": patches[:_MAX_LLM_WARNINGS],
         "rule_warnings": (warnings or [])[:_MAX_LLM_WARNINGS],
@@ -794,6 +948,14 @@ def propose_auto_sheet_edits(
     llm_meta: dict[str, Any] = {"status": "disabled"}
     llm_patches: list[dict[str, Any]] = []
     if use_llm:
+        if isinstance(fax_image_meta, dict):
+            dimensions = _png_dimensions_from_base64(fax_image_png_base64)
+            if dimensions is not None:
+                fax_image_meta = {
+                    **fax_image_meta,
+                    "pixel_width": dimensions[0],
+                    "pixel_height": dimensions[1],
+                }
         patch_response_schema = {
             "type": "OBJECT",
             "properties": {
@@ -825,16 +987,17 @@ def propose_auto_sheet_edits(
             "You review a Japanese FAX order sheet. Return JSON only. "
             "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
             "Do not use OCR output, OCR candidates, OCR confidence, OCR evidence, or OCR-vs-sheet comparisons. "
-            "For each quantity cell, use target_cell_map to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "For each quantity cell, use target_cell_map.bbox in attached image pixel coordinates to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
             "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
             "For corrections or uncertainty reviews, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         try:
-            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "20")), 80))
+            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "9")), 80))
         except ValueError:
-            chunk_size = 20
+            chunk_size = 9
         try:
             max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
         except ValueError:
@@ -860,6 +1023,7 @@ def propose_auto_sheet_edits(
                     include_ocr_context=False,
                     include_target_cell_map=True,
                     target_cells_override=target_chunk,
+                    fax_image_meta=fax_image_meta,
                 ),
                 model=model,
                 array_key="patches",
@@ -891,6 +1055,36 @@ def propose_auto_sheet_edits(
                 continue
             if isinstance(patch_items, list):
                 combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
+        if failed_chunks:
+            for payload, meta, chunk_index, target_count in chunk_results:
+                chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
+                if chunk_status == "ok":
+                    continue
+                target_chunk = target_chunks[chunk_index] if chunk_index < len(target_chunks) else []
+                retry_patch_count = 0
+                retry_failed = 0
+                for target_cell in target_chunk:
+                    retry_payload, retry_meta, _retry_chunk_index, _retry_target_count = request_chunk(
+                        (chunk_index, [target_cell])
+                    )
+                    retry_status = _normalize_text(retry_meta.get("status") if isinstance(retry_meta, dict) else "")
+                    retry_patches = retry_payload.get("patches") if isinstance(retry_payload, dict) else []
+                    if retry_status != "ok":
+                        retry_failed += 1
+                        continue
+                    if isinstance(retry_patches, list):
+                        retry_patch_count += len(retry_patches)
+                        combined_payload_patches.extend([item for item in retry_patches if isinstance(item, dict)])
+                chunk_meta.append(
+                    {
+                        "chunk_index": chunk_index,
+                        "status": "retry_failed" if retry_failed == len(target_chunk) else "retry_ok",
+                        "target_count": len(target_chunk),
+                        "patch_count": retry_patch_count,
+                        "error": None if retry_failed == 0 else f"{retry_failed}_single_cell_retries_failed",
+                        "retry_of_failed_chunk": True,
+                    }
+                )
         llm_payload = {"patches": combined_payload_patches}
         if failed_chunks == len(target_chunks):
             llm_status = "failed"
