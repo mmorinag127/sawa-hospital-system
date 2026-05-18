@@ -1152,9 +1152,7 @@ export default function OrderWorkflowV2Page() {
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
-  const step3PreviewImageUrl = ocrPreviewMode === "sheet"
-    ? (selectedOcrSheetReviewBaseUrl || selectedOcrOverlayUrl)
-    : selectedOcrOverlayUrl;
+  const step3PreviewImageUrl = ocrPreviewMode === "sheet" ? selectedOcrSheetReviewBaseUrl : selectedOcrOverlayUrl;
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
@@ -3991,13 +3989,8 @@ export default function OrderWorkflowV2Page() {
                           {focusedTargetBox ? " / overlay対応あり" : " / overlay対応なし"}
                         </span>
                       ) : null}
-                      {ocrPreviewMode === "sheet" ? (
+                      {ocrPreviewMode === "sheet" && selectedOcrSheetReviewBaseUrl ? (
                         <div className="sheet-review-overlay" aria-label="sheet values overlay">
-                          {!selectedOcrSheetReviewBaseUrl ? (
-                            <span className="sheet-review-fallback-note">
-                              既存OCR結果のため通常overlayを暫定表示中
-                            </span>
-                          ) : null}
                           {sheetReviewItems.map((entry) => (
                             <span
                               key={`sheet-review-${entry.rowIndex}-${entry.colIndex}`}
