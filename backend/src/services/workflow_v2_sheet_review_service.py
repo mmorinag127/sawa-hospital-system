@@ -754,7 +754,7 @@ def _review_contact_sheet_png_base64(
         raw = base64.b64decode(_normalize_text(fax_image_png_base64), validate=False)
         image = Image.open(BytesIO(raw)).convert("RGB")
         font = ImageFont.load_default()
-        slots: list[tuple[dict[str, Any], Image.Image, list[int]]] = []
+        slots: list[tuple[dict[str, Any], Image.Image, list[int], list[int] | None]] = []
         for item in target_cells:
             scaled = _scale_bbox_for_image(item.get("bbox"), coordinate_transform)
             bbox = scaled or item.get("bbox")
@@ -773,8 +773,17 @@ def _review_contact_sheet_png_base64(
             if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
                 continue
             crop = image.crop(tuple(crop_box)).convert("RGB")
+            original_crop_size = crop.size
             crop.thumbnail((360, 220), Image.Resampling.LANCZOS)
-            slots.append((item, crop, crop_box))
+            scale_x = crop.width / max(1, original_crop_size[0])
+            scale_y = crop.height / max(1, original_crop_size[1])
+            target_rect = [
+                int(round((x0 - crop_box[0]) * scale_x)),
+                int(round((y0 - crop_box[1]) * scale_y)),
+                int(round((x1 - crop_box[0]) * scale_x)),
+                int(round((y1 - crop_box[1]) * scale_y)),
+            ]
+            slots.append((item, crop, crop_box, target_rect))
         if not slots:
             return None
         slot_w = 420
@@ -783,7 +792,7 @@ def _review_contact_sheet_png_base64(
         rows = (len(slots) + columns - 1) // columns
         sheet = Image.new("RGB", (columns * slot_w, rows * slot_h), "white")
         draw = ImageDraw.Draw(sheet)
-        for index, (item, crop, crop_box) in enumerate(slots):
+        for index, (item, crop, crop_box, target_rect) in enumerate(slots):
             col = index % columns
             row = index // columns
             ox = col * slot_w
@@ -798,6 +807,17 @@ def _review_contact_sheet_png_base64(
             py = oy + 52
             sheet.paste(crop, (px, py))
             draw.rectangle((px, py, px + crop.width, py + crop.height), outline=(190, 0, 0), width=2)
+            if target_rect is not None:
+                draw.rectangle(
+                    (
+                        px + target_rect[0],
+                        py + target_rect[1],
+                        px + target_rect[2],
+                        py + target_rect[3],
+                    ),
+                    outline=(0, 80, 220),
+                    width=4,
+                )
         out = BytesIO()
         sheet.save(out, format="PNG")
         return base64.b64encode(out.getvalue()).decode("ascii")
@@ -1239,11 +1259,13 @@ def propose_auto_sheet_edits(
             "The provided target_cell_map contains suspect cells only. They were selected because quantity-presence hints and current sheet values disagree, an adjacent-column shift is plausible, or the value is a gap inside the same date/daypart block. "
             "The attached image is a review contact sheet containing enlarged crops around the suspect cells. "
             "Each crop label shows the matching row_index, col_index, and sheet cell. "
-            "For each suspect quantity cell, inspect the matching enlarged crop and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "The blue rectangle inside each crop is the exact suspect cell; ignore handwritten numbers outside that blue rectangle except to detect adjacent-column shifts. "
+            "For each suspect quantity cell, inspect the matching blue rectangle and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
             "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
             "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
             "If the current sheet has a number but the FAX cell is blank, or the mark visibly belongs to an adjacent column, return a patch for the extra cell with suggested_value as an empty string. "
+            "When suspect_review.reasons contains sheet_value_but_no_presence_mark, you must explicitly verify the blue rectangle. If the blue rectangle is blank, return suggested_value as an empty string. "
             "When a mark appears one column left or right from the current sheet value, report both sides when needed: blank the extra cell and fill the missing adjacent cell. "
             "For corrections or uncertainty reviews, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
