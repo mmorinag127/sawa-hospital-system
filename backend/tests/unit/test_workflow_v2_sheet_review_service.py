@@ -472,6 +472,55 @@ def test_suspect_selector_excludes_totals() -> None:
     assert workflow_v2_sheet_review_service._suspect_target_cells_from_presence(sheet) == []  # noqa: SLF001
 
 
+def test_auto_edit_rule_fallback_blanks_extra_and_fills_stable_staff(monkeypatch) -> None:
+    def _fake_gemini_json_request(**kwargs):
+        target = kwargs["user_payload"]["target_cell_map"][0]
+        return {
+            "patches": [
+                {
+                    "row_index": target["target_row_index"],
+                    "col_index": target["target_col_index"],
+                    "current_value": target["suspect_review"]["current_value"],
+                    "suggested_value": "9",
+                    "reason": "llm_conflicting_value",
+                    "confidence": "medium",
+                }
+            ]
+        }, {"status": "ok"}
+
+    sheet = {
+        "fields": ["date", "daypart", "menu", "qty.regular", "qty.staff"],
+        "header": ["日付", "区分", "献立", "常食", "職員"],
+        "rows": [
+            ["04/28", "朝", "A", "10", "5"],
+            ["04/28", "朝", "B", "10", "1"],
+            ["04/28", "朝", "C", "10", ""],
+            ["04/28", "朝", "D", "10", "5"],
+        ],
+        "ocr_numeric_cell_items": [
+            {"target_row_index": 2, "target_col_index": 4, "classification": "deterministic_candidate"},
+        ],
+        "target_cell_map": [
+            {"target_row_index": 1, "target_col_index": 4, "field": "qty.staff", "bbox": [0, 0, 10, 10]},
+            {"target_row_index": 2, "target_col_index": 4, "field": "qty.staff", "bbox": [0, 10, 10, 20]},
+        ],
+    }
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64="",
+        fax_image_meta={"status": "attached"},
+    )
+
+    by_row = {patch["row_index"]: patch for patch in result["patches"]}
+    assert by_row[1]["suggested_value"] == ""
+    assert by_row[1]["source"] == "rule"
+    assert by_row[2]["suggested_value"] == "5"
+    assert by_row[2]["source"] == "rule"
+
+
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:
     captured = {}
 
