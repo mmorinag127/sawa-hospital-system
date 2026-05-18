@@ -2224,6 +2224,55 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
     )
 
 
+def test_workflow_v2_dismiss_sheet_anomaly_warning_allows_sheet_hash_mismatch_without_confirming(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    sheet = {
+        "fields": ["date", "daypart", "menu", "regular", "soft"],
+        "header": ["日付", "区分", "献立", "常食", "軟菜"],
+        "rows": [
+            ["04/28", "朝", "A", "110", "5"],
+            ["04/28", "朝", "B", "12", "5"],
+            ["04/29", "朝", "C", "10", "5"],
+            ["04/30", "朝", "D", "11", "5"],
+        ],
+    }
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
+        order_id,
+        sheet=sheet,
+        use_llm=False,
+    )
+    assert error is None
+    warning = next(item for item in anomaly["anomaly_review"]["warnings"] if item["type"] == "high_outlier")
+    changed_sheet = dict(sheet)
+    changed_sheet["rows"] = [list(row) for row in sheet["rows"]]
+    changed_sheet["rows"][0][3] = "111"
+
+    dismissed, error = order_workflow_v2_service.dismiss_sheet_anomaly_warning(
+        order_id=order_id,
+        sheet=changed_sheet,
+        warning=warning,
+    )
+
+    assert error is None
+    assert "anomaly_review" not in dismissed["pre_save_checks"]
+    assert not any(
+        item["row_index"] == warning["row_index"]
+        and item["col_index"] == warning["col_index"]
+        and item["type"] == warning["type"]
+        for item in dismissed["anomaly_review"]["warnings"]
+    )
+
+
 def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

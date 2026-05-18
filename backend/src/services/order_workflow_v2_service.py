@@ -145,6 +145,13 @@ def _set_pre_save_check(meta: dict[str, Any], key: str, *, sheet_hash: str, payl
     meta["pre_save_checks"] = checks
 
 
+def _clear_pre_save_check(meta: dict[str, Any], key: str) -> None:
+    checks = _workflow_pre_save_checks(meta)
+    if key in checks:
+        checks.pop(key, None)
+        meta["pre_save_checks"] = checks
+
+
 def _clear_pre_save_checks(meta: dict[str, Any]) -> None:
     meta["pre_save_checks"] = {}
 
@@ -3232,8 +3239,7 @@ def dismiss_sheet_anomaly_warning(
         if not isinstance(anomaly_review, dict):
             return None, "anomaly_review_required"
         review_hash = _normalize_id(anomaly_review.get("sheet_hash"))
-        if review_hash and review_hash != sheet_hash:
-            return None, "anomaly_review_sheet_mismatch"
+        sheet_matches_review = not review_hash or review_hash == sheet_hash
         warnings = anomaly_review.get("warnings")
         if not isinstance(warnings, list):
             return None, "anomaly_review_warnings_missing"
@@ -3255,17 +3261,20 @@ def dismiss_sheet_anomaly_warning(
             "warning_count": len(next_warnings),
             "dismissed_warning_count": len(next_review["dismissed_warnings"]),
         }
-        next_review["sheet_hash"] = sheet_hash
+        next_review["sheet_hash"] = review_hash or sheet_hash
         anomaly_review_id = _normalize_id(next_review.get("anomaly_review_id")) or _new_id("OAR")
         next_review["anomaly_review_id"] = anomaly_review_id
         meta["anomaly_review_id"] = anomaly_review_id
         meta["anomaly_review"] = next_review
-        _set_pre_save_check(
-            meta,
-            "anomaly_review",
-            sheet_hash=sheet_hash,
-            payload={"anomaly_review_id": anomaly_review_id},
-        )
+        if sheet_matches_review:
+            _set_pre_save_check(
+                meta,
+                "anomaly_review",
+                sheet_hash=sheet_hash,
+                payload={"anomaly_review_id": anomaly_review_id},
+            )
+        else:
+            _clear_pre_save_check(meta, "anomaly_review")
         _write_workflow_meta(workflow, meta)
         return {
             "workflow": _serialize_workflow(workflow),
