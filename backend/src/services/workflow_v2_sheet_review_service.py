@@ -1271,9 +1271,9 @@ def propose_auto_sheet_edits(
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         try:
-            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "4")), 8))
+            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "1")), 4))
         except ValueError:
-            chunk_size = 4
+            chunk_size = 1
         try:
             max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
         except ValueError:
