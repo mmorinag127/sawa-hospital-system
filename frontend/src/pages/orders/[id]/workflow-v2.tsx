@@ -2653,6 +2653,17 @@ export default function OrderWorkflowV2Page() {
     setSelectedAutoEditIndex(null);
   };
 
+  const dismissSingleSheetAutoEditPatch = (patch: SheetAutoEditPatch) => {
+    setSheetAutoEditResult((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        patches: removeFirstMatchingItem(current.patches || [], (item) => sameSheetPatchTarget(item, patch)),
+      };
+    });
+    setSelectedAutoEditIndex(null);
+  };
+
   const applyAnomalyCorrections = () => {
     const patches = anomalyWarnings.filter((warning) => (
       typeof warning.row_index === "number"
@@ -4085,12 +4096,12 @@ export default function OrderWorkflowV2Page() {
                           <table className="anomaly-table auto-edit-table">
                             <thead>
                               <tr>
+                                <th>操作</th>
                                 <th>行</th>
                                 <th>列</th>
                                 <th>現状</th>
                                 <th>候補</th>
                                 <th>理由</th>
-                                <th>操作</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4103,24 +4114,36 @@ export default function OrderWorkflowV2Page() {
                                   ].filter(Boolean).join(" ")}
                                   onClick={() => selectAutoEditPatch(patch, idx)}
                                 >
+                                  <td className="anomaly-row-actions-cell">
+                                    <div className="inline-row-actions">
+                                      <button
+                                        className="btn tiny row-apply-button"
+                                        type="button"
+                                        disabled={!String(patch.suggested_value || "").trim()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          applySingleSheetAutoEditPatch(patch);
+                                        }}
+                                      >
+                                        採用
+                                      </button>
+                                      <button
+                                        className="btn tiny ghost"
+                                        type="button"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          dismissSingleSheetAutoEditPatch(patch);
+                                        }}
+                                      >
+                                        却下
+                                      </button>
+                                    </div>
+                                  </td>
                                   <td>R{patch.row_index + 1}</td>
                                   <td>{patch.label || patch.field || `C${patch.col_index + 1}`}</td>
                                   <td>{patch.current_value || "空"}</td>
                                   <td><strong>{patch.suggested_value}</strong></td>
                                   <td>{patch.reason || patch.evidence || ""}</td>
-                                  <td>
-                                    <button
-                                      className="btn tiny row-apply-button"
-                                      type="button"
-                                      disabled={!String(patch.suggested_value || "").trim()}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        applySingleSheetAutoEditPatch(patch);
-                                      }}
-                                    >
-                                      採用
-                                    </button>
-                                  </td>
                                 </tr>
                               ))}
                             </tbody>
