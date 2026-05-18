@@ -12,6 +12,7 @@ SENTINELS = [
     "src/pages/orders/[id].tsx",
     "src/pages/orders/[id]/workflow-v2.tsx",
     "src/pages/orders/[id]/inspection-v2.tsx",
+    "src/pages/facility-master.tsx",
     "src/pages/index.tsx",
 ]
 
