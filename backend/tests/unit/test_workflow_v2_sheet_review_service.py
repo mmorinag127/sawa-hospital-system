@@ -204,7 +204,9 @@ def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
 
     assert captured["image_png_base64"] == "png-base64"
     assert captured["user_payload"]["ocr_numeric_cell_items"] == []
+    assert captured["user_payload"]["ocr_quantity_presence_hints"]
     assert captured["user_payload"]["target_cell_map"]
+    assert captured["user_payload"]["target_cell_map"][0]["ocr_quantity_presence"]["has_quantity_mark"] is True
     assert result["llm"]["fax_image"]["status"] == "attached"
     assert any(patch["source"] == "llm" and patch["suggested_value"] == "10" for patch in result["patches"])
 

@@ -566,6 +566,36 @@ def _target_cells_from_sheet(sheet: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _quantity_presence_hints_from_sheet(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    items = sheet.get("ocr_numeric_cell_items") if isinstance(sheet, dict) else None
+    if not isinstance(items, list):
+        return []
+    hints: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row_index = _first_int(item, _EVIDENCE_ROW_KEYS)
+        col_index = _first_int(item, _EVIDENCE_COL_KEYS)
+        if row_index is None or col_index is None:
+            continue
+        key = (row_index, col_index)
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(
+            {
+                "target_row_index": row_index,
+                "target_col_index": col_index,
+                "has_quantity_mark": True,
+                "classification": _normalize_text(item.get("classification")),
+                "confidence_tier": _normalize_text(item.get("confidence_tier")),
+                "source": "ocr_quantity_presence_only",
+            }
+        )
+    return hints[:_MAX_LLM_EVIDENCE]
+
+
 def _float_pair(value: object) -> tuple[float, float] | None:
     if not isinstance(value, list) or len(value) < 2:
         return None
@@ -700,9 +730,17 @@ def _target_cell_context_items(
     target_cells: list[dict[str, Any]],
     *,
     coordinate_transform: dict[str, Any] | None = None,
+    quantity_presence_by_cell: dict[tuple[int, int], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in target_cells:
+        row_index = _coerce_int(item.get("target_row_index"))
+        col_index = _coerce_int(item.get("target_col_index"))
+        presence_hint = (
+            quantity_presence_by_cell.get((row_index, col_index))
+            if row_index is not None and col_index is not None and isinstance(quantity_presence_by_cell, dict)
+            else None
+        )
         scaled_bbox = _scale_bbox_for_image(item.get("bbox"), coordinate_transform)
         scaled_center = _scale_center_for_image(item.get("center"), coordinate_transform)
         context = {
@@ -720,6 +758,8 @@ def _target_cell_context_items(
             "field_label": item.get("field_label") or item.get("label"),
             "logical_targets": item.get("logical_targets"),
         }
+        if isinstance(presence_hint, dict):
+            context["ocr_quantity_presence"] = presence_hint
         if scaled_bbox is not None:
             context["bbox_coordinate_space"] = "attached_image_pixels"
         items.append(context)
@@ -754,6 +794,13 @@ def _sheet_context_for_llm(
         target_cells=_target_cells_from_sheet(sheet),
         fax_image_meta=fax_image_meta,
     )
+    quantity_presence_hints = _quantity_presence_hints_from_sheet(sheet)
+    quantity_presence_by_cell = {
+        (int(item["target_row_index"]), int(item["target_col_index"])): item
+        for item in quantity_presence_hints
+        if _coerce_int(item.get("target_row_index")) is not None
+        and _coerce_int(item.get("target_col_index")) is not None
+    }
     payload = {
         "fields": fields,
         "header": header,
@@ -766,7 +813,9 @@ def _sheet_context_for_llm(
         "target_cell_map": _target_cell_context_items(
             selected_target_cells if include_target_cell_map else [],
             coordinate_transform=coordinate_transform,
+            quantity_presence_by_cell=quantity_presence_by_cell,
         ),
+        "ocr_quantity_presence_hints": quantity_presence_hints if include_target_cell_map else [],
         "fax_image": {
             "coordinate_transform": coordinate_transform,
             "instruction": (
@@ -986,7 +1035,8 @@ def propose_auto_sheet_edits(
         system_prompt = (
             "You review a Japanese FAX order sheet. Return JSON only. "
             "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
-            "Do not use OCR output, OCR candidates, OCR confidence, OCR evidence, or OCR-vs-sheet comparisons. "
+            "Do not use OCR output values, OCR digit candidates, OCR recognized text, OCR confidence scores, OCR evidence values, or OCR-vs-sheet comparisons. "
+            "You may use ocr_quantity_presence_hints only as red-dot style hints that some quantity mark exists in that cell; never copy or infer a digit from OCR. "
             "For each quantity cell, use target_cell_map.bbox in attached image pixel coordinates to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
             "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
