@@ -989,30 +989,8 @@ def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, A
     return _suspect_target_cells_from_presence(sheet)
 
 
-def _modal_numeric_value(values: list[str]) -> str | None:
-    counts: dict[str, int] = {}
-    for value in values:
-        numeric = _numeric_value(value)
-        if numeric is None or numeric <= 0:
-            continue
-        display = _numeric_display(value)
-        counts[display] = counts.get(display, 0) + 1
-    if not counts:
-        return None
-    value, count = max(counts.items(), key=lambda item: (item[1], item[0]))
-    if count < 2:
-        return None
-    return value
-
-
 def _fallback_patches_for_suspects(sheet: dict[str, Any], suspects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     fields, header, rows = _sheet_dimensions(sheet)
-    values_by_col: dict[int, list[str]] = {}
-    for row in rows:
-        for col_index, value in enumerate(row):
-            if col_index >= len(fields):
-                continue
-            values_by_col.setdefault(col_index, []).append(_normalize_text(value))
     patches: list[dict[str, Any]] = []
     for target in suspects:
         row_index = _coerce_int(target.get("target_row_index"))
@@ -1039,27 +1017,6 @@ def _fallback_patches_for_suspects(sheet: dict[str, Any], suspects: list[dict[st
                 )
             )
             continue
-        if (
-            not current
-            and "presence_mark_but_sheet_blank" in reasons
-            and "職員" in _normalize_text(label)
-        ):
-            modal = _modal_numeric_value(values_by_col.get(col_index, []))
-            if modal:
-                patches.append(
-                    _make_patch(
-                        row_index=row_index,
-                        col_index=col_index,
-                        fields=fields,
-                        header=header,
-                        current_value=current,
-                        suggested_value=modal,
-                        reason="staff_column_presence_blank_modal_fallback",
-                        confidence="medium",
-                        evidence="quantity presence exists and this staff column has a stable modal value",
-                        source="rule",
-                    )
-                )
     return patches
 
 

@@ -472,7 +472,7 @@ def test_suspect_selector_excludes_totals() -> None:
     assert workflow_v2_sheet_review_service._suspect_target_cells_from_presence(sheet) == []  # noqa: SLF001
 
 
-def test_auto_edit_rule_fallback_blanks_extra_and_fills_stable_staff(monkeypatch) -> None:
+def test_auto_edit_rule_fallback_only_blanks_extra_values(monkeypatch) -> None:
     def _fake_gemini_json_request(**kwargs):
         target = kwargs["user_payload"]["target_cell_map"][0]
         return {
@@ -517,8 +517,8 @@ def test_auto_edit_rule_fallback_blanks_extra_and_fills_stable_staff(monkeypatch
     by_row = {patch["row_index"]: patch for patch in result["patches"]}
     assert by_row[1]["suggested_value"] == ""
     assert by_row[1]["source"] == "rule"
-    assert by_row[2]["suggested_value"] == "5"
-    assert by_row[2]["source"] == "rule"
+    assert by_row[2]["suggested_value"] == "9"
+    assert by_row[2]["source"] == "llm"
 
 
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:
