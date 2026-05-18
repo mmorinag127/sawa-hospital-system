@@ -70,6 +70,9 @@ type MenuMasterCandidate = {
   name: string;
   unit_type?: string | null;
   qty_per_serving?: number | string | null;
+  bag_max_qty?: number | string | null;
+  bag_max_unit?: string | null;
+  condiments?: string[] | null;
   daypart?: string | null;
   category?: string | null;
   similarity?: number | null;
@@ -81,6 +84,9 @@ type MenuMasterSuggestedPatch = {
   name?: string | null;
   unit_type?: string | null;
   qty_per_serving?: number | string | null;
+  bag_max_qty?: number | string | null;
+  bag_max_unit?: string | null;
+  condiments?: string[] | null;
   daypart?: string | null;
   category?: string | null;
 };
@@ -98,6 +104,7 @@ type MenuMasterReviewIssue = {
   candidates?: MenuMasterCandidate[] | null;
   current_master?: MenuMasterCandidate | null;
   field_diffs?: { field: string; label?: string | null; monthly_value?: string | number | null; master_value?: string | number | null }[] | null;
+  condiment_issues?: { condiment_name?: string | null; reason?: string | null; message?: string | null }[] | null;
 };
 
 type ReviewResolutionAction = "" | "existing" | "create" | "update" | "month_only" | "category_only";
@@ -110,6 +117,9 @@ type MenuMasterReviewResolution = {
   name: string;
   unit_type: string;
   qty_per_serving: string;
+  bag_max_qty: string;
+  bag_max_unit: string;
+  condiments: string;
   category: string;
 };
 
@@ -318,7 +328,9 @@ const buildInitialReviewResolution = (issue: MenuMasterReviewIssue, index: numbe
   const candidates = issue.candidates || [];
   const suggestedPatch = issue.suggested_patch || {};
   const action: ReviewResolutionAction =
-    issue.issue_type === "diff"
+    issue.issue_type === "bagging_settings_missing"
+      ? "update"
+      : issue.issue_type === "diff"
       ? isCategoryOnlyDiffIssue(issue)
         ? "category_only"
         : "update"
@@ -332,10 +344,13 @@ const buildInitialReviewResolution = (issue: MenuMasterReviewIssue, index: numbe
     issue_key: getReviewIssueKey(issue, index),
     source_name: getReviewSourceName(issue),
     action,
-    menu_master_id: selectedCandidate?.id || "",
+    menu_master_id: selectedCandidate?.id || issue.current_master?.id || "",
     name: normalizeValue(suggestedPatch.name) || getReviewSourceName(issue),
     unit_type: normalizeUnitChoice(selectedCandidate?.unit_type || suggestedPatch.unit_type),
     qty_per_serving: toResolutionQty(selectedCandidate?.qty_per_serving ?? suggestedPatch.qty_per_serving ?? ""),
+    bag_max_qty: toResolutionQty(selectedCandidate?.bag_max_qty ?? suggestedPatch.bag_max_qty ?? ""),
+    bag_max_unit: normalizeUnitChoice(selectedCandidate?.bag_max_unit || suggestedPatch.bag_max_unit),
+    condiments: (suggestedPatch.condiments || selectedCandidate?.condiments || []).join(", "),
     category: normalizeValue(String(suggestedPatch.category ?? issue.current_master?.category ?? "")),
   };
 };
@@ -350,11 +365,14 @@ const isReviewResolutionComplete = (
   }
   if (resolution.action === "update") {
     const qty = Number(resolution.qty_per_serving);
+    const bagQtyRaw = String(resolution.bag_max_qty ?? "").trim();
+    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
     return (
       Boolean(resolution.name.trim()) &&
       Boolean(normalizeUnitChoice(resolution.unit_type)) &&
       Number.isFinite(qty) &&
-      qty > 0
+      qty > 0 &&
+      (!needsBagMax || (Number.isFinite(Number(bagQtyRaw)) && Number(bagQtyRaw) > 0 && Boolean(normalizeUnitChoice(resolution.bag_max_unit))))
     );
   }
   if (resolution.action === "month_only") {
@@ -363,21 +381,36 @@ const isReviewResolutionComplete = (
     }
     const rawQty = String(resolution.qty_per_serving ?? "").trim();
     if (!rawQty) {
-      return true;
+      return !["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type)) || (
+        Number.isFinite(Number(resolution.bag_max_qty)) &&
+        Number(resolution.bag_max_qty) > 0 &&
+        Boolean(normalizeUnitChoice(resolution.bag_max_unit))
+      );
     }
     const qty = Number(rawQty);
-    return Number.isFinite(qty) && qty > 0;
+    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
+    return Number.isFinite(qty) && qty > 0 && (!needsBagMax || (
+      Number.isFinite(Number(resolution.bag_max_qty)) &&
+      Number(resolution.bag_max_qty) > 0 &&
+      Boolean(normalizeUnitChoice(resolution.bag_max_unit))
+    ));
   }
   if (resolution.action === "category_only") {
     return Boolean(resolution.category.trim());
   }
   if (resolution.action === "create") {
     const qty = Number(resolution.qty_per_serving);
+    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
     return (
       Boolean(resolution.name.trim()) &&
       Boolean(normalizeUnitChoice(resolution.unit_type)) &&
       Number.isFinite(qty) &&
-      qty > 0
+      qty > 0 &&
+      (!needsBagMax || (
+        Number.isFinite(Number(resolution.bag_max_qty)) &&
+        Number(resolution.bag_max_qty) > 0 &&
+        Boolean(normalizeUnitChoice(resolution.bag_max_unit))
+      ))
     );
   }
   if ((issue.candidates || []).length === 0) {
@@ -726,6 +759,20 @@ export default function MonthlyMenuEditorPage() {
         const rawQty = String(resolution.qty_per_serving ?? "").trim();
         if (resolution.action !== "month_only" || rawQty) {
           body.qty_per_serving = Number(rawQty);
+        }
+        const rawBagQty = String(resolution.bag_max_qty ?? "").trim();
+        if (rawBagQty) {
+          body.bag_max_qty = Number(rawBagQty);
+        }
+        if (normalizeUnitChoice(resolution.bag_max_unit)) {
+          body.bag_max_unit = normalizeUnitChoice(resolution.bag_max_unit);
+        }
+        const condiments = resolution.condiments
+          .split(",")
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0);
+        if (condiments.length > 0) {
+          body.condiments = condiments;
         }
         if (resolution.category.trim()) {
           body.category = resolution.category.trim();
@@ -1169,6 +1216,22 @@ export default function MonthlyMenuEditorPage() {
                           <span>既存マスターを使う</span>
                         </label>
                       )}
+                      {issue.current_master?.id && (
+                        <label className="review-radio">
+                          <input
+                            type="radio"
+                            name={`review-action-${issueKey}`}
+                            checked={resolution.action === "update"}
+                            onChange={() =>
+                              updateReviewResolution(issueKey, {
+                                action: "update",
+                                menu_master_id: issue.current_master?.id || resolution.menu_master_id,
+                              })
+                            }
+                          />
+                          <span>既存マスターを更新する</span>
+                        </label>
+                      )}
                       <label className="review-radio">
                         <input
                           type="radio"
@@ -1234,10 +1297,10 @@ export default function MonthlyMenuEditorPage() {
                       </div>
                     )}
 
-                    {resolution.action === "create" && (
+                    {(resolution.action === "create" || resolution.action === "update") && (
                       <div className="review-create-grid">
                         <label>
-                          <span>新規メニュー名</span>
+                          <span>{resolution.action === "update" ? "更新後メニュー名" : "新規メニュー名"}</span>
                           <input
                             className="input"
                             aria-label={`新規メニュー名-${index + 1}`}
@@ -1271,6 +1334,43 @@ export default function MonthlyMenuEditorPage() {
                             step="1"
                             value={resolution.qty_per_serving}
                             onChange={(e) => updateReviewResolution(issueKey, { qty_per_serving: e.target.value })}
+                          />
+                        </label>
+                        <label>
+                          <span>袋上限数</span>
+                          <input
+                            className="input"
+                            aria-label={`新規袋上限数-${index + 1}`}
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={resolution.bag_max_qty}
+                            onChange={(e) => updateReviewResolution(issueKey, { bag_max_qty: e.target.value })}
+                          />
+                        </label>
+                        <label>
+                          <span>袋上限単位</span>
+                          <select
+                            className="input"
+                            aria-label={`新規袋上限単位-${index + 1}`}
+                            value={normalizeUnitChoice(resolution.bag_max_unit)}
+                            onChange={(e) => updateReviewResolution(issueKey, { bag_max_unit: e.target.value })}
+                          >
+                            <option value="">単位を選択</option>
+                            {unitChoices.map((choice) => (
+                              <option key={choice.value} value={choice.value}>
+                                {choice.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>付属品</span>
+                          <input
+                            className="input"
+                            aria-label={`新規付属品-${index + 1}`}
+                            value={resolution.condiments}
+                            onChange={(e) => updateReviewResolution(issueKey, { condiments: e.target.value })}
                           />
                         </label>
                       </div>
@@ -1418,6 +1518,16 @@ export default function MonthlyMenuEditorPage() {
                           ))}
                         </div>
                       )}
+                      {(issue.condiment_issues || []).length > 0 && (
+                        <div className="master-check-diffs">
+                          {(issue.condiment_issues || []).map((condiment, condimentIndex) => (
+                            <div key={`${issueKey}-condiment-${condimentIndex}`} className="master-check-diff-row">
+                              <strong>{condiment.condiment_name || "付属品"}</strong>
+                              <span>{condiment.message || "付属品の袋上限を設定してください"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {resolution.action === "update" && (
                         <div className="review-create-grid">
                           <label>
@@ -1455,6 +1565,43 @@ export default function MonthlyMenuEditorPage() {
                               step="1"
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            <span>袋上限数</span>
+                            <input
+                              className="input"
+                              aria-label={`差分袋上限数-${index + 1}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={resolution.bag_max_qty}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            <span>袋上限単位</span>
+                            <select
+                              className="input"
+                              aria-label={`差分袋上限単位-${index + 1}`}
+                              value={normalizeUnitChoice(resolution.bag_max_unit)}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_unit: e.target.value })}
+                            >
+                              <option value="">単位を選択</option>
+                              {unitChoices.map((choice) => (
+                                <option key={choice.value} value={choice.value}>
+                                  {choice.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span>付属品</span>
+                            <input
+                              className="input"
+                              aria-label={`差分付属品-${index + 1}`}
+                              value={resolution.condiments}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { condiments: e.target.value })}
                             />
                           </label>
                           <label>
@@ -1498,6 +1645,34 @@ export default function MonthlyMenuEditorPage() {
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
                             />
+                          </label>
+                          <label>
+                            <span>袋上限数</span>
+                            <input
+                              className="input"
+                              aria-label={`当月のみ袋上限数-${index + 1}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={resolution.bag_max_qty}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            <span>袋上限単位</span>
+                            <select
+                              className="input"
+                              aria-label={`当月のみ袋上限単位-${index + 1}`}
+                              value={normalizeUnitChoice(resolution.bag_max_unit)}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_unit: e.target.value })}
+                            >
+                              <option value="">単位を選択</option>
+                              {unitChoices.map((choice) => (
+                                <option key={choice.value} value={choice.value}>
+                                  {choice.label}
+                                </option>
+                              ))}
+                            </select>
                           </label>
                           <label>
                             <span>区分</span>

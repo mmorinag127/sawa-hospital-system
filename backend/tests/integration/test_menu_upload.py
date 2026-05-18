@@ -616,9 +616,9 @@ def test_get_menu_exposes_menu_master_missing_and_diff_checks():
     master_checks = payload["master_checks"]
     assert master_checks["count"] == 2
     issues = {issue["item_id"]: issue for issue in master_checks["issues"]}
-    assert issues["MMI_DIFF"]["issue_type"] == "diff"
+    assert issues["MMI_DIFF"]["issue_type"] == "bagging_settings_missing"
     assert issues["MMI_DIFF"]["current_master"]["id"] == "MNU_EXIST"
-    assert {diff["field"] for diff in issues["MMI_DIFF"]["field_diffs"]} == {"unit_type", "qty_per_serving"}
+    assert {diff["field"] for diff in issues["MMI_DIFF"]["field_diffs"]} == {"bag_max_qty", "bag_max_unit"}
     assert issues["MMI_MISSING"]["issue_type"] == "missing"
     assert issues["MMI_MISSING"]["suggested_patch"]["unit_type"] == "cut"
     assert issues["MMI_MISSING"]["suggested_patch"]["qty_per_serving"] == 2
@@ -770,6 +770,8 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
             "name": "タラのムニエル",
             "unit_type": "cut",
             "qty_per_serving": 2,
+            "bag_max_qty": 20,
+            "bag_max_unit": "cut",
             "daypart": "夕食",
             "category": "主菜",
         },
@@ -779,6 +781,8 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
         "MMI_UPDATE",
         {
             "action": "update",
+            "bag_max_qty": 20,
+            "bag_max_unit": "cut",
         },
     )
     month_only = menu_service.resolve_menu_master_check(
@@ -788,6 +792,8 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
             "action": "month_only",
             "unit_type": "cut",
             "qty_per_serving": 2,
+            "bag_max_qty": 20,
+            "bag_max_unit": "cut",
             "category": "主菜",
         },
     )
@@ -821,9 +827,13 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
         assert created_master.name == "タラのムニエル"
         assert created_master.unit_type == "cut"
         assert created_master.qty_per_serving == 2
+        assert created_master.bag_max_qty == 20
+        assert created_master.bag_max_unit == "cut"
         assert updated_master is not None
         assert updated_master.unit_type == "cut"
         assert updated_master.qty_per_serving == 2
+        assert updated_master.bag_max_qty == 20
+        assert updated_master.bag_max_unit == "cut"
         assert updated_master.category == "主菜（焼魚）"
         assert item_update is not None and item_update.menu_master_id == "MNU_UPDATE"
         assert item_month_only is not None
@@ -831,6 +841,8 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
         assert item_month_only.master_resolution_mode == "month_only"
         assert item_month_only.unit_type == "cut"
         assert item_month_only.qty_per_serving == 2
+        assert item_month_only.bag_max_qty == 20
+        assert item_month_only.bag_max_unit == "cut"
         assert item_month_only.category == "主菜"
         assert item_category_only is not None
         assert item_category_only.master_resolution_mode is None
@@ -1172,3 +1184,167 @@ def test_upsert_entry_exceptions_creates_facility_scoped_override_entries():
     assert base_payload is not None
     base_entries = {(entry["menu_date"], entry["daypart"], entry["slot_index"]): entry for entry in base_payload["entries"]}
     assert base_entries[("2026-06-03", "昼食", 1)]["name"] == "鶏の照焼き"
+
+
+def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+    def _parse_cut_menu(*_args, **_kwargs):
+        return None, None, [{"name": "鮭切身", "unit_type": "cut", "qty_per_serving": 1}], [
+            {"menu_date": date(2026, 7, 1), "daypart": "昼", "name": "鮭切身", "slot_index": 0},
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_cut_menu)
+
+    try:
+        menu_service.create_menu(
+            "2026-07",
+            b"dummy",
+            "menu.xlsx",
+            require_menu_master_review=True,
+        )
+        assert False, "expected menu master review"
+    except menu_service.MenuMasterResolutionRequired as exc:
+        assert exc.issues[0]["reason"] == "bagging_settings_missing"
+        assert {field["field"] for field in exc.issues[0]["field_diffs"]} == {"bag_max_qty", "bag_max_unit"}
+
+    menu_service.create_menu(
+        "2026-07",
+        b"dummy",
+        "menu.xlsx",
+        require_menu_master_review=True,
+        menu_master_resolutions=[
+            {
+                "source_name": "鮭切身",
+                "action": "create",
+                "unit_type": "cut",
+                "qty_per_serving": 1,
+                "bag_max_qty": 20,
+                "bag_max_unit": "cut",
+            }
+        ],
+    )
+
+    payload = menu_service.get_menu("2026-07")
+    assert payload is not None
+    item = payload["items"][0]
+    assert item["unit_type"] == "cut"
+    assert item["bag_max_qty"] == 20
+    assert item["bag_max_unit"] == "cut"
+    assert payload["master_checks"]["issues"] == []
+
+
+def test_monthly_menu_lists_existing_condiment_bagging_gaps():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(MonthlyMenu(id="2026-08", filename="menu.xlsx"))
+        session.add(
+            MenuMaster(
+                id="MNU_SAUCE_MAIN",
+                name="白身魚フライ",
+                normalized_name=menu_service._normalize_menu_name("白身魚フライ"),
+                unit_type="count",
+                qty_per_serving=1,
+                bag_max_qty=25,
+                bag_max_unit="count",
+                condiments=["ソース"],
+            )
+        )
+        session.add(
+            MonthlyMenuItem(
+                id="MMI_SAUCE_MAIN",
+                monthly_menu_id="2026-08",
+                menu_master_id="MNU_SAUCE_MAIN",
+                name="白身魚フライ",
+                unit_type="count",
+                qty_per_serving=1,
+                bag_max_qty=25,
+                bag_max_unit="count",
+            )
+        )
+        session.add(
+            MonthlyMenuEntry(
+                id="MME_SAUCE_MAIN",
+                monthly_menu_id="2026-08",
+                menu_date=date(2026, 8, 1),
+                daypart="昼",
+                name="白身魚フライ",
+                slot_index=0,
+            )
+        )
+
+    payload = menu_service.get_menu("2026-08")
+    assert payload is not None
+    issues = payload["master_checks"]["issues"]
+    assert len(issues) == 1
+    assert issues[0]["reason"] == "bagging_settings_missing"
+    assert issues[0]["condiment_issues"][0]["condiment_name"] == "ソース"
+
+    with session_scope() as session:
+        session.add(
+            MenuMaster(
+                id="MNU_SAUCE",
+                name="ソース",
+                normalized_name=menu_service._normalize_menu_name("ソース"),
+                unit_type="count",
+                qty_per_serving=1,
+                bag_max_qty=50,
+                bag_max_unit="count",
+            )
+        )
+
+    payload = menu_service.get_menu("2026-08")
+    assert payload is not None
+    assert payload["master_checks"]["issues"] == []
+
+
+def test_monthly_menu_upload_requires_condiment_bagging_settings(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(
+            MenuMaster(
+                id="MNU_WITH_SAUCE",
+                name="白身魚フライ",
+                normalized_name=menu_service._normalize_menu_name("白身魚フライ"),
+                unit_type="count",
+                qty_per_serving=1,
+                bag_max_qty=25,
+                bag_max_unit="count",
+                condiments=["ソース"],
+            )
+        )
+
+    def _parse_menu_with_sauce(*_args, **_kwargs):
+        return None, None, [{"name": "白身魚フライ", "unit_type": "count", "qty_per_serving": 1}], [
+            {"menu_date": date(2026, 9, 1), "daypart": "昼", "name": "白身魚フライ", "slot_index": 0},
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_menu_with_sauce)
+
+    try:
+        menu_service.create_menu(
+            "2026-09",
+            b"dummy",
+            "menu.xlsx",
+            require_menu_master_review=True,
+        )
+        assert False, "expected condiment bagging review"
+    except menu_service.MenuMasterResolutionRequired as exc:
+        assert exc.issues[0]["reason"] == "bagging_settings_missing"
+        assert exc.issues[0]["condiment_issues"][0]["condiment_name"] == "ソース"

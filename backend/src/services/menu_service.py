@@ -74,6 +74,7 @@ _MASTER_FIELDS = (
     "category",
     "bag_max_qty",
     "bag_max_unit",
+    "condiments",
 )
 
 _CONDIMENT_HEADERS = {
@@ -203,6 +204,31 @@ def _ensure_monthly_menu_items_master_resolution_mode() -> bool:
     return "master_resolution_mode" in columns
 
 
+def _ensure_monthly_menu_items_bagging_columns() -> bool:
+    inspector = inspect(engine)
+    if "monthly_menu_items" not in inspector.get_table_names():
+        return False
+    columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
+    missing = [column for column in ("bag_max_qty", "bag_max_unit") if column not in columns]
+    if not missing:
+        return True
+    migrated = False
+    with engine.begin() as conn:
+        for column in missing:
+            try:
+                if column == "bag_max_qty":
+                    conn.execute(text("ALTER TABLE monthly_menu_items ADD COLUMN bag_max_qty FLOAT"))
+                else:
+                    conn.execute(text("ALTER TABLE monthly_menu_items ADD COLUMN bag_max_unit VARCHAR"))
+                migrated = True
+            except Exception as exc:
+                logger.warning("Failed to ensure monthly_menu_items bagging column", column=column, error=str(exc))
+    if migrated:
+        inspector = inspect(engine)
+        columns = {col.get("name") for col in inspector.get_columns("monthly_menu_items")}
+    return {"bag_max_qty", "bag_max_unit"}.issubset(columns)
+
+
 def _ensure_monthly_menu_entries_scope_column() -> bool:
     inspector = inspect(engine)
     if "monthly_menu_entries" not in inspector.get_table_names():
@@ -292,11 +318,17 @@ def ensure_menu_schema() -> None:
         condiments_ok = _ensure_menu_master_condiments()
         monthly_item_ok = _ensure_monthly_menu_items_menu_master_id()
         monthly_item_mode_ok = _ensure_monthly_menu_items_master_resolution_mode()
+        monthly_item_bagging_ok = _ensure_monthly_menu_items_bagging_columns()
         monthly_entry_ok = _ensure_monthly_menu_entries_scope_column()
         indexes_ok = _ensure_menu_unique_indexes()
         # Only memoize success when the expected tables/columns are actually present.
         _MENU_SCHEMA_INITIALIZED = bool(
-            condiments_ok and monthly_item_ok and monthly_item_mode_ok and monthly_entry_ok and indexes_ok
+            condiments_ok
+            and monthly_item_ok
+            and monthly_item_mode_ok
+            and monthly_item_bagging_ok
+            and monthly_entry_ok
+            and indexes_ok
         )
 
 _TEMP_COLD_HINTS = (
@@ -925,6 +957,12 @@ def _coerce_master_field_value(field: str, value: object) -> object:
         return coerced
     if field in {"unit_type", "bag_max_unit"}:
         return _normalize_menu_unit_type(value)
+    if field == "condiments":
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if _is_blank_value(value):
+            return []
+        return [str(value).strip()]
     if field == "temp_type":
         return _normalize_temp_type(value)
     if field == "daypart":
@@ -1072,9 +1110,92 @@ def _build_menu_master_resolution_issue(
             "temp_type": _normalize_temp_type((seed_patch or {}).get("temp_type")),
             "daypart": _coerce_master_field_value("daypart", (seed_patch or {}).get("daypart")),
             "category": (seed_patch or {}).get("category"),
+            "bag_max_qty": (seed_patch or {}).get("bag_max_qty"),
+            "bag_max_unit": _normalize_menu_unit_type((seed_patch or {}).get("bag_max_unit")),
+            "condiments": list((seed_patch or {}).get("condiments") or [])
+            if isinstance((seed_patch or {}).get("condiments"), list)
+            else [],
         },
         "candidates": candidates,
     }
+
+
+def _unit_requires_bagging_settings(unit_type: object) -> bool:
+    return _normalize_menu_unit_type(unit_type) in {"cut", "count"}
+
+
+def _bagging_settings_missing(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not _unit_requires_bagging_settings(payload.get("unit_type")):
+        return False
+    return _coerce_float(payload.get("bag_max_qty")) is None or _is_blank_value(
+        _normalize_menu_unit_type(payload.get("bag_max_unit"))
+    )
+
+
+def _condiment_bagging_issues(session, condiments: object) -> list[dict]:
+    issues: list[dict] = []
+    labels = [str(item).strip() for item in condiments or [] if str(item).strip()] if isinstance(condiments, list) else []
+    for label in labels:
+        master = _find_menu_master_by_normalized(session, _normalize_menu_name(label))
+        if master is None:
+            issues.append(
+                {
+                    "condiment_name": label,
+                    "issue_type": "condiment_bagging_missing",
+                    "reason": "condiment_master_missing",
+                    "message": "付属品の袋上限を設定してください",
+                }
+            )
+            continue
+        if _coerce_float(master.bag_max_qty) is None or _is_blank_value(_normalize_menu_unit_type(master.bag_max_unit)):
+            issues.append(
+                {
+                    "condiment_name": label,
+                    "issue_type": "condiment_bagging_missing",
+                    "reason": "condiment_bagging_settings_missing",
+                    "message": "付属品の袋上限を設定してください",
+                    "current_master": serialize_menu_master(master),
+                }
+            )
+    return issues
+
+
+def _build_bagging_setting_issue(
+    session,
+    name: str,
+    seed_patch: dict[str, object] | None,
+    master: MenuMaster | None = None,
+    *,
+    item_id: str | None = None,
+) -> dict | None:
+    patch = dict(seed_patch or {})
+    if master is not None:
+        for field in _MASTER_FIELDS:
+            if _is_blank_value(patch.get(field)) and not _is_blank_value(getattr(master, field, None)):
+                patch[field] = getattr(master, field, None)
+    missing_fields: list[dict] = []
+    if _bagging_settings_missing(patch):
+        if _coerce_float(patch.get("bag_max_qty")) is None:
+            missing_fields.append({"field": "bag_max_qty", "label": "袋上限数"})
+        if _is_blank_value(_normalize_menu_unit_type(patch.get("bag_max_unit"))):
+            missing_fields.append({"field": "bag_max_unit", "label": "袋上限単位"})
+    condiment_issues = _condiment_bagging_issues(session, patch.get("condiments"))
+    if not missing_fields and not condiment_issues:
+        return None
+    issue = _build_menu_master_resolution_issue(name, patch, [])
+    issue.update(
+        {
+            "item_id": item_id,
+            "issue_type": "bagging_settings_missing",
+            "reason": "bagging_settings_missing",
+            "current_master": serialize_menu_master(master) if master is not None else None,
+            "field_diffs": missing_fields,
+            "condiment_issues": condiment_issues,
+        }
+    )
+    return issue
 
 
 def _build_upload_menu_master_plan(
@@ -1082,11 +1203,18 @@ def _build_upload_menu_master_plan(
     name: str,
     seed_patch: dict[str, object] | None,
     resolution: dict | None,
+    *,
+    require_bagging_review: bool = False,
 ) -> dict:
     normalized = _normalize_menu_name(name)
     if not normalized:
         raise ValueError("name is required")
     exact_master = _find_menu_master_by_normalized(session, normalized)
+    if exact_master and require_bagging_review:
+        bagging_issue = _build_bagging_setting_issue(session, name, seed_patch, exact_master)
+        if bagging_issue:
+            bagging_issue["reason"] = "bagging_settings_missing"
+            return {"issue": bagging_issue}
     if exact_master:
         return {
             "action": "existing",
@@ -1113,19 +1241,41 @@ def _build_upload_menu_master_plan(
             create_patch.update(
                 _extract_master_patch(
                     resolution,
-                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                    _MASTER_FIELDS,
                 )
             )
             if _is_blank_value(create_patch.get("unit_type")) or create_patch.get("qty_per_serving") is None:
                 raise ValueError(f"menu master create requires unit_type and qty_per_serving: {name}")
+            if require_bagging_review and _bagging_settings_missing(create_patch):
+                raise ValueError(f"menu master create requires bag_max_qty and bag_max_unit for bagging units: {name}")
             return {
                 "action": "create",
                 "name": create_name,
                 "seed_fields": create_patch,
             }
+        if action == "update":
+            selected_id = str(resolution.get("menu_master_id") or "").strip()
+            selected = session.get(MenuMaster, selected_id) if selected_id else exact_master
+            if not selected:
+                selected = _find_menu_master_by_normalized(session, normalized)
+            if not selected:
+                raise ValueError(f"menu master candidate not found: {name}")
+            update_patch = dict(seed_patch or {})
+            update_patch.update(_extract_master_patch(resolution, _MASTER_FIELDS))
+            if require_bagging_review and _bagging_settings_missing(update_patch):
+                raise ValueError(f"menu master update requires bag_max_qty and bag_max_unit for bagging units: {name}")
+            return {
+                "action": "update",
+                "menu_master_id": selected.id,
+                "seed_fields": update_patch,
+            }
         raise ValueError(f"unknown menu master resolution action: {name}")
 
     candidates = _find_menu_master_candidates(session, name)
+    issue = _build_bagging_setting_issue(session, name, seed_patch, None) if require_bagging_review else None
+    if issue:
+        issue["candidates"] = candidates
+        return {"issue": issue}
     return {"issue": _build_menu_master_resolution_issue(name, seed_patch, candidates)}
 
 
@@ -1167,6 +1317,13 @@ def _materialize_upload_menu_master_plan(session, name: str, plan: dict) -> Menu
             str(plan.get("name") or name),
             seed_fields=seed_fields,
         )
+    if action == "update":
+        menu_master_id = str(plan.get("menu_master_id") or "").strip()
+        master = session.get(MenuMaster, menu_master_id) if menu_master_id else None
+        if master is None:
+            raise ValueError(f"menu master candidate not found: {name}")
+        _update_menu_master_in_session(master=master, session=session, body=dict(seed_fields or {}))
+        return master
     raise ValueError(f"unknown menu master resolution action: {name}")
 
 
@@ -1175,7 +1332,7 @@ def _normalize_master_field_for_compare(field: str, value: object) -> object:
         return str(value or "").strip()
     if field in {"unit_type", "bag_max_unit"}:
         return _normalize_menu_unit_type(value)
-    if field == "qty_per_serving":
+    if field in {"qty_per_serving", "bag_max_qty"}:
         return _coerce_float(value)
     if field == "temp_type":
         return _normalize_temp_type(value)
@@ -1207,7 +1364,7 @@ def _select_single_value(values: list[object]) -> object | None:
 
 def _derive_monthly_item_patch(item: MonthlyMenuItem, entries: list[MonthlyMenuEntry]) -> dict[str, object]:
     payload = serialize_item(item)
-    patch = _extract_master_patch(payload, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
+    patch = _extract_master_patch(payload, _MASTER_FIELDS)
     scope = (item.facility_override or "").strip()
     diet_type = normalize_diet_type(getattr(item, "diet_type", None))
     matching_entries = [
@@ -1242,13 +1399,15 @@ def _build_master_field_diffs(
         ("qty_per_serving", "量", patch.get("qty_per_serving"), master.qty_per_serving),
         ("temp_type", "温冷", patch.get("temp_type"), master.temp_type),
         ("category", "区分", patch.get("category"), master.category),
+        ("bag_max_qty", "袋上限数", patch.get("bag_max_qty"), master.bag_max_qty),
+        ("bag_max_unit", "袋上限単位", patch.get("bag_max_unit"), master.bag_max_unit),
     )
     for field, label, monthly_value, master_value in field_specs:
         normalized_monthly = _normalize_master_field_for_compare(field, monthly_value)
         if _is_blank_value(normalized_monthly):
             continue
         normalized_master = _normalize_master_field_for_compare(field, master_value)
-        if field == "qty_per_serving":
+        if field in {"qty_per_serving", "bag_max_qty"}:
             if normalized_master is not None and normalized_monthly is not None:
                 if abs(float(normalized_master) - float(normalized_monthly)) < 1e-9:
                     continue
@@ -1281,6 +1440,17 @@ def _build_menu_master_check_issue(
     target_master = linked_master or exact_master
     if target_master is None:
         candidates = _find_menu_master_candidates(session, item_name)
+        bagging_issue = _build_bagging_setting_issue(session, item_name, patch, None, item_id=item.id)
+        if bagging_issue:
+            bagging_issue.update(
+                {
+                    "issue_type": "missing",
+                    "reason": "bagging_settings_missing",
+                    "candidates": candidates,
+                    "current_master": None,
+                }
+            )
+            return bagging_issue
         return {
             "item_id": item.id,
             "source_name": item_name,
@@ -1294,6 +1464,9 @@ def _build_menu_master_check_issue(
         }
     if str(getattr(item, "master_resolution_mode", "") or "").strip().lower() == "month_only":
         return None
+    bagging_issue = _build_bagging_setting_issue(session, item_name, patch, target_master, item_id=item.id)
+    if bagging_issue:
+        return bagging_issue
     field_diffs = _build_master_field_diffs(item_name, patch, target_master)
     if not field_diffs:
         return None
@@ -1318,12 +1491,12 @@ def _build_menu_master_update_body(
     update_body: dict[str, object] = {}
     if _normalize_master_field_for_compare("name", name) != _normalize_master_field_for_compare("name", master.name):
         update_body["name"] = name
-    for field in ("unit_type", "qty_per_serving", "temp_type", "category"):
+    for field in ("unit_type", "qty_per_serving", "temp_type", "category", "bag_max_qty", "bag_max_unit"):
         normalized_patch = _normalize_master_field_for_compare(field, patch.get(field))
         if _is_blank_value(normalized_patch):
             continue
         normalized_master = _normalize_master_field_for_compare(field, getattr(master, field, None))
-        if field == "qty_per_serving":
+        if field in {"qty_per_serving", "bag_max_qty"}:
             if normalized_master is not None and normalized_patch is not None:
                 if abs(float(normalized_master) - float(normalized_patch)) < 1e-9:
                     continue
@@ -1387,7 +1560,7 @@ def _update_menu_master_in_session(session, master: MenuMaster, body: dict) -> N
 def _apply_monthly_item_patch_in_session(item: MonthlyMenuItem, patch: dict[str, object] | None) -> None:
     if not patch:
         return
-    for field in ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"):
+    for field in ("unit_type", "qty_per_serving", "temp_type", "daypart", "category", "bag_max_qty", "bag_max_unit"):
         if field not in patch:
             continue
         value = _coerce_master_field_value(field, patch.get(field))
@@ -1773,8 +1946,14 @@ def create_menu(
         issues: list[dict] = []
         for name in names:
             meta = parsed_meta.get(name, {})
-            seed_patch = _extract_master_patch(meta, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
-            plan = _build_upload_menu_master_plan(session, name, seed_patch, resolution_map.get(name))
+            seed_patch = _extract_master_patch(meta, _MASTER_FIELDS)
+            plan = _build_upload_menu_master_plan(
+                session,
+                name,
+                seed_patch,
+                resolution_map.get(name),
+                require_bagging_review=require_menu_master_review,
+            )
             issue = plan.get("issue") if isinstance(plan, dict) else None
             if issue:
                 if require_menu_master_review:
@@ -1821,7 +2000,7 @@ def create_menu(
             item_id = f"MMI{uuid4().hex[:6]}"
             master = _materialize_upload_menu_master_plan(session, name, master_plans[name])
             meta = parsed_meta.get(name, {})
-            item_patch = _extract_master_patch(meta, ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"))
+            item_patch = _extract_master_patch(meta, _MASTER_FIELDS)
             session.add(
                 MonthlyMenuItem(
                     id=item_id,
@@ -1836,6 +2015,8 @@ def create_menu(
                     diet_type=normalize_diet_type(meta.get("diet_type")),
                     facility_override=resolved_scope_override,
                     master_resolution_mode=None,
+                    bag_max_qty=_coerce_float(item_patch.get("bag_max_qty")),
+                    bag_max_unit=_coerce_master_field_value("bag_max_unit", item_patch.get("bag_max_unit")),
                 )
             )
         for entry in entries:
@@ -2508,7 +2689,7 @@ def serialize_item(item: MonthlyMenuItem):
         "diet_type": normalize_diet_type(getattr(item, "diet_type", None)),
         "facility_override": item.facility_override,
         "master_resolution_mode": str(getattr(item, "master_resolution_mode", "") or "").strip() or None,
-        "bag_max_qty": None,
+        "bag_max_qty": getattr(item, "bag_max_qty", None),
         "bag_max_unit": _normalize_menu_unit_type(getattr(item, "bag_max_unit", None)),
     }
 
@@ -2884,13 +3065,15 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict |
             create_patch.update(
                 _extract_master_patch(
                     body,
-                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                    _MASTER_FIELDS,
                 )
             )
             if _is_blank_value(create_name):
                 raise ValueError("name is required")
             if _is_blank_value(create_patch.get("unit_type")) or create_patch.get("qty_per_serving") is None:
                 raise ValueError("unit_type and qty_per_serving are required")
+            if _bagging_settings_missing(create_patch):
+                raise ValueError("bag_max_qty and bag_max_unit are required for bagging units")
             master = _get_or_create_menu_master_without_rename(session, create_name, seed_fields=create_patch)
             if not master:
                 raise ValueError("failed to create menu master")
@@ -2908,11 +3091,15 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict |
             update_body.update(
                 _extract_master_patch(
                     body,
-                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                    _MASTER_FIELDS,
                 )
             )
             if "name" in body and not _is_blank_value(body.get("name")):
                 update_body["name"] = str(body.get("name") or "").strip()
+            merged_for_validation = serialize_menu_master(master)
+            merged_for_validation.update(update_body)
+            if _bagging_settings_missing(merged_for_validation):
+                raise ValueError("bag_max_qty and bag_max_unit are required for bagging units")
             _update_menu_master_in_session(session, master, update_body)
             item.menu_master_id = master.id
             item.master_resolution_mode = None
@@ -2926,7 +3113,7 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict |
             item_patch.update(
                 _extract_master_patch(
                     body,
-                    ("unit_type", "qty_per_serving", "temp_type", "daypart", "category"),
+                    _MASTER_FIELDS,
                     allow_null=True,
                 )
             )
@@ -2936,6 +3123,8 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict |
                     fallback_qty = getattr(master, "qty_per_serving", None)
                 if not _is_blank_value(fallback_qty):
                     item_patch["qty_per_serving"] = fallback_qty
+            if _bagging_settings_missing(item_patch):
+                raise ValueError("bag_max_qty and bag_max_unit are required for bagging units")
             _apply_monthly_item_patch_in_session(item, item_patch)
             item.master_resolution_mode = "month_only"
             return {
