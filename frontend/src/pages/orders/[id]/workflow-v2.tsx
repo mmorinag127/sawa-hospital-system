@@ -1083,6 +1083,26 @@ const removeItemsForSheetCell = <T extends { row_index?: number | null; col_inde
   colIndex: number,
 ) => items.filter((item) => Number(item.row_index) !== rowIndex || Number(item.col_index) !== colIndex);
 
+const anomalyReviewWithoutWarning = (
+  review: Record<string, unknown> | null | undefined,
+  warning: SheetAnomalyWarning,
+) => {
+  const source = review && typeof review === "object" && !Array.isArray(review) ? review : {};
+  const warnings = Array.isArray(source.warnings)
+    ? removeFirstMatchingItem(
+        source.warnings.filter((item): item is SheetAnomalyWarning => Boolean(item && typeof item === "object")),
+        (item) => sameSheetPatchTarget(item, warning),
+      )
+    : [];
+  const summary = source.summary && typeof source.summary === "object" && !Array.isArray(source.summary)
+    ? {
+        ...source.summary,
+        warning_count: warnings.length,
+      }
+    : { warning_count: warnings.length };
+  return { ...source, warnings, summary };
+};
+
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
@@ -1203,8 +1223,8 @@ export default function OrderWorkflowV2Page() {
     && currentSheetHash
     && sheetReviewHash === currentSheetHash,
   );
-  const effectiveAnomalyReviewConfirmed = anomalyReviewConfirmed || persistedAnomalyReviewConfirmed;
-  const effectiveSheetReviewConfirmed = sheetReviewConfirmed || persistedSheetReviewConfirmed;
+  const effectiveAnomalyReviewConfirmed = persistedAnomalyReviewConfirmed;
+  const effectiveSheetReviewConfirmed = persistedSheetReviewConfirmed;
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
@@ -2789,8 +2809,11 @@ export default function OrderWorkflowV2Page() {
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review/dismiss`,
         { sheet: parsed, warning },
       );
-      setLocalAnomalyReview(response.data.anomaly_review || null);
+      const nextAnomalyReview = anomalyReviewWithoutWarning(response.data.anomaly_review || anomalyReview, warning);
+      setLocalAnomalyReview(nextAnomalyReview);
+      setInspection((current) => current ? { ...current, anomaly_review: nextAnomalyReview } : current);
       setPreSaveChecks(response.data.pre_save_checks || {});
+      setAnomalyReviewConfirmed(false);
       setSelectedAnomalyIndex(null);
     }, {
       successMessage: "異常候補を却下しました",
