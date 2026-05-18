@@ -1152,9 +1152,12 @@ export default function OrderWorkflowV2Page() {
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
-  const step3PreviewImageUrl = ocrPreviewMode === "sheet"
-    ? (selectedOcrSheetReviewBaseUrl || selectedOcrOverlayUrl)
-    : selectedOcrOverlayUrl;
+  const step3SheetReviewImageUrl = selectedOcrSheetReviewBaseUrl || selectedOcrOverlayUrl;
+  const step3PreviewImageUrl = ocrPreviewMode === "sheet" ? step3SheetReviewImageUrl : selectedOcrOverlayUrl;
+  const step3PreviewPdfUrl = ocrPreviewMode === "original" || (ocrPreviewMode === "sheet" && !step3PreviewImageUrl)
+    ? pdfUrl
+    : "";
+  const canRenderSheetReviewValues = ocrPreviewMode === "sheet" && Boolean(selectedOcrSheetReviewBaseUrl);
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
@@ -3921,16 +3924,16 @@ export default function OrderWorkflowV2Page() {
                         別タブで開く
                       </a>
                     ) : null}
-                    {ocrPreviewMode === "original" && pdfUrl ? (
-                      <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
+                    {step3PreviewPdfUrl ? (
+                      <a className="ghost-link" href={step3PreviewPdfUrl} target="_blank" rel="noreferrer">
                         別タブで開く
                       </a>
                     ) : null}
                   </div>
                 </div>
                 <div className="step3-overlay-canvas">
-                  {ocrPreviewMode === "original" && pdfUrl ? (
-                    <iframe title="workflow-v2-step3-original-pdf" src={pdfUrl} className="step3-overlay-pdf" />
+                  {step3PreviewPdfUrl ? (
+                    <iframe title="workflow-v2-step3-original-pdf" src={step3PreviewPdfUrl} className="step3-overlay-pdf" />
                   ) : ocrPreviewMode !== "original" && step3PreviewImageUrl ? (
                     <>
                       <img
@@ -3991,7 +3994,7 @@ export default function OrderWorkflowV2Page() {
                           {focusedTargetBox ? " / overlay対応あり" : " / overlay対応なし"}
                         </span>
                       ) : null}
-                      {ocrPreviewMode === "sheet" && selectedOcrSheetReviewBaseUrl ? (
+                      {canRenderSheetReviewValues ? (
                         <div className="sheet-review-overlay" aria-label="sheet values overlay">
                           {sheetReviewItems.map((entry) => (
                             <span
@@ -4014,7 +4017,7 @@ export default function OrderWorkflowV2Page() {
                       {ocrPreviewMode === "overlay"
                         ? selectedOcr?.overlay_message || "overlay成果物がありません。"
                         : ocrPreviewMode === "sheet"
-                          ? "シート確認に使える画像がありません。"
+                          ? pdfError || selectedOcr?.overlay_message || "シート確認に使える画像がありません。"
                         : pdfError || "原本PDFを読み込み中..."}
                     </div>
                   )}
