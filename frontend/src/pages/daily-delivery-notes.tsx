@@ -981,38 +981,6 @@ export default function DailyDeliveryNotesPage() {
     }
   };
 
-  const downloadWeightWorkbook = async () => {
-    if (!date) {
-      setMessage("日付を指定してください。");
-      return;
-    }
-    setMessage("重量表Excelを作成中です...");
-    try {
-      const res = await apiClient.get("/outputs/daily-weight-workbook", {
-        params: { date, status: status || undefined },
-        responseType: "blob",
-        timeout: 0,
-      });
-      const contentDisposition = headerValueToString(
-        res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
-      );
-      const filename = extractFilename(contentDisposition) || `weight_${date}.xlsx`;
-      const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setMessage("重量表Excelをダウンロードしました。");
-    } catch (err: any) {
-      const detail = await extractErrorDetail(err);
-      setMessage(detail ? `重量表Excelのダウンロードに失敗しました: ${detail}` : "重量表Excelのダウンロードに失敗しました。");
-    }
-  };
-
   const bagDayparts = useMemo(
     () => buildDaypartGroups(Array.isArray(dailyBagSummary.groups) ? dailyBagSummary.groups : []),
     [dailyBagSummary],
@@ -1123,11 +1091,13 @@ export default function DailyDeliveryNotesPage() {
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("both")} disabled={loading}>
             当日一括Excel
           </button>
-          <button className="btn ghost" type="button" onClick={downloadWeightWorkbook} disabled={loading}>
-            重量表Excel
-          </button>
+          <Link className="btn ghost" href={`/weekly-weight-output?date=${encodeURIComponent(date)}${status ? `&status=${encodeURIComponent(status)}` : ""}`}>
+            週別重量表
+          </Link>
         </div>
-        <p className="subtle helper-text">一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。</p>
+        <p className="subtle helper-text">
+          一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。週別の重量表Excelは別ページで出力します。
+        </p>
       </section>
 
       {message ? <p className="message">{message}</p> : null}

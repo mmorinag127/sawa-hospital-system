@@ -5348,7 +5348,6 @@ def build_daily_output_bundle(
     *,
     bundle_type: str = "both",
     status: str | None = None,
-    include_weight_workbook: bool = False,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
     if normalized_type not in {"labels", "delivery", "both"}:
@@ -5462,14 +5461,6 @@ def build_daily_output_bundle(
             "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
             "items": manifest_items,
         }
-        if include_weight_workbook:
-            return _zip_daily_bundle_with_weight_workbook(
-                bundle_path,
-                target_date=target_date,
-                normalized_type=normalized_type,
-                status=status,
-                summary=summary,
-            )
         return bundle_path, summary
 
     if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
@@ -5583,36 +5574,7 @@ def build_daily_output_bundle(
         "file_format": "xlsx",
     }
 
-    if include_weight_workbook:
-        return _zip_daily_bundle_with_weight_workbook(
-            bundle_path,
-            target_date=target_date,
-            normalized_type=normalized_type,
-            status=status,
-            summary=manifest,
-        )
     return bundle_path, manifest
-
-
-def _zip_daily_bundle_with_weight_workbook(
-    bundle_path: Path,
-    *,
-    target_date: dt_date,
-    normalized_type: str,
-    status: str | None,
-    summary: dict,
-) -> tuple[Path, dict]:
-    weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
-    if weight_path is None:
-        return bundle_path, summary
-    zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_with_weight_{uuid4().hex}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(bundle_path, arcname=bundle_path.name)
-        archive.write(weight_path, arcname=weight_path.name)
-    next_summary = dict(summary)
-    next_summary["file_format"] = "zip"
-    next_summary["weight_workbook"] = weight_path.name
-    return zip_path, next_summary
 
 
 def _prepare_output_context(
