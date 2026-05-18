@@ -169,7 +169,7 @@ def test_anomaly_report_ignores_ocr_evidence_and_uses_sheet_totals() -> None:
     assert "ocr_sheet_comparison" not in result
 
 
-def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
+def test_auto_edit_llm_receives_fax_image_and_presence_suspect_context(monkeypatch) -> None:
     captured = {}
 
     def _fake_gemini_json_request(**kwargs):
@@ -207,6 +207,9 @@ def test_auto_edit_llm_receives_fax_image_and_ocr_context(monkeypatch) -> None:
     assert captured["user_payload"]["ocr_quantity_presence_hints"]
     assert captured["user_payload"]["target_cell_map"]
     assert captured["user_payload"]["target_cell_map"][0]["ocr_quantity_presence"]["has_quantity_mark"] is True
+    assert captured["user_payload"]["target_cell_map"][0]["suspect_review"]["reasons"] == [
+        "presence_mark_but_sheet_blank"
+    ]
     assert result["llm"]["fax_image"]["status"] == "attached"
     assert any(patch["source"] == "llm" and patch["suggested_value"] == "10" for patch in result["patches"])
 
@@ -277,6 +280,15 @@ def test_auto_edit_retries_failed_chunks_as_single_cells(monkeypatch) -> None:
         {"target_row_index": 0, "target_col_index": 3, "field": "qty.regular", "bbox": [0, 0, 10, 10]},
         {"target_row_index": 0, "target_col_index": 4, "field": "qty.soft", "bbox": [10, 0, 20, 10]},
     ]
+    sheet["ocr_numeric_cell_items"].append(
+        {
+            "target_row_index": 0,
+            "target_col_index": 4,
+            "value": "5",
+            "classification": "deterministic_candidate",
+            "confidence_tier": "medium",
+        }
+    )
     monkeypatch.setenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "2")
     monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
 
@@ -325,26 +337,24 @@ def test_auto_edit_preserves_blank_suggestions_for_extra_values(monkeypatch) -> 
     assert result["patches"][0]["reason"] == "mark_belongs_to_adjacent_column"
 
 
-def test_auto_edit_runs_second_pass_for_presence_sheet_disagreements(monkeypatch) -> None:
+def test_auto_edit_runs_suspect_only_for_presence_sheet_disagreements(monkeypatch) -> None:
     calls = []
 
     def _fake_gemini_json_request(**kwargs):
-        second_pass = kwargs["user_payload"]["computed_context"].get("second_pass_suspect_review")
-        calls.append(second_pass)
-        if second_pass:
-            return {
-                "patches": [
-                    {
-                        "row_index": 0,
-                        "col_index": 3,
-                        "current_value": "",
-                        "suggested_value": "5",
-                        "reason": "second_pass_presence_hint_visible_on_fax",
-                        "confidence": "high",
-                    }
-                ]
-            }, {"status": "ok"}
-        return {"patches": []}, {"status": "ok"}
+        target_cells = kwargs["user_payload"]["target_cell_map"]
+        calls.append(target_cells)
+        return {
+            "patches": [
+                {
+                    "row_index": 0,
+                    "col_index": 7,
+                    "current_value": "",
+                    "suggested_value": "5",
+                    "reason": "presence_hint_visible_on_fax",
+                    "confidence": "high",
+                }
+            ]
+        }, {"status": "ok"}
 
     sheet = {
         "fields": ["date", "daypart", "menu", "qty.regular", "qty.soft", "qty.total", "qty.daycare", "qty.staff"],
@@ -371,9 +381,53 @@ def test_auto_edit_runs_second_pass_for_presence_sheet_disagreements(monkeypatch
         fax_image_meta={"status": "attached"},
     )
 
-    assert True in calls
-    assert any(item.get("second_pass_suspect_review") for item in result["llm"]["chunks"])
+    assert len(calls) == 1
+    assert calls[0][0]["target_col_index"] == 7
+    assert calls[0][0]["suspect_review"]["reasons"] == ["presence_mark_but_sheet_blank"]
     assert result["patches"][0]["suggested_value"] == "5"
+
+
+def test_suspect_selector_marks_extra_value_without_presence_and_adjacent_missing() -> None:
+    sheet = {
+        "fields": ["date", "daypart", "menu", "qty.regular", "qty.soft"],
+        "header": ["日付", "区分", "献立", "職員", "魚禁"],
+        "rows": [["04/28", "朝", "A", "1", ""]],
+        "ocr_numeric_cell_items": [
+            {
+                "target_row_index": 0,
+                "target_col_index": 4,
+                "classification": "deterministic_candidate",
+                "confidence_tier": "medium",
+            }
+        ],
+        "target_cell_map": [
+            {"target_row_index": 0, "target_col_index": 3, "field": "qty.regular", "bbox": [0, 0, 10, 10]},
+            {"target_row_index": 0, "target_col_index": 4, "field": "qty.soft", "bbox": [10, 0, 20, 10]},
+        ],
+    }
+
+    suspects = workflow_v2_sheet_review_service._suspect_target_cells_from_presence(sheet)  # noqa: SLF001
+
+    reasons_by_col = {
+        item["target_col_index"]: item["suspect_review"]["reasons"]
+        for item in suspects
+    }
+    assert "possible_adjacent_column_extra_value" in reasons_by_col[3]
+    assert "possible_adjacent_column_missing_value" in reasons_by_col[4]
+
+
+def test_suspect_selector_excludes_totals() -> None:
+    sheet = {
+        "fields": ["date", "daypart", "menu", "qty.total"],
+        "header": ["日付", "区分", "献立", "合計"],
+        "rows": [["04/28", "朝", "A", "15"]],
+        "ocr_numeric_cell_items": [],
+        "target_cell_map": [
+            {"target_row_index": 0, "target_col_index": 3, "field": "qty.total", "bbox": [0, 0, 10, 10]},
+        ],
+    }
+
+    assert workflow_v2_sheet_review_service._suspect_target_cells_from_presence(sheet) == []  # noqa: SLF001
 
 
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:

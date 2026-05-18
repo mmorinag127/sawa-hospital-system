@@ -20,6 +20,7 @@ _STRUCTURAL_FIELDS = {
     "notes",
     "remarks",
 }
+_TOTAL_FIELD_TOKENS = ("total", "sum", "合計", "計")
 _MAX_LLM_ROWS = 80
 _MAX_LLM_EVIDENCE = 240
 _MAX_LLM_WARNINGS = 80
@@ -92,6 +93,16 @@ def _is_structural_field(field: object) -> bool:
     if normalized in _STRUCTURAL_FIELDS:
         return True
     return normalized.startswith("date") or normalized.startswith("daypart") or normalized.startswith("menu")
+
+
+def _is_review_quantity_field(field: object, label: object = "") -> bool:
+    normalized = _normalize_text(field).lower()
+    normalized_label = _normalize_text(label).lower()
+    if _is_structural_field(normalized):
+        return False
+    if any(token in normalized or token in normalized_label for token in _TOTAL_FIELD_TOKENS):
+        return False
+    return True
 
 
 def _coerce_int(value: object) -> int | None:
@@ -758,6 +769,8 @@ def _target_cell_context_items(
             "field_label": item.get("field_label") or item.get("label"),
             "logical_targets": item.get("logical_targets"),
         }
+        if isinstance(item.get("suspect_review"), dict):
+            context["suspect_review"] = item.get("suspect_review")
         if isinstance(presence_hint, dict):
             context["ocr_quantity_presence"] = presence_hint
         if scaled_bbox is not None:
@@ -771,8 +784,8 @@ def _chunk_items(items: list[dict[str, Any]], chunk_size: int) -> list[list[dict
     return [items[index : index + safe_size] for index in range(0, len(items), safe_size)]
 
 
-def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, Any]]:
-    fields, _header, rows = _sheet_dimensions(sheet)
+def _suspect_target_cells_from_presence(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    fields, header, rows = _sheet_dimensions(sheet)
     target_cells = _target_cells_from_sheet(sheet)
     target_by_cell = {}
     for item in target_cells:
@@ -786,23 +799,106 @@ def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, A
         col_index = _coerce_int(item.get("target_col_index"))
         if row_index is not None and col_index is not None:
             presence_cells.add((row_index, col_index))
-    suspects: list[dict[str, Any]] = []
-    seen: set[tuple[int, int]] = set()
+    suspects: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def is_reviewable(row_index: int, col_index: int) -> bool:
+        if row_index < 0 or row_index >= len(rows) or col_index < 0 or col_index >= len(fields):
+            return False
+        return (row_index, col_index) in target_by_cell and _is_review_quantity_field(
+            fields[col_index],
+            header[col_index] if col_index < len(header) else "",
+        )
+
+    def add_suspect(row_index: int, col_index: int, reason: str, priority: int) -> None:
+        if not is_reviewable(row_index, col_index):
+            return
+        key = (row_index, col_index)
+        current = _normalize_text(rows[row_index][col_index] if col_index < len(rows[row_index]) else "")
+        existing = suspects.get(key)
+        reasons = list((existing or {}).get("reasons") or [])
+        if reason not in reasons:
+            reasons.append(reason)
+        suspects[key] = {
+            "row_index": row_index,
+            "col_index": col_index,
+            "priority": min(priority, int((existing or {}).get("priority", priority))),
+            "reasons": reasons,
+            "current_value": current,
+            "has_quantity_presence": key in presence_cells,
+        }
+
     for row_index, row in enumerate(rows):
         for col_index, field in enumerate(fields):
-            if _is_structural_field(field) or col_index < 7:
+            if not is_reviewable(row_index, col_index):
                 continue
             current = _normalize_text(row[col_index] if col_index < len(row) else "")
             has_presence = (row_index, col_index) in presence_cells
+            if has_presence and not current:
+                add_suspect(row_index, col_index, "presence_mark_but_sheet_blank", 10)
+            if current and not has_presence:
+                add_suspect(row_index, col_index, "sheet_value_but_no_presence_mark", 10)
             if not ((has_presence and not current) or (current and not has_presence)):
                 continue
-            key = (row_index, col_index)
-            target = target_by_cell.get(key)
-            if target is None or key in seen:
+            for neighbor_col in (col_index - 2, col_index - 1, col_index + 1, col_index + 2):
+                if not is_reviewable(row_index, neighbor_col):
+                    continue
+                neighbor_current = _normalize_text(row[neighbor_col] if neighbor_col < len(row) else "")
+                neighbor_has_presence = (row_index, neighbor_col) in presence_cells
+                if current and not has_presence and neighbor_has_presence and not neighbor_current:
+                    add_suspect(row_index, col_index, "possible_adjacent_column_extra_value", 0)
+                    add_suspect(row_index, neighbor_col, "possible_adjacent_column_missing_value", 0)
+                if has_presence and not current and neighbor_current and not neighbor_has_presence:
+                    add_suspect(row_index, col_index, "possible_adjacent_column_missing_value", 0)
+                    add_suspect(row_index, neighbor_col, "possible_adjacent_column_extra_value", 0)
+
+    for row_index, row in enumerate(rows):
+        date = _normalize_text(row[0] if len(row) > 0 else "")
+        daypart = _normalize_text(row[1] if len(row) > 1 else "")
+        for col_index, field in enumerate(fields):
+            if not is_reviewable(row_index, col_index):
                 continue
-            seen.add(key)
-            suspects.append(target)
-    return suspects[:_MAX_LLM_EVIDENCE]
+            current = _normalize_text(row[col_index] if col_index < len(row) else "")
+            if current or (row_index, col_index) in presence_cells:
+                continue
+            neighbor_signal = 0
+            for neighbor_row in (row_index - 1, row_index + 1):
+                if not is_reviewable(neighbor_row, col_index):
+                    continue
+                neighbor = rows[neighbor_row]
+                if _normalize_text(neighbor[0] if len(neighbor) > 0 else "") != date:
+                    continue
+                if _normalize_text(neighbor[1] if len(neighbor) > 1 else "") != daypart:
+                    continue
+                neighbor_current = _normalize_text(neighbor[col_index] if col_index < len(neighbor) else "")
+                if neighbor_current or (neighbor_row, col_index) in presence_cells:
+                    neighbor_signal += 1
+            if neighbor_signal >= 2:
+                add_suspect(row_index, col_index, "same_block_gap_between_quantity_rows", 40)
+
+    ordered = sorted(
+        suspects.values(),
+        key=lambda item: (
+            int(item.get("priority", 100)),
+            int(item.get("row_index", 0)),
+            int(item.get("col_index", 0)),
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    for item in ordered[:_MAX_LLM_EVIDENCE]:
+        key = (int(item["row_index"]), int(item["col_index"]))
+        target = dict(target_by_cell[key])
+        target["suspect_review"] = {
+            "reasons": item["reasons"],
+            "priority": item["priority"],
+            "current_value": item["current_value"],
+            "has_quantity_presence": item["has_quantity_presence"],
+        }
+        selected.append(target)
+    return selected
+
+
+def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    return _suspect_target_cells_from_presence(sheet)
 
 
 def _sheet_context_for_llm(
@@ -1072,7 +1168,8 @@ def propose_auto_sheet_edits(
             "Use only the attached original FAX page image, the current sheet values, and target_cell_map geometry. "
             "Do not use OCR output values, OCR digit candidates, OCR recognized text, OCR confidence scores, OCR evidence values, or OCR-vs-sheet comparisons. "
             "You may use ocr_quantity_presence_hints only as red-dot style hints that some quantity mark exists in that cell; never copy or infer a digit from OCR. "
-            "For each quantity cell, use target_cell_map.bbox in attached image pixel coordinates to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "The provided target_cell_map contains suspect cells only. They were selected because quantity-presence hints and current sheet values disagree, an adjacent-column shift is plausible, or the value is a gap inside the same date/daypart block. "
+            "For each suspect quantity cell, use target_cell_map.bbox in attached image pixel coordinates to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
             "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
             "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
@@ -1082,14 +1179,15 @@ def propose_auto_sheet_edits(
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         try:
-            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "9")), 80))
+            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "4")), 8))
         except ValueError:
-            chunk_size = 9
+            chunk_size = 4
         try:
             max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
         except ValueError:
             max_workers = 6
-        target_chunks = _chunk_items(_target_cells_from_sheet(sheet), chunk_size)
+        suspect_targets = _suspect_target_cells_from_presence(sheet)
+        target_chunks = _chunk_items(suspect_targets, chunk_size)
         if not target_chunks:
             target_chunks = [[]]
 
@@ -1110,6 +1208,7 @@ def propose_auto_sheet_edits(
                         "target_chunk_index": chunk_index,
                         "target_chunk_count": len(target_chunks),
                         "target_chunk_size": len(target_chunk),
+                        "suspect_target_cell_count": len(suspect_targets),
                         "second_pass_suspect_review": bool(second_pass),
                     },
                     include_ocr_sheet_comparison=False,
@@ -1179,35 +1278,6 @@ def propose_auto_sheet_edits(
                     }
                 )
         llm_payload = {"patches": combined_payload_patches}
-        second_pass_targets = _second_pass_suspect_target_cells(sheet)
-        second_pass_prompt = (
-            system_prompt
-            + " This is a second-pass suspect-cell review. The provided target cells were selected because quantity-presence hints and current sheet values disagree, or because restriction/staff values exist without quantity-presence hints. Inspect every provided target cell carefully. Empty suggested_value is required when the current value is extra."
-        )
-        for second_pass_index, target_chunk in enumerate(_chunk_items(second_pass_targets, max(1, min(chunk_size, 6)))):
-            payload, meta, _chunk_index, target_count = request_chunk(
-                (second_pass_index, target_chunk),
-                prompt=second_pass_prompt,
-                second_pass=True,
-            )
-            chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
-            patch_items = payload.get("patches") if isinstance(payload, dict) else []
-            patch_count = len(patch_items) if isinstance(patch_items, list) else 0
-            chunk_meta.append(
-                {
-                    "chunk_index": second_pass_index,
-                    "status": chunk_status or "unknown",
-                    "target_count": target_count,
-                    "patch_count": patch_count,
-                    "error": meta.get("error") if isinstance(meta, dict) else None,
-                    "second_pass_suspect_review": True,
-                }
-            )
-            if chunk_status != "ok":
-                failed_chunks += 1
-                continue
-            if isinstance(patch_items, list):
-                combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
         llm_payload = {"patches": combined_payload_patches}
         if failed_chunks == len(target_chunks):
             llm_status = "failed"
