@@ -1202,6 +1202,19 @@ export default function OrderWorkflowV2Page() {
     setSheetReviewConfirmed(false);
     setAnomalyReviewConfirmed(false);
     setPreSaveChecks({});
+    setCurrentSheetHash("");
+  };
+  const applyPreSaveChecks = (checks: PreSaveChecks | null | undefined) => {
+    const normalized = checks || {};
+    setPreSaveChecks(normalized);
+    const serverSheetHash = String(
+      normalized.sheet_review?.sheet_hash
+      || normalized.anomaly_review?.sheet_hash
+      || "",
+    );
+    if (serverSheetHash) {
+      setCurrentSheetHash(serverSheetHash);
+    }
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
@@ -1642,7 +1655,7 @@ export default function OrderWorkflowV2Page() {
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
     ]);
     setWorkflow(workflowRes.data);
-    setPreSaveChecks(inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {});
+    applyPreSaveChecks(inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {});
     setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
     setOcrResults(Array.isArray(ocrRes.data.results) ? ocrRes.data.results : []);
     setInspection(inspectionRes.data);
@@ -1933,13 +1946,19 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     let active = true;
+    if (!sheetPayload || preSaveChecks.anomaly_review?.sheet_hash || preSaveChecks.sheet_review?.sheet_hash) {
+      if (!sheetPayload) setCurrentSheetHash("");
+      return () => {
+        active = false;
+      };
+    }
     sheetPayloadHash(sheetPayload).then((hash) => {
       if (active) setCurrentSheetHash(hash);
     });
     return () => {
       active = false;
     };
-  }, [sheetPayload]);
+  }, [preSaveChecks.anomaly_review?.sheet_hash, preSaveChecks.sheet_review?.sheet_hash, sheetPayload]);
 
   useEffect(() => {
     setSheetReviewConfirmed(false);
@@ -2812,7 +2831,7 @@ export default function OrderWorkflowV2Page() {
       const nextAnomalyReview = anomalyReviewWithoutWarning(response.data.anomaly_review || anomalyReview, warning);
       setLocalAnomalyReview(nextAnomalyReview);
       setInspection((current) => current ? { ...current, anomaly_review: nextAnomalyReview } : current);
-      setPreSaveChecks(response.data.pre_save_checks || {});
+      applyPreSaveChecks(response.data.pre_save_checks || {});
       setAnomalyReviewConfirmed(false);
       setSelectedAnomalyIndex(null);
     }, {
@@ -2865,7 +2884,7 @@ export default function OrderWorkflowV2Page() {
         { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
       );
       setLocalAnomalyReview(response.data.anomaly_review || null);
-      setPreSaveChecks(response.data.pre_save_checks || {});
+      applyPreSaveChecks(response.data.pre_save_checks || {});
       setAnomalyReviewConfirmed(true);
       setSelectedAnomalyIndex(null);
       setSelectedAutoEditIndex(null);
@@ -2884,7 +2903,7 @@ export default function OrderWorkflowV2Page() {
         `/orders/${orderId}/workflow-v2/sheet/review-confirm`,
         { sheet: parsed },
       );
-      setPreSaveChecks(response.data.pre_save_checks || {});
+      applyPreSaveChecks(response.data.pre_save_checks || {});
       setOcrPreviewMode("sheet");
       setSheetReviewConfirmed(true);
     }, {
