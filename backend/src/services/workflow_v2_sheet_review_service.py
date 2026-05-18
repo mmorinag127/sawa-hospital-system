@@ -989,37 +989,6 @@ def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, A
     return _suspect_target_cells_from_presence(sheet)
 
 
-def _fallback_patches_for_suspects(sheet: dict[str, Any], suspects: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    fields, header, rows = _sheet_dimensions(sheet)
-    patches: list[dict[str, Any]] = []
-    for target in suspects:
-        row_index = _coerce_int(target.get("target_row_index"))
-        col_index = _coerce_int(target.get("target_col_index"))
-        if row_index is None or col_index is None or row_index >= len(rows) or col_index >= len(fields):
-            continue
-        review = target.get("suspect_review") if isinstance(target.get("suspect_review"), dict) else {}
-        reasons = set(review.get("reasons") or [])
-        current = _normalize_text(rows[row_index][col_index] if col_index < len(rows[row_index]) else "")
-        label = header[col_index] if col_index < len(header) else ""
-        if current and "sheet_value_but_no_presence_mark" in reasons:
-            patches.append(
-                _make_patch(
-                    row_index=row_index,
-                    col_index=col_index,
-                    fields=fields,
-                    header=header,
-                    current_value=current,
-                    suggested_value="",
-                    reason="presence_absent_for_existing_sheet_value",
-                    confidence="medium",
-                    evidence="quantity presence hints contain no mark for this non-empty cell",
-                    source="rule",
-                )
-            )
-            continue
-    return patches
-
-
 def _sheet_context_for_llm(
     sheet: dict[str, Any],
     patches: list[dict[str, Any]],
@@ -1310,7 +1279,6 @@ def propose_auto_sheet_edits(
         except ValueError:
             max_workers = 6
         suspect_targets = _suspect_target_cells_from_presence(sheet)
-        rule_patches = rule_patches + _fallback_patches_for_suspects(sheet, suspect_targets)
         target_chunks = _chunk_items(suspect_targets, chunk_size)
         if not target_chunks:
             target_chunks = [[]]
