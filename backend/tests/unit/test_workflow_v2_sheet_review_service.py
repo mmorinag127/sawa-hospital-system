@@ -325,6 +325,57 @@ def test_auto_edit_preserves_blank_suggestions_for_extra_values(monkeypatch) -> 
     assert result["patches"][0]["reason"] == "mark_belongs_to_adjacent_column"
 
 
+def test_auto_edit_runs_second_pass_for_presence_sheet_disagreements(monkeypatch) -> None:
+    calls = []
+
+    def _fake_gemini_json_request(**kwargs):
+        second_pass = kwargs["user_payload"]["computed_context"].get("second_pass_suspect_review")
+        calls.append(second_pass)
+        if second_pass:
+            return {
+                "patches": [
+                    {
+                        "row_index": 0,
+                        "col_index": 3,
+                        "current_value": "",
+                        "suggested_value": "5",
+                        "reason": "second_pass_presence_hint_visible_on_fax",
+                        "confidence": "high",
+                    }
+                ]
+            }, {"status": "ok"}
+        return {"patches": []}, {"status": "ok"}
+
+    sheet = {
+        "fields": ["date", "daypart", "menu", "qty.regular", "qty.soft", "qty.total", "qty.daycare", "qty.staff"],
+        "header": ["日付", "区分", "献立", "常食", "軟菜", "合計", "通所", "職員"],
+        "rows": [["04/28", "朝", "A", "10", "5", "15", "", ""]],
+        "ocr_numeric_cell_items": [
+            {
+                "target_row_index": 0,
+                "target_col_index": 7,
+                "classification": "deterministic_candidate",
+                "confidence_tier": "medium",
+            }
+        ],
+    }
+    sheet["target_cell_map"] = [
+        {"target_row_index": 0, "target_col_index": 7, "field": "qty.staff", "bbox": [0, 0, 10, 10]}
+    ]
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64="",
+        fax_image_meta={"status": "attached"},
+    )
+
+    assert True in calls
+    assert any(item.get("second_pass_suspect_review") for item in result["llm"]["chunks"])
+    assert result["patches"][0]["suggested_value"] == "5"
+
+
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:
     captured = {}
 

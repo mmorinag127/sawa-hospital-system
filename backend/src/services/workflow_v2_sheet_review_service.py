@@ -771,6 +771,40 @@ def _chunk_items(items: list[dict[str, Any]], chunk_size: int) -> list[list[dict
     return [items[index : index + safe_size] for index in range(0, len(items), safe_size)]
 
 
+def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, Any]]:
+    fields, _header, rows = _sheet_dimensions(sheet)
+    target_cells = _target_cells_from_sheet(sheet)
+    target_by_cell = {}
+    for item in target_cells:
+        row_index = _coerce_int(item.get("target_row_index"))
+        col_index = _coerce_int(item.get("target_col_index"))
+        if row_index is not None and col_index is not None:
+            target_by_cell[(row_index, col_index)] = item
+    presence_cells = set()
+    for item in _quantity_presence_hints_from_sheet(sheet):
+        row_index = _coerce_int(item.get("target_row_index"))
+        col_index = _coerce_int(item.get("target_col_index"))
+        if row_index is not None and col_index is not None:
+            presence_cells.add((row_index, col_index))
+    suspects: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for row_index, row in enumerate(rows):
+        for col_index, field in enumerate(fields):
+            if _is_structural_field(field) or col_index < 7:
+                continue
+            current = _normalize_text(row[col_index] if col_index < len(row) else "")
+            has_presence = (row_index, col_index) in presence_cells
+            if not ((has_presence and not current) or (current and not has_presence)):
+                continue
+            key = (row_index, col_index)
+            target = target_by_cell.get(key)
+            if target is None or key in seen:
+                continue
+            seen.add(key)
+            suspects.append(target)
+    return suspects[:_MAX_LLM_EVIDENCE]
+
+
 def _sheet_context_for_llm(
     sheet: dict[str, Any],
     patches: list[dict[str, Any]],
@@ -1059,10 +1093,15 @@ def propose_auto_sheet_edits(
         if not target_chunks:
             target_chunks = [[]]
 
-        def request_chunk(chunk_item: tuple[int, list[dict[str, Any]]]) -> tuple[dict[str, Any] | None, dict[str, Any], int, int]:
+        def request_chunk(
+            chunk_item: tuple[int, list[dict[str, Any]]],
+            *,
+            prompt: str = system_prompt,
+            second_pass: bool = False,
+        ) -> tuple[dict[str, Any] | None, dict[str, Any], int, int]:
             chunk_index, target_chunk = chunk_item
             payload, meta = _gemini_json_request(
-                system_prompt=system_prompt,
+                system_prompt=prompt,
                 user_payload=_sheet_context_for_llm(
                     sheet,
                     rule_patches,
@@ -1071,6 +1110,7 @@ def propose_auto_sheet_edits(
                         "target_chunk_index": chunk_index,
                         "target_chunk_count": len(target_chunks),
                         "target_chunk_size": len(target_chunk),
+                        "second_pass_suspect_review": bool(second_pass),
                     },
                     include_ocr_sheet_comparison=False,
                     include_ocr_context=False,
@@ -1138,6 +1178,36 @@ def propose_auto_sheet_edits(
                         "retry_of_failed_chunk": True,
                     }
                 )
+        llm_payload = {"patches": combined_payload_patches}
+        second_pass_targets = _second_pass_suspect_target_cells(sheet)
+        second_pass_prompt = (
+            system_prompt
+            + " This is a second-pass suspect-cell review. The provided target cells were selected because quantity-presence hints and current sheet values disagree, or because restriction/staff values exist without quantity-presence hints. Inspect every provided target cell carefully. Empty suggested_value is required when the current value is extra."
+        )
+        for second_pass_index, target_chunk in enumerate(_chunk_items(second_pass_targets, max(1, min(chunk_size, 6)))):
+            payload, meta, _chunk_index, target_count = request_chunk(
+                (second_pass_index, target_chunk),
+                prompt=second_pass_prompt,
+                second_pass=True,
+            )
+            chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
+            patch_items = payload.get("patches") if isinstance(payload, dict) else []
+            patch_count = len(patch_items) if isinstance(patch_items, list) else 0
+            chunk_meta.append(
+                {
+                    "chunk_index": second_pass_index,
+                    "status": chunk_status or "unknown",
+                    "target_count": target_count,
+                    "patch_count": patch_count,
+                    "error": meta.get("error") if isinstance(meta, dict) else None,
+                    "second_pass_suspect_review": True,
+                }
+            )
+            if chunk_status != "ok":
+                failed_chunks += 1
+                continue
+            if isinstance(patch_items, list):
+                combined_payload_patches.extend([item for item in patch_items if isinstance(item, dict)])
         llm_payload = {"patches": combined_payload_patches}
         if failed_chunks == len(target_chunks):
             llm_status = "failed"
