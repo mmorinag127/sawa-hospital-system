@@ -615,6 +615,110 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     assert workbook.sheetnames == ["ラベル_そよかぜ", "納品書_そよかぜ"]
 
 
+def test_weekly_weight_collect_rows_counts_diabetes_as_regular_and_excludes_forbidden(monkeypatch):
+    target_date = dt_date(2026, 5, 12)
+    source_lines = [
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "regular",
+            "quantity_corrected": 402,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "daycare",
+            "quantity_corrected": 36,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "staff",
+            "quantity_corrected": 2,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "糖尿",
+            "quantity_corrected": 5,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "no_meat",
+            "quantity_corrected": 6,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "soft",
+            "quantity_corrected": 28,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+        {
+            "date": target_date,
+            "daypart": "昼",
+            "menu_category": "主Ａ",
+            "menu_name": "麻婆茄子",
+            "diet_type": "mixer",
+            "quantity_corrected": 21,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 100,
+        },
+    ]
+
+    class RaisingSession:
+        def __enter__(self):
+            raise RuntimeError("force fallback")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(output_builder, "session_scope", lambda: RaisingSession())
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda current_date, status=None: [{"id": "ORD-WEIGHT"}] if current_date == target_date else [],
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context_for_bundle",
+        lambda *args, **kwargs: {"order_lines": source_lines},
+    )
+    monkeypatch.setattr(output_builder.menu_service, "get_menu_entries_for_facility", lambda *args: [])
+
+    rows = output_builder._weekly_weight_collect_rows(target_date)  # noqa: SLF001
+    payload = rows[(target_date, "昼", "主Ａ")]
+
+    assert payload["regular_quantity"] == 445
+    assert payload["regular_amounts"] == {"g": 44500.0}
+    assert payload["soft_mixer_quantity"] == 49
+    assert payload["soft_mixer_amounts"] == {"g": 4900.0}
+
+
 def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_path, monkeypatch):
     sample_path = _sawa_root() / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
     target_date = dt_date(2026, 5, 12)

@@ -433,6 +433,8 @@ def _normalize_diet_key(value: str | None) -> str | None:
         return "regular"
     if "職員" in raw or lowered in {"staff"}:
         return "regular"
+    if "糖尿" in raw or lowered in {"diabetes", "diabetic"}:
+        return "diabetes"
     if "揚げ物禁" in raw or "揚物禁" in raw or lowered in {"no_fried", "nofried"}:
         return "no_fried"
     if (
@@ -4726,7 +4728,7 @@ _WEEKLY_WEIGHT_DAYPART_SLOTS = [
     ("昼", ["主Ａ", "副①", "副②"]),
     ("夕", ["主", "副①", "副②"]),
 ]
-_WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
+_WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "diabetes", "1600kcal"}
 _WEEKLY_WEIGHT_SOFT_MIXER_DIETS = {"soft", "mixer", "soft_mixer"}
 _WEEKLY_WEIGHT_UNIT_RULES = [
     {
