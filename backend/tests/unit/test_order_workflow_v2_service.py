@@ -2045,7 +2045,7 @@ def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) 
     assert "anomaly_review" not in inspection["bagging_result"]
 
 
-def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisting(monkeypatch) -> None:
+def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_check(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -2058,18 +2058,20 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisti
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
     order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
 
+    sheet = {
+        "fields": ["date", "daypart", "menu", "regular", "soft"],
+        "header": ["日付", "区分", "献立", "常食", "軟菜"],
+        "rows": [
+            ["04/28", "朝", "A", "110", "5"],
+            ["04/28", "朝", "B", "12", "5"],
+            ["04/29", "朝", "C", "10", "5"],
+            ["04/30", "朝", "D", "11", "5"],
+        ],
+    }
+
     anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
         order_id,
-        sheet={
-            "fields": ["date", "daypart", "menu", "regular", "soft"],
-            "header": ["日付", "区分", "献立", "常食", "軟菜"],
-            "rows": [
-                ["04/28", "朝", "A", "110", "5"],
-                ["04/28", "朝", "B", "12", "5"],
-                ["04/29", "朝", "C", "10", "5"],
-                ["04/30", "朝", "D", "11", "5"],
-            ],
-        },
+        sheet=sheet,
         use_llm=False,
     )
 
@@ -2077,14 +2079,89 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_without_persisti
     review = anomaly["anomaly_review"]
     assert review["source"] == "unsaved_sheet"
     assert review["source_saved_sheet_id"] is None
+    assert review["sheet_hash"] == order_workflow_v2_service._stable_json_hash(sheet)
     high_outlier = next(item for item in review["warnings"] if item["type"] == "high_outlier")
     assert high_outlier["suggested_value"] == "11.5"
 
     inspection, error = order_workflow_v2_service.get_inspection(order_id)
 
     assert error is None
-    assert inspection["anomaly_review"] is None
-    assert inspection["artifact_lineage"]["anomaly_review_id"] is None
+    assert inspection["saved_sheet"] is None
+    assert inspection["anomaly_review"]["anomaly_review_id"] == review["anomaly_review_id"]
+    assert inspection["artifact_lineage"]["anomaly_review_id"] == review["anomaly_review_id"]
+    assert inspection["pre_save_checks"]["anomaly_review"]["confirmed"] is True
+    assert inspection["pre_save_checks"]["anomaly_review"]["sheet_hash"] == review["sheet_hash"]
+    assert inspection["pre_save_checks"]["anomaly_review"]["anomaly_review_id"] == review["anomaly_review_id"]
+
+
+def test_workflow_v2_save_sheet_requires_matching_pre_save_checks(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    sheet = {
+        "fields": ["date", "daypart", "menu", "regular", "soft"],
+        "header": ["日付", "区分", "献立", "常食", "軟菜"],
+        "rows": [
+            ["04/28", "朝", "A", "110", "5"],
+            ["04/28", "朝", "B", "12", "5"],
+        ],
+    }
+
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet=sheet,
+        edited_by="test",
+        require_pre_save_checks=True,
+    )
+
+    assert saved is None
+    assert error == "sheet_pre_save_checks_required"
+
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
+        order_id,
+        sheet=sheet,
+        use_llm=False,
+    )
+    assert error is None
+    sheet_review, error = order_workflow_v2_service.confirm_sheet_review(
+        order_id=order_id,
+        sheet=sheet,
+    )
+    assert error is None
+    sheet_hash = order_workflow_v2_service._stable_json_hash(sheet)
+    assert anomaly["pre_save_checks"]["anomaly_review"]["sheet_hash"] == sheet_hash
+    assert sheet_review["pre_save_checks"]["sheet_review"]["sheet_hash"] == sheet_hash
+
+    changed_sheet = dict(sheet)
+    changed_sheet["rows"] = [list(row) for row in sheet["rows"]]
+    changed_sheet["rows"][0][3] = "111"
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet=changed_sheet,
+        edited_by="test",
+        require_pre_save_checks=True,
+    )
+    assert saved is None
+    assert error == "sheet_pre_save_checks_required"
+
+    saved, error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet=sheet,
+        edited_by="test",
+        require_pre_save_checks=True,
+    )
+
+    assert error is None
+    assert saved["workflow"]["state"] == "sheet_saved"
+    assert saved["workflow"]["pre_save_checks"] == {}
 
 
 def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch) -> None:

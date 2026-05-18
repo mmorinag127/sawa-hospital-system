@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -126,6 +127,42 @@ def _stable_json_hash(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
+def _workflow_pre_save_checks(meta: dict[str, Any]) -> dict[str, Any]:
+    checks = meta.get("pre_save_checks")
+    return checks if isinstance(checks, dict) else {}
+
+
+def _set_pre_save_check(meta: dict[str, Any], key: str, *, sheet_hash: str, payload: dict[str, Any] | None = None) -> None:
+    checks = _workflow_pre_save_checks(meta)
+    entry = {
+        "confirmed": True,
+        "sheet_hash": sheet_hash,
+        "confirmed_at": _now().isoformat(),
+    }
+    if payload:
+        entry.update(payload)
+    checks[key] = entry
+    meta["pre_save_checks"] = checks
+
+
+def _clear_pre_save_checks(meta: dict[str, Any]) -> None:
+    meta["pre_save_checks"] = {}
+
+
+def _pre_save_checks_match_sheet(meta: dict[str, Any], sheet_hash: str) -> bool:
+    checks = _workflow_pre_save_checks(meta)
+    anomaly = checks.get("anomaly_review")
+    sheet_review = checks.get("sheet_review")
+    return bool(
+        isinstance(anomaly, dict)
+        and isinstance(sheet_review, dict)
+        and anomaly.get("confirmed")
+        and sheet_review.get("confirmed")
+        and _normalize_id(anomaly.get("sheet_hash")) == sheet_hash
+        and _normalize_id(sheet_review.get("sheet_hash")) == sheet_hash
+    )
+
+
 def _normalize_id(value: object) -> str:
     return str(value or "").strip()
 
@@ -180,12 +217,12 @@ def _workflow_meta(row: OrderWorkflowState | None) -> dict[str, Any]:
     if row is None or not isinstance(row.secondary_actions_json, dict):
         return {}
     meta = row.secondary_actions_json.get(WORKFLOW_V2_META_KEY)
-    return dict(meta) if isinstance(meta, dict) else {}
+    return copy.deepcopy(meta) if isinstance(meta, dict) else {}
 
 
 def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
-    existing = dict(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
-    existing[WORKFLOW_V2_META_KEY] = dict(meta)
+    existing = copy.deepcopy(row.secondary_actions_json) if isinstance(row.secondary_actions_json, dict) else {}
+    existing[WORKFLOW_V2_META_KEY] = copy.deepcopy(meta)
     row.secondary_actions_json = existing
 
 
@@ -773,6 +810,7 @@ def _serialize_workflow(
         "quad_override": quad_override if isinstance(quad_override, dict) else None,
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
+        "pre_save_checks": _workflow_pre_save_checks(meta),
         "ocr_job": _serialize_ocr_job(ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
@@ -2170,9 +2208,11 @@ def save_sheet(
     order_id: str,
     sheet: dict[str, Any],
     edited_by: str | None = None,
+    require_pre_save_checks: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(sheet, dict):
         return None, "sheet_required"
+    sheet_hash = _stable_json_hash(sheet)
 
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -2185,6 +2225,8 @@ def save_sheet(
         if evidence is None or evidence.order_id != order.id:
             return None, "selected_ocr_missing"
         workflow_meta = _workflow_meta(workflow)
+        if require_pre_save_checks and not _pre_save_checks_match_sheet(workflow_meta, sheet_hash):
+            return None, "sheet_pre_save_checks_required"
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
             _apply_template_lineage_blocker(workflow, context_error)
@@ -2242,10 +2284,35 @@ def save_sheet(
         meta["template_version_id"] = draft.template_version_id
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
+        _clear_pre_save_checks(meta)
         _write_workflow_meta(workflow, meta)
         return {
             "workflow": _serialize_workflow(workflow),
             "saved_sheet": _serialize_saved_sheet(draft),
+        }, None
+
+
+def confirm_sheet_review(
+    *,
+    order_id: str,
+    sheet: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(sheet, dict):
+        return None, "sheet_required"
+    sheet_hash = _stable_json_hash(sheet)
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        if not workflow.evidence_run_id:
+            return None, "selected_ocr_required"
+        meta = _workflow_meta(workflow)
+        _set_pre_save_check(meta, "sheet_review", sheet_hash=sheet_hash)
+        _write_workflow_meta(workflow, meta)
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "pre_save_checks": _workflow_pre_save_checks(meta),
         }, None
 
 
@@ -3071,19 +3138,31 @@ def run_sheet_anomaly_review(
             model=model,
             use_llm=use_llm,
         )
+        sheet_hash = _stable_json_hash(review_sheet)
         anomaly_review_id = _new_id("OAR")
         anomaly_review["anomaly_review_id"] = anomaly_review_id
         anomaly_review["source_saved_sheet_id"] = source_saved_sheet_id
         anomaly_review["source"] = "unsaved_sheet" if sheet is not None else "saved_sheet"
         anomaly_review["source_bagging_result_id"] = None
+        anomaly_review["sheet_hash"] = sheet_hash
+        meta = _workflow_meta(workflow)
         if sheet is None:
-            meta = _workflow_meta(workflow)
             meta["anomaly_review_id"] = anomaly_review_id
             meta["anomaly_review"] = anomaly_review
-            _write_workflow_meta(workflow, meta)
+        else:
+            meta["anomaly_review_id"] = anomaly_review_id
+            meta["anomaly_review"] = anomaly_review
+        _set_pre_save_check(
+            meta,
+            "anomaly_review",
+            sheet_hash=sheet_hash,
+            payload={"anomaly_review_id": anomaly_review_id},
+        )
+        _write_workflow_meta(workflow, meta)
         return {
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": anomaly_review,
+            "pre_save_checks": _workflow_pre_save_checks(meta),
         }, None
 
 
@@ -3353,5 +3432,6 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             },
             "bagging_result": inspection_meta.get("bagging_result") if workflow is not None else None,
             "anomaly_review": _workflow_meta(workflow).get("anomaly_review") if workflow is not None else None,
+            "pre_save_checks": _workflow_pre_save_checks(_workflow_meta(workflow)) if workflow is not None else {},
             "output_bundle": inspection_meta.get("output_bundle") if workflow is not None else None,
         }, None

@@ -94,6 +94,10 @@ class WorkflowV2SheetAnomalyBody(BaseModel):
     use_llm: bool | None = None
 
 
+class WorkflowV2SheetReviewConfirmBody(BaseModel):
+    sheet: dict
+
+
 class WorkflowV2ExpandedCellCopyModeBody(BaseModel):
     mode: str
 
@@ -1819,6 +1823,17 @@ def save_order_workflow_v2_sheet(order_id: str, body: WorkflowV2SheetSaveBody):
             order_id=order_id,
             sheet=body.sheet,
             edited_by=body.edited_by,
+            require_pre_save_checks=True,
+        )
+    )
+
+
+@router.post("/{order_id}/workflow-v2/sheet/review-confirm", dependencies=[Depends(require_role("operator"))])
+def confirm_order_workflow_v2_sheet_review(order_id: str, body: WorkflowV2SheetReviewConfirmBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.confirm_sheet_review(
+            order_id=order_id,
+            sheet=body.sheet,
         )
     )
 
