@@ -2307,6 +2307,75 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_allows_sheet_hash_mismatch_wi
     )
 
 
+def test_workflow_v2_dismiss_sheet_anomaly_warning_matches_uncelled_llm_warning(monkeypatch) -> None:
+    _install_fake_materialization(monkeypatch)
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    sheet = {
+        "fields": ["date", "daypart", "menu", "regular"],
+        "header": ["日付", "区分", "献立", "常食"],
+        "rows": [["04/28", "朝", "A", "24"]],
+    }
+    sheet_hash = order_workflow_v2_service._stable_json_hash(sheet)
+    warning = {
+        "type": "llm_anomaly",
+        "severity": "medium",
+        "row_index": None,
+        "col_index": None,
+        "field": None,
+        "label": None,
+        "value": "",
+        "suggested_value": "25.0",
+        "message": "Inconsistent quantity.",
+        "date": None,
+        "daypart": None,
+        "menu": None,
+        "context_label": None,
+        "evidence": {},
+    }
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        meta = dict(workflow.secondary_actions_json.get(order_workflow_v2_service.WORKFLOW_V2_META_KEY) or {})
+        meta["anomaly_review"] = {
+            "anomaly_review_id": "OAR-test-uncelled",
+            "source": "unsaved_sheet",
+            "sheet_hash": sheet_hash,
+            "warnings": [dict(warning)],
+            "summary": {"warning_count": 1},
+        }
+        meta["pre_save_checks"] = {
+            "anomaly_review": {
+                "confirmed": True,
+                "sheet_hash": sheet_hash,
+                "anomaly_review_id": "OAR-test-uncelled",
+            },
+        }
+        workflow.secondary_actions_json = {
+            **dict(workflow.secondary_actions_json or {}),
+            order_workflow_v2_service.WORKFLOW_V2_META_KEY: meta,
+        }
+
+    dismissed, error = order_workflow_v2_service.dismiss_sheet_anomaly_warning(
+        order_id=order_id,
+        sheet=sheet,
+        warning=warning,
+    )
+
+    assert error is None
+    assert dismissed["anomaly_review"]["warnings"] == []
+    assert dismissed["pre_save_checks"]["anomaly_review"]["confirmed"] is True
+    assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is True
+
+
 def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -201,7 +201,13 @@ def _sheet_anomaly_warning_matches(left: dict[str, Any], right: dict[str, Any]) 
         same_cell = int(row_left) == int(row_right) and int(col_left) == int(col_right)
     except (TypeError, ValueError):
         same_cell = False
-    if not same_cell:
+    has_cell_reference = (
+        row_left is not None
+        or row_right is not None
+        or col_left is not None
+        or col_right is not None
+    )
+    if has_cell_reference and not same_cell:
         return False
     comparable_keys = (
         "type",

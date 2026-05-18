@@ -1053,8 +1053,8 @@ const sameSheetPatchTarget = (
   left: { row_index?: number | null; col_index?: number | null; suggested_value?: string | null },
   right: { row_index?: number | null; col_index?: number | null; suggested_value?: string | null },
 ) => (
-  Number(left.row_index) === Number(right.row_index)
-  && Number(left.col_index) === Number(right.col_index)
+  String(left.row_index ?? "").trim() === String(right.row_index ?? "").trim()
+  && String(left.col_index ?? "").trim() === String(right.col_index ?? "").trim()
   && String(left.suggested_value || "").trim() === String(right.suggested_value || "").trim()
 );
 
