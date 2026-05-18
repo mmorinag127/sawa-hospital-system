@@ -1152,7 +1152,9 @@ export default function OrderWorkflowV2Page() {
   };
   const selectedOcrSheetReviewBaseUrl = String(selectedOcr?.sheet_review_base_url || "").trim();
   const selectedOcrOverlayUrl = String(selectedOcr?.overlay_url || "").trim();
-  const step3PreviewImageUrl = ocrPreviewMode === "sheet" ? selectedOcrSheetReviewBaseUrl : selectedOcrOverlayUrl;
+  const step3PreviewImageUrl = ocrPreviewMode === "sheet"
+    ? (selectedOcrSheetReviewBaseUrl || selectedOcrOverlayUrl)
+    : selectedOcrOverlayUrl;
   const canSaveSheet = Boolean(
     workflow?.selected_ocr_result_id
     && sheetPayload
