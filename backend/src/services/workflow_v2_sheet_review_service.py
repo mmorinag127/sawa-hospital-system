@@ -946,8 +946,9 @@ def _normalize_llm_patches(payload: dict[str, Any] | None, fields: list[str], he
         col_index = _patch_index_from_item(item, "col_index", ("target_col_index", "sheet_col_index"))
         if row_index is None or col_index is None:
             continue
+        has_suggested_value = "suggested_value" in item
         suggested = _normalize_text(item.get("suggested_value"))
-        if not suggested:
+        if not suggested and not (has_suggested_value and _normalize_text(item.get("current_value"))):
             continue
         current = _normalize_text(item.get("current_value"))
         current_numeric = _numeric_value(current)
@@ -1041,6 +1042,8 @@ def propose_auto_sheet_edits(
             "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
             "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
+            "If the current sheet has a number but the FAX cell is blank, or the mark visibly belongs to an adjacent column, return a patch for the extra cell with suggested_value as an empty string. "
+            "When a mark appears one column left or right from the current sheet value, report both sides when needed: blank the extra cell and fill the missing adjacent cell. "
             "For corrections or uncertainty reviews, include alternative digit candidates and explain the visible basis from the FAX image only. "
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )

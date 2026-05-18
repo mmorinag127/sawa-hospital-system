@@ -292,6 +292,39 @@ def test_auto_edit_retries_failed_chunks_as_single_cells(monkeypatch) -> None:
     assert any(item.get("retry_of_failed_chunk") for item in result["llm"]["chunks"])
 
 
+def test_auto_edit_preserves_blank_suggestions_for_extra_values(monkeypatch) -> None:
+    def _fake_gemini_json_request(**kwargs):
+        return {
+            "patches": [
+                {
+                    "row_index": 0,
+                    "col_index": 3,
+                    "current_value": "1",
+                    "suggested_value": "",
+                    "reason": "mark_belongs_to_adjacent_column",
+                    "confidence": "high",
+                }
+            ]
+        }, {"status": "ok"}
+
+    sheet = _sheet([["04/28", "朝", "A", "1", ""]])
+    sheet["target_cell_map"] = [
+        {"target_row_index": 0, "target_col_index": 3, "field": "qty.regular", "bbox": [0, 0, 10, 10]}
+    ]
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+
+    result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64="",
+        fax_image_meta={"status": "attached"},
+    )
+
+    assert result["patches"][0]["current_value"] == "1"
+    assert result["patches"][0]["suggested_value"] == ""
+    assert result["patches"][0]["reason"] == "mark_belongs_to_adjacent_column"
+
+
 def test_anomaly_llm_context_excludes_ocr_comparison_and_evidence(monkeypatch) -> None:
     captured = {}
 
