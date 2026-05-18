@@ -29,6 +29,18 @@ type InvoiceColumn = {
   areaId: string;
 };
 
+type FaxColumn = {
+  index: string;
+  sourceIndex: string;
+  role: string;
+  header: string;
+  name: string;
+  format: string;
+  dietType: string;
+  areaId: string;
+  bagType: string;
+};
+
 const DAILY_LABEL_DIET_OPTIONS = [
   { value: "soft", label: "軟菜" },
   { value: "mixer", label: "ミキサー" },
@@ -182,6 +194,94 @@ const normalizeInvoiceColumn = (column: InvoiceColumn) => {
   return next;
 };
 
+const readFaxOverride = (facility?: FacilityEntry) => {
+  if (!facility || typeof facility !== "object") return { columns: [] as FaxColumn[] };
+  const override = (facility as Record<string, unknown>).fax_template_override;
+  if (!override || typeof override !== "object") return { columns: [] as FaxColumn[] };
+  const overrideRecord = override as Record<string, unknown>;
+  const columns = Array.isArray(overrideRecord.columns) ? overrideRecord.columns : [];
+  return {
+    columns: columns
+      .map((column) => {
+        if (!column || typeof column !== "object") return null;
+        const col = column as Record<string, unknown>;
+        return {
+          index: toStringValue(col.index),
+          sourceIndex: toStringValue(col.source_index),
+          role: readString(col.role),
+          header: readString(col.header),
+          name: readString(col.name),
+          format: readString(col.format),
+          dietType: readString(col.diet_type),
+          areaId: readString(col.area_id),
+          bagType: readString(col.bag_type),
+        };
+      })
+      .filter(
+        (col): col is FaxColumn =>
+          Boolean(
+            col &&
+              (col.index ||
+                col.sourceIndex ||
+                col.role ||
+                col.header ||
+                col.name ||
+                col.format ||
+                col.dietType ||
+                col.areaId ||
+                col.bagType)
+          )
+      ),
+  };
+};
+
+const normalizeFaxColumn = (column: FaxColumn) => {
+  const next: Record<string, unknown> = {};
+  if (column.index.trim()) {
+    const parsed = Number(column.index);
+    next.index = Number.isFinite(parsed) ? parsed : column.index.trim();
+  }
+  if (column.sourceIndex.trim()) {
+    const parsed = Number(column.sourceIndex);
+    next.source_index = Number.isFinite(parsed) ? parsed : column.sourceIndex.trim();
+  }
+  if (column.role.trim()) next.role = column.role.trim();
+  if (column.header.trim()) next.header = column.header.trim();
+  if (column.name.trim()) next.name = column.name.trim();
+  if (column.format.trim()) next.format = column.format.trim();
+  if (column.dietType.trim()) next.diet_type = column.dietType.trim();
+  if (column.areaId.trim()) next.area_id = column.areaId.trim();
+  if (column.bagType.trim()) next.bag_type = column.bagType.trim();
+  return next;
+};
+
+const normalizeAreaToken = (value: string) => {
+  const raw = value.trim().toLowerCase();
+  if (!raw || raw === "x" || raw === "common" || raw === "共通") return "x";
+  if (raw === "2" || raw === "2f" || raw === "2階") return "2f";
+  if (raw === "3" || raw === "3f" || raw === "3階") return "3f";
+  return raw.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "x";
+};
+
+const deriveFaxRowFields = (columns: FaxColumn[]) => {
+  const fields: string[] = [];
+  columns.forEach((column) => {
+    const role = column.role.trim();
+    const name = column.name.trim();
+    if (role === "date") fields.push("date_mmdd");
+    else if (role === "daypart") fields.push("daypart");
+    else if (role === "menu_name") fields.push("menu");
+    else if (role === "note") fields.push("remarks");
+    else if (role === "quantity" || role === "quantity_change") {
+      const diet = column.dietType.trim();
+      if (diet) fields.push(`qty.${diet}_${normalizeAreaToken(column.areaId)}`);
+    } else if (name) {
+      fields.push(name);
+    }
+  });
+  return Array.from(new Set(fields));
+};
+
 const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
   const facilities = Array.isArray(master.facilities)
     ? master.facilities.map((facility) => {
@@ -201,6 +301,18 @@ const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
           record.invoice_template = {
             ...invoice,
             columns: columns.map(normalizeInvoiceColumn).filter((column) => Object.keys(column).length > 0),
+          };
+        }
+        if (record.fax_template_override && typeof record.fax_template_override === "object") {
+          const override = record.fax_template_override as Record<string, unknown>;
+          const columns = readFaxOverride(record).columns;
+          const normalizedColumns = columns
+            .map(normalizeFaxColumn)
+            .filter((column) => Object.keys(column).length > 0);
+          record.fax_template_override = {
+            ...override,
+            columns: normalizedColumns,
+            main_ocr_row_fields: deriveFaxRowFields(columns),
           };
         }
         return record;
@@ -398,6 +510,59 @@ export default function FacilityMasterPage() {
     );
   };
 
+  const updateFaxOverride = (patch: Record<string, unknown>) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const current = ((selectedFacility as Record<string, unknown>).fax_template_override || {}) as Record<
+      string,
+      unknown
+    >;
+    updateSelectedField("fax_template_override", { ...current, ...patch });
+  };
+
+  const updateFaxColumn = (index: number, patch: Partial<FaxColumn>) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const columns = readFaxOverride(selectedFacility).columns;
+    const nextColumns = columns.map((column, itemIndex) =>
+      itemIndex === index ? { ...column, ...patch } : column
+    );
+    updateFaxOverride({
+      columns: nextColumns.map(normalizeFaxColumn),
+      main_ocr_row_fields: deriveFaxRowFields(nextColumns),
+    });
+  };
+
+  const addFaxColumn = () => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const columns = readFaxOverride(selectedFacility).columns;
+    const nextColumns = [
+      ...columns,
+      {
+        index: "",
+        sourceIndex: "",
+        role: "quantity",
+        header: "",
+        name: "",
+        format: "",
+        dietType: "",
+        areaId: "X",
+        bagType: "",
+      },
+    ];
+    updateFaxOverride({
+      columns: nextColumns.map(normalizeFaxColumn),
+      main_ocr_row_fields: deriveFaxRowFields(nextColumns),
+    });
+  };
+
+  const removeFaxColumn = (index: number) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const nextColumns = readFaxOverride(selectedFacility).columns.filter((_, itemIndex) => itemIndex !== index);
+    updateFaxOverride({
+      columns: nextColumns.map(normalizeFaxColumn),
+      main_ocr_row_fields: deriveFaxRowFields(nextColumns),
+    });
+  };
+
   const updateInvoiceTemplate = (patch: Record<string, unknown>) => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
     const current = ((selectedFacility as Record<string, unknown>).invoice_template || {}) as Record<string, unknown>;
@@ -531,6 +696,7 @@ export default function FacilityMasterPage() {
       orderFormPatternId: readString(record.order_form_pattern_id),
       faxTemplateId: readString(record.fax_template_id),
       faxTemplateIds: readEditableStringList(record.fax_template_ids),
+      faxOverride: readFaxOverride(selectedFacility),
       aliases: readEditableStringList(record.aliases),
       areas: readEditableAreas(record.areas),
       invoice: readInvoiceTemplate(selectedFacility),
@@ -596,7 +762,7 @@ export default function FacilityMasterPage() {
                       <p className="list-title">{name}</p>
                       <p className="list-meta">{id}</p>
                     </div>
-                    <span className="ghost-link">編集</span>
+                    <span className="ghost-link">選択</span>
                   </button>
                 );
               })}
@@ -614,12 +780,12 @@ export default function FacilityMasterPage() {
                         キャンセル
                       </button>
                       <button className="btn primary compact" onClick={saveMaster}>
-                        保存
+                        保存する
                       </button>
                     </div>
                   ) : (
                     <button className="btn compact" onClick={beginEdit} disabled={!selectedFacility}>
-                      編集
+                      編集する
                     </button>
                   )}
                 </div>
@@ -751,6 +917,127 @@ export default function FacilityMasterPage() {
 
               <div className="form-section">
                 <div className="section-title-row">
+                  <div>
+                    <h3>FAXテンプレート列設定</h3>
+                    <p className="mode-text">FAX注文書の列を、日付・献立・数量などの意味へ対応付けます。</p>
+                  </div>
+                  <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                    列を追加
+                  </button>
+                </div>
+                {facilityInfo?.faxOverride.columns.length ? (
+                  <div className="table-wrap">
+                    <table className="invoice-table">
+                      <thead>
+                        <tr>
+                          <th>列番号</th>
+                          <th>読取元</th>
+                          <th>役割</th>
+                          <th>見出し</th>
+                          <th>内部名</th>
+                          <th>形式</th>
+                          <th>食種</th>
+                          <th>施設区分</th>
+                          <th>袋種</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {facilityInfo.faxOverride.columns.map((col, idx) => (
+                          <tr key={`${col.index}-${col.role}-${idx}`}>
+                            <td>
+                              <input
+                                className="table-input numeric"
+                                value={col.index}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { index: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input numeric"
+                                value={col.sourceIndex}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { sourceIndex: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.role}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { role: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.header}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { header: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.name}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { name: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.format}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { format: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.dietType}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { dietType: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.areaId}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { areaId: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.bagType}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(idx, { bagType: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <button
+                                className="btn danger compact"
+                                onClick={() => removeFaxColumn(idx)}
+                                disabled={!isEditing}
+                              >
+                                削除
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="subtle">FAX列設定が未設定です。汎用テンプレートを使わず、施設専用の列設定を追加してください。</p>
+                )}
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
                   <h3>施設区分</h3>
                   <button className="btn compact" onClick={addArea} disabled={!isEditing}>
                     追加
@@ -791,6 +1078,10 @@ export default function FacilityMasterPage() {
 
               <div className="form-section">
                 <h3>ラベル比較・表示対象区分</h3>
+                <p className="section-help">
+                  日別ラベルの照合で、常食とは別枠として表示・比較する食種です。ここに入れたものだけが
+                  ラベル比較表で独立した区分になります。納品書側に同じ区分がない施設では選ばないでください。
+                </p>
                 <div className="toggle-grid">
                   {DAILY_LABEL_DIET_OPTIONS.map((option) => {
                     const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
@@ -931,6 +1222,16 @@ export default function FacilityMasterPage() {
                   <p className="subtle">納品書カラムが未設定です。列を追加してください。</p>
                 )}
               </div>
+              {isEditing && (
+                <div className="actions save-actions">
+                  <button className="btn ghost" onClick={cancelEdit}>
+                    キャンセル
+                  </button>
+                  <button className="btn primary" onClick={saveMaster}>
+                    保存する
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1175,6 +1476,13 @@ export default function FacilityMasterPage() {
           font-weight: 600;
         }
 
+        .section-help {
+          margin: 0 0 12px;
+          color: #40514c;
+          font-size: 13px;
+          line-height: 1.6;
+        }
+
         .compact-actions {
           align-items: center;
         }
@@ -1403,6 +1711,14 @@ export default function FacilityMasterPage() {
           display: flex;
           gap: 12px;
           flex-wrap: wrap;
+        }
+
+        .save-actions {
+          justify-content: flex-end;
+          padding: 14px;
+          border: 1px solid rgba(31, 42, 42, 0.1);
+          border-radius: 10px;
+          background: #f7f9f8;
         }
 
         .btn {
