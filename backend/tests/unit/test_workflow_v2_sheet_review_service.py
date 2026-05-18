@@ -235,6 +235,11 @@ def test_auto_edit_llm_scales_target_bboxes_to_attached_image_pixels(monkeypatch
     ]
     png_2x2 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGNkYPjPwMDAwMDAAAAMAQABxLUxZQAAAABJRU5ErkJggg=="
     monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+    monkeypatch.setattr(
+        workflow_v2_sheet_review_service,
+        "_review_contact_sheet_png_base64",
+        lambda **_kwargs: "contact-sheet-png",
+    )
 
     workflow_v2_sheet_review_service.propose_auto_sheet_edits(
         sheet=sheet,
@@ -251,6 +256,43 @@ def test_auto_edit_llm_scales_target_bboxes_to_attached_image_pixels(monkeypatch
     assert target["bbox_coordinate_space"] == "attached_image_pixels"
     assert target["bbox"] == [1.0, 1.33, 2.0, 2.0]
     assert target["bbox_original"] == [100, 200, 200, 300]
+
+
+def test_auto_edit_llm_uses_contact_sheet_for_suspect_chunk(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_gemini_json_request(**kwargs):
+        captured.update(kwargs)
+        return {"patches": []}, {"status": "ok"}
+
+    sheet = _sheet([["04/28", "朝", "A", "", "5"]])
+    sheet["target_cell_map"] = [
+        {
+            "target_cell_id": "D11",
+            "sheet_cell": "D11",
+            "target_row_index": 0,
+            "target_col_index": 3,
+            "field": "qty.regular",
+            "bbox": [0, 0, 10, 10],
+            "center": [5, 5],
+        }
+    ]
+    png_2x2 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGNkYPjPwMDAwMDAAAAMAQABxLUxZQAAAABJRU5ErkJggg=="
+    monkeypatch.setattr(workflow_v2_sheet_review_service, "_gemini_json_request", _fake_gemini_json_request)
+    monkeypatch.setattr(
+        workflow_v2_sheet_review_service,
+        "_review_contact_sheet_png_base64",
+        lambda **_kwargs: "contact-sheet-png",
+    )
+
+    workflow_v2_sheet_review_service.propose_auto_sheet_edits(
+        sheet=sheet,
+        use_llm=True,
+        fax_image_png_base64=png_2x2,
+        fax_image_meta={"status": "attached"},
+    )
+
+    assert captured["image_png_base64"] == "contact-sheet-png"
 
 
 def test_auto_edit_retries_failed_chunks_as_single_cells(monkeypatch) -> None:

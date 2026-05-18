@@ -737,6 +737,74 @@ def _scale_center_for_image(
     return [round(parsed[0] * scale_x, 2), round(parsed[1] * scale_y, 2)]
 
 
+def _review_contact_sheet_png_base64(
+    *,
+    fax_image_png_base64: str | None,
+    target_cells: list[dict[str, Any]],
+    coordinate_transform: dict[str, Any] | None,
+) -> str | None:
+    if not _normalize_text(fax_image_png_base64) or not target_cells:
+        return None
+    try:
+        import base64
+        from io import BytesIO
+
+        from PIL import Image, ImageDraw, ImageFont
+
+        raw = base64.b64decode(_normalize_text(fax_image_png_base64), validate=False)
+        image = Image.open(BytesIO(raw)).convert("RGB")
+        font = ImageFont.load_default()
+        slots: list[tuple[dict[str, Any], Image.Image, list[int]]] = []
+        for item in target_cells:
+            scaled = _scale_bbox_for_image(item.get("bbox"), coordinate_transform)
+            bbox = scaled or item.get("bbox")
+            parsed = _float_bbox(bbox)
+            if parsed is None:
+                continue
+            x0, y0, x1, y1 = parsed
+            pad_x = max(18, int(round((x1 - x0) * 1.2)))
+            pad_y = max(18, int(round((y1 - y0) * 1.0)))
+            crop_box = [
+                max(0, int(round(x0 - pad_x))),
+                max(0, int(round(y0 - pad_y))),
+                min(image.width, int(round(x1 + pad_x))),
+                min(image.height, int(round(y1 + pad_y))),
+            ]
+            if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+                continue
+            crop = image.crop(tuple(crop_box)).convert("RGB")
+            crop.thumbnail((360, 220), Image.Resampling.LANCZOS)
+            slots.append((item, crop, crop_box))
+        if not slots:
+            return None
+        slot_w = 420
+        slot_h = 290
+        columns = 2 if len(slots) > 1 else 1
+        rows = (len(slots) + columns - 1) // columns
+        sheet = Image.new("RGB", (columns * slot_w, rows * slot_h), "white")
+        draw = ImageDraw.Draw(sheet)
+        for index, (item, crop, crop_box) in enumerate(slots):
+            col = index % columns
+            row = index // columns
+            ox = col * slot_w
+            oy = row * slot_h
+            label = (
+                f"target {index + 1}: row={item.get('target_row_index')} "
+                f"col={item.get('target_col_index')} cell={item.get('sheet_cell') or ''}"
+            )
+            draw.text((ox + 10, oy + 8), label, fill=(0, 0, 0), font=font)
+            draw.text((ox + 10, oy + 26), f"source crop px={crop_box}", fill=(70, 70, 70), font=font)
+            px = ox + 10
+            py = oy + 52
+            sheet.paste(crop, (px, py))
+            draw.rectangle((px, py, px + crop.width, py + crop.height), outline=(190, 0, 0), width=2)
+        out = BytesIO()
+        sheet.save(out, format="PNG")
+        return base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _target_cell_context_items(
     target_cells: list[dict[str, Any]],
     *,
@@ -1169,7 +1237,9 @@ def propose_auto_sheet_edits(
             "Do not use OCR output values, OCR digit candidates, OCR recognized text, OCR confidence scores, OCR evidence values, or OCR-vs-sheet comparisons. "
             "You may use ocr_quantity_presence_hints only as red-dot style hints that some quantity mark exists in that cell; never copy or infer a digit from OCR. "
             "The provided target_cell_map contains suspect cells only. They were selected because quantity-presence hints and current sheet values disagree, an adjacent-column shift is plausible, or the value is a gap inside the same date/daypart block. "
-            "For each suspect quantity cell, use target_cell_map.bbox in attached image pixel coordinates to locate the corresponding cell on the FAX image and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
+            "The attached image is a review contact sheet containing enlarged crops around the suspect cells. "
+            "Each crop label shows the matching row_index, col_index, and sheet cell. "
+            "For each suspect quantity cell, inspect the matching enlarged crop and judge whether the current sheet value contradicts the visible handwritten number in that FAX cell. "
             "Ignore bbox_original for visual lookup; it is included only for audit lineage. "
             "Return no patch only when you can determine with 100% certainty that the current sheet value exactly matches the FAX cell image. "
             "If the match is merely plausible, approximate, partially readable, faint, messy, overwritten, crossed out, slash-corrected, or otherwise not 100% certain, you must return a patch with the best visible candidate. "
@@ -1198,6 +1268,15 @@ def propose_auto_sheet_edits(
             second_pass: bool = False,
         ) -> tuple[dict[str, Any] | None, dict[str, Any], int, int]:
             chunk_index, target_chunk = chunk_item
+            coordinate_transform = _target_coordinate_transform(
+                target_cells=_target_cells_from_sheet(sheet),
+                fax_image_meta=fax_image_meta,
+            )
+            review_image_png_base64 = _review_contact_sheet_png_base64(
+                fax_image_png_base64=fax_image_png_base64,
+                target_cells=target_chunk,
+                coordinate_transform=coordinate_transform,
+            )
             payload, meta = _gemini_json_request(
                 system_prompt=prompt,
                 user_payload=_sheet_context_for_llm(
@@ -1219,7 +1298,7 @@ def propose_auto_sheet_edits(
                 ),
                 model=model,
                 array_key="patches",
-                image_png_base64=fax_image_png_base64,
+                image_png_base64=review_image_png_base64 or fax_image_png_base64,
                 response_schema=patch_response_schema,
             )
             return payload, meta, chunk_index, len(target_chunk)
