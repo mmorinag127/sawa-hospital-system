@@ -156,7 +156,7 @@ def _clear_pre_save_checks(meta: dict[str, Any]) -> None:
     meta["pre_save_checks"] = {}
 
 
-def _pre_save_checks_match_sheet(meta: dict[str, Any], sheet_hash: str) -> bool:
+def _pre_save_checks_completed(meta: dict[str, Any]) -> bool:
     checks = _workflow_pre_save_checks(meta)
     anomaly = checks.get("anomaly_review")
     sheet_review = checks.get("sheet_review")
@@ -165,8 +165,6 @@ def _pre_save_checks_match_sheet(meta: dict[str, Any], sheet_hash: str) -> bool:
         and isinstance(sheet_review, dict)
         and anomaly.get("confirmed")
         and sheet_review.get("confirmed")
-        and _normalize_id(anomaly.get("sheet_hash")) == sheet_hash
-        and _normalize_id(sheet_review.get("sheet_hash")) == sheet_hash
     )
 
 
@@ -177,12 +175,10 @@ def _pre_save_status_for_sheet(meta: dict[str, Any], sheet_hash: str) -> dict[st
     anomaly_confirmed = bool(
         isinstance(anomaly, dict)
         and anomaly.get("confirmed")
-        and _normalize_id(anomaly.get("sheet_hash")) == sheet_hash
     )
     sheet_review_confirmed = bool(
         isinstance(sheet_review, dict)
         and sheet_review.get("confirmed")
-        and _normalize_id(sheet_review.get("sheet_hash")) == sheet_hash
     )
     return {
         "sheet_hash": sheet_hash,
@@ -2303,7 +2299,7 @@ def save_sheet(
         if evidence is None or evidence.order_id != order.id:
             return None, "selected_ocr_missing"
         workflow_meta = _workflow_meta(workflow)
-        if require_pre_save_checks and not _pre_save_checks_match_sheet(workflow_meta, sheet_hash):
+        if require_pre_save_checks and not _pre_save_checks_completed(workflow_meta):
             return None, "sheet_pre_save_checks_required"
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
@@ -3291,7 +3287,6 @@ def dismiss_sheet_anomaly_warning(
         if not isinstance(anomaly_review, dict):
             return None, "anomaly_review_required"
         review_hash = _normalize_id(anomaly_review.get("sheet_hash"))
-        sheet_matches_review = not review_hash or review_hash == sheet_hash
         warnings = anomaly_review.get("warnings")
         if not isinstance(warnings, list):
             return None, "anomaly_review_warnings_missing"
@@ -3318,15 +3313,12 @@ def dismiss_sheet_anomaly_warning(
         next_review["anomaly_review_id"] = anomaly_review_id
         meta["anomaly_review_id"] = anomaly_review_id
         meta["anomaly_review"] = next_review
-        if sheet_matches_review:
-            _set_pre_save_check(
-                meta,
-                "anomaly_review",
-                sheet_hash=sheet_hash,
-                payload={"anomaly_review_id": anomaly_review_id},
-            )
-        else:
-            _clear_pre_save_check(meta, "anomaly_review")
+        _set_pre_save_check(
+            meta,
+            "anomaly_review",
+            sheet_hash=sheet_hash,
+            payload={"anomaly_review_id": anomaly_review_id},
+        )
         _write_workflow_meta(workflow, meta)
         return {
             "workflow": _serialize_workflow(workflow),

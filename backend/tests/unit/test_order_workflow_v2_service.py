@@ -2094,7 +2094,7 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_che
     assert inspection["pre_save_checks"]["anomaly_review"]["anomaly_review_id"] == review["anomaly_review_id"]
 
 
-def test_workflow_v2_save_sheet_requires_matching_pre_save_checks(monkeypatch) -> None:
+def test_workflow_v2_save_sheet_requires_completed_pre_save_checks(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -2167,22 +2167,13 @@ def test_workflow_v2_save_sheet_requires_matching_pre_save_checks(monkeypatch) -
         sheet=changed_sheet,
     )
     assert error is None
-    assert status["pre_save_status"]["ready"] is False
-    assert status["pre_save_status"]["anomaly_review_confirmed"] is False
-    assert status["pre_save_status"]["sheet_review_confirmed"] is False
+    assert status["pre_save_status"]["ready"] is True
+    assert status["pre_save_status"]["anomaly_review_confirmed"] is True
+    assert status["pre_save_status"]["sheet_review_confirmed"] is True
 
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet=changed_sheet,
-        edited_by="test",
-        require_pre_save_checks=True,
-    )
-    assert saved is None
-    assert error == "sheet_pre_save_checks_required"
-
-    saved, error = order_workflow_v2_service.save_sheet(
-        order_id=order_id,
-        sheet=sheet,
         edited_by="test",
         require_pre_save_checks=True,
     )
@@ -2256,7 +2247,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
     )
 
 
-def test_workflow_v2_dismiss_sheet_anomaly_warning_allows_sheet_hash_mismatch_without_confirming(monkeypatch) -> None:
+def test_workflow_v2_dismiss_sheet_anomaly_warning_keeps_review_after_sheet_edit(monkeypatch) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -2296,8 +2287,8 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_allows_sheet_hash_mismatch_wi
     )
 
     assert error is None
-    assert "anomaly_review" not in dismissed["pre_save_checks"]
-    assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is False
+    assert dismissed["pre_save_checks"]["anomaly_review"]["confirmed"] is True
+    assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is True
     assert dismissed["pre_save_status"]["ready"] is False
     assert not any(
         item["row_index"] == warning["row_index"]

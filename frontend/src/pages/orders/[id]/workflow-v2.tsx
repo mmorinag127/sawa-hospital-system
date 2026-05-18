@@ -2448,7 +2448,6 @@ export default function OrderWorkflowV2Page() {
     });
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
       if (!sourceReview) return current;
@@ -2510,7 +2509,6 @@ export default function OrderWorkflowV2Page() {
   const fillQuantityColumn = () => {
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2527,7 +2525,6 @@ export default function OrderWorkflowV2Page() {
     const left = Number(swapLeftColumn);
     const right = Number(swapRightColumn);
     if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2548,7 +2545,6 @@ export default function OrderWorkflowV2Page() {
 
   const applyVisibleOcrSuggestions = () => {
     if (!sheetPayload || !ocrOverlayItemMap.size) return;
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
     setSelectedAnomalyIndex(null);
@@ -2656,7 +2652,6 @@ export default function OrderWorkflowV2Page() {
   const applySheetAutoEditPatches = () => {
     const patches = autoEditPatches;
     if (!sheetPayload || !patches.length) return;
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview(null);
     setSelectedAnomalyIndex(null);
     setSelectedAutoEditIndex(null);
@@ -2678,7 +2673,6 @@ export default function OrderWorkflowV2Page() {
     if (!sheetPayload || typeof patch.row_index !== "number" || typeof patch.col_index !== "number") return;
     const suggestedValue = String(patch.suggested_value || "").trim();
     if (!suggestedValue) return;
-    invalidateSheetPreSaveChecks();
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
       if (!sourceReview) return current;
@@ -2725,7 +2719,6 @@ export default function OrderWorkflowV2Page() {
       && String(warning.suggested_value || "").trim()
     ));
     if (!sheetPayload || !patches.length) return;
-    invalidateSheetPreSaveChecks();
     setSheetPayload((current) => {
       if (!current) return current;
       const rows = current.rows.map((row) => [...row]);
@@ -2747,7 +2740,6 @@ export default function OrderWorkflowV2Page() {
     if (!sheetPayload || typeof warning.row_index !== "number" || typeof warning.col_index !== "number") return;
     const suggestedValue = String(warning.suggested_value || "").trim();
     if (!suggestedValue) return;
-    invalidateSheetPreSaveChecks();
     const rowIndex = Number(warning.row_index);
     const colIndex = Number(warning.col_index);
     setSheetPayload((current) => {
@@ -4413,7 +4405,6 @@ export default function OrderWorkflowV2Page() {
               onChange={(event) => {
                 const nextJson = event.target.value;
                 setSheetJson(nextJson);
-                invalidateSheetPreSaveChecks();
                 try {
                   setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));
                 } catch {
