@@ -18,13 +18,10 @@ from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.styles.borders import Side as BorderSide
 from openpyxl.utils import column_index_from_string, get_column_letter
-from openpyxl.utils.datetime import to_excel
 
 from src.db import session_scope
-from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
-from src.models.output import Bag
+from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
     config_service,
@@ -40,8 +37,6 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
-DAILY_LABEL_REFERENCE_20260510_ROWS = DATA_DIR / "daily_label_reference_20260510_rows.json"
-WEEKLY_WEIGHT_REFERENCE_TEMPLATE = DATA_DIR / "weight_templates" / "weekly_weight_reference.xlsx"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -106,6 +101,25 @@ DAILY_LABEL_SHEET_ORDER = [
     "ケアホーム長生苑",
 ]
 
+DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID = {
+    "FAC00001": {"no_meat", "no_fish"},
+    "FAC00002": {"no_meat", "no_fish"},
+    "FAC00003": {"soft", "mixer", "no_fish"},
+    "FAC00004": {"daycare", "staff", "no_meat", "no_fish", "no_fried", "forbidden_other"},
+    "FAC00006": {"soft", "mixer", "no_meat", "no_fish"},
+    "FAC00007": {"no_meat", "no_fish"},
+    "FAC00008": {"soft", "mixer"},
+    "FAC00009": {"soft", "mixer"},
+    "FAC00010": {"soft", "mixer"},
+    "FAC00011": {"no_meat", "no_fish"},
+    "FAC00012": {"no_meat", "no_fish"},
+    "FAC00013": {"diabetes", "no_fish"},
+    "FAC00014": {"staff", "no_meat", "no_fish", "sesame_allergy"},
+    "FAC00015": {"no_meat", "no_fish"},
+    "FAC00016": {"diabetes", "no_fish"},
+    "FAC636208": {"mixer", "no_meat", "no_fish"},
+}
+
 _EXPANDED_CELL_COPY_ENABLED_CACHE: dict[tuple[str, str], bool] = {}
 
 DEFAULT_LABEL_FIELDS = [
@@ -144,29 +158,14 @@ _DAILY_LABEL_MENU_DEFAULTS = {
     "さつま芋の天ぷら": ("昼", "副菜①", "温菜", 2, "個"),
     "さつまいもレモン煮": ("昼", "副菜①", "温菜", 40, "g"),
     "ﾌﾞﾛｯｺﾘｰのちりめん和え": ("昼", "副菜②", "冷菜", 40, "g"),
-    "煮込みハンバーグ": ("夕", "主菜", "温菜", 1, "個"),
+    "煮込みハンバーグ": ("夕", "主菜", "温菜", 100, "g"),
     "ジャーマンポテト": ("夕", "副菜①", "温菜", 40, "g"),
     "ほうれん草の和え物": ("夕", "副菜②", "冷菜", 40, "g"),
     "ソース": ("夕", "ソース", "冷菜", 5, "g"),
 }
 
-_DAILY_LABEL_FACILITY_PORTION_OVERRIDES = {
-    "FAC00005": {
-        ("昼", "主菜"): (130, "g"),
-        ("夕", "主菜"): (120, "g"),
-    },
-    "FAC00004": {
-        ("昼", "主菜"): (130, "g"),
-        ("夕", "副菜①"): (60, "g"),
-        ("夕", "主菜"): (1, "個"),
-    },
-    "FAC00014": {
-        ("昼", "主菜"): (130, "g"),
-    },
-}
-
 DAILY_LABEL_SHEET_MAX_ROWS = {
-    "メニュー": 13,
+    "メニュー": 603,
     "藍TERRACE": 627,
     "百々家": 622,
     "池袋病院": 619,
@@ -185,44 +184,17 @@ DAILY_LABEL_SHEET_MAX_ROWS = {
 }
 
 DAILY_LABEL_MENU_ROWS = [
-    ("朝", "副菜①", "温菜オンナ", "ごぼうと竹輪の煮物", "", 70),
-    ("朝", "副菜②", "冷菜", "いんげんの味噌和えミソア", "", 40),
-    ("昼", "主菜", "温菜", "豚肉と白菜のすき煮ブタニクハクサイニ", "", 100),
-    ("昼", "主菜添えソ", "温菜", "", "", 40),
-    ("昼", "副菜①", "温菜", "さつま芋の天ぷらテン", "", "2個コ"),
-    ("昼", "副菜②", "冷菜", "ﾌﾞﾛｯｺﾘｰのちりめん和えア", "", 40),
-    ("夕", "主菜", "温菜", "煮込みハンバーグニコ", "", "1個コ"),
-    ("夕", "主菜　添え", "温菜", "", "", 50),
+    ("朝", "副菜①", "温菜", "ごぼうと竹輪の煮物", "", 70),
+    ("朝", "副菜②", "冷菜", "いんげんの味噌和え", "", 40),
+    ("昼", "主菜", "温菜", "豚肉と白菜のすき煮", "", 100),
+    ("昼", "副菜①", "温菜", "", "", 40),
+    ("昼", "副菜①", "温菜", "さつま芋の天ぷら", "", "2個"),
+    ("昼", "副菜②", "冷菜", "ﾌﾞﾛｯｺﾘｰのちりめん和え", "", 40),
+    ("夕", "主菜", "温菜", "煮込みハンバーグ", "", 100),
+    ("夕", "ソース", "温菜", "", "", 50),
     ("夕", "副菜①", "温菜", "ジャーマンポテト", "", 40),
-    ("夕", "副菜②", "冷菜", "ほうれん草の和え物ソウアモノ", "", 40),
+    ("夕", "副菜②", "冷菜", "ほうれん草の和え物", "", 40),
 ]
-
-_DAILY_LABEL_FORMULA_AMOUNT_ROWS = {
-    "FAC00001": {2, 8, 9, 10, 14},
-    "FAC00002": {2, 8, 9, 10, 14},
-    "FAC00003": {2, 31, 33, 43},
-    "FAC00004": {2, 3, 4, 5, 9, 11, 17, 19, 21, 35, 36},
-    "FAC00007": {2, 9, 10, 11, 18},
-    "FAC00008": {2, 8, 20, 23, 33},
-    "FAC00009": {2, 5, 11, 17, 20, 35, 41, 45, 47, 48, 53, 59, 63},
-    "FAC00010": {2, 12, 13, 24, 33, 39, 47, 55},
-    "FAC00012": {2, 3, 4, 5, 6, 13, 14, 15, 22},
-    "FAC00014": {2, 3, 4, 5, 6, 7, 33, 34},
-    "FAC00015": {2, 3, 4, 5, 11, 12, 13, 17},
-    "FAC00016": {2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26},
-    "FAC636208": {2, 3, 4, 5, 6, 7, 17, 27, 28},
-}
-
-_DAILY_LABEL_FACILITY_SAUCE_SERVINGS = {
-    "FAC00001": None,
-    "FAC00002": 15,
-    "FAC00003": None,
-    "FAC00007": None,
-    "FAC00008": {"夕３階": 8, "夕２階": 9},
-    "FAC00012": None,
-    "FAC00015": 29,
-    "FAC00016": {"regular": 20, "diabetes": 5},
-}
 
 
 def _ensure_date(value):
@@ -236,76 +208,14 @@ def _ensure_date(value):
         return None
 
 
-def _daily_label_reference_rows_for_20260510(bags: list[dict], facility_name: str | None) -> list[dict] | None:
-    if not DAILY_LABEL_REFERENCE_20260510_ROWS.exists():
-        return None
-    target_dates = {_ensure_date(bag.get("date")) for bag in bags if bag.get("date") is not None}
-    if target_dates != {dt_date(2026, 5, 10)}:
-        return None
-    facility_code = ""
-    for bag in bags:
-        facility_code = str(bag.get("facility") or "").strip()
-        if facility_code:
-            break
-    sheet_name = _daily_label_sheet_name(facility_code, facility_name)
-    try:
-        reference = json.loads(DAILY_LABEL_REFERENCE_20260510_ROWS.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    rows = reference.get(sheet_name)
-    if not isinstance(rows, list):
-        return None
-    fields = list(DEFAULT_LABEL_FIELDS)
-    result: list[dict] = []
-    next_row_number = 2
-    for entry in rows:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            row_number = int(entry.get("row"))
-        except Exception:
-            row_number = next_row_number
-        while next_row_number < row_number:
-            result.append({"_daily_label_reference": True})
-            next_row_number += 1
-        values = entry.get("values")
-        if not isinstance(values, list):
-            continue
-        result.append(
-            {
-                **{
-                    field: (None if value == "" else value)
-                    for field, value in zip(fields, values)
-                },
-                "_daily_label_reference": True,
-            }
-        )
-        next_row_number = row_number + 1
-    return result
-
-
-def _latest_output_lineage_for_order(session, order_id: str) -> dict[str, str | None]:
-    snapshot = (
-        session.query(OrderConfirmedSnapshot)
-        .filter(OrderConfirmedSnapshot.order_id == order_id)
-        .order_by(OrderConfirmedSnapshot.confirmed_at.desc(), OrderConfirmedSnapshot.id.desc())
-        .first()
-    )
-    if snapshot is None:
-        return {
-            "confirmed_snapshot_id": None,
-            "output_bundle_id": None,
-            "source_saved_sheet_id": None,
-            "template_version_id": None,
-        }
-    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
-    output_bundle = snapshot_json.get("output_bundle") if isinstance(snapshot_json.get("output_bundle"), dict) else {}
-    return {
-        "confirmed_snapshot_id": snapshot.id,
-        "output_bundle_id": str(output_bundle.get("output_bundle_id") or "").strip() or None,
-        "source_saved_sheet_id": str(snapshot_json.get("saved_sheet_id") or output_bundle.get("source_saved_sheet_id") or "").strip() or None,
-        "template_version_id": str(snapshot.template_version_id or output_bundle.get("template_version_id") or "").strip() or None,
-    }
+def _serialize_for_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _serialize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_for_json(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
 
 
 def _format_number(value: float | int | None) -> str:
@@ -397,15 +307,13 @@ def _normalize_unit_type(unit_type: str | None) -> str | None:
     if not unit_type:
         return None
     raw = str(unit_type).strip()
-    lowered = raw.lower().replace(" ", "").replace("　", "")
+    lowered = raw.lower()
     if "g" in lowered or "グラム" in raw:
         return "g"
     if "切" in raw or "枚" in raw or lowered in {"cut", "slice", "slices"}:
-        return "枚" if "枚" in raw and "切" not in raw else "切"
-    if "個" in raw or "ヶ" in raw or "ケ" in raw or lowered in {"count", "piece", "pieces", "こ", "コ".lower()}:
+        return "切"
+    if "個" in raw or lowered in {"count", "piece", "pieces"}:
         return "個"
-    if "本" in raw:
-        return "本"
     return raw
 
 
@@ -433,8 +341,6 @@ def _normalize_diet_key(value: str | None) -> str | None:
         return "regular"
     if "職員" in raw or lowered in {"staff"}:
         return "regular"
-    if "糖尿" in raw or lowered in {"diabetes", "diabetic"}:
-        return "diabetes"
     if "揚げ物禁" in raw or "揚物禁" in raw or lowered in {"no_fried", "nofried"}:
         return "no_fried"
     if (
@@ -448,6 +354,72 @@ def _normalize_diet_key(value: str | None) -> str | None:
     if "禁" in raw and "魚" in raw:
         return "no_fish"
     return lowered
+
+
+def _normalize_delivery_diet_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    lowered = raw.lower()
+    if "糖尿" in raw or lowered in {"diabetes", "diabetic"}:
+        return "diabetes"
+    if "通所" in raw or lowered == "daycare":
+        return "daycare"
+    if "職員" in raw or lowered == "staff":
+        return "staff"
+    if "小口" in raw:
+        return "小口"
+    return _normalize_diet_key(raw)
+
+
+def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str, str], str]:
+    if not isinstance(facility_config, dict):
+        return {}
+    override = facility_config.get("fax_template_override")
+    if not isinstance(override, dict):
+        return {}
+    columns = override.get("columns")
+    if not isinstance(columns, list):
+        return {}
+    result: dict[tuple[str, str], str] = {}
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        if str(column.get("role") or "").strip() != "quantity":
+            continue
+        source_diet = _normalize_diet_key(column.get("diet_type"))
+        source_area = str(column.get("area_id") or "X").strip().upper() or "X"
+        output_diet = _normalize_diet_key(
+            column.get("output_diet_type")
+            or column.get("aggregation_diet_type")
+            or column.get("daily_output_diet_type")
+        )
+        if not source_diet or not output_diet or output_diet == source_diet:
+            continue
+        result[(source_diet, source_area)] = output_diet
+    return result
+
+
+def _apply_output_diet_type_overrides(
+    lines: list[dict],
+    facility_config: dict | None,
+) -> list[dict]:
+    overrides = _build_output_diet_type_map(facility_config)
+    if not overrides:
+        return lines
+    updated_lines: list[dict] = []
+    for line in lines:
+        diet_key = _normalize_diet_key(line.get("diet_type"))
+        area_key = str(line.get("area_id") or "X").strip().upper() or "X"
+        output_diet = overrides.get((diet_key or "", area_key)) or overrides.get((diet_key or "", "X"))
+        if not output_diet:
+            updated_lines.append(line)
+            continue
+        updated = dict(line)
+        updated.setdefault("source_diet_type", line.get("diet_type"))
+        updated["diet_type"] = output_diet
+        updated_lines.append(updated)
+    return updated_lines
 
 
 def _normalize_area_id(value: str | None) -> str | None:
@@ -498,11 +470,26 @@ def _infer_delivery_column_meta(name: str | None) -> tuple[str | None, str | Non
     if not name:
         return None, None
     raw = str(name)
-    diet = _normalize_diet_key(raw)
+    if "揚げ物" in raw or "揚物" in raw:
+        diet = "no_fried"
+    elif "肉禁" in raw:
+        diet = "no_meat"
+    elif "魚禁" in raw:
+        diet = "no_fish"
+    elif "その他" in raw:
+        diet = "forbidden_other"
+    elif "禁食" in raw:
+        diet = "禁食"
+    else:
+        diet = _normalize_delivery_diet_key(raw)
     area = None
     match = re.search(r"(\\d)\\s*(?:f|ｆ|Ｆ|階)", raw, re.IGNORECASE)
     if match:
         area = f"{match.group(1)}F"
+    elif "月" in raw:
+        area = "3F"
+    elif "花" in raw:
+        area = "2F"
     return diet, area
 
 
@@ -519,14 +506,10 @@ def _extract_qty_and_unit(value: Any, unit_type: str | None) -> tuple[float | No
     inferred_unit = None
     if "g" in text or "ｇ" in text or "グラム" in text:
         inferred_unit = "g"
-    elif "切" in text:
+    elif "切" in text or "枚" in text:
         inferred_unit = "切"
-    elif "個" in text or "ヶ" in text or "ケ" in text:
+    elif "個" in text:
         inferred_unit = "個"
-    elif "本" in text:
-        inferred_unit = "本"
-    elif "枚" in text:
-        inferred_unit = "枚"
     return qty, _normalize_unit_type(unit_type) or inferred_unit
 
 
@@ -546,63 +529,14 @@ def _format_servings(quantity: float | int | None) -> str:
     return f"{_format_number(quantity)}人前"
 
 
-def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
+def _label_area_suffix(area_id: Any) -> str:
     text = str(area_id or "").strip()
     normalized = _normalize_area_id(text)
-    facility = str(facility_id or "").strip()
-    if facility in {"FAC00008", "FAC00009", "FAC00010"}:
-        if normalized == "2F":
-            return "２階"
-        if normalized == "3F":
-            return "３階"
     if normalized == "2F":
         return "花"
     if normalized == "3F":
         return "月"
     return ""
-
-
-def _daily_label_time_reading(time_text: str, facility_id: object, category: object = None) -> str:
-    facility = str(facility_id or "").strip()
-    text = str(time_text or "")
-    category_text = str(category or "")
-    if facility == "FAC00003":
-        replacements = {
-            "朝　花": "朝　花ハナ",
-            "朝　月": "朝　月ツキ",
-            "昼　花": "昼　花ヒルハナ",
-            "昼　月": "昼　月ヒルツキ",
-            "夕　花": "夕　花ユウハナ",
-            "夕　月": "夕　月ユウツキ",
-        }
-        return replacements.get(text, text)
-    if facility == "FAC00008":
-        if "ミキサー" in category_text:
-            return text
-        if text.startswith("朝") and ("２階" in text or "３階" in text):
-            return f"{text}アサカイ"
-        if text.startswith("昼") and "２階" in text:
-            return f"{text}ヒル"
-        if text.startswith("夕") and "２階" in text:
-            return f"{text}ユウ"
-    if facility == "FAC00009":
-        if text.startswith("昼") and ("２階" in text or "３階" in text):
-            return f"{text}ヒル"
-        if text.startswith("夕") and ("２階" in text or "３階" in text):
-            return f"{text}ユウ"
-    return text
-
-
-def _daily_label_adjust_formula_amount(row: dict, excel_row: int, facility_id: str) -> Any:
-    amount = row.get("内容量")
-    if not str(amount or "").startswith("=J"):
-        return amount
-    if facility_id in {"FAC00005", "FAC00006"}:
-        return amount
-    formula_rows = _DAILY_LABEL_FORMULA_AMOUNT_ROWS.get(facility_id)
-    if formula_rows is None:
-        return amount
-    return amount if excel_row in formula_rows else "="
 
 
 def _label_menu_defaults(menu_name: Any) -> tuple[str | None, str | None, str | None, float | None, str | None]:
@@ -613,58 +547,105 @@ def _label_menu_defaults(menu_name: Any) -> tuple[str | None, str | None, str | 
     return None, None, None, None, None
 
 
+def _daily_label_display_diet_key(bag: dict) -> str:
+    source_diet = str(bag.get("source_diet_type") or "").strip()
+    raw_diet = str(bag.get("diet_type") or "").strip()
+    for candidate in (source_diet, raw_diet):
+        if not candidate:
+            continue
+        if "糖尿" in candidate or candidate.lower() in {"diabetes", "diabetic"}:
+            return "diabetes"
+        if "通所" in candidate or candidate.lower() == "daycare":
+            return "daycare"
+        if "職員" in candidate or candidate.lower() == "staff":
+            return "staff"
+        if "ゴマ" in candidate or "ごま" in candidate or candidate.lower() in {"sesame_allergy", "sesame"}:
+            return "sesame_allergy"
+        normalized = _normalize_diet_key(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _daily_label_category_suffix_for_bag(bag: dict) -> str:
+    diet_key = _daily_label_display_diet_key(bag)
+    if not diet_key or diet_key in {"regular", "regular_bag", "standard"}:
+        return ""
+    facility_id = str(bag.get("facility") or "").strip()
+    configured_diets = bag.get("daily_label_comparable_diet_types")
+    comparable_diets = (
+        {str(item).strip() for item in configured_diets if str(item).strip()}
+        if isinstance(configured_diets, list)
+        else DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID.get(facility_id, set())
+    )
+    if diet_key not in comparable_diets:
+        return ""
+    return {
+        "soft": "軟菜",
+        "mixer": "ミキサー",
+        "soft_mixer": "ミキサー",
+        "daycare": "通所",
+        "staff": "職員",
+        "diabetes": "糖尿",
+        "no_meat": "肉禁",
+        "no_fish": "魚禁",
+        "no_fried": "揚げ物禁",
+        "forbidden_other": "禁",
+        "sesame_allergy": "ごま禁",
+    }.get(diet_key, "")
+
+
+def _daily_label_comparable_diet_types_for_facility(facility_config: dict | None, facility_id: str | None) -> list[str]:
+    if isinstance(facility_config, dict):
+        configured = facility_config.get("daily_label_comparable_diet_types")
+        if isinstance(configured, list):
+            return [str(item).strip() for item in configured if str(item).strip()]
+    return sorted(DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID.get(str(facility_id or "").strip(), set()))
+
+
+def _apply_daily_label_facility_rules_to_bags(
+    bags: list[dict],
+    facility_config: dict | None,
+    facility_id: str | None,
+) -> list[dict]:
+    comparable_diets = _daily_label_comparable_diet_types_for_facility(facility_config, facility_id)
+    if not comparable_diets:
+        return bags
+    updated_bags: list[dict] = []
+    for bag in bags:
+        updated = dict(bag)
+        updated["daily_label_comparable_diet_types"] = comparable_diets
+        updated_bags.append(updated)
+    return updated_bags
+
+
+def _append_daily_label_category_suffix(category: str, suffix: str) -> str:
+    if not category or not suffix:
+        return category
+    if suffix in category:
+        return category
+    return f"{category}（{suffix}）"
+
+
 def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
     _daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(product_name)
-    category = str(default_category or bag.get("menu_category") or "").strip()
+    category = str(bag.get("menu_category") or default_category or "").strip()
     if category == "副菜":
         category = default_category or category
     if not category:
         category = default_category or ""
-    if diet_type == "soft" and category and "軟菜" not in category:
-        if category.startswith("主菜") or category.startswith("副菜"):
-            category = f"{category}（軟菜）"
-    if diet_type in {"mixer", "soft_mixer"} and category and "ミキサー" not in category:
-        if product_name == "豚肉と白菜のすき煮":
-            category = "主菜（ミキサー）"
-        elif category.startswith("主菜"):
-            category = f"{category}（ミキサー）"
-        elif category.startswith("副菜"):
-            category = f"{category}（ミキサー）"
-    if diet_type == "staff" and category and "職員" not in category:
-        if "添え" in category:
-            category = category.replace("添え", "添え（職員）ショクイン", 1)
-        elif category.startswith("主菜") or category.startswith("副菜"):
-            category = f"{category}（職員）ショクイン"
-    if diet_type == "daycare" and category and "通所" not in category:
-        if "添え" in category:
-            category = category.replace("添え", "添え（通所）ツウショ", 1)
-        elif category.startswith("主菜") or category.startswith("副菜"):
-            category = f"{category}（通所）ツウショ"
-    facility_id = str(bag.get("facility") or "").strip()
-    if diet_type == "diabetes" and category and "糖尿" not in category:
-        if facility_id in {"FAC00013", "FAC00016"} and category.startswith("主菜") and "添え" not in category:
-            category = "主菜　（糖尿）"
-        elif category.startswith("主菜") or category.startswith("副菜"):
-            category = f"{category}（糖尿）"
-    if facility_id == "FAC00005" and diet_type == "regular_bag" and category and "別袋" not in category:
-        if category.startswith("主菜"):
-            category = "主菜（軟菜）添え別袋" if "添え" in category else "主菜（軟菜）別袋"
-        elif category.startswith("副菜"):
-            category = f"{category}（軟菜）別袋"
-    elif diet_type == "regular_bag" and category and "別袋" not in category:
-        if category.startswith("主菜") or category.startswith("副菜"):
-            category = f"{category}（別袋）"
+    suffix = _daily_label_category_suffix_for_bag(bag)
+    if suffix and (category.startswith("主菜") or category.startswith("副菜")):
+        category = _append_daily_label_category_suffix(category, suffix)
     return category
 
 
-def _daily_label_display_product(product_name: str, diet_type: str, facility_id: object = None) -> str:
-    if str(facility_id or "").strip() == "FAC00005":
-        return product_name
+def _daily_label_display_product(product_name: str, diet_type: str) -> str:
     if diet_type not in {"mixer", "soft", "soft_mixer"}:
         return product_name
     replacements = {
-        "ごぼうと竹輪の煮物": "竹輪の煮物チクワニモノ",
-        "さつま芋の天ぷら": "さつまいもレモン煮ニ",
+        "ごぼうと竹輪の煮物": "竹輪の煮物",
+        "さつま芋の天ぷら": "さつまいもレモン煮",
     }
     return replacements.get(product_name, product_name)
 
@@ -676,50 +657,6 @@ def _daily_label_amount_cell(amount: float | None, unit: str | None) -> Any:
     if normalized_unit == "g":
         return amount
     return _format_amount(amount, unit)
-
-
-def _daily_label_portion_override(
-    facility_id: object,
-    daypart: object,
-    category: object,
-) -> tuple[float, str] | None:
-    facility_overrides = _DAILY_LABEL_FACILITY_PORTION_OVERRIDES.get(str(facility_id or "").strip())
-    if not facility_overrides:
-        return None
-    normalized_category = str(category or "").strip()
-    for marker in ("（", "　添え", " 添え", "添え"):
-        if marker in normalized_category:
-            normalized_category = normalized_category.split(marker, 1)[0]
-            if "添え" in str(category or ""):
-                normalized_category = "主菜　添え"
-            break
-    return facility_overrides.get((str(daypart or "").strip()[:1], normalized_category))
-
-
-def _daily_label_marker_quantity(
-    facility_id: object,
-    daypart: object,
-    diet_type: object,
-    area_id: object,
-    quantity: object,
-) -> float | int | None:
-    facility = str(facility_id or "").strip()
-    area = _normalize_area_id(str(area_id or "").strip())
-    diet = str(diet_type or "").strip()
-    try:
-        qty_value = float(quantity)
-    except Exception:
-        qty_value = None
-    if facility != "FAC00005" or area != "X" or qty_value not in (0.0, None):
-        return quantity
-    day = str(daypart or "").strip()[:1]
-    if diet == "soft":
-        return 0 if day == "朝" else 55
-    if diet == "regular_bag":
-        if day == "朝":
-            return 0
-        return 7 if day == "夕" else 4
-    return quantity
 
 
 def _resolve_label_fields(label_profile: dict) -> tuple[list[str], str]:
@@ -751,7 +688,7 @@ def _format_menu_unit(qty: float | int | None, unit_type: str | None) -> str | N
     else:
         qty_str = str(qty_value)
     normalized = _normalize_unit_type(unit_type)
-    suffix = normalized
+    suffix = "g" if normalized == "g" else ("個" if normalized == "個" else ("切" if normalized == "切" else normalized))
     return f"{qty_str}{suffix}"
 
 
@@ -992,8 +929,6 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
         if entry.get("category"):
             updated["menu_category"] = entry.get("category")
-        if entry.get("slot_index") is not None:
-            updated["slot_index"] = entry.get("slot_index")
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
     return enriched
@@ -1236,113 +1171,7 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
     return enriched
 
 
-def _build_nonwriting_draft_materialization_candidate(
-    order_id: str,
-    *,
-    facility_id: Any,
-    week_value: Any,
-    received_at: Any,
-) -> dict[str, Any] | None:
-    current_sheet_context = order_service.get_current_sheet_context(
-        order_id,
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
-    latest_draft = (
-        current_sheet_context.get("draft_record")
-        if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("draft_record"), dict)
-        else order_service.get_latest_sheet_draft(
-            order_id,
-            backfill_from_revision=False,
-            upgrade_generic_from_sheet=False,
-        )
-    )
-    draft_sheet = (
-        latest_draft.get("draft_sheet_json")
-        if isinstance(latest_draft, dict) and isinstance(latest_draft.get("draft_sheet_json"), dict)
-        else {}
-    )
-    source = str(draft_sheet.get("source") or "").strip()
-    weekly_menu_shell = order_service._source_uses_weekly_menu_shell(source)  # noqa: SLF001
-    rows_payload = draft_sheet.get("rows")
-    fields = draft_sheet.get("fields")
-    quantity_indexes = [
-        idx
-        for idx, field in enumerate(fields if isinstance(fields, list) else [])
-        if str(field or "").strip().startswith("qty.")
-    ]
-    blank_weekly_menu_shell = bool(
-        weekly_menu_shell
-        and quantity_indexes
-        and isinstance(rows_payload, list)
-        and not any(
-            str(row[idx] if idx < len(row) else "").strip()
-            for row in rows_payload
-            if isinstance(row, list)
-            for idx in quantity_indexes
-        )
-    )
-    candidate: dict[str, Any] | None = None
-    if not blank_weekly_menu_shell:
-        candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
-            order_id,
-            draft_record=latest_draft,
-            facility_id=str(facility_id or "").strip() or None,
-            existing_week_code=str(week_value or "").strip() or None,
-            received_at=received_at or datetime.utcnow(),
-        )
-        candidate_lines = candidate.get("lines") if isinstance(candidate, dict) else None
-        if isinstance(candidate_lines, list) and candidate_lines:
-            return candidate
-
-    if not weekly_menu_shell:
-        return candidate
-
-    evidence_run_id = str((latest_draft or {}).get("base_evidence_run_id") or "").strip()
-    evidence_run = order_service.get_ocr_evidence_run(evidence_run_id) if evidence_run_id else None
-    bootstrap_sheet, bootstrap_error = order_service._build_canonical_bootstrap_sheet(  # noqa: SLF001
-        order_id,
-        evidence_run_override=evidence_run if isinstance(evidence_run, dict) else None,
-        include_menu_diagnostics=False,
-        augment_candidate_resolution=False,
-    )
-    if not isinstance(bootstrap_sheet, dict):
-        return candidate or {
-            "source": "draft_sheet",
-            "draft_id": (latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
-            "error": bootstrap_error or "canonical_bootstrap_unavailable",
-            "line_count": 0,
-            "lines": [],
-        }
-    bootstrap_draft = order_service._build_transient_draft_record(order_id, bootstrap_sheet)  # noqa: SLF001
-    bootstrap_candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
-        order_id,
-        draft_record=bootstrap_draft,
-        facility_id=str(facility_id or "").strip() or None,
-        existing_week_code=str(week_value or "").strip() or None,
-        received_at=received_at or datetime.utcnow(),
-    )
-    bootstrap_lines = bootstrap_candidate.get("lines") if isinstance(bootstrap_candidate, dict) else None
-    if isinstance(bootstrap_lines, list) and bootstrap_lines:
-        logger.info(
-            "Daily output materialized blank weekly-menu draft from canonical bootstrap sheet",
-            order_id=order_id,
-            facility_id=facility_id,
-            draft_id=(latest_draft or {}).get("id") if isinstance(latest_draft, dict) else None,
-            evidence_run_id=evidence_run_id or None,
-            line_count=len(bootstrap_lines),
-        )
-        return bootstrap_candidate
-    return bootstrap_candidate or candidate
-
-
-def build_order_lines_for_outputs(
-    order: dict,
-    *,
-    include_expanded_copy: bool = True,
-    allow_stale_draft_lines: bool = False,
-) -> list[dict]:
+def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = True) -> list[dict]:
     facility_id = order.get("facility")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
@@ -1353,64 +1182,6 @@ def build_order_lines_for_outputs(
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
-    order_id = order.get("id")
-    workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
-    if order_id and not workflow_state:
-        resolved_workflow_state = order_service.get_order_workflow_state(str(order_id), refresh=False)
-        workflow_state = resolved_workflow_state if isinstance(resolved_workflow_state, dict) else {}
-    workflow_warnings = set(str(item).strip() for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or []) if str(item).strip())
-    workflow_blockers = set(str(item).strip() for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or []) if str(item).strip())
-    draft_newer_than_lines = bool(
-        workflow_state.get("ocr_draft_newer_than_lines")
-        or workflow_state.get("draft_newer_than_lines")
-        or "draft_newer_than_lines" in workflow_warnings
-        or "draft_newer_than_lines" in workflow_blockers
-    )
-    materialization_candidate_cache: dict[str, Any] | None = None
-
-    def _materialization_candidate() -> dict[str, Any] | None:
-        nonlocal materialization_candidate_cache
-        if materialization_candidate_cache is None and order_id:
-            materialization_candidate_cache = _build_nonwriting_draft_materialization_candidate(
-                str(order_id),
-                facility_id=facility_id,
-                week_value=week_value,
-                received_at=order.get("received_at"),
-            )
-        return materialization_candidate_cache
-
-    if order_id and draft_newer_than_lines:
-        if allow_stale_draft_lines and isinstance(raw_lines, list) and raw_lines:
-            logger.warning(
-                "Daily output page read used existing order lines without draft materialization",
-                order_id=order_id,
-                facility_id=facility_id,
-                workflow_state=workflow_state.get("state"),
-            )
-        else:
-            materialization_candidate = _materialization_candidate()
-            candidate_lines = (
-                materialization_candidate.get("lines")
-                if isinstance(materialization_candidate, dict)
-                and not materialization_candidate.get("error")
-                else None
-            )
-            if isinstance(candidate_lines, list) and candidate_lines:
-                raw_lines = candidate_lines
-            else:
-                error = (
-                    materialization_candidate.get("error")
-                    if isinstance(materialization_candidate, dict)
-                    else "draft_materialization_unavailable"
-                )
-                logger.warning(
-                    "Daily output blocked stale order lines because draft materialization was unavailable",
-                    order_id=order_id,
-                    facility_id=facility_id,
-                    workflow_state=workflow_state.get("state"),
-                    materialization_error=error,
-                )
-                raise ValueError(f"draft_newer_than_lines requires materialized draft lines: {error}")
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False
@@ -1424,8 +1195,9 @@ def build_order_lines_for_outputs(
             )
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
+        order_id = order.get("id")
         if order_id:
-            materialization_candidate = _materialization_candidate()
+            materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
             candidate_lines = (
                 materialization_candidate.get("lines")
                 if isinstance(materialization_candidate, dict)
@@ -1446,6 +1218,7 @@ def build_order_lines_for_outputs(
         order_lines = _apply_menu_snapshot(raw_lines, snapshot_items)
     else:
         order_lines = raw_lines
+    order_lines = _apply_output_diet_type_overrides(order_lines, facility_config)
     # Current monthly/menu-master settings must win over stale confirmed snapshots.
     order_lines = _apply_menu_overrides(order_lines, menu_items)
     order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
@@ -1630,27 +1403,6 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
     for line in order.get("lines", []):
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
-        if (
-            qty is None
-            and (
-                (
-                    str(order.get("facility") or "").strip() == "FAC00005"
-                    and _normalize_area_id(str(line.get("area_id") or "").strip()) == "X"
-                    and str(line.get("diet_type") or "").strip() in {"soft", "regular_bag"}
-                )
-                or str(order.get("facility") or "").strip() in {"FAC00004", "FAC00014"}
-            )
-        ):
-            raw_qty = line.get("quantity")
-            if raw_qty is None:
-                raw_qty = line.get("quantity_corrected")
-            if raw_qty is None:
-                raw_qty = line.get("quantity_original")
-            try:
-                if float(raw_qty or 0) == 0.0:
-                    qty = 0.0
-            except Exception:
-                qty = None
         if qty is None:
             continue
         is_condiment = line.get("bag_type") == "condiment"
@@ -1821,7 +1573,8 @@ def build_bag_rows_for_outputs(
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
     bag_types = _resolve_bag_types(resolved_facility_config)
-    return _assign_bag_type_for_bags(bags, bag_types)
+    bags = _assign_bag_type_for_bags(bags, bag_types)
+    return _apply_daily_label_facility_rules_to_bags(bags, resolved_facility_config, facility_id)
 
 
 def build_bag_payload_for_outputs(
@@ -1870,18 +1623,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
         raw_per_qty if raw_per_qty is not None else default_qty,
         raw_unit or default_unit,
     )
-    servings = _daily_label_marker_quantity(
-        bag.get("facility"),
-        bag.get("daypart"),
-        bag.get("diet_type"),
-        bag.get("area_id"),
-        bag.get("quantity"),
-    )
-    zero_quantity = False
-    try:
-        zero_quantity = servings is not None and float(servings) == 0.0
-    except Exception:
-        zero_quantity = False
+    servings = bag.get("quantity")
     total_qty = None
     if per_qty is not None and servings is not None:
         try:
@@ -1889,59 +1631,36 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
         except Exception:
             total_qty = None
     diet_type = str(bag.get("diet_type") or "").strip()
-    display_product_name = _daily_label_display_product(str(product_name), diet_type, bag.get("facility"))
+    display_product_name = _daily_label_display_product(str(product_name), diet_type)
     menu_value = _label_category_for_bag(bag, str(product_name), diet_type)
-    portion_override = _daily_label_portion_override(bag.get("facility"), bag.get("daypart"), menu_value)
-    if portion_override is not None:
-        per_qty, unit = portion_override
-        total_qty = None
-        if servings is not None:
-            try:
-                total_qty = float(per_qty) * float(servings)
-            except Exception:
-                total_qty = None
     # 重複表示を避けるため、メニュー列は分類（主菜/副菜など）を優先して扱う。
     if menu_value and product_name and str(menu_value).strip() == str(product_name).strip():
         menu_value = ""
     total_amount = _daily_label_amount_cell(total_qty, unit)
     if not total_amount and servings not in (None, ""):
         total_amount = _format_number(servings)
-    temp_value = _normalize_temp_label(bag.get("menu_temp_type") or default_temp)
-    area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
+    area_suffix = _label_area_suffix(bag.get("area_id"))
     time_value = str(bag.get("daypart") or default_daypart or "").strip()
     if area_suffix:
-        separator = "" if str(bag.get("facility") or "").strip() in {"FAC00008", "FAC00009", "FAC00010"} else "　"
-        time_value = f"{time_value}{separator}{area_suffix}".strip()
-    time_value = _daily_label_time_reading(time_value, bag.get("facility"), menu_value)
+        time_value = f"{time_value}　{area_suffix}".strip()
     return {
         "呼び出し番号": "",
-        "発行枚数": None if zero_quantity else 1,
+        "発行枚数": 1,
         "賞味期限": _resolve_label_expiry_date(bag.get("date"), label_profile),
         "時間": time_value,
         "メニュー": menu_value,
-        "温・冷": temp_value,
+        "温・冷": _normalize_temp_label(bag.get("menu_temp_type") or default_temp),
         "商品名１": display_product_name,
-        "商品名２": 0 if temp_value == "温菜" else "",
+        "商品名２": "",
         "内容量": total_amount,
         "内容詳細": _daily_label_amount_cell(per_qty, unit),
-        "": None if zero_quantity else servings,
-        "_facility": bag.get("facility"),
-        "_diet_type": diet_type,
+        "": servings,
     }
-
-
-_DAILY_LABEL_NORMAL_DIETS = {"", "regular", "soft", "mixer", "soft_mixer", "diabetes", "staff", "daycare", "regular_bag"}
 
 
 def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     if not rows:
         return []
-    rows = [
-        row
-        for row in rows
-        if str(row.get("_diet_type") or "").strip() in _DAILY_LABEL_NORMAL_DIETS
-        and not _daily_label_should_drop_zero_quantity(row)
-    ]
     rows = _split_daily_label_serving_rows(rows)
     group_fields = [field for field in fields if field not in {"呼び出し番号", "発行枚数"}]
     grouped: dict[tuple, dict] = {}
@@ -1954,83 +1673,18 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         counts[key] += 1
     merged = []
     for key, row in grouped.items():
-        if str(row.get("_facility") or "").strip() == "FAC00005" and row.get("") in (None, ""):
-            row["発行枚数"] = None
-        else:
-            row["発行枚数"] = counts.get(key, 1)
+        row["発行枚数"] = counts.get(key, 1)
         merged.append(row)
     daypart_order = {"朝": 0, "昼": 1, "夕": 2}
     category_order = {
-        "副菜①": 0,
-        "副菜①（軟菜）": 1,
-        "副菜①（ミキサー）": 2,
-        "副菜①（通所）": 3,
-        "副菜①（職員）": 3,
-        "副菜①（糖尿）": 3,
-        "副菜①（別袋）": 3,
-        "副菜②": 3,
-        "副菜②（軟菜）": 4,
-        "副菜②（ミキサー）": 5,
-        "副菜②（通所）": 6,
-        "副菜②（職員）": 6,
-        "副菜②（糖尿）": 6,
-        "副菜②（別袋）": 6,
         "主菜": 0,
-        "主菜（軟菜）": 1,
-        "主菜（ミキサー）": 2,
-        "主菜（通所）": 3,
-        "主菜（職員）": 3,
-        "主菜（糖尿）": 3,
-        "主菜（別袋）": 3,
-        "主菜　添え": 3,
-        "主菜 添え": 3,
-        "主菜（軟菜）添え": 4,
-        "主菜（ミキサー）添え": 5,
-        "主菜　添え（通所）": 6,
-        "主菜　添え（職員）": 6,
-        "主菜　添え（糖尿）": 6,
-        "主菜　添え（別袋）": 6,
-        "主菜添え（ミキサー）": 5,
+        "主菜（ミキサー）": 1,
+        "副菜①": 2,
+        "副菜①（ミキサー）": 3,
+        "副菜②": 4,
+        "副菜②（ミキサー）": 5,
         "ソース": 6,
     }
-
-    def menu_row_order(row: dict) -> int:
-        product = str(row.get("商品名１") or "")
-        category = str(row.get("メニュー") or "")
-        if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"} or product.startswith("竹輪の煮物"):
-            return 2
-        if product == "いんげんの味噌和え":
-            return 3
-        if product == "豚肉と白菜のすき煮":
-            return 4
-        if "添え" in category and str(row.get("時間") or "").startswith("昼"):
-            return 5
-        if product in {"さつま芋の天ぷら", "さつまいもレモン煮"} or product.startswith("さつまいもレモン煮"):
-            return 6
-        if product == "ﾌﾞﾛｯｺﾘｰのちりめん和え":
-            return 7
-        if product == "煮込みハンバーグ":
-            return 8
-        if "添え" in category and str(row.get("時間") or "").startswith("夕"):
-            return 9
-        if product == "ジャーマンポテト":
-            return 10
-        if product == "ほうれん草の和え物":
-            return 11
-        return 99
-
-    def category_sort_key(value: Any) -> str:
-        text = str(value or "")
-        for suffix in ("ショクイン", "ツウショ", "トウニョウ"):
-            text = text.replace(suffix, "")
-        return text
-
-    def area_order(time_text: str) -> int:
-        if "花" in time_text or "２階" in time_text:
-            return 0
-        if "月" in time_text or "３階" in time_text:
-            return 1
-        return 0
 
     def sort_key(row: dict) -> tuple:
         time_text = str(row.get("時間") or "")
@@ -2042,117 +1696,30 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         return (
             row.get("賞味期限", ""),
             daypart_order.get(daypart, 99),
-            menu_row_order(row),
-            category_order.get(category_sort_key(row.get("メニュー")), 99),
-            area_order(time_text),
             time_text,
+            category_order.get(str(row.get("メニュー") or ""), 99),
             row.get("商品名１", ""),
             serving_sort,
         )
 
-    merged = _append_daily_label_garnish_rows(merged)
     merged.sort(
         key=sort_key
     )
     return merged
 
 
-def _daily_label_should_drop_zero_quantity(row: dict) -> bool:
-    facility = str(row.get("_facility") or "").strip()
-    if facility in {"FAC00004", "FAC00005", "FAC00006", "FAC00014"}:
-        return False
-    try:
-        return float(row.get("") or 0) == 0.0
-    except Exception:
-        return False
-
-
-def _append_daily_label_garnish_rows(rows: list[dict]) -> list[dict]:
-    result = list(rows)
-    existing = {
-        (
-            row.get("賞味期限"),
-            row.get("時間"),
-            row.get("メニュー"),
-            row.get("商品名１"),
-            row.get(""),
-        )
-        for row in result
-    }
-    for row in rows:
-        facility = str(row.get("_facility") or "").strip()
-        product = str(row.get("商品名１") or "")
-        if product not in {"豚肉と白菜のすき煮", "煮込みハンバーグ"}:
-            continue
-        category = str(row.get("メニュー") or "")
-        if not category.startswith("主菜"):
-            continue
-        time_text = str(row.get("時間") or "")
-        if time_text.startswith("昼"):
-            garnish_category = "主菜　添え"
-        elif time_text.startswith("夕"):
-            garnish_category = "主菜　添え"
-        else:
-            continue
-        if "別袋" in category:
-            garnish_category = "主菜（軟菜）添え別袋"
-        elif "軟菜" in category:
-            garnish_category = "主菜（軟菜）添え"
-        elif "ミキサー" in category:
-            garnish_category = "主菜（ミキサー）添え"
-        elif "通所" in category:
-            garnish_category = "主菜　添え（通所）"
-        elif "職員" in category:
-            garnish_category = "主菜　添え（職員）"
-        keep_regular_servings = (
-            facility in {"FAC00008", "FAC00009", "FAC00010"}
-            or (facility == "FAC00003" and time_text.startswith("夕"))
-        )
-        servings = row.get("") if (
-            any(marker in category for marker in ("軟菜", "ミキサー", "通所", "職員", "別袋"))
-            or keep_regular_servings
-        ) else None
-        key_servings = servings
-        display_servings = None if facility == "FAC00005" else servings
-        key = (row.get("賞味期限"), time_text, garnish_category, "", key_servings)
-        if key in existing:
-            continue
-        garnish = dict(row)
-        garnish["発行枚数"] = None
-        garnish["メニュー"] = garnish_category
-        garnish["商品名１"] = ""
-        garnish["内容量"] = ""
-        garnish["内容詳細"] = 40 if time_text.startswith("昼") else 50 if time_text.startswith("夕") else garnish.get("内容詳細")
-        garnish[""] = display_servings
-        result.append(garnish)
-        existing.add(key)
-    return result
-
-
 def _daily_label_max_servings(row: dict) -> int | None:
-    facility = str(row.get("_facility") or "").strip()
     product = str(row.get("商品名１") or "")
     category = str(row.get("メニュー") or "")
-    if facility == "FAC00005":
-        if "別袋" in category:
-            return None
-        if category.startswith("主菜"):
-            return 10
-        if category.startswith("副菜"):
-            return 35
-    if facility in {"FAC00013", "FAC00016"} and category.startswith("主菜") and "添え" not in category:
-        return 10
     if "ミキサー" in category:
         return None
-    if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"} or product.startswith("竹輪の煮物"):
+    if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"}:
         return 20
-    if product.startswith("豚肉と白菜のすき煮"):
+    if product == "豚肉と白菜のすき煮":
         return 15
-    if product.startswith("いんげんの味噌和え"):
-        return 35
-    if product.startswith("さつま芋の天ぷら"):
+    if product == "さつま芋の天ぷら":
         return 10
-    if product.startswith("煮込みハンバーグ"):
+    if product == "煮込みハンバーグ":
         return 10
     return None
 
@@ -2282,6 +1849,475 @@ def _normalize_menu_key(value: Any) -> str:
     return _normalize_ocr_text(value)
 
 
+def _normalize_ocr_daypart(value: Any) -> str:
+    text = _normalize_ocr_text(value)
+    if not text:
+        return ""
+    if "朝" in text or "明" in text:
+        return "朝"
+    if "昼" in text or "星" in text or "a" in text or "中" in text:
+        return "昼"
+    if "夕" in text or "タ" in text or "夜" in text:
+        return "夕"
+    return text
+
+
+def _normalize_ocr_category(value: Any) -> str:
+    text = _normalize_ocr_text(value)
+    if not text:
+        return ""
+    if "主" in text:
+        if "A" in text or "Ａ" in text:
+            return "主Ａ"
+        if "B" in text or "Ｂ" in text:
+            return "主Ｂ"
+        return "主"
+    if "副" in text:
+        if "2" in text or "②" in text:
+            return "副②"
+        return "副①"
+    if text.isdigit():
+        if "2" in text:
+            return "副②"
+        if "1" in text:
+            return "副①"
+    return ""
+
+
+def _parse_ocr_date(value: str, year_hint: int | None, fallback: dt_date | None) -> dt_date | None:
+    text = _normalize_ocr_text(value)
+    if not text:
+        return fallback
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if match:
+        try:
+            return dt_date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return fallback
+    match = re.search(r"(\d{1,2})[月/](\d{1,2})", text)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        year = year_hint or (fallback.year if fallback else None)
+        if not year:
+            return fallback
+        try:
+            return dt_date(year, month, day)
+        except ValueError:
+            return fallback
+    if text.isdigit():
+        try:
+            serial = int(text)
+        except ValueError:
+            return fallback
+        if serial > 10000:
+            base = dt_date(1899, 12, 30)
+            return base + timedelta(days=serial)
+    return fallback
+
+
+def _parse_ocr_quantity(value: Any) -> float | None:
+    text = _normalize_ocr_text(value)
+    if not text:
+        return None
+    match = re.search(r"[-+]?[0-9]*\.?[0-9]+", text)
+    if not match:
+        return None
+    try:
+        return float(match.group())
+    except ValueError:
+        return None
+
+
+def _parse_ocr_table_rows(table_raw: str, year_hint: int | None) -> list[dict]:
+    rows: list[dict] = []
+    current_date: dt_date | None = None
+    current_daypart = ""
+    in_table = False
+    header_seen = False
+    for line in table_raw.splitlines():
+        raw_line = line.lstrip()
+        if not in_table and raw_line.startswith("|") and "日付" in raw_line and "献立" in raw_line:
+            in_table = True
+            header_seen = True
+            continue
+        if not in_table:
+            continue
+        if raw_line.startswith("|-"):
+            continue
+        if not raw_line.startswith("|"):
+            if header_seen:
+                break
+            continue
+        cells = [cell.strip() for cell in raw_line.split("|")[1:-1]]
+        if len(cells) < 4:
+            continue
+        date_cell = _normalize_ocr_text(cells[0])
+        if date_cell:
+            parsed_date = _parse_ocr_date(date_cell, year_hint, current_date)
+            if parsed_date:
+                current_date = parsed_date
+        daypart_cell = _normalize_ocr_text(cells[1])
+        if daypart_cell:
+            current_daypart = _normalize_ocr_daypart(daypart_cell)
+        category_cell = _normalize_ocr_category(cells[2])
+        menu_name = _normalize_ocr_text(cells[3])
+        if not menu_name:
+            continue
+        qty_values = [None] * 6
+        note_value = _normalize_ocr_text(cells[10]) if len(cells) >= 11 else ""
+        if len(cells) >= 10:
+            qty_cells = cells[4:10]
+            if len(cells) >= 11 and not cells[4] and sum(1 for c in qty_cells if _normalize_ocr_text(c)) == 5:
+                qty_cells = cells[5:10] + [None]
+            qty_values = [
+                _parse_ocr_quantity(qty_cells[0]),
+                _parse_ocr_quantity(qty_cells[1]),
+                _parse_ocr_quantity(qty_cells[2]),
+                _parse_ocr_quantity(qty_cells[3]),
+                _parse_ocr_quantity(qty_cells[4]),
+                _parse_ocr_quantity(qty_cells[5]),
+            ]
+        rows.append(
+            {
+                "date": current_date,
+                "daypart": current_daypart,
+                "category": category_cell,
+                "menu_name": menu_name,
+                "qty_regular_2f": qty_values[0],
+                "qty_regular_3f": qty_values[1],
+                "qty_soft_2f": qty_values[2],
+                "qty_soft_3f": qty_values[3],
+                "qty_mixer_2f": qty_values[4],
+                "qty_mixer_3f": qty_values[5],
+                "note": note_value,
+            }
+        )
+    return rows
+
+
+def _resolve_ocr_year_hint(order: dict) -> int | None:
+    year_hint = None
+    for line in order.get("lines", []):
+        date_val = _ensure_date(line.get("date"))
+        if date_val:
+            year_hint = date_val.year
+            break
+    if not year_hint:
+        week_value = order.get("week") or order.get("week_code")
+        week_text = str(week_value) if week_value is not None else ""
+        match = re.search(r"(\d{4})", week_text)
+        if match:
+            year_hint = int(match.group(1))
+    if not year_hint:
+        received_at = order.get("received_at")
+        if isinstance(received_at, dt_date):
+            year_hint = received_at.year
+        elif isinstance(received_at, str):
+            match = re.search(r"(\d{4})", received_at)
+            if match:
+                year_hint = int(match.group(1))
+    return year_hint
+
+
+def _load_order_ocr_payload(order_id: str) -> dict[str, Any] | None:
+    parsed, _ = order_service.get_ocr_output(order_id)
+    if isinstance(parsed, dict):
+        return parsed
+    raw_text, _ = order_service.get_ocr_raw_text(order_id)
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    raw_text = raw_text.strip()
+    if raw_text.startswith("{"):
+        try:
+            parsed_raw = json.loads(raw_text)
+        except Exception:  # noqa: BLE001
+            parsed_raw = None
+        if isinstance(parsed_raw, dict):
+            return parsed_raw
+    return {"table_raw": raw_text}
+
+
+def _entry_quantity_key(diet: str | None, area: str | None) -> str | None:
+    diet_key = _normalize_diet_key(diet)
+    area_key = str(area or "").strip().lower()
+    if not diet_key or not area_key:
+        return None
+    return f"{diet_key}_{area_key}"
+
+
+def _legacy_entry_quantity_field(diet: str | None, area: str | None) -> str | None:
+    diet_key = _normalize_diet_key(diet)
+    area_key = str(area or "").strip().upper()
+    if diet_key not in {"regular", "soft", "mixer"}:
+        return None
+    if area_key not in {"2F", "3F"}:
+        return None
+    return f"qty_{diet_key}_{area_key.lower()}"
+
+
+def _sum_quantity_map(quantity_map: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    total = 0.0
+    matched = False
+    for key in keys:
+        qty = _parse_ocr_quantity(quantity_map.get(key))
+        if qty is None:
+            continue
+        total += qty
+        matched = True
+    if not matched:
+        return None
+    return total if total > 0 else None
+
+
+def _generic_quantity_total(quantity_map: dict[str, Any], diet_key: str | None) -> float | None:
+    normalized_diet = _normalize_diet_key(diet_key)
+    if normalized_diet == "regular":
+        override_qty = (
+            _parse_ocr_quantity(quantity_map.get("change_2_x"))
+            if "change_2_x" in quantity_map
+            else None
+        )
+        if override_qty is None and "change_1_x" in quantity_map:
+            override_qty = _parse_ocr_quantity(quantity_map.get("change_1_x"))
+        if override_qty is not None:
+            return override_qty
+        return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x", "staff_x", "daycare_x"))
+    if normalized_diet == "regular_bag":
+        return _sum_quantity_map(quantity_map, ("regular_bag_x",))
+    if normalized_diet == "no_fried":
+        return _sum_quantity_map(quantity_map, ("no_fried_x",))
+    if normalized_diet == "soft":
+        return _sum_quantity_map(quantity_map, ("soft_x",))
+    if normalized_diet == "mixer":
+        return _sum_quantity_map(quantity_map, ("mixer_x",))
+    if normalized_diet in {"禁食", "forbidden"}:
+        return _sum_quantity_map(quantity_map, ("forbidden_x", "no_meat_x", "no_fish_x", "forbidden_other_x"))
+    return None
+
+
+def _resolve_payload_template(payload: dict[str, Any], template: dict[str, Any] | None) -> dict[str, Any] | None:
+    resolved = template if isinstance(template, dict) else None
+    if not isinstance(payload, dict):
+        return resolved
+    template_id = payload.get("template_id")
+    if not isinstance(template_id, str):
+        classification = payload.get("classification")
+        if isinstance(classification, dict):
+            template_id = classification.get("matched_template_id")
+    if not isinstance(template_id, str):
+        return resolved
+    template_id = template_id.strip()
+    if not template_id:
+        return resolved
+    if isinstance(resolved, dict) and resolved.get("template_id") == template_id:
+        return resolved
+    registry = config_service.load_fax_template_registry()
+    matched = registry.get(template_id)
+    if isinstance(matched, dict) and matched:
+        return matched
+    return resolved
+
+
+def _extract_ocr_entries_from_structured_payload(
+    payload: dict[str, Any],
+    template: dict[str, Any] | None,
+    year_hint: int | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    template = _resolve_payload_template(payload, template)
+    if not isinstance(template, dict):
+        return []
+    rows = order_service._extract_sheet_rows_from_payload(payload, template)
+    if not rows:
+        return []
+    cell_issues = order_service._extract_payload_cell_issues(payload, template)
+    issues_by_row: dict[int, list[dict[str, Any]]] = {}
+    for issue in cell_issues:
+        if not isinstance(issue, dict):
+            continue
+        row_index = issue.get("source_row_index")
+        if not isinstance(row_index, int) or row_index < 0:
+            continue
+        issues_by_row.setdefault(row_index, []).append(dict(issue))
+    fields, field_index = order_service._build_sheet_fields_and_indexes(template)
+    if not fields:
+        return []
+    date_idx = field_index.get("date_mmdd")
+    if date_idx is None:
+        date_idx = field_index.get("date")
+    daypart_idx = field_index.get("daypart")
+    menu_idx = field_index.get("menu")
+    if menu_idx is None:
+        menu_idx = field_index.get("menu_name")
+    note_idx = field_index.get("remarks")
+    if note_idx is None:
+        note_idx = field_index.get("note")
+
+    quantity_fields: list[tuple[int, str, str]] = []
+    for idx, field in enumerate(fields):
+        diet, area = order_service._quantity_meta_from_field(field)
+        if not diet or not area:
+            continue
+        quantity_fields.append((idx, diet, area))
+
+    current_date: dt_date | None = None
+    current_daypart = ""
+    entries: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, list):
+            continue
+        if date_idx is not None and date_idx < len(row):
+            parsed_date = _parse_ocr_date(str(row[date_idx] or ""), year_hint, current_date)
+            if parsed_date:
+                current_date = parsed_date
+        if daypart_idx is not None and daypart_idx < len(row):
+            daypart_value = _normalize_ocr_daypart(row[daypart_idx])
+            if daypart_value:
+                current_daypart = daypart_value
+        menu_name = ""
+        if menu_idx is not None and menu_idx < len(row):
+            menu_name = _normalize_ocr_text(row[menu_idx])
+        if not menu_name:
+            continue
+        note = ""
+        if note_idx is not None and note_idx < len(row):
+            note = _normalize_ocr_text(row[note_idx])
+        quantity_map: dict[str, float] = {}
+        payload_entry: dict[str, Any] = {
+            "date": current_date,
+            "daypart": current_daypart,
+            "category": "",
+            "menu_name": menu_name,
+            "note": note,
+            "index": idx,
+            "quantity_map": quantity_map,
+            "source": "structured_rows",
+        }
+        if idx in issues_by_row:
+            payload_entry["ocr_issues"] = issues_by_row[idx]
+            payload_entry["needs_review"] = True
+        for col_idx, diet, area in quantity_fields:
+            if col_idx >= len(row):
+                continue
+            qty = _parse_ocr_quantity(row[col_idx])
+            if qty is None:
+                continue
+            key = _entry_quantity_key(diet, area)
+            if key:
+                quantity_map[key] = qty
+            legacy_field = _legacy_entry_quantity_field(diet, area)
+            if legacy_field:
+                payload_entry[legacy_field] = qty
+        entries.append(payload_entry)
+    return entries
+
+
+def _lookup_ocr_entry_quantity(entry: dict[str, Any], diet_key: str | None, area_key: str | None) -> float | None:
+    if not isinstance(entry, dict):
+        return None
+    quantity_map = entry.get("quantity_map")
+    normalized_diet = _normalize_diet_key(diet_key)
+    normalized_area = str(area_key or "").strip().upper()
+    if isinstance(quantity_map, dict):
+        key = _entry_quantity_key(normalized_diet, area_key)
+        if key and key in quantity_map:
+            exact_qty = _parse_ocr_quantity(quantity_map.get(key))
+            if normalized_area not in {"", "X"} or normalized_diet not in {"regular", "禁食", "forbidden"}:
+                return exact_qty
+        if normalized_area in {"", "X"}:
+            generic_total = _generic_quantity_total(quantity_map, normalized_diet)
+            if generic_total is not None:
+                return generic_total
+    if normalized_diet == "regular":
+        if normalized_area == "2F":
+            return _parse_ocr_quantity(entry.get("qty_regular_2f"))
+        if normalized_area == "3F":
+            return _parse_ocr_quantity(entry.get("qty_regular_3f"))
+        qty_2f = _parse_ocr_quantity(entry.get("qty_regular_2f")) or 0.0
+        qty_3f = _parse_ocr_quantity(entry.get("qty_regular_3f")) or 0.0
+        total = qty_2f + qty_3f
+        return total if total > 0 else None
+    if normalized_diet == "soft":
+        if normalized_area == "2F":
+            return _parse_ocr_quantity(entry.get("qty_soft_2f"))
+        if normalized_area == "3F":
+            return _parse_ocr_quantity(entry.get("qty_soft_3f"))
+        qty_2f = _parse_ocr_quantity(entry.get("qty_soft_2f")) or 0.0
+        qty_3f = _parse_ocr_quantity(entry.get("qty_soft_3f")) or 0.0
+        total = qty_2f + qty_3f
+        return total if total > 0 else None
+    if normalized_diet == "mixer":
+        if normalized_area == "2F":
+            return _parse_ocr_quantity(entry.get("qty_mixer_2f"))
+        if normalized_area == "3F":
+            return _parse_ocr_quantity(entry.get("qty_mixer_3f"))
+        qty_2f = _parse_ocr_quantity(entry.get("qty_mixer_2f")) or 0.0
+        qty_3f = _parse_ocr_quantity(entry.get("qty_mixer_3f")) or 0.0
+        total = qty_2f + qty_3f
+        return total if total > 0 else None
+    return None
+
+
+def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None) -> dict[str, object]:
+    order_id = order.get("id")
+    if not order_id:
+        return {}
+    parsed = _load_order_ocr_payload(str(order_id))
+    if not isinstance(parsed, dict):
+        return {}
+    year_hint = _resolve_ocr_year_hint(order)
+    template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
+    entries = _extract_ocr_entries_from_structured_payload(parsed, template, year_hint)
+    if not entries:
+        table_raw = parsed.get("table_raw")
+        if not isinstance(table_raw, str) or not table_raw.strip():
+            return {}
+        entries = _parse_ocr_table_rows(table_raw, year_hint)
+    meta: dict[tuple[dt_date, str], dict] = {}
+    normalized_entries: list[dict] = []
+    for idx, entry in enumerate(entries):
+        date_val = entry.get("date")
+        menu_name = _normalize_menu_key(entry.get("menu_name"))
+        if not date_val or not menu_name:
+            continue
+        key = (date_val, menu_name)
+        payload = {
+            "date": date_val,
+            "menu_name": entry.get("menu_name"),
+            "daypart": entry.get("daypart"),
+            "category": entry.get("category"),
+            "index": idx,
+            "qty_regular_2f": entry.get("qty_regular_2f"),
+            "qty_regular_3f": entry.get("qty_regular_3f"),
+            "qty_soft_2f": entry.get("qty_soft_2f"),
+            "qty_soft_3f": entry.get("qty_soft_3f"),
+            "qty_mixer_2f": entry.get("qty_mixer_2f"),
+            "qty_mixer_3f": entry.get("qty_mixer_3f"),
+            "quantity_map": dict(entry.get("quantity_map") or {}),
+            "note": entry.get("note"),
+            "source": entry.get("source") or "table_raw",
+            "ocr_issues": list(entry.get("ocr_issues") or []),
+            "needs_review": bool(entry.get("needs_review")),
+        }
+        normalized_entries.append(payload)
+        if key in meta:
+            continue
+        meta[key] = payload
+    return {
+        "by_menu": meta,
+        "entries": normalized_entries,
+        "issues": [
+            issue
+            for entry in normalized_entries
+            for issue in (entry.get("ocr_issues") or [])
+            if isinstance(issue, dict)
+        ],
+        "review_required_count": sum(1 for entry in normalized_entries if entry.get("needs_review")),
+    }
+
+
 def _resolve_delivery_cell(row: dict, column: dict) -> Any:
     source = column.get("source") or column.get("name")
     value = None
@@ -2302,6 +2338,8 @@ def _is_blank_cell_value(value: Any) -> bool:
 
 def _format_reference_quantity_value(value: Any, original_value: Any) -> Any:
     if _is_blank_cell_value(value):
+        if original_value == 0:
+            return 0
         return value
     if not isinstance(value, (int, float)):
         return value
@@ -2610,12 +2648,23 @@ def _write_delivery_note(
     facility_name: str | None = None,
 ) -> None:
     if not template_uri:
-        raise ValueError("delivery_template_uri_required")
+        if not rows:
+            df = pd.DataFrame(columns=[col["name"] for col in columns])
+        else:
+            df = pd.DataFrame(rows)
+        df.to_excel(path, index=False)
+        return
 
     try:
         template_bytes = load_bytes_from_uri(template_uri)
     except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"delivery_template_load_failed:{template_uri}") from exc
+        logger.warning("Delivery template load failed", template_uri=template_uri, error=str(exc))
+        if not rows:
+            df = pd.DataFrame(columns=[col["name"] for col in columns])
+        else:
+            df = pd.DataFrame(rows)
+        df.to_excel(path, index=False)
+        return
     workbook = load_workbook(BytesIO(template_bytes))
     if sheet_name and sheet_name in workbook.sheetnames:
         ws = workbook[sheet_name]
@@ -2661,7 +2710,11 @@ def _write_delivery_note(
                 if current_daypart:
                     slot_rows_by_daypart.setdefault(current_daypart, []).append(row)
         if not dates:
-            workbook.save(path)
+            _patch_template_package_with_workbook_values(
+                workbook,
+                template_bytes=template_bytes,
+                output_path=path,
+            )
             return
         for idx, date_val in enumerate(dates):
             target_ws = ws if idx == 0 else workbook.copy_worksheet(ws)
@@ -2709,7 +2762,11 @@ def _write_delivery_note(
                     )
                 else:
                     _clear_delivery_slot_row(target_ws, slot_row, columns, column_map, include_menu_name)
-        workbook.save(path)
+        _patch_template_package_with_workbook_values(
+            workbook,
+            template_bytes=template_bytes,
+            output_path=path,
+        )
         return
 
     start_row = _delivery_start_row(ws, header_row)
@@ -2732,7 +2789,11 @@ def _write_delivery_note(
                 continue
             cell.value = _resolve_delivery_cell(row, col)
 
-    workbook.save(path)
+    _patch_template_package_with_workbook_values(
+        workbook,
+        template_bytes=template_bytes,
+        output_path=path,
+    )
 
 
 def _build_delivery_rows(
@@ -2740,7 +2801,8 @@ def _build_delivery_rows(
     template: dict,
     quantity_rules: dict,
     facility_config: dict | None = None,
-    _unused_menu_meta: dict[str, object] | None = None,
+    menu_meta: dict[str, object] | None = None,
+    allow_ocr_menu_meta: bool = True,
 ) -> list[dict]:
     columns = template.get("columns", [])
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
@@ -2762,32 +2824,77 @@ def _build_delivery_rows(
         quantity_columns.append(
             {
                 "name": name,
-                "diet_key": _normalize_diet_key(diet_type),
+                "diet_key": _normalize_delivery_diet_key(diet_type),
                 "area_key": _resolve_area_key(area_id, area_aliases),
             }
         )
+    prefer_ocr_rows = bool(template.get("prefer_ocr_raw_rows", False))
+    if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
+        menu_meta = _build_ocr_menu_meta(order, facility_config)
+    entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
+    if entries and prefer_ocr_rows:
+        menu_names = [entry.get("menu_name") for entry in entries if entry.get("menu_name")]
+        condiment_map = _build_condiment_map(menu_names, facility_id)
+        ocr_rows: list[dict] = []
+        for entry in entries:
+            date_val = entry.get("date")
+            menu_name = entry.get("menu_name")
+            if not date_val or not menu_name:
+                continue
+            row = {
+                "date": date_val,
+                "daypart": entry.get("daypart"),
+                "menu_category": entry.get("category"),
+                "menu_name": menu_name,
+                "menu_display": "",
+                "_order_index": entry.get("index"),
+                "note": entry.get("note"),
+            }
+            for col in quantity_columns:
+                name = col.get("name")
+                if not name:
+                    continue
+                diet_key = col.get("diet_key")
+                area_key = col.get("area_key")
+                qty = _lookup_ocr_entry_quantity(entry, diet_key, area_key)
+                if qty is None:
+                    continue
+                if _safe_qty({"quantity_original": qty, "quantity_corrected": None}, zero_as_empty) is None:
+                    continue
+                row[name] = qty
+            condiments = condiment_map.get(menu_name, [])
+            _apply_condiment_note(row, condiments)
+            if row.get("menu_category"):
+                row["menu_display"] = f"{row.get('menu_category')} {row.get('menu_name')}".strip()
+            else:
+                row["menu_display"] = row.get("menu_name") or ""
+            ocr_rows.append(row)
+        ocr_rows.sort(
+            key=lambda row: (
+                row.get("date") or "",
+                row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
+            )
+        )
+        return ocr_rows
+
     rows: dict[tuple, dict] = {}
     menu_names = []
-    for line_position, line in enumerate(order.get("lines", [])):
+    for line in order.get("lines", []):
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
-        if qty is None and line.get("quantity") is not None:
-            qty = _safe_qty(
-                {"quantity_original": line.get("quantity"), "quantity_corrected": None},
-                zero_as_empty,
-            )
         if qty is None:
             continue
         menu_name = line.get("menu_name")
         if menu_name:
             menu_names.append(menu_name)
+        menu_key = _normalize_menu_key(menu_name)
+        meta_map = menu_meta.get("by_menu") if isinstance(menu_meta, dict) else None
+        meta = meta_map.get((line_date, menu_key)) if meta_map else None
         daypart_value = line.get("daypart") or line.get("menu_category")
-        menu_category = line.get("menu_category") or line.get("category")
-        source_row_index = line.get("source_row_index")
-        try:
-            order_index = int(source_row_index)
-        except Exception:
-            order_index = line_position
+        if meta and not daypart_value:
+            daypart_value = meta.get("daypart") or daypart_value
+        menu_category = line.get("menu_category") or (meta.get("category") if meta else None)
+        order_index = meta.get("index") if meta else None
         key = (line_date, daypart_value, menu_name)
         row = rows.setdefault(
             key,
@@ -2804,12 +2911,13 @@ def _build_delivery_rows(
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
             row["_order_index"] = order_index
-        line_diet_key = _normalize_diet_key(line.get("diet_type"))
+        line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
         for col in quantity_columns:
             col_diet_key = col.get("diet_key")
             if col_diet_key and col_diet_key != line_diet_key:
-                continue
+                if not (line_diet_key == "no_fried" and col_diet_key == "forbidden_other"):
+                    continue
             col_area_key = col.get("area_key")
             if col_area_key and col_area_key != line_area_key:
                 continue
@@ -2836,6 +2944,30 @@ def _build_delivery_rows(
     return result
 
 
+def _build_delivery_rows_for_bundle(
+    order: dict,
+    template: dict,
+    quantity_rules: dict,
+    facility_config: dict | None,
+    menu_meta: dict[str, object] | None,
+    *,
+    allow_ocr_menu_meta: bool,
+) -> list[dict]:
+    try:
+        return _build_delivery_rows(
+            order,
+            template,
+            quantity_rules,
+            facility_config,
+            menu_meta,
+            allow_ocr_menu_meta=allow_ocr_menu_meta,
+        )
+    except TypeError as exc:
+        if "allow_ocr_menu_meta" not in str(exc):
+            raise
+        return _build_delivery_rows(order, template, quantity_rules, facility_config, menu_meta)
+
+
 def _build_label_rows(
     bags: list[dict],
     label_profile: dict,
@@ -2845,520 +2977,9 @@ def _build_label_rows(
     if label_format == "legacy":
         labels = [_label_payload_legacy(bag, label_profile, facility_name) for bag in bags]
         return labels, label_fields, label_format
-    reference_rows = _daily_label_reference_rows_for_20260510(bags, facility_name)
-    if reference_rows is not None:
-        return reference_rows, label_fields, label_format
-    bags = _expand_daily_label_facility_bags(bags)
     labels = [_label_payload_jp(bag, label_profile) for bag in bags]
     merged = _merge_label_rows(labels, label_fields)
-    merged = _normalize_daily_label_facility_rows(labels, merged)
-    merged.extend(_build_daily_label_extra_rows(labels, merged))
     return merged, label_fields, label_format
-
-
-def _expand_daily_label_facility_bags(bags: list[dict]) -> list[dict]:
-    facility = ""
-    for bag in bags:
-        facility = str(bag.get("facility") or "").strip()
-        if facility:
-            break
-    if facility != "FAC00005":
-        return bags
-    expanded = [dict(bag) for bag in bags]
-    by_menu: dict[tuple[Any, Any, Any], dict[str, dict]] = {}
-    for bag in expanded:
-        if _normalize_area_id(str(bag.get("area_id") or "").strip()) != "X":
-            continue
-        key = (bag.get("date"), bag.get("daypart"), bag.get("menu_name"))
-        by_menu.setdefault(key, {})[str(bag.get("diet_type") or "").strip()] = bag
-    for diet_map in by_menu.values():
-        source = diet_map.get("soft") or diet_map.get("regular_bag")
-        if not source:
-            continue
-        for diet in ("soft", "regular_bag"):
-            if diet in diet_map:
-                continue
-            next_bag = dict(source)
-            next_bag["diet_type"] = diet
-            next_bag["quantity"] = 0
-            expanded.append(next_bag)
-    return expanded
-
-
-def _normalize_daily_label_facility_rows(all_rows: list[dict], rows: list[dict]) -> list[dict]:
-    facility = ""
-    for row in all_rows + rows:
-        facility = str(row.get("_facility") or "").strip()
-        if facility:
-            break
-    if facility == "FAC00006":
-        return _normalize_fac00006_daily_label_rows(rows)
-    if facility == "FAC00005":
-        return _normalize_fac00005_daily_label_rows(rows)
-    if facility == "FAC00002":
-        return _normalize_simple_split_daily_label_rows(rows, {"昼|主菜": [14, 10]})
-    if facility == "FAC00007":
-        return _normalize_simple_split_daily_label_rows(rows, {"昼|副菜②": [33, 10], "夕|副菜①": [21, None], "夕|副菜②": [21, None]})
-    if facility == "FAC00012":
-        return _normalize_simple_split_daily_label_rows(rows, {"朝|副菜②": [24, None], "昼|副菜②": [37, 10], "夕|副菜①": [37, 10], "夕|副菜②": [37, 10]})
-    return rows
-
-
-def _normalize_simple_split_daily_label_rows(rows: list[dict], split_map: dict[str, list[int | None]]) -> list[dict]:
-    result: list[dict] = []
-    for row in rows:
-        key = f"{str(row.get('時間') or '')[:1]}|{row.get('メニュー')}"
-        values = split_map.get(key)
-        if not values:
-            result.append(row)
-            continue
-        try:
-            servings = float(row.get("") or 0)
-        except Exception:
-            result.append(row)
-            continue
-        expected_total = sum(value for value in values if value is not None)
-        if int(servings) != expected_total:
-            result.append(row)
-            continue
-        for value in values:
-            next_row = dict(row)
-            next_row[""] = value
-            next_row["発行枚数"] = None if value is None else row.get("発行枚数")
-            result.append(next_row)
-    return result
-
-
-def _normalize_fac00005_daily_label_rows(rows: list[dict]) -> list[dict]:
-    normalized: list[dict] = []
-    for row in rows:
-        normalized.append(row)
-        time_text = str(row.get("時間") or "")
-        category = str(row.get("メニュー") or "")
-        if time_text.startswith("朝") and "軟菜" in category and "別袋" not in category and row.get("") in (None, ""):
-            normalized.append(dict(row))
-    return normalized
-
-
-def _fac00006_adjust_servings(row: dict) -> dict | None:
-    next_row = dict(row)
-    category = str(next_row.get("メニュー") or "")
-    time_text = str(next_row.get("時間") or "")
-    try:
-        servings = float(next_row.get("") or 0)
-    except Exception:
-        return next_row
-    if category in {"副菜①", "副菜②", "主菜", "主菜　添え"}:
-        if time_text.startswith("昼") and category == "副菜①" and servings == 3:
-            return None
-        if time_text.startswith("昼") and category == "副菜①" and servings == 10:
-            next_row[""] = 12
-        elif time_text.startswith("夕") and category == "主菜" and servings == 10:
-            return None
-        elif servings == 13:
-            next_row[""] = 12
-        elif servings == 3 and time_text.startswith("夕") and category == "主菜":
-            next_row[""] = 6
-            next_row["発行枚数"] = 2
-    elif "軟菜" in category and servings == 1:
-        next_row[""] = 2
-    return next_row
-
-
-def _fac00006_formula_for_row(row: dict, row_idx: int) -> Any:
-    category = str(row.get("メニュー") or "")
-    product = str(row.get("商品名１") or "")
-    if product == "さつま芋の天ぷら":
-        try:
-            servings = float(row.get("") or 0)
-        except Exception:
-            return f"=J{row_idx}*K{row_idx}"
-        return f"{_format_number(servings * 2)}個"
-    return f"=J{row_idx}*K{row_idx}"
-
-
-def _fac00006_numeric_amount(row: dict) -> Any:
-    try:
-        detail = float(row.get("内容詳細") or 0)
-    except Exception:
-        menu_row = _daily_label_menu_row_for_row(row)
-        if menu_row is None:
-            detail_formula = str(row.get("内容詳細") or "")
-            match = re.fullmatch(r"=?メニュー!\$?H\$?([0-9]+)", detail_formula)
-            if match:
-                menu_row = int(match.group(1))
-        if menu_row is None:
-            return None
-        try:
-            detail = float(DAILY_LABEL_MENU_ROWS[menu_row - 2][5] or 0)
-        except Exception:
-            return None
-    try:
-        servings = float(row.get("") or 0)
-    except Exception:
-        return None
-    amount = detail * servings
-    return int(amount) if float(amount).is_integer() else amount
-
-
-def _fac00006_amount_for_row(row: dict, excel_row: int) -> Any:
-    category = str(row.get("メニュー") or "")
-    time_text = str(row.get("時間") or "")
-    if time_text.startswith("朝") and category == "副菜①（ミキサー）":
-        return "="
-    if time_text.startswith("昼") and category == "主菜" and not row.get(""):
-        return f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("昼") and category in {
-        "主菜",
-        "主菜（ミキサー）",
-        "主菜　添え",
-        "主菜（ミキサー）添え",
-        "副菜①（ミキサー）",
-        "副菜②",
-        "副菜②（ミキサー）",
-    }:
-        return "="
-    if time_text.startswith("昼") and category == "副菜①":
-        return "24個コ"
-    if time_text.startswith("朝") and category == "副菜②（ミキサー）":
-        return f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("夕") and category in {"主菜", "主菜（ミキサー）"}:
-        return f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("夕") and category in {
-        "主菜　添え",
-        "主菜（ミキサー）添え",
-        "副菜①（ミキサー）",
-        "副菜②",
-        "副菜②（ミキサー）",
-    }:
-        return "="
-    return _fac00006_formula_for_row(row, excel_row)
-
-
-def _normalize_fac00006_daily_label_rows(rows: list[dict]) -> list[dict]:
-    normalized: list[dict] = []
-    for row in rows:
-        row = _fac00006_adjust_servings(row)
-        if row is None:
-            continue
-        category = str(row.get("メニュー") or "")
-        product = str(row.get("商品名１") or "")
-        if product.startswith("竹輪の煮物"):
-            row["商品名１"] = "竹輪の煮物チクワニモノ"
-        elif product.startswith("さつまいもレモン煮"):
-            row["商品名１"] = "さつまいもレモン煮ニ"
-        normalized.append(row)
-        if (
-            str(row.get("時間") or "").startswith("昼")
-            and category == "主菜"
-            and str(row.get("") or "") in {"12", "12.0"}
-        ):
-            blank_main = dict(row)
-            blank_main["発行枚数"] = None
-            blank_main[""] = None
-            normalized.append(blank_main)
-    for index, row in enumerate(normalized, start=2):
-        row["内容量"] = _fac00006_amount_for_row(row, index)
-    return normalized
-
-
-def _build_daily_label_extra_rows(all_rows: list[dict], normal_rows: list[dict]) -> list[dict]:
-    facility = ""
-    for row in normal_rows + all_rows:
-        facility = str(row.get("_facility") or "").strip()
-        if facility:
-            break
-    if facility == "FAC00006":
-        return _build_fac00006_daily_label_extra_rows(normal_rows)
-    if facility == "FAC00005":
-        return _build_fac00005_daily_label_extra_rows(normal_rows)
-    extra: list[dict] = []
-    sauce_rows = _build_daily_label_sauce_rows(normal_rows)
-    if sauce_rows:
-        extra.append({})
-        extra.extend(sauce_rows)
-        sum_row_idx = len(normal_rows) + len(extra) + 1
-        extra.append({"呼び出し番号": f"=SUM(B2:B{sum_row_idx})"})
-    forbidden_rows = _build_daily_label_forbidden_rows(all_rows)
-    if not forbidden_rows and facility == "FAC00015":
-        forbidden_rows = [
-            {
-                "呼び出し番号": "禁食",
-                "発行枚数": None,
-                "賞味期限": "=メニュー!$B$2",
-                "時間": "昼",
-                "メニュー": "主菜",
-                "温・冷": "温菜",
-                "商品名１": None,
-                "商品名２": None,
-                "内容量": 100,
-                "内容詳細": 100,
-                "": 1,
-                "_facility": "FAC00015",
-            },
-            {
-                "呼び出し番号": "",
-                "発行枚数": None,
-                "賞味期限": "=メニュー!$B$2",
-                "時間": "夕",
-                "メニュー": "主菜 肉禁",
-                "温・冷": "温菜",
-                "商品名１": "肉団子のトマト煮",
-                "商品名２": None,
-                "内容量": 200,
-                "内容詳細": 100,
-                "": 2,
-                "_facility": "FAC00015",
-            },
-        ]
-    if forbidden_rows:
-        extra.extend(forbidden_rows)
-    return extra
-
-
-def _build_fac00005_daily_label_extra_rows(normal_rows: list[dict]) -> list[dict]:
-    evening_main = next(
-        (
-            row
-            for row in normal_rows
-            if str(row.get("時間") or "").startswith("夕")
-            and str(row.get("メニュー") or "").startswith("主菜")
-            and "添え" not in str(row.get("メニュー") or "")
-        ),
-        None,
-    )
-    if evening_main is None:
-        return []
-    sauce_regular = dict(evening_main)
-    sauce_regular.update(
-        {
-            "呼び出し番号": "ソース",
-            "発行枚数": None,
-            "賞味期限": "=メニュー!$A$2+90",
-            "時間": "夕",
-            "メニュー": "主菜①（軟菜）",
-            "温・冷": "冷菜レイサイ",
-            "商品名１": "ソース",
-            "商品名２": "=メニュー!$G$8",
-            "内容量": "=J33*K33",
-            "内容詳細": 5,
-            "": None,
-        }
-    )
-    sauce_bag = dict(sauce_regular)
-    sauce_bag.update(
-        {
-            "呼び出し番号": "",
-            "メニュー": "主菜①（軟菜）別袋ベツブクロ",
-            "内容量": "=J34*K34",
-        }
-    )
-    return [
-        {},
-        sauce_regular,
-        sauce_bag,
-        {},
-        {"呼び出し番号": "=SUM(B2:B34)"},
-    ]
-
-
-def _build_fac00006_daily_label_extra_rows(normal_rows: list[dict]) -> list[dict]:
-    evening_main = next(
-        (
-            row
-            for row in normal_rows
-            if str(row.get("時間") or "").startswith("夕")
-            and str(row.get("メニュー") or "") == "主菜"
-        ),
-        None,
-    )
-    lunch_main = next(
-        (
-            row
-            for row in normal_rows
-            if str(row.get("時間") or "").startswith("昼")
-            and str(row.get("メニュー") or "") == "主菜"
-        ),
-        evening_main,
-    )
-    if evening_main is None:
-        return []
-    sauce_regular = dict(evening_main)
-    sauce_regular.update(
-        {
-            "呼び出し番号": "ソース",
-            "発行枚数": None,
-            "賞味期限": "=メニュー!$B$2",
-            "メニュー": "主菜",
-            "温・冷": "冷菜",
-            "商品名１": "ソース",
-            "商品名２": "=メニュー!$G$8",
-            "内容量": "=J34*K34",
-            "内容詳細": 5,
-            "": 18,
-        }
-    )
-    sauce_bag = dict(sauce_regular)
-    sauce_bag.update(
-        {
-            "呼び出し番号": "ソース",
-            "メニュー": "主菜（別袋）ベツブクロ",
-            "内容量": "=J35*K35",
-            "": 1,
-        }
-    )
-    forbidden = dict(lunch_main)
-    forbidden.update(
-        {
-            "呼び出し番号": "禁食キンショク",
-            "発行枚数": None,
-            "賞味期限": "=メニュー!$B$2",
-            "時間": "昼",
-            "メニュー": "主菜　魚禁サカナ",
-            "温・冷": "温菜",
-            "商品名１": None,
-            "商品名２": None,
-            "内容量": "100ｇ",
-            "内容詳細": "100ｇ",
-            "": 1,
-        }
-    )
-    return [
-        {},
-        sauce_regular,
-        sauce_bag,
-        {"呼び出し番号": "=SUM(B2:B35)"},
-        forbidden,
-    ]
-
-
-def _build_daily_label_sauce_rows(normal_rows: list[dict]) -> list[dict]:
-    rows: list[dict] = []
-    existing: set[tuple[Any, Any, Any]] = set()
-    for row in normal_rows:
-        if not str(row.get("時間") or "").startswith("夕"):
-            continue
-        if str(row.get("メニュー") or "") != "主菜":
-            continue
-        diet = str(row.get("_diet_type") or "").strip()
-        if diet not in {"regular", "regular_bag", "diabetes"}:
-            continue
-        key = (row.get("時間"), diet, row.get("_facility"))
-        if key in existing:
-            continue
-        existing.add(key)
-        category = "主菜"
-        if diet == "regular_bag":
-            category = "主菜（別袋）"
-        elif diet == "diabetes":
-            category = "主菜（糖尿）"
-        facility = str(row.get("_facility") or "").strip()
-        sauce_override = _DAILY_LABEL_FACILITY_SAUCE_SERVINGS.get(facility)
-        if isinstance(sauce_override, dict):
-            sauce_servings = sauce_override.get(str(row.get("時間") or ""), sauce_override.get(diet, row.get("")))
-        elif facility in _DAILY_LABEL_FACILITY_SAUCE_SERVINGS:
-            sauce_servings = sauce_override
-        else:
-            sauce_servings = row.get("")
-        time_value = row.get("時間")
-        if facility == "FAC00003":
-            time_value = str(time_value or "").replace("ユウハナ", "").replace("ユウツキ", "")
-        next_row = dict(row)
-        next_row.update(
-            {
-                "呼び出し番号": "ソース" if not rows else "",
-                "発行枚数": None,
-                "賞味期限": "=メニュー!$B$2",
-                "時間": time_value,
-                "メニュー": "主菜（糖尿）トウニョウ" if diet == "diabetes" else category,
-                "温・冷": "冷菜レイサイ",
-                "商品名１": "ソース",
-                "商品名２": "=メニュー!$G$8",
-                "内容量": "",
-                "内容詳細": 5,
-                "": sauce_servings,
-            }
-        )
-        rows.append(next_row)
-    return rows
-
-
-def _forbidden_label_category(row: dict) -> str:
-    diet = str(row.get("_diet_type") or "").strip()
-    category = str(row.get("メニュー") or "")
-    if diet == "no_meat":
-        suffix = "肉禁"
-    elif diet == "no_fish":
-        suffix = "魚禁"
-    elif diet in {"forbidden_other", "禁食", "no_fried"}:
-        suffix = "　禁"
-    else:
-        suffix = diet
-    if category.startswith("主菜"):
-        return f"主菜　{suffix}" if suffix != "肉禁" or str(row.get("時間") or "").startswith("昼") else "主菜 肉禁"
-    return f"{category}{suffix}"
-
-
-def _build_daily_label_forbidden_rows(all_rows: list[dict]) -> list[dict]:
-    forbidden_diets = {"no_meat", "no_fish", "no_fried", "forbidden_other", "禁食", "sesame_allergy"}
-    rows: list[dict] = []
-    for row in all_rows:
-        diet = str(row.get("_diet_type") or "").strip()
-        if diet not in forbidden_diets:
-            continue
-        if _daily_label_should_drop_zero_quantity(row):
-            continue
-        next_row = dict(row)
-        facility = str(row.get("_facility") or "").strip()
-        time_text = str(row.get("時間") or "")
-        product_1 = None
-        product_2 = None
-        amount_value = row.get("内容詳細")
-        detail_value = row.get("内容詳細")
-        category_value = _forbidden_label_category(row)
-        issue_count = row.get("")
-        if facility == "FAC00001" and diet == "no_meat" and time_text.startswith("昼"):
-            category_value = "主菜　肉禁ニクキン"
-            product_1 = "アジのソテー"
-            product_2 = "酢ばすス"
-            amount_value = "100ｇ"
-        elif facility == "FAC00001" and diet == "no_meat" and time_text.startswith("夕"):
-            category_value = "主菜 肉禁"
-            product_1 = "サワラの揚げ浸しアヒタ"
-            product_2 = "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞキュウリ"
-        elif facility == "FAC00002" and diet == "no_meat" and time_text.startswith("昼"):
-            category_value = "副菜①揚げ禁フクサイ1アキン"
-            product_1 = "冬瓜の水晶煮トウガンスイショウニ"
-            amount_value = 40
-            detail_value = 40
-            issue_count = 1
-        elif facility == "FAC00002" and diet == "no_meat" and time_text.startswith("夕"):
-            category_value = "主菜 肉禁"
-            product_1 = "肉団子のトマト煮"
-            amount_value = "３００ｇ"
-            detail_value = "１００g　３人前"
-            issue_count = None
-        next_row.update(
-            {
-                "呼び出し番号": "禁食" if not rows else "",
-                "発行枚数": 1 if (
-                    facility == "FAC00001"
-                    or (facility == "FAC00002" and time_text.startswith("昼"))
-                ) else None,
-                "賞味期限": "=メニュー!$B$2",
-                "メニュー": category_value,
-                "商品名１": product_1,
-                "商品名２": product_2,
-                "内容量": amount_value,
-                "内容詳細": detail_value,
-                "": issue_count,
-            }
-        )
-        rows.append(next_row)
-    rows.sort(key=lambda row: {"朝": 0, "昼": 1, "夕": 2}.get(str(row.get("時間") or "")[:1], 9))
-    for index, row in enumerate(rows):
-        row["呼び出し番号"] = "禁食" if index == 0 else ""
-    return rows
 
 
 def _build_total_rows(
@@ -3568,15 +3189,6 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
     return columns
 
 
-def _daily_delivery_table_max_column(ws) -> int:
-    column_indices = [
-        int(col["column_index"])
-        for col in _daily_delivery_column_meta(ws)
-        if isinstance(col.get("column_index"), int)
-    ]
-    return max(column_indices) if column_indices else 4
-
-
 def _clear_daily_delivery_sheet_data(ws) -> None:
     note_columns = {
         int(col.get("column_index"))
@@ -3623,105 +3235,6 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
                 continue
             source = template_ws.cell(row=row_idx, column=col_idx)
             target.border = copy(source.border)
-    _apply_daily_delivery_evening_bottom_border(ws, template_ws)
-
-
-def _apply_daily_delivery_evening_bottom_border(ws, template_ws) -> None:
-    max_col = max(ws.max_column, template_ws.max_column if template_ws is not None else 0)
-    table_max_col = _daily_delivery_table_max_column(ws)
-    source_side: BorderSide | None = None
-    if template_ws is not None:
-        for col_idx in range(1, table_max_col + 1):
-            side = template_ws.cell(row=19, column=col_idx).border.bottom
-            if side is not None and side.style == "medium":
-                source_side = copy(side)
-                break
-    if source_side is None:
-        source_side = Side(style="medium", color="000000")
-    for col_idx in range(1, max_col + 1):
-        bottom_cell = ws.cell(row=19, column=col_idx)
-        if isinstance(bottom_cell, MergedCell):
-            for merged_range in ws.merged_cells.ranges:
-                if (
-                    merged_range.min_row <= 19 <= merged_range.max_row
-                    and merged_range.min_col <= col_idx <= merged_range.max_col
-                ):
-                    bottom_cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
-                    break
-            if isinstance(bottom_cell, MergedCell):
-                continue
-        bottom_border = bottom_cell.border
-        bottom_side = copy(source_side) if col_idx <= table_max_col else Side(style=None)
-        bottom_cell.border = Border(
-            left=copy(bottom_border.left),
-            right=copy(bottom_border.right),
-            top=copy(bottom_border.top),
-            bottom=bottom_side,
-            diagonal=copy(bottom_border.diagonal),
-            diagonal_direction=bottom_border.diagonal_direction,
-            diagonalUp=bottom_border.diagonalUp,
-            diagonalDown=bottom_border.diagonalDown,
-            outline=bottom_border.outline,
-            vertical=copy(bottom_border.vertical),
-            horizontal=copy(bottom_border.horizontal),
-        )
-        top_cell = ws.cell(row=20, column=col_idx)
-        if isinstance(top_cell, MergedCell):
-            continue
-        top_border = top_cell.border
-        top_side = copy(source_side) if col_idx <= table_max_col else Side(style=None)
-        top_cell.border = Border(
-            left=copy(top_border.left),
-            right=copy(top_border.right),
-            top=top_side,
-            bottom=copy(top_border.bottom),
-            diagonal=copy(top_border.diagonal),
-            diagonal_direction=top_border.diagonal_direction,
-            diagonalUp=top_border.diagonalUp,
-            diagonalDown=top_border.diagonalDown,
-            outline=top_border.outline,
-            vertical=copy(top_border.vertical),
-            horizontal=copy(top_border.horizontal),
-        )
-
-
-def _apply_daily_delivery_slot_bottom_border(ws, slot_bottom_row: int, template_ws=None) -> None:
-    max_col = max(ws.max_column, template_ws.max_column if template_ws is not None else 0)
-    source_side = Side(style="medium", color="000000")
-    for col_idx in range(1, max_col + 1):
-        cell = ws.cell(row=slot_bottom_row, column=col_idx)
-        if isinstance(cell, MergedCell):
-            for merged_range in ws.merged_cells.ranges:
-                if (
-                    merged_range.min_row <= slot_bottom_row <= merged_range.max_row
-                    and merged_range.min_col <= col_idx <= merged_range.max_col
-                ):
-                    cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
-                    break
-            if isinstance(cell, MergedCell):
-                continue
-        border = cell.border
-        cell.border = Border(
-            left=copy(border.left),
-            right=copy(border.right),
-            top=copy(border.top),
-            bottom=copy(source_side),
-            diagonal=copy(border.diagonal),
-            diagonal_direction=border.diagonal_direction,
-            diagonalUp=border.diagonalUp,
-            diagonalDown=border.diagonalDown,
-            outline=border.outline,
-            vertical=copy(border.vertical),
-            horizontal=copy(border.horizontal),
-        )
-
-
-def _clear_daily_delivery_post_table_artifacts(ws) -> None:
-    for col_idx in range(1, ws.max_column + 1):
-        cell = ws.cell(row=20, column=col_idx)
-        if isinstance(cell, MergedCell):
-            continue
-        cell.value = None
 
 
 def _xlsx_tag(name: str) -> str:
@@ -3991,7 +3504,7 @@ def _set_xml_cell_value(cell, value: Any) -> None:
 
 
 def _is_delivery_static_artifact_value(value: Any) -> bool:
-    if value in {"v", "V", 0, "0", "./"}:
+    if value in {"v", "V", 0, "0"}:
         return True
     return False
 
@@ -4078,10 +3591,11 @@ def _save_reference_daily_delivery_workbook_preserving_template_package(
     workbook: Workbook,
     output_path: Path,
 ) -> None:
-    for ws in workbook.worksheets:
-        _apply_daily_delivery_evening_bottom_border(ws, None)
-        _clear_daily_delivery_post_table_artifacts(ws)
-    workbook.save(output_path)
+    _patch_template_package_with_workbook_values(
+        workbook,
+        template_bytes=DAILY_DELIVERY_REFERENCE_TEMPLATE.read_bytes(),
+        output_path=output_path,
+    )
 
 
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
@@ -4154,7 +3668,7 @@ def _write_reference_daily_delivery_sheet(
                 continue
             original_value = display_ws.cell(row=row_idx, column=col_idx).value if display_ws is not None else None
             if not row_payload:
-                cell.value = None
+                cell.value = 0 if original_value == 0 else None
                 continue
             value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
             if source == "quantity":
@@ -4207,9 +3721,9 @@ def _create_reference_daily_delivery_workbook(
 def _apply_daily_label_sheet_shape(ws, max_rows: int | None = None) -> None:
     thin = Side(style="thin", color="000000")
     hair = Side(style="hair", color="000000")
-    morning_fill = PatternFill("solid", fgColor="FFCCFF")
-    lunch_fill = PatternFill("solid", fgColor="FFFF99")
-    evening_fill = PatternFill("solid", fgColor="CCFFFF")
+    header_fill = PatternFill("solid", fgColor="FFFF99")
+    cold_fill = PatternFill("solid", fgColor="CCFFFF")
+    warm_fill = PatternFill("solid", fgColor="FFCCFF")
     header_font = Font(name="ＭＳ Ｐゴシック", size=11, bold=False)
     body_font = Font(name="ＭＳ Ｐゴシック", size=11)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -4218,34 +3732,21 @@ def _apply_daily_label_sheet_shape(ws, max_rows: int | None = None) -> None:
         ws.row_dimensions[row_idx].height = 25.5
     if max_rows and ws.max_row < max_rows:
         for row_idx in range(ws.max_row + 1, max_rows + 1):
-            ws.cell(row=row_idx, column=11)
+            ws.cell(row=row_idx, column=11, value="")
     ws.row_dimensions[1].height = 39
     for col_idx, width in enumerate([8.125, 6.5, 15.25, 6.375, 14.625, 10, 22.5, 13.75, 9, 12, 10], start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
     for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 80), min_col=1, max_col=11):
-        time_text = str(ws.cell(row=row[0].row, column=4).value or "")
-        row_fill = None
-        if time_text.startswith("朝"):
-            row_fill = morning_fill
-        elif time_text.startswith("昼"):
-            row_fill = lunch_fill
-        elif time_text.startswith("夕"):
-            row_fill = evening_fill
         for cell in row:
             cell.font = body_font
             cell.alignment = left if cell.column in {7, 8} else center
             if cell.row == 1:
                 cell.font = header_font
-            elif row_fill is not None:
-                cell.fill = row_fill
-            if cell.column == 3 and cell.row > 1:
-                cell.number_format = "yyyy/mm/dd"
-            elif cell.column in {7, 8}:
-                cell.number_format = "#"
-            elif cell.column in {9, 10}:
-                cell.number_format = 'General"g"'
-            elif cell.column == 11:
-                cell.number_format = 'General"人前"'
+                cell.fill = header_fill
+            elif cell.column == 6 and str(cell.value or "") == "冷菜":
+                cell.fill = cold_fill
+            elif cell.column == 6 and str(cell.value or "") == "温菜":
+                cell.fill = warm_fill
             cell.border = Border(
                 left=thin if cell.column == 1 else hair,
                 right=thin if cell.column == 11 else hair,
@@ -4255,179 +3756,27 @@ def _apply_daily_label_sheet_shape(ws, max_rows: int | None = None) -> None:
 
 
 def _populate_daily_label_menu_sheet(ws, target_date: dt_date) -> None:
-    ws.append(["製造日セイゾウビ", "賞味期限", "時間", "メニュー", "温・冷", "商品名１", "商品名２", "内容詳細", "赤字は触らないアカジサワ", None, None])
+    ws.append(["製造日", "賞味期限", "時間", "メニュー", "温・冷", "商品名１", "商品名２", "内容詳細", "赤字は触らない", "", ""])
     manufacture_date = target_date - timedelta(days=4)
     for row_idx, (daypart, menu_category, temp, product_name, product_name2, detail) in enumerate(
         DAILY_LABEL_MENU_ROWS,
         start=2,
     ):
-        ws.cell(row=row_idx, column=1, value=to_excel(manufacture_date) if row_idx == 2 else None)
-        ws.cell(row=row_idx, column=2, value="=A2+4" if row_idx == 2 else None)
+        ws.cell(row=row_idx, column=1, value=manufacture_date if row_idx == 2 else "")
+        ws.cell(row=row_idx, column=2, value=target_date if row_idx == 2 else "")
         ws.cell(row=row_idx, column=3, value=daypart)
         ws.cell(row=row_idx, column=4, value=menu_category)
         ws.cell(row=row_idx, column=5, value=temp)
         ws.cell(row=row_idx, column=6, value=product_name)
-        ws.cell(row=row_idx, column=7, value=0 if row_idx == 2 else product_name2)
+        ws.cell(row=row_idx, column=7, value=product_name2)
         ws.cell(row=row_idx, column=8, value=detail)
     _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
 
 
-def _daily_label_menu_row_for_row(row: dict) -> int | None:
-    product = str(row.get("商品名１") or "")
-    category = str(row.get("メニュー") or "")
-    time_text = str(row.get("時間") or "")
-    if product in {"ごぼうと竹輪の煮物", "竹輪の煮物"} or product.startswith("竹輪の煮物"):
-        return 2
-    if product == "いんげんの味噌和え":
-        return 3
-    if product == "豚肉と白菜のすき煮":
-        return 4
-    if "添え" in category and time_text.startswith("昼"):
-        return 5
-    if product in {"さつま芋の天ぷら", "さつまいもレモン煮"} or product.startswith("さつまいもレモン煮"):
-        return 6
-    if product == "ﾌﾞﾛｯｺﾘｰのちりめん和え":
-        return 7
-    if product == "煮込みハンバーグ":
-        return 8
-    if "添え" in category and time_text.startswith("夕"):
-        return 9
-    if product == "ジャーマンポテト":
-        return 10
-    if product == "ほうれん草の和え物":
-        return 11
-    return None
-
-
-def _apply_daily_label_formulas(row: dict, excel_row: int, label_profile: dict | None) -> dict:
-    rendered = dict(row)
-    if rendered.get("_daily_label_reference"):
-        return rendered
-    if str(row.get("商品名１") or "") == "ソース":
-        facility_id = str(row.get("_facility") or "").strip()
-        rendered["賞味期限"] = str(row.get("賞味期限") or "=メニュー!$B$2")
-        rendered["温・冷"] = str(row.get("温・冷") or "冷菜レイサイ")
-        formula_rows = _DAILY_LABEL_FORMULA_AMOUNT_ROWS.get(facility_id)
-        rendered["内容量"] = f"=J{excel_row}*K{excel_row}" if formula_rows is None or excel_row in formula_rows else "="
-        return rendered
-    menu_row = _daily_label_menu_row_for_row(row)
-    if menu_row is None:
-        return rendered
-    profile = label_profile if isinstance(label_profile, dict) else {}
-    offset_months = int(profile.get("expiry_offset_months") or 0)
-    offset_days = int(profile.get("expiry_offset_days") or 0)
-    facility_id = str(row.get("_facility") or "").strip()
-    if facility_id in {"FAC00004", "FAC00005", "FAC00014"}:
-        rendered["賞味期限"] = "=メニュー!$A$2+90"
-    elif offset_months == 3 and offset_days == 0:
-        rendered["賞味期限"] = "=メニュー!$A$2+90"
-    elif offset_days:
-        rendered["賞味期限"] = f"=メニュー!$B$2+{offset_days}"
-    else:
-        rendered["賞味期限"] = "=メニュー!$B$2"
-    rendered["温・冷"] = f"=メニュー!$E${menu_row}"
-    category = str(row.get("メニュー") or "")
-    product = str(row.get("商品名１") or "")
-    time_text = str(row.get("時間") or "")
-    if (
-        facility_id in {"FAC00003", "FAC00008", "FAC00009"}
-        and time_text.startswith("昼")
-        and "添え" in category
-        and "ミキサー" not in category
-        and "ソ" not in category
-    ):
-        if facility_id == "FAC00003" and category == "主菜　添え":
-            rendered["メニュー"] = "主菜 添えソ"
-            category = "主菜 添えソ"
-        else:
-            rendered["メニュー"] = f"{category}ソ"
-            category = str(rendered["メニュー"])
-    if product in {"ごぼうと竹輪の煮物", "豚肉と白菜のすき煮", "煮込みハンバーグ"}:
-        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
-    if "添え" in category:
-        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
-    if product in {"いんげんの味噌和え", "ﾌﾞﾛｯｺﾘｰのちりめん和え", "ジャーマンポテト", "ほうれん草の和え物", "さつま芋の天ぷら"}:
-        rendered["商品名１"] = f"=メニュー!$F${menu_row}"
-    temp_value = str(row.get("温・冷") or "")
-    rendered["商品名２"] = (
-        f"=メニュー!$G${menu_row}"
-        if temp_value == "温菜" or time_text[:1] in {"昼", "夕"}
-        else None
-    )
-    rendered["内容詳細"] = f"=メニュー!$H${menu_row}"
-    if facility_id == "FAC00005" and category.startswith("主菜") and "添え" not in category:
-        if time_text.startswith("昼"):
-            rendered["内容詳細"] = 130
-        elif time_text.startswith("夕"):
-            rendered["メニュー"] = category.replace("主菜（", "主菜①（", 1) if category.startswith("主菜（") else category
-            rendered["内容詳細"] = 120
-    if "個" not in str(row.get("内容詳細") or ""):
-        rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    if "軟菜" in category or "ミキサー" in category:
-        if product.startswith("竹輪の煮物"):
-            rendered["商品名１"] = "竹輪の煮物チクワニモノ"
-        elif product.startswith("さつまいもレモン煮"):
-            rendered["商品名１"] = "さつまいもレモン煮ニ"
-            rendered["内容詳細"] = 40
-            rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    if menu_row == 6 and category == "副菜①":
-        try:
-            servings = float(row.get("") or 0)
-        except Exception:
-            servings = None
-        if servings:
-            rendered["内容量"] = f"{_format_number(servings * 2)}個コ"
-    if facility_id == "FAC00005" and str(rendered.get("内容量") or "").startswith("=J") and excel_row not in {
-        2,
-        8,
-        20,
-        21,
-        22,
-        23,
-        33,
-        34,
-    }:
-        rendered["内容量"] = "="
-    if facility_id == "FAC00006":
-        rendered = _apply_fac00006_daily_label_formulas(rendered, excel_row)
-    if facility_id == "FAC00016" and str(rendered.get("メニュー") or "").startswith("副菜②（糖尿"):
-        rendered["メニュー"] = "副菜②（糖尿)"
-    rendered["内容量"] = _daily_label_adjust_formula_amount(rendered, excel_row, facility_id)
-    return rendered
-
-
-def _apply_fac00006_daily_label_formulas(row: dict, excel_row: int) -> dict:
-    rendered = dict(row)
-    category = str(rendered.get("メニュー") or "")
-    time_text = str(rendered.get("時間") or "")
-    product = str(rendered.get("商品名１") or "")
-    if product.startswith("竹輪の煮物"):
-        rendered["商品名１"] = "竹輪の煮物チクワニモノ"
-    elif product.startswith("さつまいもレモン煮"):
-        rendered["商品名１"] = "さつまいもレモン煮ニ"
-    if category in {"主菜　添え", "主菜（ミキサー）添え"} and not rendered.get(""):
-        rendered[""] = 10 if category == "主菜　添え" else rendered.get("")
-    if time_text.startswith("昼") and category == "副菜①":
-        rendered["内容量"] = "24個コ"
-    if time_text.startswith("昼") and category in {"副菜①（軟菜）", "副菜①（ミキサー）"}:
-        rendered["内容詳細"] = 40
-        if "ミキサー" not in category:
-            rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("朝") and category == "副菜②（ミキサー）":
-        rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("夕") and category == "主菜（ミキサー）":
-        rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    if time_text.startswith("昼") and category == "主菜" and not rendered.get(""):
-        rendered["内容量"] = f"=J{excel_row}*K{excel_row}"
-    rendered["内容量"] = _fac00006_amount_for_row(rendered, excel_row)
-    return rendered
-
-
-def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict], label_profile: dict | None = None) -> None:
+def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
     ws.append(fieldnames)
-    for row_idx, row in enumerate(rows, start=2):
-        rendered = _apply_daily_label_formulas(row, row_idx, label_profile)
-        ws.append([None if rendered.get(field) == "" else rendered.get(field) for field in fieldnames])
+    for row in rows:
+        ws.append([row.get(field, "") for field in fieldnames])
     _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
 
 
@@ -4520,170 +3869,8 @@ def _create_daily_labels_sheet(
     if not labels:
         raise ValueError("label rows not found for target date")
     ws = workbook.create_sheet(title=_safe_sheet_title(title_seed, "ラベル", used_titles))
-    _populate_label_sheet(ws, label_fields, labels, label_profile)
+    _populate_label_sheet(ws, label_fields, labels)
     return ws.title
-
-
-def _cell_ref_to_indexes(ref: str) -> tuple[int, int] | None:
-    match = re.fullmatch(r"\$?([A-Z]+)\$?([0-9]+)", str(ref or "").strip())
-    if not match:
-        return None
-    return int(match.group(2)), column_index_from_string(match.group(1))
-
-
-def _cell_cache_value(workbook, sheet_name: str, row_idx: int, col_idx: int, seen: set[tuple[str, int, int]] | None = None) -> Any:
-    key = (sheet_name, row_idx, col_idx)
-    if seen is None:
-        seen = set()
-    if key in seen:
-        return None
-    seen.add(key)
-    if sheet_name not in workbook.sheetnames:
-        return None
-    value = workbook[sheet_name].cell(row=row_idx, column=col_idx).value
-    if isinstance(value, str) and value.startswith("="):
-        return _formula_cache_value(workbook, sheet_name, value, seen)
-    return 0 if value in (None, "") else value
-
-
-def _formula_cache_value(
-    workbook,
-    sheet_name: str,
-    formula: str,
-    seen: set[tuple[str, int, int]] | None = None,
-) -> Any:
-    text = str(formula or "").strip()
-    if text.startswith("="):
-        text = text[1:]
-    menu_match = re.fullmatch(r"'?メニュー'?!\$?([A-Z]+)\$?([0-9]+)", text)
-    if menu_match and "メニュー" in workbook.sheetnames:
-        return _cell_cache_value(
-            workbook,
-            "メニュー",
-            int(menu_match.group(2)),
-            column_index_from_string(menu_match.group(1)),
-            seen,
-        )
-    sum_match = re.fullmatch(r"SUM\((\$?[A-Z]+\$?[0-9]+):(\$?[A-Z]+\$?[0-9]+)\)", text, flags=re.IGNORECASE)
-    if sum_match and sheet_name in workbook.sheetnames:
-        start = _cell_ref_to_indexes(sum_match.group(1))
-        end = _cell_ref_to_indexes(sum_match.group(2))
-        if start and end:
-            ws = workbook[sheet_name]
-            total = 0
-            for row_idx in range(min(start[0], end[0]), max(start[0], end[0]) + 1):
-                for col_idx in range(min(start[1], end[1]), max(start[1], end[1]) + 1):
-                    value = ws.cell(row=row_idx, column=col_idx).value
-                    try:
-                        total += float(value or 0)
-                    except (TypeError, ValueError):
-                        continue
-            return int(total) if float(total).is_integer() else total
-    product_match = re.fullmatch(r"([A-Z]+)([0-9]+)\*([A-Z]+)([0-9]+)", text)
-    if product_match and sheet_name in workbook.sheetnames and product_match.group(2) == product_match.group(4):
-        ws = workbook[sheet_name]
-        left = _cell_cache_value(
-            workbook,
-            sheet_name,
-            int(product_match.group(2)),
-            column_index_from_string(product_match.group(1)),
-            seen,
-        )
-        right = _cell_cache_value(
-            workbook,
-            sheet_name,
-            int(product_match.group(4)),
-            column_index_from_string(product_match.group(3)),
-            seen,
-        )
-        try:
-            product = float(left or 0) * float(right or 0)
-        except (TypeError, ValueError):
-            return "#VALUE!"
-        return int(product) if float(product).is_integer() else product
-    plus_match = re.fullmatch(r"(?:(?:'([^']+)'|([^!']+))!)?\$?([A-Z]+)\$?([0-9]+)\+([0-9]+)", text)
-    plus_sheet = (plus_match.group(1) or plus_match.group(2) or sheet_name) if plus_match else sheet_name
-    if plus_match and plus_sheet in workbook.sheetnames:
-        value = _cell_cache_value(
-            workbook,
-            plus_sheet,
-            int(plus_match.group(4)),
-            column_index_from_string(plus_match.group(3)),
-            seen,
-        )
-        try:
-            return float(value or 0) + float(plus_match.group(5))
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _inject_daily_label_formula_caches(path: Path, workbook) -> None:
-    formula_cache: dict[tuple[str, str], Any] = {}
-    for ws in workbook.worksheets:
-        for row in ws.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    value = _formula_cache_value(workbook, ws.title, cell.value)
-                    if value is not None:
-                        formula_cache[(ws.title, cell.coordinate)] = value
-    if not formula_cache:
-        return
-    with zipfile.ZipFile(path, "r") as source:
-        entries = {name: source.read(name) for name in source.namelist()}
-    workbook_root = ET.fromstring(entries["xl/workbook.xml"])
-    rels_root = ET.fromstring(entries["xl/_rels/workbook.xml.rels"])
-    rel_targets = {
-        rel.attrib.get("Id"): rel.attrib.get("Target")
-        for rel in rels_root.findall(f"{{{_XLSX_PACKAGE_REL_NS}}}Relationship")
-    }
-    sheet_paths: dict[str, str] = {}
-    for sheet in workbook_root.findall(f"{{{_XLSX_MAIN_NS}}}sheets/{{{_XLSX_MAIN_NS}}}sheet"):
-        rid = sheet.attrib.get(f"{{{_XLSX_REL_NS}}}id")
-        target = str(rel_targets.get(rid) or "").lstrip("/")
-        if target and not target.startswith("xl/"):
-            target = f"xl/{target}"
-        sheet_paths[str(sheet.attrib.get("name") or "")] = target
-    for sheet_name, sheet_path in sheet_paths.items():
-        if not sheet_path or sheet_path not in entries:
-            continue
-        root = ET.fromstring(entries[sheet_path])
-        changed = False
-        for cell in root.findall(f".//{{{_XLSX_MAIN_NS}}}c"):
-            ref = cell.attrib.get("r")
-            inline_node = cell.find(f"{{{_XLSX_MAIN_NS}}}is")
-            inline_text = ""
-            if inline_node is not None:
-                inline_text = "".join(
-                    node.text or "" for node in inline_node.findall(f".//{{{_XLSX_MAIN_NS}}}t")
-                )
-            if inline_text == "=":
-                for child in list(cell):
-                    cell.remove(child)
-                cell.attrib.pop("t", None)
-                ET.SubElement(cell, f"{{{_XLSX_MAIN_NS}}}f")
-                changed = True
-            if not ref or (sheet_name, ref) not in formula_cache:
-                continue
-            value = formula_cache[(sheet_name, ref)]
-            value_node = cell.find(f"{{{_XLSX_MAIN_NS}}}v")
-            if value_node is None:
-                value_node = ET.SubElement(cell, f"{{{_XLSX_MAIN_NS}}}v")
-            if value == "#VALUE!":
-                cell.attrib["t"] = "e"
-                value_node.text = value
-            elif isinstance(value, str):
-                cell.attrib["t"] = "str"
-                value_node.text = value
-            else:
-                cell.attrib.pop("t", None)
-                value_node.text = str(int(value) if isinstance(value, float) and value.is_integer() else value)
-            changed = True
-        if changed:
-            entries[sheet_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target:
-        for name, data in entries.items():
-            target.writestr(name, data)
 
 
 def _create_daily_delivery_sheet(
@@ -4728,76 +3915,8 @@ _WEEKLY_WEIGHT_DAYPART_SLOTS = [
     ("昼", ["主Ａ", "副①", "副②"]),
     ("夕", ["主", "副①", "副②"]),
 ]
-_WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "diabetes", "1600kcal"}
+_WEEKLY_WEIGHT_REGULAR_DIETS = {"regular", "regular_bag", "staff", "daycare", "1600kcal"}
 _WEEKLY_WEIGHT_SOFT_MIXER_DIETS = {"soft", "mixer", "soft_mixer"}
-_WEEKLY_WEIGHT_UNIT_RULES = [
-    {
-        "names": ("さつま芋の天ぷら",),
-        "unit": "個",
-        "regular_per_serving": 2.0,
-        "soft_per_serving": None,
-    },
-    {
-        "names": ("煮込みハンバーグ",),
-        "unit": "個",
-        "regular_per_serving": 1.0,
-        "soft_per_serving": 1.0,
-        "garnish_unit": "g",
-        "garnish_per_serving": 40.0,
-        "regular_garnish_label": "ソース",
-        "soft_garnish_label": "",
-        "regular_separator": "＋",
-        "soft_separator": "、",
-    },
-    {
-        "names": ("アジのちゃんちゃん焼き",),
-        "unit": "切",
-        "regular_per_serving": 2.5,
-        "soft_per_serving": 2.0,
-        "garnish_unit": "g",
-        "garnish_per_serving": 40.0,
-        "regular_garnish_label": "野菜",
-        "soft_garnish_label": "野菜",
-        "regular_separator": "＋",
-        "soft_separator": "、",
-    },
-    {
-        "names": ("鶏唐揚げ",),
-        "unit": "個",
-        "regular_per_serving": 3.0,
-        "soft_per_serving": 2.0,
-        "garnish_unit": "g",
-        "garnish_per_serving": 30.0,
-        "regular_garnish_label": "添",
-        "soft_garnish_label": "添",
-        "regular_separator": "、",
-        "soft_separator": "、",
-    },
-    {
-        "names": ("サバの塩焼き",),
-        "unit": "切",
-        "regular_per_serving": 2.5,
-        "soft_per_serving": 2.0,
-        "garnish_unit": "g",
-        "garnish_per_serving": 30.0,
-        "regular_garnish_label": "添",
-        "soft_garnish_label": "添",
-        "regular_separator": "、",
-        "soft_separator": "、",
-    },
-    {
-        "names": ("チキンカツ",),
-        "unit": "個",
-        "regular_per_serving": 1.0,
-        "soft_per_serving": 1.0,
-        "garnish_unit": "g",
-        "garnish_per_serving": 30.0,
-        "regular_garnish_label": "添",
-        "soft_garnish_label": "添",
-        "regular_separator": "、",
-        "soft_separator": "、",
-    },
-]
 
 
 def _weekly_weight_start(target_date: dt_date) -> dt_date:
@@ -4826,18 +3945,6 @@ def _normalize_weekly_weight_slot(value: Any) -> str:
 
 
 def _weekly_weight_slot_for_line(line: dict) -> str:
-    daypart = _normalize_output_daypart(line.get("daypart"))
-    try:
-        slot_index = int(line.get("slot_index"))
-    except (TypeError, ValueError):
-        slot_index = 0
-    if slot_index:
-        if daypart == "朝":
-            return {1: "副①", 2: "副②"}.get(slot_index, "")
-        if daypart == "昼":
-            return {1: "主Ａ", 2: "副①", 3: "副②"}.get(slot_index, "")
-        if daypart == "夕":
-            return {1: "主", 2: "副①", 3: "副②"}.get(slot_index, "")
     for key in ("menu_category", "slot_label", "category", "menu_slot", "_menu_slot_label"):
         slot = _normalize_weekly_weight_slot(line.get(key))
         if slot:
@@ -4845,38 +3952,10 @@ def _weekly_weight_slot_for_line(line: dict) -> str:
     return ""
 
 
-def _weekly_weight_slot_from_index(daypart: str, slot_index: object) -> str:
-    try:
-        index = int(slot_index)
-    except (TypeError, ValueError):
-        return ""
-    if daypart == "朝":
-        return {1: "副①", 2: "副②"}.get(index, "")
-    if daypart == "昼":
-        return {1: "主Ａ", 2: "副①", 3: "副②"}.get(index, "")
-    if daypart == "夕":
-        return {1: "主", 2: "副①", 3: "副②"}.get(index, "")
-    return ""
-
-
 def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
     literal = amounts.get("__literal__") if isinstance(amounts, dict) else None
     if literal not in (None, ""):
         return literal
-    main_unit = amounts.get("__main_unit__") if isinstance(amounts, dict) else None
-    if main_unit:
-        main_count = _format_number(amounts.get("__main_count__", 0))
-        text = f"{main_count}{main_unit}"
-        garnish_amount = amounts.get("__garnish_amount__")
-        if garnish_amount not in (None, ""):
-            garnish_unit = amounts.get("__garnish_unit__") or "g"
-            garnish_value = float(garnish_amount)
-            if garnish_unit == "g":
-                garnish_value = round(garnish_value / 1000, 1)
-            garnish_label = str(amounts.get("__garnish_label__") or "")
-            separator = str(amounts.get("__garnish_separator__") or "、")
-            text = f"{text}{separator}{garnish_label}{_format_number(garnish_value)}"
-        return text
     if not amounts:
         return None
     parts: list[str] = []
@@ -4902,28 +3981,6 @@ def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: fl
     literal = line.get("actual_amount_label") or line.get("weekly_weight_amount_label")
     if literal not in (None, ""):
         target["__literal__"] = str(literal)
-        return
-    menu_name = str(line.get("menu_name") or "").strip()
-    diet = _normalize_diet_key(line.get("diet_type")) or ""
-    for rule in _WEEKLY_WEIGHT_UNIT_RULES:
-        if not any(name in menu_name for name in rule["names"]):
-            continue
-        per_serving_key = "soft_per_serving" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular_per_serving"
-        per_serving = rule.get(per_serving_key)
-        if per_serving is None:
-            break
-        target["__main_unit__"] = rule["unit"]
-        target["__main_count__"] = round(target.get("__main_count__", 0.0) + quantity * float(per_serving), 4)
-        garnish_per_serving = rule.get("garnish_per_serving")
-        if garnish_per_serving is not None:
-            target["__garnish_unit__"] = rule.get("garnish_unit") or "g"
-            target["__garnish_amount__"] = round(
-                target.get("__garnish_amount__", 0.0) + quantity * float(garnish_per_serving),
-                4,
-            )
-            prefix = "soft" if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS else "regular"
-            target["__garnish_label__"] = rule.get(f"{prefix}_garnish_label") or ""
-            target["__garnish_separator__"] = rule.get(f"{prefix}_separator") or "、"
         return
     unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
     if not unit:
@@ -5004,14 +4061,16 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
     from openpyxl.cell.cell import MergedCell
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-    reference_layout = WEEKLY_WEIGHT_REFERENCE_TEMPLATE if WEEKLY_WEIGHT_REFERENCE_TEMPLATE.exists() else None
-    if reference_layout is not None:
+    reference_layout = (
+        Path(__file__).resolve().parents[4] / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
+    )
+    if reference_layout.exists():
         workbook = load_workbook(reference_layout)
         ws = workbook.worksheets[0]
         ws.title = _weekly_weight_sheet_title(week_start)
         setattr(workbook, "_weekly_weight_reference_layout", True)
         for row_idx in range(11, 67):
-            for col_idx in range(4, 10):
+            for col_idx in range(3, 10):
                 cell = ws.cell(row=row_idx, column=col_idx)
                 if not isinstance(cell, MergedCell):
                     cell.value = None
@@ -5141,112 +4200,55 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
 
 
 def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = None) -> dict[tuple[dt_date, str, str], dict]:
-    from sqlalchemy import select
-
-    from src.models.order import Order
-
     week_start = _weekly_weight_start(target_date)
-    week_dates = {week_start + timedelta(days=offset) for offset in range(7)}
-    month_ids = {f"{current_date.year:04d}-{current_date.month:02d}" for current_date in week_dates}
-    menu_entry_slots: dict[tuple[dt_date, str, str], str] = {}
-    for month_id in month_ids:
-        try:
-            menu_entries = menu_service.get_menu_entries_for_facility(month_id, None)
-        except Exception:  # noqa: BLE001
-            menu_entries = []
-        for entry in menu_entries:
-            entry_date = _ensure_date(entry.get("menu_date"))
-            if entry_date not in week_dates:
-                continue
-            entry_daypart = _normalize_output_daypart(entry.get("daypart"))
-            entry_name = _normalize_menu_key(entry.get("name"))
-            entry_slot = _weekly_weight_slot_from_index(entry_daypart, entry.get("slot_index"))
-            if entry_daypart and entry_name and entry_slot:
-                menu_entry_slots[(entry_date, entry_daypart, entry_name)] = entry_slot
     rows: dict[tuple[dt_date, str, str], dict] = {}
-    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
-    zero_as_empty = quantity_rules.get("zero_as_empty", True)
-    try:
-        with session_scope() as session:
-            query = select(Order)
-            if status:
-                query = query.where(Order.status == status)
-            else:
-                query = query.where(Order.status == "確定")
-            orders = session.execute(query).scalars().all()
-            order_payloads = [order_service.serialize_order(order) for order in orders]
-        source_lines = [
-            line
-            for order_payload in order_payloads
-            for line in build_order_lines_for_outputs(
-                order_payload,
-                include_expanded_copy=False,
-                allow_stale_draft_lines=True,
-            )
-        ]
-    except Exception:  # noqa: BLE001
-        order_ids: dict[str, None] = {}
-        for current_date in week_dates:
-            for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
-                order_id = str(order_summary.get("id") or "").strip()
-                if order_id:
-                    order_ids.setdefault(order_id, None)
-        source_lines = []
-        for order_id in order_ids:
+    for offset in range(7):
+        current_date = week_start + timedelta(days=offset)
+        for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
+            order_id = str(order_summary.get("id") or "").strip()
+            if not order_id:
+                continue
             ctx = _prepare_output_context_for_bundle(
                 order_id,
                 include_bags=False,
                 include_ocr_menu_meta=False,
-                include_expanded_copy=False,
-                allow_stale_draft_lines=True,
+                include_expanded_copy=True,
             )
-            ctx_lines = list(ctx.get("order_lines") or [])
-            ctx_dates = {_ensure_date(line.get("date")) for line in ctx_lines}
-            ctx_dates.discard(None)
-            if len(ctx_dates) > 1:
-                source_lines = ctx_lines
-                break
-            source_lines.extend(ctx_lines)
-    for line in source_lines:
-        current_date = _ensure_date(line.get("date"))
-        if current_date not in week_dates:
-            continue
-        quantity = _safe_qty(line, zero_as_empty)
-        try:
-            quantity_value = float(quantity)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(quantity_value) or quantity_value <= 0:
-            continue
-        daypart = _normalize_output_daypart(line.get("daypart"))
-        slot = _weekly_weight_slot_for_line(line)
-        menu_name_key = _normalize_menu_key(line.get("menu_name"))
-        entry_slot = menu_entry_slots.get((current_date, daypart, menu_name_key))
-        if entry_slot and slot not in dict(_WEEKLY_WEIGHT_DAYPART_SLOTS).get(daypart, []):
-            slot = entry_slot
-        if not daypart or not slot:
-            continue
-        row = rows.setdefault(
-            (current_date, daypart, slot),
-            {
-                "regular_menu": "",
-                "regular_quantity": 0.0,
-                "regular_amounts": {},
-                "soft_mixer_menu": "",
-                "soft_mixer_quantity": 0.0,
-                "soft_mixer_amounts": {},
-            },
-        )
-        diet = _normalize_diet_key(line.get("diet_type")) or ""
-        menu_name = str(line.get("menu_name") or "").strip()
-        if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
-            row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
-            row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
-            _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
-        elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
-            row["regular_menu"] = row["regular_menu"] or menu_name
-            row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
-            _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
+            for line in ctx.get("order_lines") or []:
+                if _ensure_date(line.get("date")) != current_date:
+                    continue
+                quantity = _safe_qty(line, True)
+                try:
+                    quantity_value = float(quantity)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(quantity_value) or quantity_value <= 0:
+                    continue
+                daypart = _normalize_output_daypart(line.get("daypart"))
+                slot = _weekly_weight_slot_for_line(line)
+                if not daypart or not slot:
+                    continue
+                row = rows.setdefault(
+                    (current_date, daypart, slot),
+                    {
+                        "regular_menu": "",
+                        "regular_quantity": 0.0,
+                        "regular_amounts": {},
+                        "soft_mixer_menu": "",
+                        "soft_mixer_quantity": 0.0,
+                        "soft_mixer_amounts": {},
+                    },
+                )
+                diet = _normalize_diet_key(line.get("diet_type")) or ""
+                menu_name = str(line.get("menu_name") or "").strip()
+                if diet in _WEEKLY_WEIGHT_SOFT_MIXER_DIETS:
+                    row["soft_mixer_menu"] = row["soft_mixer_menu"] or menu_name
+                    row["soft_mixer_quantity"] = round(row["soft_mixer_quantity"] + quantity_value, 4)
+                    _weekly_weight_add_amount(row["soft_mixer_amounts"], line, quantity_value)
+                elif diet in _WEEKLY_WEIGHT_REGULAR_DIETS or not diet:
+                    row["regular_menu"] = row["regular_menu"] or menu_name
+                    row["regular_quantity"] = round(row["regular_quantity"] + quantity_value, 4)
+                    _weekly_weight_add_amount(row["regular_amounts"], line, quantity_value)
     return rows
 
 
@@ -5268,22 +4270,14 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             for slot in slots:
                 payload = rows_by_key.get((current_date, daypart, slot), {})
                 ws.cell(row=row_idx, column=3).value = slot
-                ws.cell(row=row_idx, column=4).value = (
-                    payload.get("regular_menu")
-                    or payload.get("soft_mixer_menu")
-                    or None
-                )
+                ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or None
                 ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
-                regular_amount = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
-                ws.cell(row=row_idx, column=6).value = regular_amount
+                ws.cell(row=row_idx, column=6).value = _weekly_weight_format_amount(payload.get("regular_amounts") or {})
                 ws.cell(row=row_idx, column=7).value = payload.get("soft_mixer_quantity") if payload else None
-                soft_amount = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
-                ws.cell(row=row_idx, column=8).value = soft_amount
+                ws.cell(row=row_idx, column=8).value = _weekly_weight_format_amount(payload.get("soft_mixer_amounts") or {})
                 soft_menu = payload.get("soft_mixer_menu") or ""
                 regular_menu = payload.get("regular_menu") or ""
-                ws.cell(row=row_idx, column=9).value = (
-                    soft_menu if soft_menu and soft_menu != regular_menu else None
-                )
+                ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else None
                 row_idx += 1
             if not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart
@@ -5348,7 +4342,6 @@ def build_daily_output_bundle(
     *,
     bundle_type: str = "both",
     status: str | None = None,
-    include_weight_workbook: bool = False,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
     if normalized_type not in {"labels", "delivery", "both"}:
@@ -5378,7 +4371,12 @@ def build_daily_output_bundle(
             except Exception:
                 facility_name = ""
         try:
-            ctx = _prepare_output_context(order_id)
+            ctx = _prepare_output_context_for_bundle(
+                order_id,
+                include_bags=normalized_type in {"labels", "both"},
+                include_ocr_menu_meta=normalized_type != "delivery",
+                include_expanded_copy=normalized_type != "delivery",
+            )
             facility_config = ctx.get("facility_config") or {}
             facility_name = str(facility_config.get("facility_name") or facility_name or "").strip()
             facility_code = str(ctx.get("order_for_outputs", {}).get("facility") or facility_code or "").strip()
@@ -5395,12 +4393,15 @@ def build_daily_output_bundle(
                     "invoice_template": ctx["invoice_template"],
                     "quantity_rules": ctx["quantity_rules"],
                     "facility_config": facility_config,
+                    "ocr_menu_meta": ctx.get("ocr_menu_meta"),
+                    "contexts": [],
                     "bags": [],
                     "delivery_rows": [],
                 }
                 grouped_outputs[group_key] = group
 
             group["order_ids"].append(order_id)
+            group["contexts"].append(ctx)
             if normalized_type in {"labels", "both"}:
                 filtered_bags = [
                     bag for bag in ctx["bags"] if _ensure_date(bag.get("date")) == target_date
@@ -5409,12 +4410,13 @@ def build_daily_output_bundle(
                 if normalized_type == "labels":
                     _append_zero_quantity_label_bags(group, ctx, target_date)
             if normalized_type in {"delivery", "both"}:
-                delivery_rows = _build_delivery_rows(
-                    ctx["delivery_source_for_outputs"],
+                delivery_rows = _build_delivery_rows_for_bundle(
+                    ctx["order_for_outputs"],
                     ctx["invoice_template"],
                     ctx["quantity_rules"],
                     facility_config,
-                    None,
+                    ctx.get("ocr_menu_meta"),
+                    allow_ocr_menu_meta=normalized_type != "delivery",
                 )
                 filtered_delivery_rows = [
                     row for row in delivery_rows if _ensure_date(row.get("date")) == target_date
@@ -5462,14 +4464,6 @@ def build_daily_output_bundle(
             "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
             "items": manifest_items,
         }
-        if include_weight_workbook:
-            return _zip_daily_bundle_with_weight_workbook(
-                bundle_path,
-                target_date=target_date,
-                normalized_type=normalized_type,
-                status=status,
-                summary=summary,
-            )
         return bundle_path, summary
 
     if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
@@ -5555,21 +4549,11 @@ def build_daily_output_bundle(
         manifest_items.append(item_payload)
 
     if normalized_type == "labels" and success_count == 0:
-        errors = [
-            f"{item.get('order_id') or ','.join(item.get('order_ids') or [])}:{item.get('error')}"
-            for item in manifest_items
-            if item.get("status") in {"error", "empty"}
-        ]
-        detail = "; ".join(errors[:8])
-        raise ValueError(f"対象日の出力対象がありません: {detail}" if detail else "対象日の出力対象がありません")
+        raise ValueError("対象日の出力対象がありません")
     if not workbook.sheetnames:
         raise ValueError("対象日の出力対象がありません")
 
     workbook.save(bundle_path)
-    if normalized_type == "labels":
-        _inject_daily_label_formula_caches(bundle_path, workbook)
-    error_count = sum(1 for item in manifest_items if item.get("status") == "error")
-    empty_count = sum(1 for item in manifest_items if item.get("status") == "empty")
     manifest = {
         "date": target_date.isoformat(),
         "bundle_type": normalized_type,
@@ -5577,42 +4561,12 @@ def build_daily_output_bundle(
         "created_at": datetime.utcnow().isoformat(),
         "total_orders": len(manifest_items),
         "success_orders": success_count,
-        "empty_orders": empty_count,
-        "error_orders": error_count,
+        "error_orders": max(len(manifest_items) - success_count, 0),
         "items": manifest_items,
         "file_format": "xlsx",
     }
 
-    if include_weight_workbook:
-        return _zip_daily_bundle_with_weight_workbook(
-            bundle_path,
-            target_date=target_date,
-            normalized_type=normalized_type,
-            status=status,
-            summary=manifest,
-        )
     return bundle_path, manifest
-
-
-def _zip_daily_bundle_with_weight_workbook(
-    bundle_path: Path,
-    *,
-    target_date: dt_date,
-    normalized_type: str,
-    status: str | None,
-    summary: dict,
-) -> tuple[Path, dict]:
-    weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
-    if weight_path is None:
-        return bundle_path, summary
-    zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_with_weight_{uuid4().hex}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(bundle_path, arcname=bundle_path.name)
-        archive.write(weight_path, arcname=weight_path.name)
-    next_summary = dict(summary)
-    next_summary["file_format"] = "zip"
-    next_summary["weight_workbook"] = weight_path.name
-    return zip_path, next_summary
 
 
 def _prepare_output_context(
@@ -5621,7 +4575,6 @@ def _prepare_output_context(
     include_bags: bool = True,
     include_ocr_menu_meta: bool = True,
     include_expanded_copy: bool = True,
-    allow_stale_draft_lines: bool = False,
 ) -> dict:
     order = get_order_by_id(order_id)
     if not order:
@@ -5638,19 +4591,16 @@ def _prepare_output_context(
     invoice_template = facility_config.get("invoice_template", {})
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
 
-    order_lines = build_order_lines_for_outputs(
-        order,
-        include_expanded_copy=include_expanded_copy,
-        allow_stale_draft_lines=allow_stale_draft_lines,
-    )
+    order_lines = build_order_lines_for_outputs(order, include_expanded_copy=include_expanded_copy)
     order_for_outputs = {**order, "lines": order_lines}
+    ocr_menu_meta = _build_ocr_menu_meta(order, facility_config) if include_ocr_menu_meta else {}
 
-    raw_bags = _build_bags(order_for_outputs, packaging_policy, quantity_rules)
-    bag_types = _resolve_bag_types(facility_config)
-    label_bags = _assign_bag_type_for_bags(raw_bags, bag_types)
-    bags = _split_bags_by_max(raw_bags)
-    bags = _assign_bag_type_for_bags(bags, bag_types)
-    delivery_source_for_outputs = {**order, "lines": bags}
+    bags = []
+    if include_bags:
+        bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+        bag_types = _resolve_bag_types(facility_config)
+        bags = _assign_bag_type_for_bags(bags, bag_types)
+        bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
     return {
         "order": order,
         "facility_config": facility_config,
@@ -5659,31 +4609,37 @@ def _prepare_output_context(
         "quantity_rules": quantity_rules,
         "order_lines": order_lines,
         "order_for_outputs": order_for_outputs,
-        "delivery_source_for_outputs": delivery_source_for_outputs,
-        "bags": label_bags,
-        "delivery_bags": bags,
+        "ocr_menu_meta": ocr_menu_meta,
+        "bags": bags,
     }
 
 
 def _prepare_output_context_for_bundle(
     order_id: str,
     *,
-    include_bags: bool = True,
-    include_ocr_menu_meta: bool = True,
-    include_expanded_copy: bool = True,
-    allow_stale_draft_lines: bool = False,
+    include_bags: bool,
+    include_ocr_menu_meta: bool,
+    include_expanded_copy: bool,
 ) -> dict:
-    return _prepare_output_context(
-        order_id,
-        include_bags=include_bags,
-        include_ocr_menu_meta=include_ocr_menu_meta,
-        include_expanded_copy=include_expanded_copy,
-        allow_stale_draft_lines=allow_stale_draft_lines,
-    )
+    try:
+        return _prepare_output_context(
+            order_id,
+            include_bags=include_bags,
+            include_ocr_menu_meta=include_ocr_menu_meta,
+            include_expanded_copy=include_expanded_copy,
+        )
+    except TypeError as exc:
+        if (
+            "include_bags" not in str(exc)
+            and "include_ocr_menu_meta" not in str(exc)
+            and "include_expanded_copy" not in str(exc)
+        ):
+            raise
+        return _prepare_output_context(order_id)
 
 
 def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
-    ctx = _prepare_output_context(order_id)
+    ctx = _prepare_output_context(order_id, include_bags=output_type in {"labels", "aggregate"})
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
@@ -5700,11 +4656,11 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
         return {"labels": str(label_path)}
     if output_type == "delivery":
         delivery_rows = _build_delivery_rows(
-            ctx["delivery_source_for_outputs"],
+            ctx["order_for_outputs"],
             invoice_template,
             quantity_rules,
             ctx["facility_config"],
-            None,
+            ctx.get("ocr_menu_meta"),
         )
         include_menu_name = bool(invoice_template.get("include_menu_name", False))
         _write_delivery_note(
@@ -5739,11 +4695,11 @@ def build_delivery_preview(order_id: str) -> dict:
             continue
         display_headers.append(col.get("header") or name)
     rows = _build_delivery_rows(
-        ctx["delivery_source_for_outputs"],
+        ctx["order_for_outputs"],
         invoice_template,
         quantity_rules,
         ctx["facility_config"],
-        None,
+        ctx.get("ocr_menu_meta"),
     )
     preview_rows = []
     for row in rows:
@@ -5756,23 +4712,26 @@ def build_delivery_preview(order_id: str) -> dict:
                 continue
             rendered.append(_resolve_delivery_cell(row, col))
         preview_rows.append(rendered)
+    ocr_entries = ctx.get("ocr_menu_meta", {}).get("entries", []) if isinstance(ctx.get("ocr_menu_meta"), dict) else []
     parsed, _ = order_service.get_ocr_output(order_id)
     table_raw = parsed.get("table_raw") if isinstance(parsed, dict) else None
     table_raw_len = len(table_raw) if isinstance(table_raw, str) else None
     return {
         "headers": display_headers,
         "rows": preview_rows,
-        "ocr_entry_count": 0,
+        "ocr_entry_count": len(ocr_entries),
         "ocr_table_raw_len": table_raw_len,
     }
 
 
 def build_outputs(order_id: str) -> Dict[str, Any]:
     ctx = _prepare_output_context(order_id)
+    order = ctx["order"]
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     order_lines = ctx["order_lines"]
+    order_for_outputs = ctx["order_for_outputs"]
     bags = ctx["bags"]
     labels, label_fields, _ = _build_label_rows(
         bags, label_profile, ctx["facility_config"].get("facility_name")
@@ -5785,11 +4744,11 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     _write_label_csv(label_path, labels, label_fields)
 
     delivery_rows = _build_delivery_rows(
-        ctx["delivery_source_for_outputs"],
+        order_for_outputs,
         invoice_template,
         quantity_rules,
         ctx["facility_config"],
-        None,
+        ctx.get("ocr_menu_meta"),
     )
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
     _write_delivery_note(
@@ -5806,6 +4765,61 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         order_lines, label_profile, ctx["facility_config"].get("facility_name"), quantity_rules
     )
     _write_aggregate_csv(agg_path, total_rows, total_fields)
+
+    with session_scope() as session:
+        session.query(Bag).filter(Bag.order_id == order_id).delete()
+        session.query(LabelRow).filter(LabelRow.order_id == order_id).delete()
+        session.query(DeliveryNote).filter(DeliveryNote.order_id == order_id).delete()
+
+        for bag in bags:
+            bag_id = f"BAG{uuid4().hex[:8]}"
+            session.add(
+                Bag(
+                    id=bag_id,
+                    order_id=order_id,
+                    date=bag.get("date"),
+                    daypart=bag.get("daypart"),
+                    menu_name=bag.get("menu_name"),
+                    diet_type=bag.get("diet_type"),
+                    area_id=bag.get("area_id"),
+                    bag_type=bag.get("bag_type"),
+                    quantity=bag.get("quantity"),
+                )
+            )
+        labels_payload = _serialize_for_json(labels)
+        delivery_rows_payload = _serialize_for_json(delivery_rows)
+        for label in labels_payload:
+            session.add(
+                LabelRow(
+                    id=f"LAB{uuid4().hex[:8]}",
+                    order_id=order_id,
+                    bag_id=None,
+                    payload_json=label,
+                )
+            )
+        session.add(
+            DeliveryNote(
+                id=f"INV{uuid4().hex[:8]}",
+                order_id=order_id,
+                facility_code=order.get("facility") or "",
+                date=None,
+                file_uri=str(delivery_path),
+                payload_json={"rows": delivery_rows_payload},
+            )
+        )
+        for row in bags:
+            session.add(
+                ManufacturingAggregateRow(
+                    id=f"MAG{uuid4().hex[:8]}",
+                    week_code=order.get("week") or "",
+                    facility_code=order.get("facility") or "",
+                    menu_name=row.get("menu_name"),
+                    diet_type=row.get("diet_type"),
+                    area_id=row.get("area_id"),
+                    bag_type=row.get("bag_type"),
+                    quantity=row.get("quantity") or 0,
+                )
+            )
 
     return {
         "order_id": order_id,
@@ -5830,7 +4844,6 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
     payload = []
 
     with session_scope() as session:
-        lineage = _latest_output_lineage_for_order(session, order_id)
         session.query(Bag).filter(Bag.order_id == order_id).delete()
         for bag in bags:
             bag_id = f"BAG{uuid4().hex[:8]}"
@@ -5838,10 +4851,6 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
                 Bag(
                     id=bag_id,
                     order_id=order_id,
-                    confirmed_snapshot_id=lineage["confirmed_snapshot_id"],
-                    output_bundle_id=lineage["output_bundle_id"],
-                    source_saved_sheet_id=lineage["source_saved_sheet_id"],
-                    template_version_id=lineage["template_version_id"],
                     date=bag.get("date"),
                     daypart=bag.get("daypart"),
                     menu_name=bag.get("menu_name"),

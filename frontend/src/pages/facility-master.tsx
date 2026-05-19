@@ -15,18 +15,56 @@ type FacilityMaster = {
   facilities?: FacilityEntry[];
 };
 
-type FacilityEditDraft = {
-  facility_id: string;
-  facility_name: string;
-  aliases_text: string;
-  areas_text: string;
-  address: string;
-  phone: string;
-  order_form_pattern_id: string;
-  fax_template_id: string;
+type AreaEntry = {
+  id: string;
+  name: string;
+};
+
+type InvoiceColumn = {
+  name: string;
+  source: string;
+  header: string;
+  columnIndex: string;
+  dietType: string;
+  areaId: string;
+};
+
+const DAILY_LABEL_DIET_OPTIONS = [
+  { value: "soft", label: "軟菜" },
+  { value: "mixer", label: "ミキサー" },
+  { value: "daycare", label: "通所" },
+  { value: "staff", label: "職員" },
+  { value: "diabetes", label: "糖尿" },
+  { value: "no_meat", label: "肉禁" },
+  { value: "no_fish", label: "魚禁" },
+  { value: "no_fried", label: "揚げ物禁" },
+  { value: "forbidden_other", label: "その他禁食" },
+  { value: "sesame_allergy", label: "ごま禁" },
+];
+
+const DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID: Record<string, string[]> = {
+  FAC00001: ["no_meat", "no_fish"],
+  FAC00002: ["no_meat", "no_fish"],
+  FAC00003: ["soft", "mixer", "no_fish"],
+  FAC00004: ["daycare", "staff", "no_meat", "no_fish", "no_fried", "forbidden_other"],
+  FAC00006: ["soft", "mixer", "no_meat", "no_fish"],
+  FAC00007: ["no_meat", "no_fish"],
+  FAC00008: ["soft", "mixer"],
+  FAC00009: ["soft", "mixer"],
+  FAC00010: ["soft", "mixer"],
+  FAC00011: ["no_meat", "no_fish"],
+  FAC00012: ["no_meat", "no_fish"],
+  FAC00013: ["diabetes", "no_fish"],
+  FAC00014: ["staff", "no_meat", "no_fish", "sesame_allergy"],
+  FAC00015: ["no_meat", "no_fish"],
+  FAC00016: ["diabetes", "no_fish"],
+  FAC636208: ["mixer", "no_meat", "no_fish"],
 };
 
 const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
+
+const cloneFacility = (facility: FacilityEntry | null) =>
+  facility ? (JSON.parse(JSON.stringify(facility)) as FacilityEntry) : null;
 
 const parseJson = (text: string) => {
   try {
@@ -60,6 +98,21 @@ const readStringList = (value: unknown) => {
     .filter((item) => item);
 };
 
+const readEditableStringList = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === "string" ? item : "")).filter((item) => item || item === "");
+};
+
+const readDailyLabelDietTypes = (facility?: FacilityEntry | null) => {
+  if (!facility || typeof facility !== "object") return [];
+  const raw = (facility as Record<string, unknown>).daily_label_comparable_diet_types;
+  if (Array.isArray(raw)) {
+    return readStringList(raw);
+  }
+  const facilityId = readString((facility as Record<string, unknown>).facility_id);
+  return DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID[facilityId] || [];
+};
+
 const readAreas = (value: unknown) => {
   if (!Array.isArray(value)) return [];
   return value
@@ -80,92 +133,82 @@ const readAreas = (value: unknown) => {
     .filter((item): item is { id: string; name: string } => Boolean(item));
 };
 
-const facilityEntryToDraft = (facility?: FacilityEntry | null): FacilityEditDraft => {
-  const record = facility && typeof facility === "object" ? (facility as Record<string, unknown>) : {};
-  return {
-    facility_id: readString(record.facility_id),
-    facility_name: readString(record.facility_name),
-    aliases_text: readStringList(record.aliases).join("\n"),
-    areas_text: readAreas(record.areas)
-      .map((area) => area.name)
-      .join("\n"),
-    address: readString(record.address),
-    phone: readString(record.phone),
-    order_form_pattern_id: readString(record.order_form_pattern_id),
-    fax_template_id: readString(record.fax_template_id),
-  };
+const readEditableAreas = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((area) => {
+      if (typeof area === "string") {
+        return { id: area, name: area };
+      }
+      if (area && typeof area === "object") {
+        const record = area as Record<string, unknown>;
+        return {
+          id: readString(record.area_id || record.id),
+          name: readString(record.name || record.label),
+        };
+      }
+      return null;
+    })
+    .filter((item): item is AreaEntry => Boolean(item));
 };
 
-const facilityDraftToEntry = (draft: FacilityEditDraft, base: FacilityEntry | null): FacilityEntry => {
-  const next: FacilityEntry = { ...(base || {}) };
-  next.facility_id = draft.facility_id.trim();
-  next.facility_name = draft.facility_name.trim();
-  next.aliases = draft.aliases_text
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  next.areas = draft.areas_text
-    .split(/\r?\n|,/)
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .map((name) => ({ id: name, name }));
-  if (draft.address.trim()) {
-    next.address = draft.address.trim();
-  } else {
-    delete next.address;
+const toStringValue = (value: unknown) => {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+};
+
+const compactStringList = (items: string[]) => items.map((item) => item.trim()).filter((item) => item);
+
+const normalizeArea = (area: AreaEntry) => {
+  const id = area.id.trim();
+  const name = area.name.trim();
+  if (!id && !name) return null;
+  return { area_id: id || name, name: name || id };
+};
+
+const normalizeInvoiceColumn = (column: InvoiceColumn) => {
+  const next: Record<string, unknown> = {};
+  if (column.name.trim()) next.name = column.name.trim();
+  if (column.source.trim()) next.source = column.source.trim();
+  if (column.header.trim()) next.header = column.header.trim();
+  if (column.columnIndex.trim()) {
+    const parsed = Number(column.columnIndex);
+    next.column_index = Number.isFinite(parsed) ? parsed : column.columnIndex.trim();
   }
-  if (draft.phone.trim()) {
-    next.phone = draft.phone.trim();
-  } else {
-    delete next.phone;
-  }
-  if (draft.order_form_pattern_id.trim()) {
-    next.order_form_pattern_id = draft.order_form_pattern_id.trim();
-  } else {
-    delete next.order_form_pattern_id;
-  }
-  if (draft.fax_template_id.trim()) {
-    next.fax_template_id = draft.fax_template_id.trim();
-    next.fax_template_ids = [draft.fax_template_id.trim()];
-  }
+  if (column.dietType.trim()) next.diet_type = column.dietType.trim();
+  if (column.areaId.trim()) next.area_id = column.areaId.trim();
   return next;
 };
 
-const hasDraftContentBeyondId = (draft: FacilityEditDraft) => Boolean(
-  draft.facility_name.trim()
-    || draft.aliases_text.trim()
-    || draft.areas_text.trim()
-    || draft.address.trim()
-    || draft.phone.trim()
-    || draft.order_form_pattern_id.trim()
-    || draft.fax_template_id.trim()
-);
-
-const isBlankDraftFacilityEntry = (facility: FacilityEntry) => {
-  const record = facility && typeof facility === "object" ? (facility as Record<string, unknown>) : {};
-  const name = readString(record.facility_name).trim();
-  const aliases = readStringList(record.aliases);
-  const areas = readAreas(record.areas);
-  const address = readString(record.address).trim();
-  const phone = readString(record.phone).trim();
-  const orderFormPatternId = readString(record.order_form_pattern_id).trim();
-  const faxTemplateId = readString(record.fax_template_id).trim();
-  const faxTemplateIds = readStringList(record.fax_template_ids);
-  return !name
-    && aliases.length === 0
-    && areas.length === 0
-    && !address
-    && !phone
-    && !orderFormPatternId
-    && !faxTemplateId
-    && faxTemplateIds.length === 0;
+const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
+  const facilities = Array.isArray(master.facilities)
+    ? master.facilities.map((facility) => {
+        const record = { ...facility };
+        if (Array.isArray(record.aliases)) {
+          record.aliases = compactStringList(readEditableStringList(record.aliases));
+        }
+        if (Array.isArray(record.fax_template_ids)) {
+          record.fax_template_ids = compactStringList(readEditableStringList(record.fax_template_ids));
+        }
+        if (Array.isArray(record.areas)) {
+          record.areas = readEditableAreas(record.areas).map(normalizeArea).filter(Boolean);
+        }
+        if (record.invoice_template && typeof record.invoice_template === "object") {
+          const invoice = record.invoice_template as Record<string, unknown>;
+          const columns = readInvoiceTemplate(record)?.columns || [];
+          record.invoice_template = {
+            ...invoice,
+            columns: columns.map(normalizeInvoiceColumn).filter((column) => Object.keys(column).length > 0),
+          };
+        }
+        return record;
+      })
+    : master.facilities;
+  return { ...master, facilities };
 };
 
-const removeBlankDraftFacilities = (master: FacilityMaster): FacilityMaster => {
-  if (!Array.isArray(master.facilities)) return master;
-  const facilities = master.facilities.filter((facility) => !isBlankDraftFacilityEntry(facility));
-  return facilities.length === master.facilities.length ? master : { ...master, facilities };
-};
 
 const readInvoiceTemplate = (facility?: FacilityEntry) => {
   if (!facility || typeof facility !== "object") return null;
@@ -184,13 +227,15 @@ const readInvoiceTemplate = (facility?: FacilityEntry) => {
         return {
           name: readString(col.name),
           source: readString(col.source),
+          header: readString(col.header),
+          columnIndex: toStringValue(col.column_index),
           dietType: readString(col.diet_type),
           areaId: readString(col.area_id),
         };
       })
       .filter(
-        (col): col is { name: string; source: string; dietType: string; areaId: string } =>
-          Boolean(col && (col.name || col.source))
+        (col): col is InvoiceColumn =>
+          Boolean(col && (col.name || col.source || col.header || col.columnIndex || col.dietType || col.areaId))
       ),
   };
 };
@@ -199,8 +244,8 @@ export default function FacilityMasterPage() {
   const [master, setMaster] = useState<FacilityMaster | null>(null);
   const [masterText, setMasterText] = useState("");
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
-  const [facilityText, setFacilityText] = useState("");
-  const [facilityDraft, setFacilityDraft] = useState<FacilityEditDraft>(() => facilityEntryToDraft(null));
+  const [editingIndex, setEditingIndex] = useState<number>(-1);
+  const [editBaseline, setEditBaseline] = useState<FacilityEntry | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [path, setPath] = useState("");
@@ -222,13 +267,11 @@ export default function FacilityMasterPage() {
       const nextFacilities = Array.isArray(nextMaster.facilities) ? nextMaster.facilities : [];
       if (nextFacilities.length > 0) {
         setSelectedIndex(0);
-        setFacilityText(prettyJson(nextFacilities[0]));
-        setFacilityDraft(facilityEntryToDraft(nextFacilities[0]));
       } else {
         setSelectedIndex(-1);
-        setFacilityText("{}");
-        setFacilityDraft(facilityEntryToDraft(null));
       }
+      setEditingIndex(-1);
+      setEditBaseline(null);
       setMessage("");
     } catch (err) {
       setMessage("Facility master の取得に失敗しました。");
@@ -242,9 +285,11 @@ export default function FacilityMasterPage() {
   const selectFacility = (index: number) => {
     const target = facilities[index];
     if (!target) return;
+    if (editingIndex >= 0 && index !== selectedIndex) {
+      setMessage("編集中です。保存またはキャンセルしてから別の施設を選択してください。");
+      return;
+    }
     setSelectedIndex(index);
-    setFacilityText(prettyJson(target));
-    setFacilityDraft(facilityEntryToDraft(target));
   };
 
   const updateFacilityState = (nextFacility: FacilityEntry) => {
@@ -258,61 +303,138 @@ export default function FacilityMasterPage() {
     }
     const nextMaster = { ...master, facilities: nextFacilities };
     setMaster(nextMaster);
-    setFacilityText(prettyJson(nextFacility));
-    setFacilityDraft(facilityEntryToDraft(nextFacility));
     setMasterText(prettyJson(nextMaster));
     return nextMaster;
   };
 
-  const updateFacilityDraft = (field: keyof FacilityEditDraft, value: string) => {
-    setFacilityDraft((current) => ({ ...current, [field]: value }));
+  const updateSelectedFacilityPatch = (patch: FacilityEntry) => {
+    if (editingIndex !== selectedIndex) return;
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const nextFacility = { ...(selectedFacility as FacilityEntry), ...patch };
+    updateFacilityState(nextFacility);
   };
 
-  const applyFacilityForm = () => {
-    if (!master) return null;
-    if (selectedIndex < 0 && !hasDraftContentBeyondId(facilityDraft)) {
-      return removeBlankDraftFacilities(master);
+  const beginEdit = () => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    setEditingIndex(selectedIndex);
+    setEditBaseline(cloneFacility(selectedFacility));
+    setMessage("編集モードにしました。");
+  };
+
+  const cancelEdit = () => {
+    if (editingIndex < 0) return;
+    if (editBaseline && master) {
+      const nextFacilities = [...facilities];
+      if (editingIndex >= 0 && editingIndex < nextFacilities.length) {
+        nextFacilities[editingIndex] = editBaseline;
+        const nextMaster = { ...master, facilities: nextFacilities };
+        setMaster(nextMaster);
+        setMasterText(prettyJson(nextMaster));
+        setSelectedIndex(editingIndex);
+      }
     }
-    if (!facilityDraft.facility_id.trim()) {
-      setMessage("施設IDを入力してください。");
-      return null;
+    setEditingIndex(-1);
+    setEditBaseline(null);
+    setMessage("編集をキャンセルしました。");
+  };
+
+  const toggleDailyLabelDietType = (dietType: string) => {
+    const current = new Set(readDailyLabelDietTypes(selectedFacility));
+    if (current.has(dietType)) {
+      current.delete(dietType);
+    } else {
+      current.add(dietType);
     }
-    if (!facilityDraft.facility_name.trim()) {
-      setMessage("施設名を入力してください。");
-      return null;
-    }
-    const duplicate = facilities.some((facility, index) => {
-      if (index === selectedIndex) return false;
-      return String(facility.facility_id || "").trim() === facilityDraft.facility_id.trim();
+    const ordered = DAILY_LABEL_DIET_OPTIONS.map((option) => option.value).filter((value) => current.has(value));
+    updateSelectedFacilityPatch({ daily_label_comparable_diet_types: ordered });
+  };
+
+  const updateSelectedField = (field: string, value: unknown) => {
+    updateSelectedFacilityPatch({ [field]: value });
+  };
+
+  const updateStringListItem = (field: string, index: number, value: string) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    const next = [...current];
+    next[index] = value;
+    updateSelectedField(field, next);
+  };
+
+  const addStringListItem = (field: string) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    updateSelectedField(field, [...current, ""]);
+  };
+
+  const removeStringListItem = (field: string, index: number) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    updateSelectedField(
+      field,
+      current.filter((_, itemIndex) => itemIndex !== index)
+    );
+  };
+
+  const updateArea = (index: number, patch: Partial<AreaEntry>) => {
+    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
+    const next = current.map((area, itemIndex) => (itemIndex === index ? { ...area, ...patch } : area));
+    updateSelectedField("areas", next.map(normalizeArea).filter(Boolean));
+  };
+
+  const addArea = () => {
+    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
+    updateSelectedField("areas", [...current.map(normalizeArea).filter(Boolean), { area_id: "", name: "" }]);
+  };
+
+  const removeArea = (index: number) => {
+    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
+    updateSelectedField(
+      "areas",
+      current
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map(normalizeArea)
+        .filter(Boolean)
+    );
+  };
+
+  const updateInvoiceTemplate = (patch: Record<string, unknown>) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const current = ((selectedFacility as Record<string, unknown>).invoice_template || {}) as Record<string, unknown>;
+    updateSelectedField("invoice_template", { ...current, ...patch });
+  };
+
+  const updateInvoiceColumn = (index: number, patch: Partial<InvoiceColumn>) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const invoice = readInvoiceTemplate(selectedFacility);
+    const columns = invoice?.columns || [];
+    const nextColumns = columns.map((column, itemIndex) =>
+      itemIndex === index ? { ...column, ...patch } : column
+    );
+    updateInvoiceTemplate({ columns: nextColumns.map(normalizeInvoiceColumn) });
+  };
+
+  const addInvoiceColumn = () => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const invoice = readInvoiceTemplate(selectedFacility);
+    const columns = invoice?.columns || [];
+    updateInvoiceTemplate({
+      columns: [
+        ...columns.map(normalizeInvoiceColumn),
+        { name: "", source: "quantity", header: "", column_index: "", diet_type: "", area_id: "" },
+      ],
     });
-    if (duplicate) {
-      setMessage(`施設ID ${facilityDraft.facility_id.trim()} は既に使われています。`);
-      return null;
-    }
-    const base = selectedIndex >= 0 && selectedIndex < facilities.length ? facilities[selectedIndex] : null;
-    const nextFacility = facilityDraftToEntry(facilityDraft, base);
-    return updateFacilityState(nextFacility) || master;
   };
 
-  const applyFacilityEditor = () => {
-    if (!master) return null;
-    if (selectedIndex < 0 || facilities.length === 0) {
-      return master;
-    }
-    const parsed = parseJson(facilityText);
-    if (parsed.error) {
-      setMessage(`施設JSONエラー: ${parsed.error}`);
-      return null;
-    }
-    if (!parsed.value || typeof parsed.value !== "object") {
-      setMessage("施設JSONはオブジェクトで入力してください。");
-      return null;
-    }
-    const nextFacility = { ...(parsed.value as FacilityEntry) };
-    delete (nextFacility as Record<string, unknown>).main_ocr_facility_prompt;
-    delete (nextFacility as Record<string, unknown>).ocr_prompt;
-    delete (nextFacility as Record<string, unknown>).facility_prompt;
-    return updateFacilityState(nextFacility) || master;
+  const removeInvoiceColumn = (index: number) => {
+    if (!selectedFacility || typeof selectedFacility !== "object") return;
+    const invoice = readInvoiceTemplate(selectedFacility);
+    const columns = invoice?.columns || [];
+    updateInvoiceTemplate({
+      columns: columns
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map(normalizeInvoiceColumn),
+    });
   };
 
   const addFacility = () => {
@@ -324,11 +446,23 @@ export default function FacilityMasterPage() {
       facility_name: "",
       aliases: [],
       areas: [],
+      fax_template_ids: [],
+      daily_label_comparable_diet_types: [],
+      invoice_template: {
+        template_uri: "",
+        sheet_name: "",
+        include_menu_name: false,
+        columns: [],
+      },
     };
-    setSelectedIndex(-1);
-    setFacilityText(prettyJson(nextFacility));
-    setFacilityDraft(facilityEntryToDraft(nextFacility));
-    setMessage("新規施設の下書きを作成しました。施設名を入力して保存すると一覧に追加されます。");
+    const nextFacilities = [...facilities, nextFacility];
+    const nextMaster = { ...master, facilities: nextFacilities };
+    setMaster(nextMaster);
+    setSelectedIndex(nextFacilities.length - 1);
+    setEditingIndex(nextFacilities.length - 1);
+    setEditBaseline(null);
+    setMasterText(prettyJson(nextMaster));
+    setMessage("新規施設を追加しました。編集内容を保存してください。");
   };
 
   const applyMasterJson = () => {
@@ -347,28 +481,26 @@ export default function FacilityMasterPage() {
     const nextFacilities = Array.isArray(nextMaster.facilities) ? nextMaster.facilities : [];
     if (nextFacilities.length > 0) {
       setSelectedIndex(0);
-      setFacilityText(prettyJson(nextFacilities[0]));
-      setFacilityDraft(facilityEntryToDraft(nextFacilities[0]));
     } else {
       setSelectedIndex(-1);
-      setFacilityText("{}");
-      setFacilityDraft(facilityEntryToDraft(null));
     }
+    setEditingIndex(-1);
+    setEditBaseline(null);
     setMessage("Master JSON を反映しました。");
   };
 
   const saveMaster = async () => {
     if (!master) return;
-    const nextMaster = applyFacilityForm();
-    if (!nextMaster) return;
-    const savePayload = removeBlankDraftFacilities(nextMaster);
+    const payload = sanitizeMasterForSave(master);
     try {
-      const res = await apiClient.put("/facility-master", savePayload);
+      const res = await apiClient.put("/facility-master", payload);
       const updatedMaster = res.data.facility_master as FacilityMaster;
       setMaster(updatedMaster);
       setMasterText(prettyJson(updatedMaster));
       setValidation(res.data.validation || null);
       setPath(res.data.path || path);
+      setEditingIndex(-1);
+      setEditBaseline(null);
       setMessage("Facility master を保存しました。");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
@@ -385,6 +517,7 @@ export default function FacilityMasterPage() {
     () => (selectedIndex >= 0 && selectedIndex < facilities.length ? facilities[selectedIndex] : null),
     [facilities, selectedIndex]
   );
+  const isEditing = editingIndex === selectedIndex && Boolean(selectedFacility);
   const facilityInfo = useMemo(() => {
     if (!selectedFacility || typeof selectedFacility !== "object") {
       return null;
@@ -396,9 +529,12 @@ export default function FacilityMasterPage() {
       address: readString(record.address),
       phone: readString(record.phone),
       orderFormPatternId: readString(record.order_form_pattern_id),
-      aliases: readStringList(record.aliases),
-      areas: readAreas(record.areas),
+      faxTemplateId: readString(record.fax_template_id),
+      faxTemplateIds: readEditableStringList(record.fax_template_ids),
+      aliases: readEditableStringList(record.aliases),
+      areas: readEditableAreas(record.areas),
       invoice: readInvoiceTemplate(selectedFacility),
+      dailyLabelDietTypes: readDailyLabelDietTypes(selectedFacility),
     };
   }, [selectedFacility]);
 
@@ -437,7 +573,7 @@ export default function FacilityMasterPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>施設一覧</h2>
-          <button className="btn" onClick={addFacility}>
+          <button className="btn" onClick={addFacility} disabled={isEditing}>
             新規追加
           </button>
         </header>
@@ -466,201 +602,334 @@ export default function FacilityMasterPage() {
               })}
             </div>
             <div className="editor">
-              <div className="form-grid">
-                <label className="field">
-                  <span className="field-label">施設ID</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.facility_id}
-                    onChange={(e) => updateFacilityDraft("facility_id", e.target.value)}
-                    placeholder="FAC00017"
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">施設名</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.facility_name}
-                    onChange={(e) => updateFacilityDraft("facility_name", e.target.value)}
-                    placeholder="ケアホーム長生苑"
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">注文書テンプレート</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.fax_template_id}
-                    onChange={(e) => updateFacilityDraft("fax_template_id", e.target.value)}
-                    placeholder="fax_layout_regular_forbidden_v1"
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">注文書パターン</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.order_form_pattern_id}
-                    onChange={(e) => updateFacilityDraft("order_form_pattern_id", e.target.value)}
-                    placeholder="PATTERN_A"
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">住所</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.address}
-                    onChange={(e) => updateFacilityDraft("address", e.target.value)}
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">電話番号</span>
-                  <input
-                    className="input"
-                    value={facilityDraft.phone}
-                    onChange={(e) => updateFacilityDraft("phone", e.target.value)}
-                  />
-                </label>
-                <label className="field form-wide">
-                  <span className="field-label">別名 (改行またはカンマ区切り)</span>
-                  <textarea
-                    className="textarea compact-textarea"
-                    value={facilityDraft.aliases_text}
-                    onChange={(e) => updateFacilityDraft("aliases_text", e.target.value)}
-                    rows={3}
-                  />
-                </label>
-                <label className="field form-wide">
-                  <span className="field-label">施設区分/エリア (改行またはカンマ区切り)</span>
-                  <textarea
-                    className="textarea compact-textarea"
-                    value={facilityDraft.areas_text}
-                    onChange={(e) => updateFacilityDraft("areas_text", e.target.value)}
-                    rows={3}
-                  />
-                </label>
-              </div>
-              <div className="actions">
-                <button className="btn ghost" onClick={applyFacilityForm}>
-                  フォーム内容を反映
-                </button>
-                <button className="btn primary" onClick={saveMaster}>
-                  施設一覧を保存
-                </button>
-              </div>
-              <div className="detail-grid">
-                <div className="detail-card">
-                  <p className="detail-label">施設ID</p>
-                  <p className="detail-value">{facilityInfo?.id || "-"}</p>
-                </div>
-                <div className="detail-card">
-                  <p className="detail-label">施設名</p>
-                  <p className="detail-value">{facilityInfo?.name || "-"}</p>
-                </div>
-                <div className="detail-card">
-                  <p className="detail-label">住所</p>
-                  <p className="detail-value">{facilityInfo?.address || "-"}</p>
-                </div>
-                <div className="detail-card">
-                  <p className="detail-label">電話番号</p>
-                  <p className="detail-value">{facilityInfo?.phone || "-"}</p>
-                </div>
-                <div className="detail-card">
-                  <p className="detail-label">注文書パターン</p>
-                  <p className="detail-value">{facilityInfo?.orderFormPatternId || "未設定"}</p>
-                </div>
-              </div>
-              <div className="detail-card detail-wide">
-                <p className="detail-label">別名</p>
-                {facilityInfo?.aliases?.length ? (
-                  <div className="chip-row">
-                    {facilityInfo.aliases.map((alias) => (
-                      <span key={alias} className="chip">
-                        {alias}
-                      </span>
-                    ))}
+              <div className="form-section">
+                <div className="section-title-row">
+                  <div>
+                    <h3>基本情報</h3>
+                    <p className="mode-text">{isEditing ? "編集中" : "閲覧中"}</p>
                   </div>
-                ) : (
-                  <p className="subtle">未設定</p>
-                )}
+                  {isEditing ? (
+                    <div className="actions compact-actions">
+                      <button className="btn ghost compact" onClick={cancelEdit}>
+                        キャンセル
+                      </button>
+                      <button className="btn primary compact" onClick={saveMaster}>
+                        保存
+                      </button>
+                    </div>
+                  ) : (
+                    <button className="btn compact" onClick={beginEdit} disabled={!selectedFacility}>
+                      編集
+                    </button>
+                  )}
+                </div>
+                <div className="form-grid">
+                  <label className="field">
+                    <span className="field-label">施設ID</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.id || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("facility_id", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">施設名</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.name || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("facility_name", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">住所</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.address || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("address", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">電話番号</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.phone || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("phone", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">注文書パターンID</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.orderFormPatternId || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("order_form_pattern_id", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">FAXテンプレートID</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.faxTemplateId || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("fax_template_id", e.target.value)}
+                    />
+                  </label>
+                </div>
               </div>
-              <div className="detail-card detail-wide">
-                <p className="detail-label">施設区分</p>
-                {facilityInfo?.areas?.length ? (
-                  <div className="chip-row">
-                    {facilityInfo.areas.map((area) => (
-                      <span key={`${area.id}-${area.name}`} className="chip">
-                        {area.name}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="subtle">未設定</p>
-                )}
-              </div>
-              <div className="detail-card detail-wide">
-                <p className="detail-label">納品書テンプレート</p>
-                {facilityInfo?.invoice ? (
-                  <>
-                    {facilityInfo.invoice.templateUri ? (
-                      <p className="detail-meta">template_uri: {facilityInfo.invoice.templateUri}</p>
-                    ) : (
-                      <p className="detail-meta">template_uri: 未設定</p>
-                    )}
-                    {facilityInfo.invoice.sheetName ? (
-                      <p className="detail-meta">sheet_name: {facilityInfo.invoice.sheetName}</p>
-                    ) : (
-                      <p className="detail-meta">sheet_name: 未設定</p>
-                    )}
-                    <p className="detail-meta">
-                      include_menu_name: {facilityInfo.invoice.includeMenuName ? "true" : "false"}
-                    </p>
-                    {facilityInfo.invoice.columns.length ? (
-                      <div className="table-wrap">
-                        <table className="invoice-table">
-                          <thead>
-                            <tr>
-                              <th>列名</th>
-                              <th>ソース</th>
-                              <th>区分</th>
-                              <th>エリア</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {facilityInfo.invoice.columns.map((col, idx) => (
-                              <tr key={`${col.name}-${col.source}-${idx}`}>
-                                <td>{col.name || "-"}</td>
-                                <td>{col.source || "-"}</td>
-                                <td>{col.dietType || "-"}</td>
-                                <td>{col.areaId || "-"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <h3>別名</h3>
+                  <button className="btn compact" onClick={() => addStringListItem("aliases")} disabled={!isEditing}>
+                    追加
+                  </button>
+                </div>
+                {facilityInfo?.aliases.length ? (
+                  <div className="row-list">
+                    {facilityInfo.aliases.map((alias, index) => (
+                      <div className="row-editor" key={`${alias}-${index}`}>
+                        <input
+                          className="input"
+                          value={alias}
+                          disabled={!isEditing}
+                          onChange={(e) => updateStringListItem("aliases", index, e.target.value)}
+                        />
+                        <button
+                          className="btn danger compact"
+                          onClick={() => removeStringListItem("aliases", index)}
+                          disabled={!isEditing}
+                        >
+                          削除
+                        </button>
                       </div>
-                    ) : (
-                      <p className="subtle">納品書カラムが未設定です。</p>
-                    )}
-                  </>
+                    ))}
+                  </div>
                 ) : (
-                  <p className="subtle">納品書テンプレートが未設定です。</p>
+                  <p className="subtle">未設定です。追加ボタンから登録してください。</p>
                 )}
               </div>
-              <details className="json-panel">
-                <summary>施設JSON (上級)</summary>
-                <label className="field">
-                  <span className="field-label">施設JSON</span>
-                  <textarea
-                    className="textarea json-textarea"
-                    value={facilityText}
-                    onChange={(e) => setFacilityText(e.target.value)}
-                    rows={14}
-                    wrap="soft"
-                  />
-                </label>
-              </details>
-              <div className="actions">
-                <button className="btn ghost" onClick={applyFacilityEditor}>
-                  施設編集を反映
-                </button>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <h3>FAXテンプレート候補</h3>
+                  <button
+                    className="btn compact"
+                    onClick={() => addStringListItem("fax_template_ids")}
+                    disabled={!isEditing}
+                  >
+                    追加
+                  </button>
+                </div>
+                {facilityInfo?.faxTemplateIds.length ? (
+                  <div className="row-list">
+                    {facilityInfo.faxTemplateIds.map((templateId, index) => (
+                      <div className="row-editor" key={`${templateId}-${index}`}>
+                        <input
+                          className="input"
+                          value={templateId}
+                          disabled={!isEditing}
+                          onChange={(e) => updateStringListItem("fax_template_ids", index, e.target.value)}
+                        />
+                        <button
+                          className="btn danger compact"
+                          onClick={() => removeStringListItem("fax_template_ids", index)}
+                          disabled={!isEditing}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="subtle">未設定です。単一テンプレートの場合は基本情報のFAXテンプレートIDを使用します。</p>
+                )}
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <h3>施設区分</h3>
+                  <button className="btn compact" onClick={addArea} disabled={!isEditing}>
+                    追加
+                  </button>
+                </div>
+                {facilityInfo?.areas.length ? (
+                  <div className="area-list">
+                    {facilityInfo.areas.map((area, index) => (
+                      <div className="area-row" key={`${area.id}-${area.name}-${index}`}>
+                        <label className="field">
+                          <span className="field-label">区分ID</span>
+                          <input
+                            className="input"
+                            value={area.id}
+                            disabled={!isEditing}
+                            onChange={(e) => updateArea(index, { id: e.target.value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span className="field-label">区分名</span>
+                          <input
+                            className="input"
+                            value={area.name}
+                            disabled={!isEditing}
+                            onChange={(e) => updateArea(index, { name: e.target.value })}
+                          />
+                        </label>
+                        <button className="btn danger compact" onClick={() => removeArea(index)} disabled={!isEditing}>
+                          削除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="subtle">未設定です。通所・職員など施設内区分がある場合に追加してください。</p>
+                )}
+              </div>
+
+              <div className="form-section">
+                <h3>ラベル比較・表示対象区分</h3>
+                <div className="toggle-grid">
+                  {DAILY_LABEL_DIET_OPTIONS.map((option) => {
+                    const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
+                    return (
+                      <label key={option.value} className={`toggle-item ${checked ? "checked" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleDailyLabelDietType(option.value)}
+                          disabled={!isEditing}
+                        />
+                        <span>{option.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="detail-meta">
+                  未選択の場合はシステム既定値を使用します。施設固有に確定した区分だけ選択してください。
+                </p>
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <h3>納品書テンプレート</h3>
+                  <button className="btn compact" onClick={addInvoiceColumn} disabled={!isEditing}>
+                    列を追加
+                  </button>
+                </div>
+                <div className="form-grid">
+                  <label className="field">
+                    <span className="field-label">テンプレートURI</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.invoice?.templateUri || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateInvoiceTemplate({ template_uri: e.target.value })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">シート名</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.invoice?.sheetName || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateInvoiceTemplate({ sheet_name: e.target.value })}
+                    />
+                  </label>
+                  <label className="check-field">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(facilityInfo?.invoice?.includeMenuName)}
+                      disabled={!isEditing}
+                      onChange={(e) => updateInvoiceTemplate({ include_menu_name: e.target.checked })}
+                    />
+                    <span>献立名を含める</span>
+                  </label>
+                </div>
+                {facilityInfo?.invoice?.columns.length ? (
+                  <div className="table-wrap">
+                    <table className="invoice-table">
+                      <thead>
+                        <tr>
+                          <th>列名</th>
+                          <th>ソース</th>
+                          <th>ヘッダー</th>
+                          <th>列番号</th>
+                          <th>食種</th>
+                          <th>施設区分</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {facilityInfo.invoice.columns.map((col, idx) => (
+                          <tr key={`${col.name}-${col.source}-${idx}`}>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.name}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { name: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.source}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { source: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.header}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { header: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input numeric"
+                                value={col.columnIndex}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { columnIndex: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.dietType}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { dietType: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className="table-input"
+                                value={col.areaId}
+                                disabled={!isEditing}
+                                onChange={(e) => updateInvoiceColumn(idx, { areaId: e.target.value })}
+                              />
+                            </td>
+                            <td>
+                              <button
+                                className="btn danger compact"
+                                onClick={() => removeInvoiceColumn(idx)}
+                                disabled={!isEditing}
+                              >
+                                削除
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="subtle">納品書カラムが未設定です。列を追加してください。</p>
+                )}
               </div>
             </div>
           </div>
@@ -879,18 +1148,64 @@ export default function FacilityMasterPage() {
           gap: 14px;
         }
 
+        .form-section {
+          border-radius: 10px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          background: #ffffff;
+          padding: 14px;
+        }
+
+        .form-section h3 {
+          font-size: 15px;
+          margin: 0 0 12px;
+        }
+
+        .section-title-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+
+        .mode-text {
+          margin: 4px 0 0;
+          color: #5f7b74;
+          font-size: 12px;
+          font-weight: 600;
+        }
+
+        .compact-actions {
+          align-items: center;
+        }
+
+        .section-title-row h3 {
+          margin: 0;
+        }
+
         .form-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           gap: 12px;
-          padding: 14px;
-          border-radius: 16px;
-          border: 1px solid rgba(31, 42, 42, 0.12);
-          background: #fbfaf7;
         }
 
-        .form-wide {
-          grid-column: 1 / -1;
+        .row-list,
+        .area-list {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .row-editor,
+        .area-row {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 10px;
+          align-items: end;
+        }
+
+        .area-row {
+          grid-template-columns: minmax(120px, 0.7fr) minmax(160px, 1fr) auto;
         }
 
         .detail-grid {
@@ -945,6 +1260,38 @@ export default function FacilityMasterPage() {
           color: #1f2a2a;
         }
 
+        .toggle-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+
+        .toggle-item {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-height: 36px;
+          padding: 8px 10px;
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          border-radius: 8px;
+          background: #fbfaf7;
+          font-size: 13px;
+          cursor: pointer;
+        }
+
+        .toggle-item.checked {
+          border-color: #1f2a2a;
+          background: #eef3f1;
+          font-weight: 700;
+        }
+
+        .toggle-item input {
+          width: 16px;
+          height: 16px;
+          accent-color: #1f2a2a;
+        }
+
         .field {
           display: flex;
           flex-direction: column;
@@ -968,14 +1315,43 @@ export default function FacilityMasterPage() {
           background: #fbfaf7;
         }
 
+        .input {
+          width: 100%;
+        }
+
+        .input:disabled,
+        .table-input:disabled,
+        .toggle-item input:disabled + span,
+        .check-field input:disabled + span {
+          color: #4c5955;
+        }
+
+        .input:disabled,
+        .table-input:disabled {
+          background: #f4f5f3;
+          border-color: rgba(31, 42, 42, 0.08);
+          cursor: default;
+        }
+
+        .check-field {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-height: 42px;
+          padding-top: 18px;
+          font-size: 13px;
+          font-weight: 600;
+        }
+
+        .check-field input {
+          width: 16px;
+          height: 16px;
+          accent-color: #1f2a2a;
+        }
+
         .textarea {
           min-height: 120px;
           resize: vertical;
-        }
-
-        .compact-textarea {
-          min-height: 72px;
-          font-family: "Manrope", "Noto Sans JP", sans-serif;
         }
 
         .json-textarea {
@@ -990,7 +1366,37 @@ export default function FacilityMasterPage() {
         }
 
         .invoice-table {
+          width: 100%;
+          border-collapse: collapse;
           font-size: 12px;
+        }
+
+        .invoice-table th,
+        .invoice-table td {
+          border-bottom: 1px solid rgba(31, 42, 42, 0.1);
+          padding: 6px;
+          text-align: left;
+          vertical-align: middle;
+        }
+
+        .table-wrap {
+          width: 100%;
+          overflow-x: auto;
+        }
+
+        .table-input {
+          width: 100%;
+          min-width: 92px;
+          border: 1px solid rgba(31, 42, 42, 0.18);
+          border-radius: 8px;
+          padding: 7px 8px;
+          font-family: "JetBrains Mono", "Noto Sans JP", monospace;
+          font-size: 12px;
+          background: #fbfaf7;
+        }
+
+        .table-input.numeric {
+          min-width: 64px;
         }
 
         .actions {
@@ -1009,6 +1415,11 @@ export default function FacilityMasterPage() {
           color: #f7f2e7;
         }
 
+        .btn:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+
         .btn.ghost {
           background: #eef3f1;
           color: #1f2a2a;
@@ -1017,6 +1428,17 @@ export default function FacilityMasterPage() {
         .btn.primary {
           background: #1f2a2a;
           color: #f7f2e7;
+        }
+
+        .btn.compact {
+          padding: 7px 12px;
+          border-radius: 8px;
+          font-size: 12px;
+        }
+
+        .btn.danger {
+          background: #f3e8e8;
+          color: #7a2d2d;
         }
 
         .message {

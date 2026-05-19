@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -172,15 +172,6 @@ type TotalRow = {
   menu_name?: string | null;
   diet_type?: string | null;
   quantity?: number | null;
-  order_refs?: {
-    order_id?: string | null;
-    facility_id?: string | null;
-    facility_name?: string | null;
-    source_diet_type?: string | null;
-    aggregated_diet_type?: string | null;
-    area_id?: string | null;
-    quantity?: number | null;
-  }[];
 };
 
 const dietTypeLabels: Record<string, string> = {
@@ -247,16 +238,6 @@ const formatQuantity = (value?: number | null) => {
   if (value == null || Number.isNaN(value)) return "-";
   return Number(value).toLocaleString("ja-JP");
 };
-
-const buildTotalRowKey = (row: TotalRow, index: number) =>
-  [
-    row.date || "-",
-    row.daypart || "-",
-    row.menu_category || "-",
-    row.menu_name || "-",
-    row.diet_type || "-",
-    index,
-  ].join("__");
 
 const auditSeverityLabels: Record<string, string> = {
   high: "高",
@@ -372,8 +353,6 @@ const overrideUnitOptions = [
   { value: "g", label: "グラム" },
   { value: "切", label: "切れ" },
   { value: "個", label: "個" },
-  { value: "本", label: "本" },
-  { value: "枚", label: "枚" },
 ];
 
 const normalizeOverrideUnitValue = (value?: string | null) => {
@@ -382,10 +361,8 @@ const normalizeOverrideUnitValue = (value?: string | null) => {
   const compact = raw.toLowerCase().replace(/[　\s]+/g, "");
   if (compact === "g" || compact === "ｇ" || raw.includes("グラム")) return "g";
   if (raw.includes("切") || raw.includes("枚") || compact === "cut" || compact === "slice" || compact === "slices")
-    return raw.includes("枚") && !raw.includes("切") ? "枚" : "切";
-  if (raw.includes("個") || raw.includes("ヶ") || raw.includes("ケ") || compact === "count" || compact === "piece" || compact === "pieces")
-    return "個";
-  if (raw.includes("本")) return "本";
+    return "切";
+  if (raw.includes("個") || compact === "count" || compact === "piece" || compact === "pieces") return "個";
   return "g";
 };
 
@@ -425,7 +402,6 @@ export default function DailyDeliveryNotesPage() {
   const [dailyBagAudit, setDailyBagAudit] = useState<DailyBagAuditResponse>({});
   const [auditAiLoading, setAuditAiLoading] = useState(false);
   const [totalsRows, setTotalsRows] = useState<TotalRow[]>([]);
-  const [expandedTotalRows, setExpandedTotalRows] = useState<Set<string>>(() => new Set());
   const [overrideEditor, setOverrideEditor] = useState<DailyOutputOverrideResponse | null>(null);
   const [overrideEditorLoading, setOverrideEditorLoading] = useState(false);
   const [overrideEditorMessage, setOverrideEditorMessage] = useState("");
@@ -523,7 +499,6 @@ export default function DailyDeliveryNotesPage() {
     setDailyBagSummary({});
     setDailyBagAudit({});
     setTotalsRows([]);
-    setExpandedTotalRows(new Set());
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
@@ -531,7 +506,7 @@ export default function DailyDeliveryNotesPage() {
         apiClient.get("/orders/by-line-date", { params }),
         apiClient.get("/orders/daily-bags", { params }),
         apiClient.get("/orders/daily-bags/audit", { params }),
-        apiClient.get("/totals", { params: { date, include_order_refs: true } }),
+        apiClient.get("/totals", { params: { date } }),
       ]);
 
       if (ordersRes.status === "fulfilled") {
@@ -960,7 +935,7 @@ export default function DailyDeliveryNotesPage() {
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
-      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.zip`;
+      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.xlsx`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -971,45 +946,11 @@ export default function DailyDeliveryNotesPage() {
       link.remove();
       URL.revokeObjectURL(url);
       const successOrders = Number(res.headers?.["x-daily-bundle-success-orders"] || 0);
-      const emptyOrders = Number(res.headers?.["x-daily-bundle-empty-orders"] || 0);
       const errorOrders = Number(res.headers?.["x-daily-bundle-error-orders"] || 0);
-      const skippedPart = emptyOrders > 0 ? ` / 対象なし ${emptyOrders}件` : "";
-      setMessage(`${label}をダウンロードしました。成功 ${successOrders}件${skippedPart} / 失敗 ${errorOrders}件`);
+      setMessage(`${label}をダウンロードしました。成功 ${successOrders}件 / 失敗 ${errorOrders}件`);
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
       setMessage(detail ? `一括ダウンロードに失敗しました: ${detail}` : "一括ダウンロードに失敗しました。");
-    }
-  };
-
-  const downloadWeightWorkbook = async () => {
-    if (!date) {
-      setMessage("日付を指定してください。");
-      return;
-    }
-    setMessage("重量表Excelを作成中です...");
-    try {
-      const res = await apiClient.get("/outputs/daily-weight-workbook", {
-        params: { date, status: status || undefined },
-        responseType: "blob",
-        timeout: 0,
-      });
-      const contentDisposition = headerValueToString(
-        res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
-      );
-      const filename = extractFilename(contentDisposition) || `weight_${date}.xlsx`;
-      const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setMessage("重量表Excelをダウンロードしました。");
-    } catch (err: any) {
-      const detail = await extractErrorDetail(err);
-      setMessage(detail ? `重量表Excelのダウンロードに失敗しました: ${detail}` : "重量表Excelのダウンロードに失敗しました。");
     }
   };
 
@@ -1032,18 +973,6 @@ export default function DailyDeliveryNotesPage() {
     });
     return rows;
   }, [totalsRows]);
-
-  const toggleTotalRow = (rowKey: string) => {
-    setExpandedTotalRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(rowKey)) {
-        next.delete(rowKey);
-      } else {
-        next.add(rowKey);
-      }
-      return next;
-    });
-  };
 
   const auditFindings = useMemo(
     () => (Array.isArray(dailyBagAudit.rule_based?.findings) ? dailyBagAudit.rule_based?.findings || [] : []),
@@ -1123,11 +1052,13 @@ export default function DailyDeliveryNotesPage() {
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("both")} disabled={loading}>
             当日一括Excel
           </button>
-          <button className="btn ghost" type="button" onClick={downloadWeightWorkbook} disabled={loading}>
-            重量表Excel
-          </button>
+          <Link className="btn ghost" href={`/weekly-weight-output?date=${encodeURIComponent(date)}${status ? `&status=${encodeURIComponent(status)}` : ""}`}>
+            週別重量表
+          </Link>
         </div>
-        <p className="subtle helper-text">一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。</p>
+        <p className="subtle helper-text">
+          一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。週別の重量表Excelは別ページで出力します。
+        </p>
       </section>
 
       {message ? <p className="message">{message}</p> : null}
@@ -1424,95 +1355,32 @@ export default function DailyDeliveryNotesPage() {
                 <th>メニュー</th>
                 <th>区分</th>
                 <th>注文数</th>
-                <th>施設別</th>
               </tr>
             </thead>
             <tbody>
               {totalsSummaryRows.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>該当データなし</td>
+                  <td colSpan={5}>該当データなし</td>
                 </tr>
               ) : (
-                totalsSummaryRows.map((row, index) => {
-                  const rowKey = buildTotalRowKey(row, index);
-                  const refs = Array.isArray(row.order_refs) ? row.order_refs : [];
-                  const expanded = expandedTotalRows.has(rowKey);
-                  return (
-                    <Fragment key={rowKey}>
-                      <tr key={rowKey}>
-                        <td>{row.daypart || "-"}</td>
-                        <td>{row.menu_category || "-"}</td>
-                        <td>{row.menu_name || "-"}</td>
-                        <td>{formatDietType(row.diet_type)}</td>
-                        <td className="numeric">{formatQuantity(row.quantity)}</td>
-                        <td>
-                          <button
-                            className="btn ghost total-breakdown-toggle"
-                            type="button"
-                            onClick={() => toggleTotalRow(rowKey)}
-                            disabled={!refs.length}
-                            aria-expanded={expanded}
-                          >
-                            {expanded ? "閉じる" : "施設別"}
-                          </button>
-                        </td>
-                      </tr>
-                      {expanded ? (
-                        <tr key={`${rowKey}__breakdown`} className="total-breakdown-row">
-                          <td colSpan={6}>
-                            <div className="total-breakdown-panel">
-                              {refs.length ? (
-                                <table className="total-breakdown-table">
-                                  <thead>
-                                    <tr>
-                                      <th>施設</th>
-                                      <th>元区分</th>
-                                      <th>エリア</th>
-                                      <th>注文ID</th>
-                                      <th>数量</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {refs.map((ref, refIndex) => (
-                                      <tr
-                                        key={[
-                                          ref.order_id || "-",
-                                          ref.facility_id || "-",
-                                          ref.source_diet_type || "-",
-                                          ref.area_id || "-",
-                                          refIndex,
-                                        ].join("__")}
-                                      >
-                                        <td>
-                                          {ref.facility_name || ref.facility_id || "-"}
-                                          {ref.facility_id ? <span className="total-breakdown-facility-id"> {ref.facility_id}</span> : null}
-                                        </td>
-                                        <td>{formatDietType(ref.source_diet_type)}</td>
-                                        <td>{ref.area_id || "-"}</td>
-                                        <td>
-                                          {ref.order_id ? (
-                                            <Link className="link" href={`/orders/${ref.order_id}/workflow-v2`}>
-                                              {ref.order_id}
-                                            </Link>
-                                          ) : (
-                                            "-"
-                                          )}
-                                        </td>
-                                        <td className="numeric">{formatQuantity(ref.quantity)}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              ) : (
-                                <p className="subtle">施設別内訳がありません。</p>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  );
-                })
+                totalsSummaryRows.map((row, index) => (
+                  <tr
+                    key={[
+                      row.date || "-",
+                      row.daypart || "-",
+                      row.menu_category || "-",
+                      row.menu_name || "-",
+                      row.diet_type || "-",
+                      index,
+                    ].join("__")}
+                  >
+                    <td>{row.daypart || "-"}</td>
+                    <td>{row.menu_category || "-"}</td>
+                    <td>{row.menu_name || "-"}</td>
+                    <td>{formatDietType(row.diet_type)}</td>
+                    <td className="numeric">{formatQuantity(row.quantity)}</td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
@@ -2102,38 +1970,6 @@ export default function DailyDeliveryNotesPage() {
           gap: 12px;
           font-size: 12px;
           color: #758680;
-        }
-
-        .total-breakdown-toggle {
-          padding: 6px 10px;
-          font-size: 12px;
-        }
-
-        .total-breakdown-row {
-          background: #f8fbfa !important;
-        }
-
-        .total-breakdown-panel {
-          border: 1px solid rgba(25, 32, 30, 0.08);
-          border-radius: 14px;
-          background: #ffffff;
-          padding: 10px;
-        }
-
-        .total-breakdown-table {
-          min-width: 100%;
-          font-size: 12px;
-        }
-
-        .total-breakdown-table th,
-        .total-breakdown-table td {
-          padding: 7px 8px;
-          white-space: nowrap;
-        }
-
-        .total-breakdown-facility-id {
-          color: #778680;
-          font-size: 11px;
         }
 
         .audit-summary-row {

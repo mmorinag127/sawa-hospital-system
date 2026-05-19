@@ -59,6 +59,11 @@ export default function TopNav() {
           isActive: (path) => path.startsWith("/daily-delivery-notes") || path.startsWith("/totals"),
         },
         {
+          href: "/weekly-weight-output",
+          label: "週別重量表",
+          isActive: (path) => path.startsWith("/weekly-weight-output"),
+        },
+        {
           href: "/shipping",
           label: "送り状",
           isActive: (path) => path === "/shipping",
