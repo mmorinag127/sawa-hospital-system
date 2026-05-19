@@ -142,15 +142,15 @@ export default function WeeklyWeightOutputPage() {
       {message ? <p className="message">{message}</p> : null}
 
       <style jsx>{`
-        body {
+        :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
           font-family: "Manrope", "Noto Sans JP", sans-serif;
         }
-        * {
+        :global(*) {
           box-sizing: border-box;
         }
-        a {
+        :global(a) {
           color: inherit;
           text-decoration: none;
         }
