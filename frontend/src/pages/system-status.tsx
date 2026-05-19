@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -491,6 +492,9 @@ export default function SystemStatusPage() {
           <button className="btn ghost" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy}>
             状態を再取得
           </button>
+          <Link className="btn ghost link-btn" href="/system-process-logs">
+            処理ログを確認
+          </Link>
           {isAdmin ? (
             <>
               <button className="btn ghost" type="button" onClick={() => downloadDb(false)} disabled={maintenanceBusy}>
@@ -760,6 +764,10 @@ export default function SystemStatusPage() {
         .btn.ghost {
           background: #eef2f0;
           color: #1f2a2a;
+        }
+        .link-btn {
+          display: inline-flex;
+          text-decoration: none;
         }
         .btn.danger {
           background: #b94014;

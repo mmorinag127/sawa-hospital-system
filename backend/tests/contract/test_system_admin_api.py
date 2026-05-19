@@ -10,7 +10,9 @@ from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.ingest_job import IngestJob  # noqa: E402
 from src.models.ocr_job import OcrJob  # noqa: E402
+from src.models.shipping_tracking import ShippingTrackingLog  # noqa: E402
 from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
+from src.models.user import AuditLog  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
@@ -81,6 +83,89 @@ def test_system_status_and_admin_endpoints():
     assert clear_res.status_code == 200
     clear_payload = clear_res.json()
     assert clear_payload.get("result", {}).get("total_removed", 0) >= 1
+
+
+def test_system_process_logs_returns_recent_one_row_per_process():
+    order_service.clear_all()
+    now = datetime.utcnow()
+    with session_scope() as session:
+        session.query(ShippingTrackingLog).delete()
+        session.query(UploadedPdf).delete()
+        session.query(OcrJob).delete()
+        session.query(IngestJob).delete()
+        session.query(AuditLog).delete()
+        session.add_all(
+            [
+                AuditLog(
+                    id="audit-process-log-001",
+                    actor="operator@example.com",
+                    action="order.confirm",
+                    target="ORD-process-log",
+                    metadata_json={"order_id": "ORD-process-log"},
+                    created_at=now - timedelta(minutes=1),
+                ),
+                IngestJob(
+                    id="msg-process-log-001",
+                    status="done",
+                    payload={"message_id": "msg-process-log-001", "pdf_uri": "file://process.pdf"},
+                    attempts=1,
+                    created_at=now - timedelta(minutes=5),
+                    updated_at=now - timedelta(minutes=4),
+                ),
+                OcrJob(
+                    id="OCR-process-log-001",
+                    status="failed",
+                    input_reference="file://process.pdf",
+                    metrics={"provider": "test"},
+                    error_message="ocr_failed_for_test",
+                    created_at=now - timedelta(minutes=3),
+                    updated_at=now - timedelta(minutes=2),
+                ),
+                UploadedPdf(
+                    id="UPL-process-log-001",
+                    message_id="msg-process-log-001",
+                    content_sha256="sha-process-log-001",
+                    source_kind="manual_upload",
+                    original_filename="process.pdf",
+                    storage_uri="gs://bucket/process.pdf",
+                    received_at=now - timedelta(minutes=6),
+                    status="completed",
+                    current_stage="done",
+                    attempt_count=1,
+                    max_attempts=5,
+                    created_at=now - timedelta(minutes=6),
+                    updated_at=now - timedelta(minutes=3),
+                ),
+                ShippingTrackingLog(
+                    id="ship-process-log-001",
+                    tracking_key="track-process-log-001",
+                    tracking_number="123456789012",
+                    status="delivered",
+                    delivered=True,
+                    source="manual",
+                    looked_up_at=now - timedelta(minutes=7),
+                    created_at=now - timedelta(minutes=7),
+                ),
+            ]
+        )
+
+    client = TestClient(app)
+    res = client.get("/system/process-logs?limit=3")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload.get("limit") == 3
+    items = payload.get("items") or []
+    assert len(items) == 3
+    assert items[0]["id"] == "audit:audit-process-log-001"
+    assert all(item.get("details") for item in items)
+    assert {item.get("process_type") for item in items} <= {
+        "audit",
+        "ingest",
+        "ocr",
+        "uploaded_pdf",
+        "shipping_tracking",
+    }
 
 
 def test_system_status_reports_manual_upload_mode(monkeypatch):

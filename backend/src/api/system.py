@@ -16,6 +16,7 @@ from src.services.system_maintenance_service import (
     get_db_quota_status,
     get_sqlite_db_path,
 )
+from src.services.system_process_log_service import list_process_logs
 
 router = APIRouter()
 
@@ -86,6 +87,11 @@ def system_status():
 @router.get("/system/db/quota", dependencies=[Depends(require_role("operator"))])
 def get_db_quota():
     return get_db_quota_status()
+
+
+@router.get("/system/process-logs", dependencies=[Depends(require_role("operator"))])
+def get_process_logs(limit: int = 100):
+    return list_process_logs(limit=limit)
 
 
 @router.get("/system/db/download", dependencies=[Depends(require_role("admin"))])
