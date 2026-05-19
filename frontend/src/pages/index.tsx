@@ -1017,17 +1017,21 @@ export default function HomePage() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 12px;
           margin-bottom: 16px;
         }
 
         h2 {
           font-size: 18px;
           margin: 0;
+          min-width: 0;
         }
 
         .ghost-link {
+          flex: 0 0 auto;
           font-size: 13px;
           color: #5f7b74;
+          white-space: nowrap;
         }
 
         .table-wrap {
@@ -1057,17 +1061,29 @@ export default function HomePage() {
         .pending-list {
           display: grid;
           gap: 12px;
+          max-height: min(420px, 48vh);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding-right: 4px;
         }
 
         .pending-item {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 12px;
+          min-width: 0;
           padding: 12px 14px;
           border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.06);
           background: #fbfbf9;
           transition: transform 0.2s ease;
+        }
+
+        .pending-item > div,
+        .shipping-item > div,
+        .menu-card > div {
+          min-width: 0;
         }
 
         .shipping-summary {
@@ -1078,13 +1094,23 @@ export default function HomePage() {
           background: #fbf8ef;
           font-size: 13px;
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-          gap: 6px;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px 12px;
+        }
+
+        .shipping-summary p {
+          margin: 0;
+          min-width: 0;
+          overflow-wrap: anywhere;
         }
 
         .shipping-list {
           display: grid;
           gap: 10px;
+          max-height: min(520px, 52vh);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding-right: 4px;
         }
 
         .shipping-item {
@@ -1092,7 +1118,8 @@ export default function HomePage() {
           justify-content: space-between;
           align-items: flex-start;
           gap: 10px;
-          padding: 12px 14px;
+          min-width: 0;
+          padding: 10px 12px;
           border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.06);
           background: #fbfbf9;
@@ -1122,12 +1149,16 @@ export default function HomePage() {
         .pending-title {
           margin: 0 0 4px;
           font-weight: 600;
+          line-height: 1.35;
+          overflow-wrap: anywhere;
         }
 
         .pending-meta {
           margin: 0;
           font-size: 12px;
+          line-height: 1.45;
           color: #5f7b74;
+          overflow-wrap: anywhere;
         }
 
         .pending-meta.warn {
@@ -1135,10 +1166,12 @@ export default function HomePage() {
         }
 
         .status-tag {
+          flex: 0 0 auto;
           background: #e6ebe9;
           padding: 4px 10px;
           border-radius: 999px;
           font-size: 12px;
+          white-space: nowrap;
         }
 
         .badge {
@@ -1162,12 +1195,17 @@ export default function HomePage() {
           display: grid;
           gap: 12px;
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          max-height: min(540px, 58vh);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding-right: 4px;
         }
 
         .menu-card {
           display: flex;
           justify-content: space-between;
           gap: 12px;
+          min-width: 0;
           padding: 14px;
           border-radius: 14px;
           border: 1px solid rgba(25, 32, 30, 0.06);
