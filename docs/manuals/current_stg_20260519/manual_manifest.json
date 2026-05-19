@@ -1,0 +1,115 @@
+{
+  "version": "v2026.05.19-current-stg",
+  "created": "2026-05-19 09:20 JST",
+  "screenshotSource": "current stg live workflow-v2",
+  "manuals": [
+    {
+      "key": "order_processing",
+      "title": "注文処理 workflow-v2 マニュアル",
+      "kind": "detail",
+      "md": "order_processing_detail_workflow_v2_current_stg_20260519_1030.md",
+      "pdf": "order_processing_detail_workflow_v2_current_stg_20260519_1030.pdf",
+      "sourceUrl": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2",
+      "capturedAt": "2026-05-19 10:30 JST",
+      "cloudRunRevision": "web-stg-00206-rxc",
+      "buildId": "hU_EpWS8vP9LhGph2MCQk",
+      "updatedAt": "2026-05-19 10:30 JST"
+    },
+    {
+      "key": "order_processing",
+      "title": "注文処理 workflow-v2 マニュアル",
+      "kind": "quick",
+      "md": "order_processing_quick_workflow_v2_current_stg_20260519_0920.md",
+      "pdf": "order_processing_quick_workflow_v2_current_stg_20260519_0920.pdf",
+      "sourceUrl": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2",
+      "capturedAt": "2026-05-19 09:20 JST",
+      "cloudRunRevision": "web-stg-00200-xf6",
+      "buildId": "hU_EpWS8vP9LhGph2MCQk"
+    },
+    {
+      "key": "order_form_creation",
+      "title": "注文書作成マニュアル",
+      "kind": "detail",
+      "md": "order_form_creation_detail_current_stg_20260519_0805.md",
+      "pdf": "order_form_creation_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "order_form_creation",
+      "title": "注文書作成マニュアル",
+      "kind": "quick",
+      "md": "order_form_creation_quick_current_stg_20260519_0805.md",
+      "pdf": "order_form_creation_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "daily_output",
+      "title": "日別出力処理マニュアル",
+      "kind": "detail",
+      "md": "daily_output_detail_current_stg_20260519_0805.md",
+      "pdf": "daily_output_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "daily_output",
+      "title": "日別出力処理マニュアル",
+      "kind": "quick",
+      "md": "daily_output_quick_current_stg_20260519_0805.md",
+      "pdf": "daily_output_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "weekly_output",
+      "title": "週別出力処理マニュアル",
+      "kind": "detail",
+      "md": "weekly_output_detail_current_stg_20260519_0805.md",
+      "pdf": "weekly_output_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "weekly_output",
+      "title": "週別出力処理マニュアル",
+      "kind": "quick",
+      "md": "weekly_output_quick_current_stg_20260519_0805.md",
+      "pdf": "weekly_output_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "monthly_menu",
+      "title": "月次メニュー登録処理マニュアル",
+      "kind": "detail",
+      "md": "monthly_menu_detail_current_stg_20260519_0805.md",
+      "pdf": "monthly_menu_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "monthly_menu",
+      "title": "月次メニュー登録処理マニュアル",
+      "kind": "quick",
+      "md": "monthly_menu_quick_current_stg_20260519_0805.md",
+      "pdf": "monthly_menu_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "facility_management",
+      "title": "施設一覧 修正・新規追加マニュアル",
+      "kind": "detail",
+      "md": "facility_management_detail_current_stg_20260519_0805.md",
+      "pdf": "facility_management_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "facility_management",
+      "title": "施設一覧 修正・新規追加マニュアル",
+      "kind": "quick",
+      "md": "facility_management_quick_current_stg_20260519_0805.md",
+      "pdf": "facility_management_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "shipping",
+      "title": "送り状処理マニュアル",
+      "kind": "detail",
+      "md": "shipping_detail_current_stg_20260519_0805.md",
+      "pdf": "shipping_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "shipping",
+      "title": "送り状処理マニュアル",
+      "kind": "quick",
+      "md": "shipping_quick_current_stg_20260519_0805.md",
+      "pdf": "shipping_quick_current_stg_20260519_0805.pdf"
+    }
+  ],
+  "updated": "2026-05-19 10:30 JST"
+}

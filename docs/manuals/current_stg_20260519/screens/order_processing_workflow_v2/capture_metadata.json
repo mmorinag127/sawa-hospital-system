@@ -1,0 +1,374 @@
+{
+  "capturedAt": "2026-05-19T00:20:39.325Z",
+  "capturedAtJst": "2026年5月19日火曜日 9:20:39 JST",
+  "target": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2",
+  "orderId": "ORDb1702157",
+  "route": "/orders/ORDb1702157/workflow-v2",
+  "cloudRunRevision": "web-stg-00200-xf6",
+  "buildId": "hU_EpWS8vP9LhGph2MCQk",
+  "viewport": {
+    "width": 1440,
+    "height": 1050
+  },
+  "bodyTextPreview": "WORKFLOW V2\n\n注文処理 v2\n\nDB workflow state と artifact lineage だけで step を進めます。\n\nダッシュボード\nダッシュボード\n注文系\n注文一覧\n注文書アップロード\n注文書生成\n作業系\n日別出力\n送り状\n送り状履歴\n施設系\n施設別注文\n施設一覧\nメニュー系\n月次メニュー\n基準メニュー\nメニューマスター\nメニュールール\n\n注文情報 / 現在状態\n\n確定済み\n\n注文が確定されました\n\n注文 / 状態\n\nORDb1702157\n\n確定済み\n\n施設\n\nグランフォレスト方上 (FAC00012)\n\n週次 / テンプレート\n\n2026-05 (05/10-05/16)\n\nグランフォレスト方上\n\nOCR\n\n1件 / -\n\n処理時間: 未計測\n\nOCR開始 / 更新\n\n-\n\n-\n\nシート最終保存\n\n05/14 08:29:07\n\n再読込\n確認専用ページ\n注文一覧へ戻る\nSTEP1\nPDF/施設/週次\nSTEP2\nOCR選択\nSTEP3\nシート編集\nSTEP4\n出力確認\n\nStep4\n\n出力確認\n\n袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。\n\n出力確認を作成\n確定して一覧にもどる\n袋分け結果\n対象行\n\n68件\n\n数量行\n\n68件\n\n合計数量\n\n2,653\n\n袋数\n\n159袋\n\n同じ日付の数量セルをまとめて表示します。区分・メニュー・食種・エリアを確認してから確定してください。\n\n2026-05-10\n17件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tさつま芋の天ぷら\t常食\tX\tlarge\t37\t1袋\n昼\tさつま芋の天ぷら\t常食\tX\tmedium\t10\t1袋\n昼\tﾌﾞﾛｯｺﾘｰのちりめん和え\t常食\tX\tlarge\t37\t1袋\n昼\tﾌﾞﾛｯｺﾘｰのちりめん和え\t常食\tX\tmedium\t10\t1袋\n昼\t豚肉と白菜のすき煮\t肉禁\tX\tmedium\t3\t1袋\n昼\t豚肉と白菜のすき煮\t常食\tX\tlarge\t44\t3袋15 + 15 + 14\n朝\tいんげんの味噌和え\t常食\tX\tlarge\t37\t1袋\n朝\tいんげんの味噌和え\t常食\tX\tmedium\t11\t1袋\n朝\tごぼうと竹輪の煮物\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\tごぼうと竹輪の煮物\t常食\tX\tmedium\t6\t1袋\n夕\tジャーマンポテト\t常食\tX\tlarge\t37\t1袋\n夕\tジャーマンポテト\t常食\tX\tmedium\t10\t1袋\n夕\tほうれん草の和え物\t常食\tX\tlarge\t37\t1袋\n夕\tほうれん草の和え物\t常食\tX\tmedium\t10\t1袋\n夕\t煮込みハンバーグ\t肉禁\tX\tsmall\t1\t1袋\n夕\t煮込みハンバーグ\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n夕\t煮込みハンバーグ\t常食\tX\tsmall\t1\t1袋\n2026-05-11\n19件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tアジのちゃんちゃん焼き\t魚禁\tX\tmedium\t2\t1袋\n昼\tアジのちゃんちゃん焼き\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n昼\t春雨のカニマヨサラダ\t常食\tX\tlarge\t37\t1袋\n昼\t春雨のカニマヨサラダ\t常食\tX\tmedium\t9\t1袋\n昼\t里芋の煮物\t常食\tX\tlarge\t37\t1袋\n昼\t里芋の煮物\t常食\tX\tmedium\t10\t1袋\n朝\t豆腐と大根の含め煮\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\t豆腐と大根の含め煮\t常食\tX\tmedium\t6\t1袋\n朝\t白菜のおかか和え\t常食\tX\tlarge\t37\t1袋\n朝\t白菜のおかか和え\t常食\tX\tmedium\t11\t1袋\n夕\tさつま芋のソテー\t常食\tX\tlarge\t37\t1袋\n夕\tさつま芋のソテー\t常食\tX\tmedium\t11\t1袋\n夕\tﾌﾞﾛｯｺﾘｰ\t肉禁\tX\tsmall\t2\t1袋\n夕\tﾌﾞﾛｯｺﾘｰ\t常食\tX\tlarge\t46\t1袋\n夕\t鶏唐揚げ\t肉禁\tX\tmedium\t2\t1袋\n夕\t鶏唐揚げ\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n夕\t鶏唐揚げ\t常食\tX\tsmall\t1\t1袋\n夕\t胡瓜の酢の物\t常食\tX\tlarge\t37\t1袋\n夕\t胡瓜の酢の物\t常食\tX\tmedium\t11\t1袋\n2026-05-12\n16件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tもやしナムル\t常食\tX\tlarge\t37\t1袋\n昼\tもやしナムル\t常食\tX\tmedium\t9\t1袋\n昼\t麻婆茄子\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n昼\t麻婆茄子\t常食\tX\tsmall\t1\t1袋\n昼\t野菜の卵とじ\t常食\tX\tlarge\t37\t1袋\n昼\t野菜の卵とじ\t常食\tX\tmedium\t9\t1袋\n朝\tコールスロ―サラダ\t常食\tX\tlarge\t37\t1袋\n朝\tコールスロ―サラダ\t常食\tX\tmedium\t11\t1袋\n朝\t大豆のトマト煮\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\t大豆のトマト煮\t常食\tX\tmedium\t6\t1袋\n夕\tオクラサラダ\t常食\tX\tlarge\t37\t1袋\n夕\tオクラサラダ\t常食\tX\tmedium\t11\t1袋\n夕\tかぶの煮物\t常食\tX\tlarge\t37\t1袋\n夕\tかぶの煮物\t常食\tX\tmedium\t11\t1袋\n夕\t豚肉のきのこ炒め\t肉禁\tX\tmedium\t3\t1袋\n夕\t豚肉のきのこ炒め\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n2026-05-13\n17件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tオムレツの和風あん\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n昼\tオムレツの和風あん\t常食\tX\tmedium\t3\t1袋\n昼\tカリフラワーの甘酢\t常食\tX\tlarge\t37\t1袋\n昼\tカリフラワーの甘酢\t常食\tX\tmedium\t11\t1袋\n昼\tマカロニソテー\t常食\tX\tlarge\t37\t1袋\n昼\tマカロニソテー\t常食\tX\tmedium\t11\t1袋\n朝\tほうれん草のお浸し\t常食\tX\tlarge\t37\t1袋\n朝\tほうれん草のお浸し\t常食\tX\tmedium\t11\t1袋\n朝\t蓮根と平天の炒め煮\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\t蓮根と平天の炒め煮\t常食\tX\tmedium\t6\t1袋\n夕\tキャベツのソテー\t常食\tX\tlarge\t37\t1袋\n夕\tキャベツのソテー\t常食\tX\tmedium\t11\t1袋\n夕\tブロッコリーサラダ\t常食\tX\tlarge\t37\t1袋\n夕\tブロッコリーサラダ\t常食\tX\tmedium\t11\t1袋\n夕\t鶏肉のクリーム煮\t肉禁\tX\tmedium\t2\t1袋\n夕\t鶏肉のクリーム煮\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n夕\t鶏肉のクリーム煮\t常食\tX\tsmall\t1\t1袋\n2026-05-14\n18件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tいんげんのごま和え\t常食\tX\tlarge\t37\t1袋\n昼\tいんげんのごま和え\t常食\tX\tmedium\t9\t1袋\n昼\tさつま芋の甘煮\t常食\tX\tlarge\t37\t1袋\n昼\tさつま芋の甘煮\t常食\tX\tmedium\t8\t1袋\n昼\t豚肉の味噌炒め\t肉禁\tX\tmedium\t3\t1袋\n昼\t豚肉の味噌炒め\t常食\tX\tlarge\t43\t3袋15 + 15 + 13\n朝\tけんちん煮\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\tけんちん煮\t常食\tX\tmedium\t6\t1袋\n朝\t大根の青じそ和え\t常食\tX\tlarge\t37\t1袋\n朝\t大根の青じそ和え\t常食\tX\tmedium\t11\t1袋\n夕\tサバの塩焼き\t魚禁\tX\tmedium\t4\t1袋\n夕\tサバの塩焼き\t常食\tX\tlarge\t44\t3袋15 + 15 + 14\n夕\tピーマンのじゃこ炒め\t常食\tX\tlarge\t37\t1袋\n夕\tピーマンのじゃこ炒め\t常食\tX\tmedium\t11\t1袋\n夕\t春雨の酢の物\t常食\tX\tlarge\t37\t1袋\n夕\t春雨の酢の物\t常食\tX\tmedium\t11\t1袋\n夕\t小松菜\t魚禁\tX\tmedium\t4\t1袋\n夕\t小松菜\t常食\tX\tlarge\t44\t1袋\n2026-05-15\n20件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\tｷｬﾍﾞﾂ\t肉禁\tX\tsmall\t2\t1袋\n昼\tｷｬﾍﾞﾂ\t常食\tX\tlarge\t46\t1袋\n昼\tチキンカツ\t肉禁\tX\tmedium\t2\t1袋\n昼\tチキンカツ\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n昼\tチキンカツ\t常食\tX\tsmall\t1\t1袋\n昼\tチンゲン菜のカニ和え\t常食\tX\tlarge\t37\t1袋\n昼\tチンゲン菜のカニ和え\t常食\tX\tmedium\t11\t1袋\n昼\t大豆のコンソメ煮\t常食\tX\tlarge\t37\t1袋\n昼\t大豆のコンソメ煮\t常食\tX\tmedium\t11\t1袋\n朝\tもやしのお浸し\t常食\tX\tlarge\t37\t1袋\n朝\tもやしのお浸し\t常食\tX\tmedium\t11\t1袋\n朝\t豚肉と白菜の煮物\t肉禁\tX\tmedium\t3\t1袋\n朝\t豚肉と白菜の煮物\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\t豚肉と白菜の煮物\t常食\tX\tmedium\t3\t1袋\n夕\tツナと胡瓜のわさびﾏﾖ\t常食\tX\tlarge\t37\t1袋\n夕\tツナと胡瓜のわさびﾏﾖ\t常食\tX\tmedium\t11\t1袋\n夕\t玉子焼き\t常食\tX\tlarge\t37\t1袋\n夕\t玉子焼き\t常食\tX\tmedium\t11\t1袋\n夕\t厚揚げの中華煮\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n夕\t厚揚げの中華煮\t常食\tX\tmedium\t3\t1袋\n2026-05-16\n17件\n食区\tメニュー\t区分\tエリア\t袋種\t注文数\t計算結果\n昼\t茄子の味噌炒め\t常食\tX\tlarge\t37\t1袋\n昼\t茄子の味噌炒め\t常食\tX\tmedium\t7\t1袋\n昼\t豚肉とれんこんの炒め煮\t肉禁\tX\tmedium\t3\t1袋\n昼\t豚肉とれんこんの炒め煮\t常食\tX\tlarge\t41\t3袋15 + 15 + 11\n昼\t白菜の酢の物\t常食\tX\tlarge\t37\t1袋\n昼\t白菜の酢の物\t常食\tX\tmedium\t7\t1袋\n朝\tキャベツサラダ\t常食\tX\tlarge\t37\t1袋\n朝\tキャベツサラダ\t常食\tX\tmedium\t11\t1袋\n朝\tじゃが芋のコンソメ煮\t常食\tX\tlarge\t42\t2袋21 + 21\n朝\tじゃが芋のコンソメ煮\t常食\tX\tmedium\t6\t1袋\n夕\t鶏肉のケチャップ炒め\t肉禁\tX\tmedium\t2\t1袋\n夕\t鶏肉のケチャップ炒め\t常食\tX\tlarge\t45\t3袋15 + 15 + 15\n夕\t鶏肉のケチャップ炒め\t常食\tX\tsmall\t1\t1袋\n夕\t小松菜のお浸し\t常食\tX\tlarge\t37\t1袋\n夕\t小松菜のお浸し\t常食\tX\tmedium\t11\t1袋\n夕\t切干大根煮\t常食\tX\tlarge\t37\t1袋\n夕\t切干大根煮\t常食\tX\tmedium\t11\t1袋\n出力\n出力状態\n\nreview_ready\n\n出力ID\n\nOOB23909a96b332454c\n\n作成日時\n\n05/14 08:29:16\n\nラベルCSV\nダウンロード\nプレビュー\n納品書Excel\nダウンロード\nプレビュー\n総量CSV\nダウンロード\nプレビュー\n\nRead Only Inspection\n\n状態と lineage\n\n現在の workflow state と、この注文に紐づく成果物 ID だけを表示します。詳細確認は確認専用ページを使います。\n\n現在状態\n\n確定済み\n\n正解OCR\n\nOEV0f52fc17d113\n\n保存シート\n\nODS33b48c88890e4b53\n\n袋分け\n\nOBG1e6de398fafb48d3\n\n出力\n\nOOB23909a96b332454c\n\n確定snapshot\n\nOCSd009ae5610a7424f\n\n確認専用ページで見る\nデバッグ用 raw JSON を開く",
+  "captures": [
+    {
+      "id": "01_workflow_v2_header",
+      "label": "注文処理 v2 ヘッダーと現在状態",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/01_workflow_v2_header_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/01_workflow_v2_header.png",
+      "box": {
+        "x": 44,
+        "y": 62,
+        "width": 327.734375,
+        "height": 48,
+        "text": "注文処理 v2"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "02_step_nav_step1",
+      "label": "Step1 PDF/施設/週次タブ",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/02_step_nav_step1_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/02_step_nav_step1.png",
+      "box": {
+        "x": 44,
+        "y": 491.171875,
+        "width": 330.5,
+        "height": 68,
+        "text": "STEP1\nPDF/施設/週次"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "03_facility_select",
+      "label": "施設選択プルダウン",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/03_facility_select_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/03_facility_select.png",
+      "box": {
+        "x": 80,
+        "y": 505.171875,
+        "width": 570.59375,
+        "height": 39,
+        "text": "施設を選択\nいこいの森 (FAC00013)\nいこいの森プラス (FAC00016)\nグランフォレスト方上 (FAC00012)\nグループホームそよかぜ (FAC00009)\nケアハウス四万十 (FAC00011)\nケアハウス四万十ピア (FAC00015)\nケアホーム長生庵 (FAC636208)\nシルバーホームなごみ (FAC00002)\nゆうゆう（株）百々家 (FAC00007)\n介護老人保"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "04_week_select",
+      "label": "週選択プルダウン",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/04_week_select_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/04_week_select.png",
+      "box": {
+        "x": 662.59375,
+        "y": 505.171875,
+        "width": 697.40625,
+        "height": 39,
+        "text": "週を選択\n2026-03 (03/01-03/07)\n2026-03 (03/08-03/14)\n2026-03 (03/15-03/21)\n2026-03 (03/22-03/28)\n2026-03 (03/29-03/31)\n2026-04 (04/01-04/04)\n2026-04 (04/05-04/11)\n2026-04 (04/12-04/18)\n2026-04 (04/19-04/2"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "05_exception_details",
+      "label": "例外範囲を指定する",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/05_exception_details_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/05_exception_details.png",
+      "box": {
+        "x": 675.59375,
+        "y": 516.171875,
+        "width": 671.40625,
+        "height": 18,
+        "text": "例外範囲を指定する"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "06_exception_apply",
+      "label": "例外範囲の反映ボタン",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/06_exception_apply_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/06_exception_apply.png",
+      "box": {
+        "x": 548.21875,
+        "y": 504.171875,
+        "width": 89.375,
+        "height": 42,
+        "text": "推定を反映"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "07_context_apply_disabled",
+      "label": "施設と週を選択ボタン",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/07_context_apply_disabled_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/07_context_apply_disabled.png",
+      "box": null,
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "08_ocr_mode",
+      "label": "OCR実行方式",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/08_ocr_mode_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/08_ocr_mode.png",
+      "box": {
+        "x": 365.65625,
+        "y": 505.171875,
+        "width": 150,
+        "height": 39,
+        "text": "箱館方式\nAIに任せる"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "09_run_ocr_disabled",
+      "label": "OCRを実行ボタン",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/09_run_ocr_disabled_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/09_run_ocr_disabled.png",
+      "box": {
+        "x": 527.65625,
+        "y": 505.171875,
+        "width": 101.625,
+        "height": 40,
+        "text": "OCRを実行"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "10_warning_facility_week",
+      "label": "未設定時の警告",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/10_warning_facility_week_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/10_warning_facility_week.png",
+      "box": null,
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "11_original_pdf_area",
+      "label": "原本PDFエリア",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/11_original_pdf_area_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/11_original_pdf_area.png",
+      "box": {
+        "x": 67,
+        "y": 160.171875,
+        "width": 1306,
+        "height": 730,
+        "text": "原本PDF\n\n施設と週次の確認用です。"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "12_step2_tab",
+      "label": "Step2 OCR選択タブ",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/12_step2_tab_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/12_step2_tab.png",
+      "box": {
+        "x": 384.5,
+        "y": 491.171875,
+        "width": 330.5,
+        "height": 68,
+        "text": "STEP2\nOCR選択"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "13_step2_screen",
+      "label": "Step2 OCR選択画面",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/13_step2_screen_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/13_step2_screen.png",
+      "box": null,
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "14_step3_tab",
+      "label": "Step3 シート編集タブ",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/14_step3_tab_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/14_step3_tab.png",
+      "box": {
+        "x": 725,
+        "y": 491.171875,
+        "width": 330.5,
+        "height": 68,
+        "text": "STEP3\nシート編集"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "15_step3_screen",
+      "label": "Step3 シート編集画面",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/15_step3_screen_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/15_step3_screen.png",
+      "box": null,
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "16_step4_tab",
+      "label": "Step4 出力確認タブ",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/16_step4_tab_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/16_step4_tab.png",
+      "box": {
+        "x": 1065.5,
+        "y": 491.171875,
+        "width": 330.5,
+        "height": 68,
+        "text": "STEP4\n出力確認"
+      },
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    },
+    {
+      "id": "17_step4_screen",
+      "label": "Step4 出力確認画面",
+      "file": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/17_step4_screen_marked.png",
+      "rawFile": "/Users/mmorinag/Sawa/2025.12/integration/daily-weight-develop-20260516/docs/manuals/current_stg_20260519/screens/order_processing_workflow_v2/17_step4_screen.png",
+      "box": null,
+      "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2?manual_capture=1779150023231"
+    }
+  ],
+  "buttons": [
+    {
+      "i": 0,
+      "text": "再読込",
+      "disabled": false
+    },
+    {
+      "i": 1,
+      "text": "STEP1\nPDF/施設/週次",
+      "disabled": false
+    },
+    {
+      "i": 2,
+      "text": "STEP2\nOCR選択",
+      "disabled": false
+    },
+    {
+      "i": 3,
+      "text": "STEP3\nシート編集",
+      "disabled": false
+    },
+    {
+      "i": 4,
+      "text": "STEP4\n出力確認",
+      "disabled": false
+    },
+    {
+      "i": 5,
+      "text": "出力確認を作成",
+      "disabled": false
+    },
+    {
+      "i": 6,
+      "text": "確定して一覧にもどる",
+      "disabled": false
+    },
+    {
+      "i": 7,
+      "text": "ダウンロード",
+      "disabled": false
+    },
+    {
+      "i": 8,
+      "text": "プレビュー",
+      "disabled": false
+    },
+    {
+      "i": 9,
+      "text": "ダウンロード",
+      "disabled": false
+    },
+    {
+      "i": 10,
+      "text": "プレビュー",
+      "disabled": false
+    },
+    {
+      "i": 11,
+      "text": "ダウンロード",
+      "disabled": false
+    },
+    {
+      "i": 12,
+      "text": "プレビュー",
+      "disabled": false
+    }
+  ],
+  "selects": [],
+  "links": [
+    {
+      "i": 0,
+      "text": "ダッシュボード",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/"
+    },
+    {
+      "i": 1,
+      "text": "注文一覧",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/orders"
+    },
+    {
+      "i": 2,
+      "text": "注文書アップロード",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/pdf-upload"
+    },
+    {
+      "i": 3,
+      "text": "注文書生成",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/order-forms"
+    },
+    {
+      "i": 4,
+      "text": "日別出力",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/daily-delivery-notes"
+    },
+    {
+      "i": 5,
+      "text": "送り状",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/shipping"
+    },
+    {
+      "i": 6,
+      "text": "送り状履歴",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/shipping-history"
+    },
+    {
+      "i": 7,
+      "text": "施設別注文",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/facility-orders"
+    },
+    {
+      "i": 8,
+      "text": "施設一覧",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/facility-master"
+    },
+    {
+      "i": 9,
+      "text": "月次メニュー",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/menus"
+    },
+    {
+      "i": 10,
+      "text": "基準メニュー",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/base-menus"
+    },
+    {
+      "i": 11,
+      "text": "メニューマスター",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/menu-masters"
+    },
+    {
+      "i": 12,
+      "text": "メニュールール",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/menu-rules"
+    },
+    {
+      "i": 13,
+      "text": "確認専用ページ",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/inspection-v2"
+    },
+    {
+      "i": 14,
+      "text": "注文一覧へ戻る",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/orders"
+    },
+    {
+      "i": 15,
+      "text": "確認専用ページで見る",
+      "href": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/inspection-v2"
+    }
+  ]
+}

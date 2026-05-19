@@ -1,0 +1,7 @@
+{
+  "sourceUrl": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2",
+  "capturedAt": "2026-05-19T01:26:03.999Z",
+  "orderId": "ORDb1702157",
+  "cloudRunRevision": "web-stg-00206-rxc",
+  "note": "Current stg live workflow-v2 UI. Step1.5 visibility condition was fulfilled in browser route for documentation capture because no current stg order was in quad_estimation_failed state."
+}

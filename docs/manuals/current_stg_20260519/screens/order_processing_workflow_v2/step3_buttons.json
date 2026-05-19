@@ -1,0 +1,97 @@
+[
+  {
+    "i": 0,
+    "text": "再読込",
+    "disabled": false
+  },
+  {
+    "i": 1,
+    "text": "STEP1\nPDF/施設/週次",
+    "disabled": false
+  },
+  {
+    "i": 2,
+    "text": "STEP2\nOCR選択",
+    "disabled": false
+  },
+  {
+    "i": 3,
+    "text": "STEP3\nシート編集",
+    "disabled": false
+  },
+  {
+    "i": 4,
+    "text": "STEP4\n出力確認",
+    "disabled": false
+  },
+  {
+    "i": 5,
+    "text": "選択OCRからシート生成",
+    "disabled": false
+  },
+  {
+    "i": 6,
+    "text": "AI自動補正を提案",
+    "disabled": false
+  },
+  {
+    "i": 7,
+    "text": "AI提案を反映",
+    "disabled": true
+  },
+  {
+    "i": 8,
+    "text": "異常チェック",
+    "disabled": false
+  },
+  {
+    "i": 9,
+    "text": "異常を補正",
+    "disabled": true
+  },
+  {
+    "i": 10,
+    "text": "シート確認",
+    "disabled": false
+  },
+  {
+    "i": 11,
+    "text": "シートを保存",
+    "disabled": true
+  },
+  {
+    "i": 12,
+    "text": "上下表示に切替",
+    "disabled": false
+  },
+  {
+    "i": 13,
+    "text": "オーバーレイ",
+    "disabled": false
+  },
+  {
+    "i": 14,
+    "text": "原本PDF",
+    "disabled": false
+  },
+  {
+    "i": 15,
+    "text": "シート確認",
+    "disabled": false
+  },
+  {
+    "i": 16,
+    "text": "表示中提案を採用",
+    "disabled": false
+  },
+  {
+    "i": 17,
+    "text": "数量列を入替",
+    "disabled": true
+  },
+  {
+    "i": 18,
+    "text": "列全体へ入力",
+    "disabled": true
+  }
+]

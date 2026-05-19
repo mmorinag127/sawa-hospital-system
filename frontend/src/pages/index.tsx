@@ -460,51 +460,14 @@ export default function HomePage() {
           <p className="role-label">マニュアル集</p>
           <h2>最新の操作マニュアル</h2>
           <ol>
-            <li>注文登録から注文詳細で確定するまでの流れを見る</li>
-            <li>日別出力、袋分け、数量監査、一括出力の使い方を見る</li>
-            <li>通常作業は最短版、迷ったら詳細版で確認する</li>
+            <li>注文処理、注文書作成、出力、施設、送り状のマニュアルを一覧で確認する</li>
+            <li>詳細版と簡易版はマニュアルページから選ぶ</li>
+            <li>バージョンと更新日時を見て最新版を開く</li>
           </ol>
           <div className="role-actions">
-            <a
-              href="/manuals/order_quick_manual.pdf"
-              className="mini-link"
-              target="_blank"
-              rel="noreferrer"
-            >
-              注文確定 最短版
-            </a>
-            <a
-              href="/manuals/order_registration_to_confirm_marp_draft.pdf"
-              className="mini-link"
-              target="_blank"
-              rel="noreferrer"
-            >
-              注文確定 詳細版
-            </a>
-            <a
-              href="/manuals/sheet_edit_manual.pdf"
-              className="mini-link"
-              target="_blank"
-              rel="noreferrer"
-            >
-              シート操作
-            </a>
-            <a
-              href="/manuals/daily_quick_manual.pdf"
-              className="mini-link"
-              target="_blank"
-              rel="noreferrer"
-            >
-              日別出力 最短版
-            </a>
-            <a
-              href="/manuals/daily_output_marp_draft.pdf"
-              className="mini-link"
-              target="_blank"
-              rel="noreferrer"
-            >
-              日別出力 詳細版
-            </a>
+            <Link href="/manual-library" className="mini-link">
+              マニュアルページへ
+            </Link>
           </div>
         </article>
       </section>
