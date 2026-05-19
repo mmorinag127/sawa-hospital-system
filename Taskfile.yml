@@ -21,6 +21,8 @@ vars:
   STG_WORKER_SERVICE: "worker-stg"
   STG_TERRAFORM_DIR: "infra/terraform/envs/stg"
   WORKTREE_ROOT: "/Users/mmorinag/Sawa/2025.12/worktrees"
+  PROD_RELEASE_BRANCH: "release/prod-20260517-stg-sync"
+  PROD_RELEASE_OUT_DIR: "tmp/prod_release_from_stg"
 
 tasks:
   backend_setup:
@@ -459,6 +461,120 @@ tasks:
         ALLOW_BASIC_ONLY_AUTH="1"
         ./scripts/deploy_worker_prod_with_checks.sh "$image" "${ORDER_ID}"
 
+  prod_release_from_stg_preflight:
+    desc: Record read-only release facts for promoting stg-authoritative code to prod.
+    cmds:
+      - >-
+        RELEASE_BRANCH="${RELEASE_BRANCH:-{{.PROD_RELEASE_BRANCH}}}"
+        BASE_REF="${BASE_REF:-HEAD}"
+        OUT_DIR="${OUT_DIR:-{{.PROD_RELEASE_OUT_DIR}}}"
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        REGION="{{.STG_REGION}}"
+        ./scripts/prod_release_from_stg_preflight.sh
+
+  prod_release_from_stg_create_branch:
+    desc: Create or switch to the named prod release branch for stg-authoritative promotion; no deploy.
+    cmds:
+      - >-
+        RELEASE_BRANCH="${RELEASE_BRANCH:-{{.PROD_RELEASE_BRANCH}}}"
+        BASE_REF="${BASE_REF:-HEAD}"
+        OUT_DIR="${OUT_DIR:-{{.PROD_RELEASE_OUT_DIR}}}"
+        CREATE_BRANCH=1
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        REGION="{{.STG_REGION}}"
+        ./scripts/prod_release_from_stg_preflight.sh
+
+  release_ops_setup:
+    desc: Create a lightweight venv for release planning scripts.
+    cmds:
+      - 'python3.11 -m venv .release-ops-venv'
+      - '.release-ops-venv/bin/pip install -U pip setuptools wheel'
+      - '.release-ops-venv/bin/pip install "cloud-sql-python-connector[pg8000]>=1.12.0"'
+
+  prod_release_db_diff:
+    desc: Read-only stg/prod DB diff; orders and menus are report-only, facility data requires decisions.
+    deps:
+      - release_ops_setup
+    cmds:
+      - >-
+        GOOGLE_CLOUD_PROJECT="{{.STG_PROJECT_ID}}"
+        CLOUDSQL_CONNECTOR_AUTH="${CLOUDSQL_CONNECTOR_AUTH:-gcloud-token}"
+        .release-ops-venv/bin/python ./scripts/compare_stg_prod_db.py
+        --out-dir "{{.PROD_RELEASE_OUT_DIR}}/db_diff"
+
+  prod_release_plan:
+    desc: Run read-only release preflight and DB diff for stg-to-prod release planning.
+    cmds:
+      - task: prod_release_from_stg_preflight
+      - task: prod_release_db_diff
+
+  prod_release_prepare_web_source:
+    desc: Create a fresh web deploy source from the current named release branch; no deploy.
+    cmds:
+      - >-
+        branch="$(git branch --show-current)";
+        expected="${RELEASE_BRANCH:-{{.PROD_RELEASE_BRANCH}}}";
+        if [ "$branch" != "$expected" ]; then
+          echo "Current branch must be $expected, got $branch";
+          exit 1;
+        fi;
+        deploy_dir="$(WEB_DEPLOY_LABEL="${WEB_DEPLOY_LABEL:-prod-web-stg-sync}" ./scripts/prepare_web_deploy_source.sh "${WEB_DEPLOY_LABEL:-prod-web-stg-sync}")";
+        echo "$deploy_dir" | tee last_frontend_deploy_dir.txt
+
+  prod_release_prepare_backend_source:
+    desc: Create a fresh backend deploy source from the current named release branch; no deploy.
+    cmds:
+      - >-
+        branch="$(git branch --show-current)";
+        expected="${RELEASE_BRANCH:-{{.PROD_RELEASE_BRANCH}}}";
+        if [ "$branch" != "$expected" ]; then
+          echo "Current branch must be $expected, got $branch";
+          exit 1;
+        fi;
+        deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh "${BACKEND_DEPLOY_LABEL:-prod-backend-stg-sync}")";
+        echo "$deploy_dir" | tee last_backend_deploy_dir.txt
+
+  exception_prod_maintenance_deploy:
+    desc: EXCEPTION ONLY. Deploy a temporary prod maintenance page while DB/full release work is in progress.
+    cmds:
+      - >-
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        REGION="{{.STG_REGION}}"
+        SERVICE="web-prod"
+        CONFIRM="${CONFIRM:-}"
+        ./scripts/deploy_prod_maintenance_page.sh
+
+  exception_prod_db_backup:
+    desc: EXCEPTION ONLY. Export a full prod Cloud SQL backup before stg-to-prod DB replacement.
+    cmds:
+      - >-
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        CONFIRM="${CONFIRM:-}"
+        OUT_DIR="{{.PROD_RELEASE_OUT_DIR}}/db_full_copy"
+        ./scripts/prod_db_full_backup.sh
+
+  exception_stg_db_export_for_prod_restore:
+    desc: EXCEPTION ONLY. Export stg Cloud SQL as the source for prod DB replacement.
+    cmds:
+      - >-
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        CONFIRM="${CONFIRM:-}"
+        OUT_DIR="{{.PROD_RELEASE_OUT_DIR}}/db_full_copy"
+        ./scripts/stg_db_export_for_prod_restore.sh
+
+  exception_prod_db_restore_from_stg:
+    desc: EXCEPTION ONLY. Destructively replace prod DB schema/data from a stg export after backup.
+    deps:
+      - release_ops_setup
+    cmds:
+      - >-
+        PROJECT_ID="{{.STG_PROJECT_ID}}"
+        CONFIRM="${CONFIRM:-}"
+        STG_EXPORT_URI="${STG_EXPORT_URI:-}"
+        PROD_BACKUP_URI="${PROD_BACKUP_URI:-}"
+        CLOUDSQL_CONNECTOR_AUTH="${CLOUDSQL_CONNECTOR_AUTH:-gcloud-token}"
+        ./scripts/prod_db_restore_from_stg_export.sh
+
   infra_stg_init:
     desc: Init stg Terraform with backend.hcl and either credentials file or gcloud access token.
     dir: "{{.STG_TERRAFORM_DIR}}"
@@ -598,6 +714,12 @@ tasks:
       - 'bash -n ./scripts/deploy_web_with_checks.sh'
       - 'bash -n ./scripts/deploy_prod_web.sh'
       - 'bash -n ./scripts/deploy_worker_prod_with_checks.sh'
+      - 'bash -n ./scripts/prod_release_from_stg_preflight.sh'
+      - 'bash -n ./scripts/prod_db_full_backup.sh'
+      - 'bash -n ./scripts/stg_db_export_for_prod_restore.sh'
+      - 'bash -n ./scripts/prod_db_restore_from_stg_export.sh'
+      - 'bash -n ./scripts/deploy_prod_maintenance_page.sh'
+      - 'python3.11 -m py_compile ./scripts/compare_stg_prod_db.py'
 
   ops_script_test:
     desc: Run lightweight script tests for workflow helpers.

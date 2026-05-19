@@ -16,6 +16,7 @@
 **/*.py[cod]
 **/.venv/
 **/.venv*/
+.release-ops-venv/
 **/venv/
 **/*.egg-info/
 **/.pytest_cache/

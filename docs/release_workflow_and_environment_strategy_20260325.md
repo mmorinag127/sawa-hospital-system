@@ -145,3 +145,12 @@ worktree の merge タイミング:
 - 先に `worktree`, `stg`, `promote`, `feature flag` を整える
 
 この順番なら、今の monolith 構成を壊さずに、並行開発と実運用の両方を滑らかにできる。
+
+## 2026-05-17 Prod Release From Stg
+
+The current prod release flow is documented in `docs/runbooks/prod-release-from-stg-and-exception-db-copy.md`.
+
+Important distinction:
+
+- Normal release: stg is authoritative for code, but prod remains authoritative for orders and menus.
+- Exception path: full prod DB replacement from stg is allowed only with explicit approval and `exception_` Taskfile targets.
