@@ -61,7 +61,7 @@ DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC00014": "さくら",
     "FAC00015": "四万十ピア",
     "FAC00016": "いこいの森",
-    "FAC636208": "長生苑",
+    "FAC636208": "長生庵",
 }
 
 DAILY_LABEL_SHEET_BY_FACILITY_ID = {
@@ -79,7 +79,7 @@ DAILY_LABEL_SHEET_BY_FACILITY_ID = {
     "FAC00014": "湘南さくら病院",
     "FAC00015": "四万十ピア",
     "FAC00016": "いこいの森",
-    "FAC636208": "ケアホーム長生苑",
+    "FAC636208": "ケアホーム長生庵",
 }
 
 DAILY_LABEL_SHEET_ORDER = [
@@ -98,7 +98,7 @@ DAILY_LABEL_SHEET_ORDER = [
     "グランフォレスト",
     "ふれあいの丘",
     "湘南さくら病院",
-    "ケアホーム長生苑",
+    "ケアホーム長生庵",
 ]
 
 DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID = {
@@ -180,7 +180,7 @@ DAILY_LABEL_SHEET_MAX_ROWS = {
     "グランフォレスト": 622,
     "ふれあいの丘": 629,
     "湘南さくら病院": 627,
-    "ケアホーム長生苑": 621,
+    "ケアホーム長生庵": 621,
 }
 
 DAILY_LABEL_MENU_ROWS = [

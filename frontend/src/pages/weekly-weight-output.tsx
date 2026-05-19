@@ -96,18 +96,14 @@ export default function WeeklyWeightOutputPage() {
 
   return (
     <main className="page">
-      <TopNav />
-
-      <section className="panel hero">
+      <header className="hero">
         <div>
-          <p className="eyebrow">週別出力</p>
+          <p className="eyebrow">Weekly Outputs</p>
           <h1>週別重量表</h1>
           <p className="subtle">指定日の週に含まれる注文から、週別の重量表Excelだけを出力します。</p>
         </div>
-        <Link href="/daily-delivery-notes" className="btn ghost">
-          日別出力へ
-        </Link>
-      </section>
+        <TopNav />
+      </header>
 
       <section className="panel">
         <header className="panel-header">
@@ -115,6 +111,9 @@ export default function WeeklyWeightOutputPage() {
             <h2>出力条件</h2>
             <p className="subtle">対象週: {weekLabel || "-"}</p>
           </div>
+          <Link href="/daily-delivery-notes" className="ghost-link">
+            日別出力へ
+          </Link>
         </header>
         <div className="filters">
           <label className="field">
@@ -143,45 +142,70 @@ export default function WeeklyWeightOutputPage() {
       {message ? <p className="message">{message}</p> : null}
 
       <style jsx>{`
+        body {
+          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
+          color: #1f2a2a;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
+        }
+        * {
+          box-sizing: border-box;
+        }
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
         .page {
           min-height: 100vh;
-          background: #f5f7fb;
-          color: #1f2937;
-          padding: 24px;
+          padding: 48px 6vw 80px;
         }
         .panel {
           background: #ffffff;
-          border: 1px solid #d8dee9;
-          border-radius: 8px;
-          padding: 18px;
-          margin-top: 16px;
+          border-radius: 18px;
+          padding: 20px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
+          margin-bottom: 20px;
         }
         .hero {
           display: flex;
+          flex-wrap: wrap;
           justify-content: space-between;
-          gap: 16px;
-          align-items: flex-start;
+          gap: 24px;
+          align-items: center;
+          margin-bottom: 32px;
         }
         .eyebrow {
-          margin: 0 0 6px;
-          color: #4b5563;
-          font-size: 13px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          font-size: 12px;
+          color: #5f7b74;
+          margin: 0 0 8px;
           font-weight: 700;
         }
-        h1,
+        h1 {
+          font-size: clamp(26px, 4vw, 36px);
+          margin: 0 0 12px;
+        }
         h2 {
+          font-size: 18px;
           margin: 0;
         }
         .subtle {
-          color: #667085;
-          margin: 8px 0 0;
+          color: #51615c;
+          margin: 0;
         }
         .panel-header {
           display: flex;
           justify-content: space-between;
-          gap: 16px;
+          gap: 12px;
           align-items: flex-start;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
+        }
+        .ghost-link {
+          color: #5f7b74;
+          font-size: 13px;
+          white-space: nowrap;
+          font-weight: 700;
         }
         .filters {
           display: flex;
@@ -194,16 +218,16 @@ export default function WeeklyWeightOutputPage() {
           gap: 6px;
         }
         .field-label {
-          color: #344054;
+          color: #5f7b74;
           font-size: 13px;
           font-weight: 700;
         }
         .input {
           min-height: 40px;
-          border: 1px solid #cbd5e1;
-          border-radius: 6px;
+          border: 1px solid rgba(31, 42, 42, 0.2);
+          border-radius: 12px;
           padding: 8px 10px;
-          background: #ffffff;
+          background: #fbfaf7;
           font-size: 14px;
         }
         .btn {
@@ -211,8 +235,8 @@ export default function WeeklyWeightOutputPage() {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border-radius: 6px;
-          border: 1px solid #cbd5e1;
+          border-radius: 999px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
           padding: 8px 14px;
           font-size: 14px;
           font-weight: 700;
@@ -220,13 +244,9 @@ export default function WeeklyWeightOutputPage() {
           cursor: pointer;
         }
         .btn.primary {
-          background: #2563eb;
-          color: #ffffff;
-          border-color: #2563eb;
-        }
-        .btn.ghost {
-          background: #ffffff;
-          color: #1f2937;
+          background: #1f2a2a;
+          color: #f7f2e7;
+          border-color: #1f2a2a;
         }
         .btn:disabled {
           opacity: 0.55;
@@ -238,14 +258,15 @@ export default function WeeklyWeightOutputPage() {
         .message {
           margin-top: 16px;
           padding: 12px 14px;
-          border-radius: 8px;
-          background: #eff6ff;
-          border: 1px solid #bfdbfe;
-          color: #1e40af;
+          border-radius: 14px;
+          background: #eef3f1;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          color: #1f2a2a;
+          font-weight: 700;
         }
         @media (max-width: 720px) {
           .page {
-            padding: 14px;
+            padding: 32px 18px 56px;
           }
           .hero {
             display: grid;
