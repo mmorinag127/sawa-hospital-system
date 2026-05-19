@@ -44,8 +44,9 @@
       "key": "daily_output",
       "title": "日別出力処理マニュアル",
       "kind": "detail",
-      "md": "daily_output_detail_current_stg_20260519_0805.md",
-      "pdf": "daily_output_detail_current_stg_20260519_0805.pdf"
+      "md": "daily_output_detail_current_stg_20260519_1045.md",
+      "pdf": "daily_output_detail_current_stg_20260519_1045.pdf",
+      "updatedAt": "2026-05-19 10:45 JST"
     },
     {
       "key": "daily_output",
@@ -111,5 +112,5 @@
       "pdf": "shipping_quick_current_stg_20260519_0805.pdf"
     }
   ],
-  "updated": "2026-05-19 10:30 JST"
+  "updated": "2026-05-19 10:45 JST"
 }
