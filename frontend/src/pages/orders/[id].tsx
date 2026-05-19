@@ -3905,6 +3905,8 @@ export default function OrderDetailPage() {
         cellProvenanceRows: [],
         ocrNumericCellItems: [],
         ocrNumericCellSummary: blankOcrNumericCellSummary(),
+        ocrNumericReviewItems: [],
+        ocrNumericReviewSummary: blankOcrNumericReviewSummary(),
         source: typeof payload.source === "string" ? payload.source : "",
         warnings: rowValues.length ? Array.from(new Set([...warnings, "sheet_contract_invalid"])) : warnings,
       };
