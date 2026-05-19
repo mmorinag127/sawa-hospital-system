@@ -1,0 +1,92 @@
+{
+  "version": "v2026.05.19-current-stg",
+  "created": "2026-05-19 08:05 JST",
+  "screenshotSource": "current stg live",
+  "manuals": [
+    {
+      "key": "order_form_creation",
+      "title": "注文書作成マニュアル",
+      "kind": "detail",
+      "md": "order_form_creation_detail_current_stg_20260519_0805.md",
+      "pdf": "order_form_creation_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "order_form_creation",
+      "title": "注文書作成マニュアル",
+      "kind": "quick",
+      "md": "order_form_creation_quick_current_stg_20260519_0805.md",
+      "pdf": "order_form_creation_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "daily_output",
+      "title": "日別出力処理マニュアル",
+      "kind": "detail",
+      "md": "daily_output_detail_current_stg_20260519_0805.md",
+      "pdf": "daily_output_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "daily_output",
+      "title": "日別出力処理マニュアル",
+      "kind": "quick",
+      "md": "daily_output_quick_current_stg_20260519_0805.md",
+      "pdf": "daily_output_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "weekly_output",
+      "title": "週別出力処理マニュアル",
+      "kind": "detail",
+      "md": "weekly_output_detail_current_stg_20260519_0805.md",
+      "pdf": "weekly_output_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "weekly_output",
+      "title": "週別出力処理マニュアル",
+      "kind": "quick",
+      "md": "weekly_output_quick_current_stg_20260519_0805.md",
+      "pdf": "weekly_output_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "monthly_menu",
+      "title": "月次メニュー登録処理マニュアル",
+      "kind": "detail",
+      "md": "monthly_menu_detail_current_stg_20260519_0805.md",
+      "pdf": "monthly_menu_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "monthly_menu",
+      "title": "月次メニュー登録処理マニュアル",
+      "kind": "quick",
+      "md": "monthly_menu_quick_current_stg_20260519_0805.md",
+      "pdf": "monthly_menu_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "facility_management",
+      "title": "施設一覧 修正・新規追加マニュアル",
+      "kind": "detail",
+      "md": "facility_management_detail_current_stg_20260519_0805.md",
+      "pdf": "facility_management_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "facility_management",
+      "title": "施設一覧 修正・新規追加マニュアル",
+      "kind": "quick",
+      "md": "facility_management_quick_current_stg_20260519_0805.md",
+      "pdf": "facility_management_quick_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "shipping",
+      "title": "送り状処理マニュアル",
+      "kind": "detail",
+      "md": "shipping_detail_current_stg_20260519_0805.md",
+      "pdf": "shipping_detail_current_stg_20260519_0805.pdf"
+    },
+    {
+      "key": "shipping",
+      "title": "送り状処理マニュアル",
+      "kind": "quick",
+      "md": "shipping_quick_current_stg_20260519_0805.md",
+      "pdf": "shipping_quick_current_stg_20260519_0805.pdf"
+    }
+  ],
+  "order_processing_status": "removed: invalid screenshots used / workflow-v2 recapture required"
+}

@@ -184,24 +184,32 @@ export default function SystemProcessLogsPage() {
       </section>
 
       <style jsx>{`
+        :global(body) {
+          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
+          color: #1f2a2a;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
+        }
+        :global(*) {
+          box-sizing: border-box;
+        }
         .page {
           min-height: 100vh;
-          background: #f5f7f6;
-          color: #1f2a27;
-          padding: 28px;
+          padding: 48px 6vw 80px;
         }
         .hero {
-          display: grid;
-          gap: 18px;
-          margin: 0 auto 22px;
-          max-width: 1380px;
+          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 24px;
+          justify-content: space-between;
+          margin-bottom: 32px;
         }
         .eyebrow {
-          color: #66736f;
+          color: #5f7b74;
           font-size: 12px;
           font-weight: 700;
-          letter-spacing: 0;
-          margin: 0 0 6px;
+          letter-spacing: 0.12em;
+          margin: 0 0 8px;
           text-transform: uppercase;
         }
         h1,
@@ -210,39 +218,45 @@ export default function SystemProcessLogsPage() {
           margin: 0;
         }
         h1 {
-          font-size: 32px;
+          font-size: clamp(28px, 4vw, 40px);
           line-height: 1.2;
+          margin-bottom: 12px;
         }
         h2 {
           font-size: 18px;
           line-height: 1.35;
         }
         .subtle {
-          color: #66736f;
+          color: #51615c;
           font-size: 14px;
           line-height: 1.6;
         }
         .toolbar,
         .log-layout {
-          margin: 0 auto;
-          max-width: 1380px;
+          margin: 0;
+          max-width: none;
         }
         .toolbar {
           align-items: center;
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 18px;
+          box-shadow: 0 10px 30px rgba(27, 35, 33, 0.08);
           display: flex;
           justify-content: space-between;
           gap: 16px;
-          padding: 16px 0;
+          margin-bottom: 18px;
+          padding: 18px 20px;
         }
         .toolbar-count {
           font-size: 22px;
           font-weight: 800;
         }
         .btn {
-          background: #1f6f5b;
+          background: #1f2a2a;
           border: 0;
-          border-radius: 8px;
-          color: #fff;
+          border-radius: 999px;
+          color: #f7f2e7;
           cursor: pointer;
           font-size: 14px;
           font-weight: 700;
@@ -256,10 +270,9 @@ export default function SystemProcessLogsPage() {
         .error {
           background: #fff2f0;
           border: 1px solid #f1b2ab;
-          border-radius: 8px;
+          border-radius: 12px;
           color: #9b2c22;
-          margin: 0 auto 16px;
-          max-width: 1380px;
+          margin: 0 0 16px;
           padding: 12px 14px;
         }
         .log-layout {
@@ -271,8 +284,9 @@ export default function SystemProcessLogsPage() {
         .log-list,
         .detail {
           background: #fff;
-          border: 1px solid #dde5e1;
-          border-radius: 8px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 18px;
+          box-shadow: 0 10px 30px rgba(27, 35, 33, 0.08);
           overflow: hidden;
         }
         .log-header,
@@ -282,7 +296,7 @@ export default function SystemProcessLogsPage() {
           gap: 10px;
         }
         .log-header {
-          background: #eef3f1;
+          background: #f6f1e6;
           color: #55625e;
           font-size: 12px;
           font-weight: 800;
@@ -303,7 +317,7 @@ export default function SystemProcessLogsPage() {
         }
         .log-row:hover,
         .log-row.active {
-          background: #f1f7f4;
+          background: #f4f7f6;
         }
         .log-row span,
         .log-header span {
@@ -379,7 +393,7 @@ export default function SystemProcessLogsPage() {
         }
         .json {
           background: #17211f;
-          border-radius: 8px;
+          border-radius: 12px;
           color: #e8f4ef;
           font-size: 12px;
           line-height: 1.55;
@@ -395,7 +409,7 @@ export default function SystemProcessLogsPage() {
         }
         @media (max-width: 980px) {
           .page {
-            padding: 18px;
+            padding: 28px 16px 48px;
           }
           .toolbar {
             align-items: stretch;

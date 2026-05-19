@@ -456,6 +456,20 @@ export default function HomePage() {
             </Link>
           </div>
         </article>
+        <article className="role-card manual-card">
+          <p className="role-label">マニュアル集</p>
+          <h2>最新版マニュアル</h2>
+          <ol>
+            <li>詳細版と簡易版を業務別に確認する</li>
+            <li>各PDFはバージョンと更新日時つきで管理する</li>
+            <li>迷ったら詳細版、通常処理は簡易版を見る</li>
+          </ol>
+          <div className="role-actions">
+            <Link href="/manual-library" className="mini-link">
+              マニュアルページへ
+            </Link>
+          </div>
+        </article>
       </section>
 
       <section className="summary-strip">
@@ -498,6 +512,9 @@ export default function HomePage() {
             </span>
             <Link href="/system-status" className="ghost-link">
               管理画面
+            </Link>
+            <Link href="/system-process-logs" className="ghost-link">
+              処理ログ
             </Link>
           </header>
           <div className="system-grid">
