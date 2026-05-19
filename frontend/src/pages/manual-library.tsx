@@ -2,7 +2,7 @@ import Link from "next/link";
 import TopNav from "../components/TopNav";
 
 const version = "v2026.05.19-current-stg";
-const updatedAt = "2026-05-19 10:30 JST";
+const updatedAt = "2026-05-19 10:45 JST";
 const groups = [
   {
     "key": "order_processing",
@@ -46,7 +46,7 @@ const groups = [
       {
         "kind": "detail",
         "label": "詳細版",
-        "href": "/manuals/current-stg-20260519/daily_output_detail_current_stg_20260519_0805.pdf"
+        "href": "/manuals/current-stg-20260519/daily_output_detail_current_stg_20260519_1045.pdf"
       },
       {
         "kind": "quick",
