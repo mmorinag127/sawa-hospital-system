@@ -73,6 +73,11 @@ export default function TopNav() {
           label: "送り状履歴",
           isActive: (path) => path.startsWith("/shipping-history"),
         },
+        {
+          href: "/manual-library",
+          label: "マニュアル",
+          isActive: (path) => path.startsWith("/manual-library"),
+        },
       ],
     },
     {
