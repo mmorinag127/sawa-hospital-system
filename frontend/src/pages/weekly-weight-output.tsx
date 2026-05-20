@@ -34,12 +34,36 @@ const extractErrorDetail = async (err: any) => {
   return "";
 };
 
+type OrderSummary = {
+  id: string;
+  facility?: string | null;
+  week?: string | null;
+  status?: string | null;
+  received_at?: string | null;
+  line_count?: number | null;
+};
+
+const formatTimestamp = (value?: string | null) => {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
 export default function WeeklyWeightOutputPage() {
   const router = useRouter();
   const [date, setDate] = useState(todayIso());
   const [status, setStatus] = useState("");
   const [message, setMessage] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const [orders, setOrders] = useState<OrderSummary[]>([]);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -49,17 +73,58 @@ export default function WeeklyWeightOutputPage() {
     if (queryStatus) setStatus(queryStatus);
   }, [router.isReady, router.query.date, router.query.status]);
 
-  const weekLabel = useMemo(() => {
+  const weekDates = useMemo(() => {
     const parsed = new Date(`${date}T00:00:00`);
-    if (Number.isNaN(parsed.getTime())) return "";
+    if (Number.isNaN(parsed.getTime())) return [];
     const day = parsed.getDay();
     const offset = day === 0 ? -6 : 1 - day;
     const monday = new Date(parsed);
     monday.setDate(parsed.getDate() + offset);
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    return `${monday.toISOString().slice(0, 10)} から ${sunday.toISOString().slice(0, 10)}`;
+    return Array.from({ length: 7 }, (_, index) => {
+      const item = new Date(monday);
+      item.setDate(monday.getDate() + index);
+      return item.toISOString().slice(0, 10);
+    });
   }, [date]);
+
+  const weekLabel = useMemo(() => {
+    if (weekDates.length === 0) return "";
+    return `${weekDates[0]} から ${weekDates[6]}`;
+  }, [weekDates]);
+
+  const loadWeeklyOrders = async () => {
+    if (weekDates.length === 0) {
+      setOrders([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const responses = await Promise.all(
+        weekDates.map((targetDate) =>
+          apiClient.get("/orders/by-line-date", {
+            params: { date: targetDate, status: status || undefined },
+          }),
+        ),
+      );
+      const byId = new Map<string, OrderSummary>();
+      responses.forEach((response) => {
+        (response.data?.orders || []).forEach((order: OrderSummary) => {
+          if (order?.id) byId.set(order.id, order);
+        });
+      });
+      setOrders(Array.from(byId.values()));
+    } catch {
+      setOrders([]);
+      setMessage("対象週の注文一覧を取得できませんでした。");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWeeklyOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekLabel, status]);
 
   const downloadWeeklyWeight = async () => {
     if (!date) {
@@ -100,44 +165,19 @@ export default function WeeklyWeightOutputPage() {
         <div>
           <p className="eyebrow">週別出力</p>
           <h1>週別重量表</h1>
-          <p className="subtle">指定日の週に含まれる注文から、週別の重量表Excelを出力します。</p>
+          <p className="subtle">日別出力と同じ条件で、対象週の重量表Excelを作成します。</p>
         </div>
         <TopNav />
       </header>
 
       <section className="panel">
         <header className="panel-header">
-          <h2>この画面で見ること</h2>
-        </header>
-        <div className="guide-grid">
-          <article className="guide-card">
-            <p className="guide-title">週単位で出力</p>
-            <p className="guide-text">選択した日付を含む週の重量表Excelを作成します。</p>
-          </article>
-          <article className="guide-card">
-            <p className="guide-title">日別出力と連動</p>
-            <p className="guide-text">日別出力画面のフィルタから同じ日付とステータスを引き継げます。</p>
-          </article>
-          <article className="guide-card">
-            <p className="guide-title">空週も出力</p>
-            <p className="guide-text">対象データがない週でも、確認用の空フォーマットを出力します。</p>
-          </article>
-        </div>
-      </section>
-
-      <section className="panel">
-        <header className="panel-header">
-          <div>
-            <h2>出力条件</h2>
-            <p className="subtle">対象週: {weekLabel || "-"}</p>
-          </div>
-          <Link href="/daily-delivery-notes" className="btn ghost">
-            日別出力へ
-          </Link>
+          <h2>フィルタ</h2>
+          <span className="badge">対象 {orders.length} 件</span>
         </header>
         <div className="filters">
           <label className="field">
-            <span className="field-label">週に含まれる日付</span>
+            <span className="field-label">日付</span>
             <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </label>
           <label className="field">
@@ -150,16 +190,64 @@ export default function WeeklyWeightOutputPage() {
               <option value="エラー">エラー</option>
             </select>
           </label>
+          <button className="btn primary" type="button" onClick={loadWeeklyOrders} disabled={loading}>
+            {loading ? "取得中..." : "取得"}
+          </button>
           <button className="btn primary" type="button" onClick={downloadWeeklyWeight} disabled={downloading}>
             {downloading ? "作成中..." : "週別重量表Excel"}
           </button>
+          <Link href="/daily-delivery-notes" className="btn ghost">
+            日別出力へ
+          </Link>
         </div>
         <p className="subtle helper-text">
-          日別のラベルExcel・納品書Excel・一括Excelには重量表を同梱しません。重量表が必要な場合はこのページから出力します。
+          対象週: {weekLabel || "-"}。対象データがない週でも空の重量表Excelを出力します。
         </p>
       </section>
 
       {message ? <p className="message">{message}</p> : null}
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>対象週の注文一覧</h2>
+        </header>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>施設</th>
+                <th>週</th>
+                <th>ステータス</th>
+                <th>受信日時</th>
+                <th>行数</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {orders.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>該当データなし</td>
+                </tr>
+              ) : (
+                orders.map((order) => (
+                  <tr key={order.id}>
+                    <td>{order.facility || "-"}</td>
+                    <td>{order.week || "未確定"}</td>
+                    <td>{order.status || "-"}</td>
+                    <td>{formatTimestamp(order.received_at)}</td>
+                    <td className="numeric">{order.line_count ?? "-"}</td>
+                    <td className="actions">
+                      <Link href={`/orders/${order.id}`} className="link">
+                        詳細
+                      </Link>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <style jsx>{`
         .page {
@@ -219,25 +307,17 @@ export default function WeeklyWeightOutputPage() {
           align-items: center;
           margin-bottom: 16px;
         }
-        .guide-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          gap: 14px;
-        }
-        .guide-card {
-          border-radius: 16px;
-          border: 1px solid rgba(25, 32, 30, 0.1);
-          background: #fcfbf7;
-          padding: 16px;
-        }
-        .guide-title {
-          margin: 0 0 8px;
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 30px;
+          border-radius: 999px;
+          padding: 0 12px;
+          background: #f0f4f2;
+          color: #33443f;
+          font-size: 12px;
           font-weight: 800;
-        }
-        .guide-text {
-          margin: 0;
-          color: #51615c;
-          line-height: 1.6;
         }
         .filters {
           display: grid;
@@ -298,6 +378,37 @@ export default function WeeklyWeightOutputPage() {
           background: #eff7f4;
           border: 1px solid rgba(31, 42, 42, 0.1);
           color: #1f2a2a;
+        }
+        .table-wrap {
+          overflow-x: auto;
+        }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 14px;
+        }
+        th,
+        td {
+          border-bottom: 1px solid rgba(25, 32, 30, 0.08);
+          padding: 12px 10px;
+          text-align: left;
+          white-space: nowrap;
+        }
+        th {
+          color: #5f7b74;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .numeric {
+          text-align: right;
+        }
+        .actions {
+          text-align: right;
+        }
+        .link {
+          color: #1f6f64;
+          font-weight: 800;
+          text-decoration: none;
         }
         @media (max-width: 720px) {
           .page {
