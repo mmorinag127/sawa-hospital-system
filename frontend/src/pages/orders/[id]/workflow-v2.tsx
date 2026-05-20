@@ -266,7 +266,7 @@ type ConfidenceDisplayMode = "strict" | "assisted" | "suggestion";
 type Step3LayoutMode = "side-by-side" | "stacked";
 type OcrPreviewMode = "overlay" | "original" | "sheet";
 type OcrRunMode = "hakodate" | "llm";
-type OutputPreviewType = "labels" | "delivery" | "aggregate";
+type OutputPreviewType = "labels" | "delivery" | "order_form_saved_sheet" | "aggregate";
 type OutputPreview = {
   type: OutputPreviewType;
   headers: string[];
@@ -2909,28 +2909,45 @@ export default function OrderWorkflowV2Page() {
   const outputPreviewLabels: Record<OutputPreviewType, string> = {
     labels: "ラベルCSV",
     delivery: "納品書Excel",
+    order_form_saved_sheet: "発注書Excel",
     aggregate: "総量CSV",
   };
 
   const loadOutputPreview = async (type: OutputPreviewType) => {
     if (!orderId) return;
     setOutputPreviewLoading(true);
-    setOutputPreviewMessage("プレビューを取得中...");
+    setOutputPreview(null);
+    setOutputPreviewMessage("プレビューを開いています...");
     try {
-      const res = await apiClient.get("/outputs/preview", {
-        params: { order_id: orderId, type, limit: 10 },
+      const popup = window.open("", "_blank", "popup=yes,width=1180,height=840");
+      if (popup) {
+        popup.document.title = `${outputPreviewLabels[type]} プレビュー`;
+        popup.document.body.innerHTML = "<p>プレビューを読み込み中...</p>";
+      }
+      const res = await apiClient.get("/outputs/file-preview", {
+        params: { order_id: orderId, type },
+        responseType: "text",
       });
-      const headers = Array.isArray(res.data?.headers) ? res.data.headers.map((item: unknown) => String(item ?? "")) : [];
-      const rows = Array.isArray(res.data?.rows)
-        ? res.data.rows
-            .filter((row: unknown): row is unknown[] => Array.isArray(row))
-            .slice(0, 10)
-            .map((row: unknown[]) => row.map((cell) => String(cell ?? "")))
-        : [];
-      setOutputPreview({ type, headers, rows });
-      setOutputPreviewMessage(rows.length ? "" : "プレビューが空です。");
+      if (popup) {
+        popup.document.open();
+        popup.document.write(String(res.data || ""));
+        popup.document.close();
+        popup.focus();
+        setOutputPreviewMessage("");
+      } else {
+        const blob = new Blob([String(res.data || "")], { type: "text/html;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+        setOutputPreviewMessage("");
+      }
     } catch {
-      setOutputPreview(null);
       setOutputPreviewMessage("プレビューの取得に失敗しました。");
     } finally {
       setOutputPreviewLoading(false);
@@ -4537,6 +4554,9 @@ export default function OrderWorkflowV2Page() {
                   <span className="output-link">発注書Excel</span>
                   <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "発注書Excel")}>
                     ダウンロード
+                  </button>
+                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("order_form_saved_sheet")} disabled={outputPreviewLoading}>
+                    プレビュー
                   </button>
                 </div>
                 <div className="output-card">
