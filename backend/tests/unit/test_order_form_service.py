@@ -620,6 +620,30 @@ def test_build_fax_order_form_excel_uses_explicit_facility_source_workbook(tmp_p
     assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
 
 
+def test_write_week_entries_restores_weekday_to_template_weekday_block() -> None:
+    source_path = order_form_service._resolve_source_workbook_path("共通　2604.xlsx")
+    workbook = load_workbook(source_path)
+    worksheet = workbook["4月26日～4月30日"]
+
+    order_form_service._clear_week_sheet_body(worksheet)
+    order_form_service._write_week_entries(
+        worksheet,
+        [
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "朝", "category": "副①", "name": "A"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "朝", "category": "副②", "name": "B"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "昼", "category": "主", "name": "C"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "昼", "category": "副①", "name": "D"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "昼", "category": "副②", "name": "E"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "主", "name": "F"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "副①", "name": "G"},
+            {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "副②", "name": "H"},
+        ],
+    )
+
+    assert _cell_date(worksheet["A11"].value) == datetime(2026, 4, 26).date()
+    assert worksheet["A16"].value == "（日）"
+
+
 def test_clear_week_sheet_body_uses_header_detected_quantity_columns_for_sibling_template() -> None:
     source_path = order_form_service._resolve_source_workbook_path("百々家 2604.xlsx")
     workbook = load_workbook(source_path)

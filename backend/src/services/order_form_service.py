@@ -729,6 +729,45 @@ def _weekday_label(menu_date: date) -> str:
     return _WEEKDAY_LABELS[menu_date.weekday()]
 
 
+def _column_merged_ranges(worksheet, col_idx: int) -> list[tuple[int, int, int, int]]:
+    ranges: list[tuple[int, int, int, int]] = []
+    for merged_range in worksheet.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        if min_col <= col_idx <= max_col:
+            ranges.append((min_col, min_row, max_col, max_row))
+    return sorted(ranges, key=lambda item: (item[1], item[0], item[3], item[2]))
+
+
+def _write_weekday_label_for_date_block(
+    worksheet,
+    *,
+    date_start_row: int,
+    date_end_row: int,
+    menu_date: date,
+) -> None:
+    date_range: tuple[int, int, int, int] | None = None
+    col_ranges = _column_merged_ranges(worksheet, 1)
+    for merged in col_ranges:
+        _min_col, min_row, _max_col, max_row = merged
+        if min_row <= date_start_row <= max_row:
+            date_range = merged
+            break
+    target_row = date_end_row
+    if date_range is not None:
+        _min_col, _min_row, _max_col, date_range_end = date_range
+        for merged in col_ranges:
+            _min_col, min_row, _max_col, max_row = merged
+            if min_row > date_range_end and min_row <= date_end_row <= max_row:
+                target_row = min_row
+                break
+    _write_to_cell_or_merged_anchor(
+        worksheet,
+        row_idx=target_row,
+        col_idx=1,
+        value=_weekday_label(menu_date),
+    )
+
+
 def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
     row_idx = _ORDER_FORM_BODY_START_ROW
     current_date: date | None = None
@@ -748,11 +787,11 @@ def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
 
         if current_date != menu_date:
             if current_date is not None and row_idx - 1 > date_start_row:
-                _write_to_cell_or_merged_anchor(
+                _write_weekday_label_for_date_block(
                     worksheet,
-                    row_idx=row_idx - 1,
-                    col_idx=1,
-                    value=_weekday_label(current_date),
+                    date_start_row=date_start_row,
+                    date_end_row=row_idx - 1,
+                    menu_date=current_date,
                 )
             current_date = menu_date
             date_start_row = row_idx
@@ -773,11 +812,11 @@ def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
         written_rows += 1
 
     if current_date is not None and row_idx - 1 > date_start_row:
-        _write_to_cell_or_merged_anchor(
+        _write_weekday_label_for_date_block(
             worksheet,
-            row_idx=row_idx - 1,
-            col_idx=1,
-            value=_weekday_label(current_date),
+            date_start_row=date_start_row,
+            date_end_row=row_idx - 1,
+            menu_date=current_date,
         )
     return written_rows
 
@@ -946,11 +985,11 @@ def _write_saved_sheet_rows_to_order_form(
             continue
         if parsed_date and current_date != parsed_date:
             if current_date is not None and row_idx - 1 > date_start_row:
-                _write_to_cell_or_merged_anchor(
+                _write_weekday_label_for_date_block(
                     worksheet,
-                    row_idx=row_idx - 1,
-                    col_idx=1,
-                    value=_weekday_label(current_date),
+                    date_start_row=date_start_row,
+                    date_end_row=row_idx - 1,
+                    menu_date=current_date,
                 )
             current_date = parsed_date
             date_start_row = row_idx
@@ -976,11 +1015,11 @@ def _write_saved_sheet_rows_to_order_form(
         row_idx += 1
         written_rows += 1
     if current_date is not None and row_idx - 1 > date_start_row:
-        _write_to_cell_or_merged_anchor(
+        _write_weekday_label_for_date_block(
             worksheet,
-            row_idx=row_idx - 1,
-            col_idx=1,
-            value=_weekday_label(current_date),
+            date_start_row=date_start_row,
+            date_end_row=row_idx - 1,
+            menu_date=current_date,
         )
     return written_rows
 
