@@ -17,6 +17,8 @@ from openpyxl.utils import get_column_letter, range_boundaries
 
 from src.db import session_scope
 from src.models.order import Order
+from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service, draft_sheet_service, menu_service, sheet_week_service
 from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
@@ -784,6 +786,15 @@ def _sheet_field_indexes(fields: list[Any]) -> dict[str, int]:
     return result
 
 
+def _normalize_sheet_label(value: object) -> str:
+    return re.sub(r"[\s　・]+", "", str(value or "")).strip().lower()
+
+
+def _sheet_field_label(fields: list[Any], header: list[Any], idx: int) -> str:
+    header_text = str(header[idx] or "").strip() if idx < len(header) else ""
+    return header_text or str(fields[idx] or "").strip()
+
+
 def _first_field_index(field_indexes: dict[str, int], candidates: tuple[str, ...]) -> int | None:
     for candidate in candidates:
         if candidate in field_indexes:
@@ -811,6 +822,61 @@ def _coerce_quantity_cell(value: object) -> object:
     return number
 
 
+def _field_role(field: object, label: object = "") -> str | None:
+    field_text = str(field or "").strip().lower()
+    label_text = _normalize_sheet_label(label)
+    token = f"{field_text} {label_text}"
+    if field_text in {"date", "menu_date", "date_mmdd"} or label_text in {"日付", "日にち"}:
+        return "date"
+    if field_text in {"daypart", "meal"} or label_text in {"区分", "食区分"}:
+        return "daypart"
+    if field_text in {"category", "menu_category"} or label_text in {"献立区分", "副区分", "区分2"}:
+        return "category"
+    if field_text in {"menu_name", "name", "menu"} or label_text in {"献立", "メニュー"}:
+        return "menu"
+    if field_text in {"remarks", "remark", "note", "notes"} or "備考" in label_text:
+        return "remarks"
+    if "合計" in label_text or "total" in token:
+        return "total"
+    if "常食" in label_text or "regular" in token:
+        return "regular"
+    if "通所" in label_text or "daycare" in token:
+        return "daycare"
+    if "職員" in label_text or "staff" in token:
+        return "staff"
+    if "肉禁" in label_text or "nomeat" in token or "no_meat" in token:
+        return "no_meat"
+    if "魚禁" in label_text or "nofish" in token or "no_fish" in token:
+        return "no_fish"
+    if "その他" in label_text or "forbiddenother" in token or "forbidden_other" in token:
+        return "forbidden_other"
+    if "揚禁" in label_text or "nofried" in token or "no_fried" in token:
+        return "no_fried"
+    if "変更①" in label_text or "変更1" in label_text or "change_1" in token:
+        return "change_1"
+    if "変更②" in label_text or "変更2" in label_text or "change_2" in token:
+        return "change_2"
+    if "placeholder" in token or "unknown" in token or "不明" in label_text:
+        return None
+    return None
+
+
+def _worksheet_quantity_column_role_map(worksheet) -> dict[str, int]:
+    merged_values = _worksheet_effective_merged_values(worksheet)
+    result: dict[str, int] = {}
+    for col_idx in sorted(_worksheet_quantity_column_indexes(worksheet)):
+        header_parts = [
+            worksheet.cell(row=row_idx, column=col_idx).value or merged_values.get((row_idx, col_idx))
+            for row_idx in _ORDER_FORM_HEADER_ROWS
+        ]
+        role = _field_role("", "".join(str(part or "") for part in header_parts))
+        if role and role not in result:
+            result[role] = col_idx
+    if "forbidden_other" in result and "no_fried" not in result:
+        result["no_fried"] = result["forbidden_other"]
+    return result
+
+
 def _write_to_cell_or_merged_anchor(worksheet, *, row_idx: int, col_idx: int, value: object) -> None:
     cell = worksheet.cell(row=row_idx, column=col_idx)
     if not isinstance(cell, MergedCell):
@@ -829,28 +895,26 @@ def _write_saved_sheet_rows_to_order_form(
     worksheet,
     *,
     fields: list[Any],
+    header: list[Any] | None = None,
     rows: list[Any],
     received_at: datetime,
 ) -> int:
-    field_indexes = _sheet_field_indexes(fields)
-    date_idx = _first_field_index(field_indexes, ("date", "menu_date", "日付"))
-    daypart_idx = _first_field_index(field_indexes, ("daypart", "meal", "区分"))
-    category_idx = _first_field_index(field_indexes, ("category", "menu_category", "献立区分"))
-    menu_idx = _first_field_index(field_indexes, ("menu_name", "name", "menu", "献立", "メニュー"))
-    quantity_field_indexes = [
-        idx
-        for idx, field in enumerate(fields)
-        if str(field or "").strip().startswith("qty.")
-    ]
-    if not quantity_field_indexes:
-        quantity_field_indexes = [
-            idx
-            for idx, field in enumerate(fields)
-            if idx not in {date_idx, daypart_idx, category_idx, menu_idx}
-        ]
-    quantity_columns = sorted(_worksheet_quantity_column_indexes(worksheet))
-    if not quantity_columns:
+    header_values = list(header or [])
+    role_indexes: dict[str, int] = {}
+    quantity_field_roles: list[tuple[int, str]] = []
+    structural_roles = {"date", "daypart", "category", "menu", "remarks"}
+    for idx, field in enumerate(fields):
+        label = _sheet_field_label(fields, header_values, idx)
+        role = _field_role(field, label)
+        if role in structural_roles and role not in role_indexes:
+            role_indexes[role] = idx
+        elif role and role not in structural_roles:
+            quantity_field_roles.append((idx, role))
+
+    quantity_columns_by_role = _worksheet_quantity_column_role_map(worksheet)
+    if not quantity_columns_by_role:
         raise ValueError("order form quantity columns not found")
+
     row_idx = _ORDER_FORM_BODY_START_ROW
     current_date: date | None = None
     date_start_row = _ORDER_FORM_BODY_START_ROW
@@ -861,6 +925,10 @@ def _write_saved_sheet_rows_to_order_form(
             continue
         if row_idx > _ORDER_FORM_BODY_END_ROW:
             raise ValueError("saved sheet exceeds supported template rows")
+        date_idx = role_indexes.get("date")
+        daypart_idx = role_indexes.get("daypart")
+        category_idx = role_indexes.get("category")
+        menu_idx = role_indexes.get("menu")
         date_value = _sheet_cell(raw_row, date_idx)
         parsed_date = parse_date_string(str(date_value or ""), received_at) if date_value not in (None, "") else None
         daypart = str(_sheet_cell(raw_row, daypart_idx) or "").strip()
@@ -868,7 +936,7 @@ def _write_saved_sheet_rows_to_order_form(
         menu_name = str(_sheet_cell(raw_row, menu_idx) or "").strip()
         if not any([parsed_date, daypart, category, menu_name]) and not any(
             str(_sheet_cell(raw_row, idx) or "").strip()
-            for idx in quantity_field_indexes
+            for idx, _role in quantity_field_roles
         ):
             continue
         if parsed_date and current_date != parsed_date:
@@ -881,7 +949,10 @@ def _write_saved_sheet_rows_to_order_form(
         worksheet.cell(row=row_idx, column=2, value=daypart if daypart and current_daypart != daypart else None)
         worksheet.cell(row=row_idx, column=3, value=category or None)
         worksheet.cell(row=row_idx, column=4, value=menu_name or None)
-        for qty_idx, col_idx in zip(quantity_field_indexes, quantity_columns, strict=False):
+        for qty_idx, role in quantity_field_roles:
+            col_idx = quantity_columns_by_role.get(role)
+            if col_idx is None:
+                continue
             value = _coerce_quantity_cell(_sheet_cell(raw_row, qty_idx))
             if value is not None:
                 _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=col_idx, value=value)
@@ -1079,14 +1150,26 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         facility_id = str(order.facility_code or "").strip()
         week_code = order.week_code
         received_at = order.received_at or datetime.utcnow()
+        workflow = session.get(OrderWorkflowState, normalized_order_id)
+        workflow_draft_id = str(getattr(workflow, "draft_id", None) or "").strip() or None
+        draft_row = session.get(OrderSheetDraft, workflow_draft_id) if workflow_draft_id else None
+        if draft_row is not None and draft_row.order_id == normalized_order_id:
+            draft = {
+                "id": draft_row.id,
+                "draft_sheet_json": draft_row.draft_sheet_json if isinstance(draft_row.draft_sheet_json, dict) else {},
+            }
+        else:
+            draft = None
     if not facility_id:
         raise ValueError("facility missing")
 
-    draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
+    if not isinstance(draft, dict):
+        draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
     draft_payload = draft.get("draft_sheet_json") if isinstance(draft, dict) else None
     if not isinstance(draft_payload, dict):
         raise ValueError("saved sheet not found")
     fields = draft_payload.get("fields")
+    header = draft_payload.get("header")
     rows = draft_payload.get("rows")
     if not isinstance(fields, list) or not isinstance(rows, list) or not rows:
         raise ValueError("saved sheet rows not found")
@@ -1127,6 +1210,7 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     written_rows = _write_saved_sheet_rows_to_order_form(
         worksheet,
         fields=fields,
+        header=header if isinstance(header, list) else None,
         rows=rows,
         received_at=received_at,
     )

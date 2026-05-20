@@ -16,6 +16,10 @@ def _metadata_rows(workbook):
     return {key: value for key, value in workbook["設定"].iter_rows(min_row=2, values_only=True)}
 
 
+def _cell_date(value):
+    return value.date() if hasattr(value, "date") else value
+
+
 def _build_source_workbook(path: pathlib.Path, sheet_name: str) -> None:
     workbook = Workbook()
     worksheet = workbook.active
@@ -390,12 +394,111 @@ def test_build_saved_sheet_order_form_excel_uses_latest_family_source_when_month
     metadata = _metadata_rows(workbook)
     assert workbook.sheetnames == [target_week_sheet, "設定"]
     assert worksheet["A4"].value == "月欠損施設"
-    assert worksheet["A11"].value.date() == datetime(2026, 5, 10).date()
+    assert _cell_date(worksheet["A11"].value) == datetime(2026, 5, 10).date()
     assert worksheet["D11"].value == "5月欠損献立"
     assert worksheet["E11"].value == 9
     assert worksheet["F11"].value == 1
     assert metadata["source_workbook"] == source_name
     assert metadata["week_sheet_name"] == target_week_sheet
+
+
+def test_write_saved_sheet_rows_maps_workflow_v2_fields_by_header_role() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["A7"] = "日　付"
+    worksheet["B7"] = "区　分"
+    worksheet["C7"] = "副区分"
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "合計"
+    worksheet["F7"] = "常食"
+    worksheet["G7"] = "通所"
+    worksheet["H7"] = "職員"
+    worksheet["I7"] = "禁食"
+    worksheet["I9"] = "肉禁"
+    worksheet["J9"] = "魚禁"
+    worksheet["K9"] = "その他"
+    worksheet["L7"] = "変更①"
+    worksheet["M7"] = "備考欄"
+
+    written = order_form_service._write_saved_sheet_rows_to_order_form(
+        worksheet,
+        fields=[
+            "date_mmdd",
+            "daypart",
+            "aux.col_2",
+            "menu",
+            "aux.col_4",
+            "qty.regular_x",
+            "qty.daycare_x",
+            "qty.staff_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.no_fried_x",
+            "qty.change_1_x",
+            "remarks",
+        ],
+        header=["日付", "区分", "副区分", "メニュー", "合計"],
+        rows=[
+            ["05/10", "昼", "主", "豚肉と白菜のすき煮", "65", "60", "2", "1", "3", "4", "5", "6", "備考"],
+        ],
+        received_at=datetime(2026, 5, 10, 9, 0, 0),
+    )
+
+    assert written == 1
+    assert _cell_date(worksheet["A11"].value) == datetime(2026, 5, 10).date()
+    assert worksheet["B11"].value == "昼"
+    assert worksheet["C11"].value == "主"
+    assert worksheet["D11"].value == "豚肉と白菜のすき煮"
+    assert worksheet["E11"].value == 65
+    assert worksheet["F11"].value == 60
+    assert worksheet["G11"].value == 2
+    assert worksheet["H11"].value == 1
+    assert worksheet["I11"].value == 3
+    assert worksheet["J11"].value == 4
+    assert worksheet["K11"].value == 5
+    assert worksheet["L11"].value == 6
+
+
+def test_write_saved_sheet_rows_skips_unknown_quantity_without_shifting_columns() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["A7"] = "日　付"
+    worksheet["B7"] = "区　分"
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["G7"] = "禁食"
+    worksheet["G9"] = "肉禁"
+    worksheet["H9"] = "魚禁"
+    worksheet["I7"] = "変更①"
+    worksheet["J7"] = "変更②"
+
+    written = order_form_service._write_saved_sheet_rows_to_order_form(
+        worksheet,
+        fields=[
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_x",
+            "qty.unknown_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
+            "remarks",
+        ],
+        header=["日付", "区分", "メニュー", "常食", "不明"],
+        rows=[
+            ["05/10", "昼", "豚肉と白菜のすき煮", "32", "", "1", "2", "3", "4", ""],
+        ],
+        received_at=datetime(2026, 5, 10, 9, 0, 0),
+    )
+
+    assert written == 1
+    assert worksheet["E11"].value == 32
+    assert worksheet["G11"].value == 1
+    assert worksheet["H11"].value == 2
+    assert worksheet["I11"].value == 3
+    assert worksheet["J11"].value == 4
 
 
 def test_clear_week_sheet_body_preserves_quantity_body_merges_for_diabetes_template() -> None:
