@@ -10,9 +10,9 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, inspect, select, text
 
-from src.db import DB_URI, session_scope
+from src.db import Base, DB_URI, engine, session_scope
 from src.models.shipping_tracking import (
     ShippingTrackingCurrent,
     ShippingTrackingEvent,
