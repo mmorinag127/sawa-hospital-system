@@ -61,6 +61,23 @@ def test_ingest_supersede_records_upload_time_versions_and_line_snapshots():
     assert updated["versions"][0]["line_snapshot"][0]["menu_name"] == "変更後メニュー"
     assert updated["versions"][1]["line_snapshot"][0]["menu_name"] == "初回メニュー"
 
+    retried = order_service.create_order_from_ingest(
+        second,
+        lines=[
+            {
+                "line_id": "second-line",
+                "date": "2025-12-24",
+                "daypart": "夕",
+                "menu_name": "変更後メニュー",
+                "quantity_original": 7,
+            }
+        ],
+    )
+
+    assert retried["version_count"] == 2
+    assert [version["version_no"] for version in retried["versions"]] == [2, 1]
+    assert [version["message_id"] for version in retried["versions"]] == ["msg-version-2", "msg-version-1"]
+
 
 def test_ingest_supersede_replaces_prior():
     order_service.clear_all()

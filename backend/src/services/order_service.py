@@ -4499,6 +4499,40 @@ def create_order_from_ingest(
     with session_scope() as session:
         received_at = _normalize_received_at(payload.received_at)
         effective_week_hint = _derive_ingest_week_hint(payload)
+        existing_document = (
+            session.execute(
+                select(OrderDocument)
+                .where(OrderDocument.source_email_id == payload.message_id)
+                .order_by(OrderDocument.received_at.desc(), OrderDocument.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if existing_document is not None:
+            existing_order, _match_reason, effective_week_hint = _find_existing_order_for_ingest(
+                session,
+                payload,
+                effective_week_hint=effective_week_hint,
+            )
+            if existing_order is not None:
+                historical_document_ids = {
+                    str(document_id or "").strip()
+                    for document_id in (existing_order.superseded_document_ids or [])
+                    if str(document_id or "").strip()
+                }
+                current_document_id = str(existing_order.current_document_id or "").strip()
+                if existing_document.id == current_document_id or existing_document.id in historical_document_ids:
+                    needs_context_update = (
+                        (not str(existing_order.week_code or "").strip() and str(effective_week_hint or "").strip())
+                        or (not str(existing_order.facility_code or "").strip() and str(payload.facility_hint or "").strip())
+                    )
+                    if needs_context_update:
+                        pass
+                    else:
+                        _ensure_legacy_current_order_version(session, existing_order)
+                        if existing_document.id == current_document_id:
+                            _record_current_order_version(session, existing_order, existing_document)
+                        return serialize_order(existing_order)
         doc_id = _make_document_id()
         document = OrderDocument(
             id=doc_id,

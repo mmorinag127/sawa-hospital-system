@@ -123,7 +123,7 @@ def test_process_uploaded_pdf_job_marks_completed_when_ingest_creates_order(monk
         assert order is not None
         assert order.week_code == "2026-04@2026-04-05~2026-04-11"
         assert order.current_document_id == completed["current_document_id"]
-        assert len(order.superseded_document_ids or []) == 1
+        assert order.superseded_document_ids in (None, [])
 
 
 def test_process_uploaded_pdf_job_reclaims_stale_processing_and_schedules_retry(monkeypatch):
