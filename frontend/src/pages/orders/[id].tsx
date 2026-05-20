@@ -13268,6 +13268,16 @@ export default function OrderDetailPage() {
                 </button>
               </div>
               <div className="output-card">
+                <span className="output-link">発注書Excel</span>
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${order.id}`, "発注書Excel")}
+                >
+                  ダウンロード
+                </button>
+              </div>
+              <div className="output-card">
                 <span className="output-link">総量CSV</span>
                 <button
                   className="btn primary"

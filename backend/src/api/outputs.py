@@ -13,6 +13,7 @@ from src.services.output_builder import (
     build_daily_output_bundle,
     build_weekly_weight_summary_workbook,
 )
+from src.services import order_form_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -77,6 +78,25 @@ def download_delivery(order_id: str):
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{order_id}_delivery.xlsx",
+    )
+
+
+@router.get("/order-form-saved-sheet", dependencies=[Depends(require_role("operator"))])
+def download_order_form_saved_sheet(order_id: str):
+    try:
+        path = order_form_service.build_saved_sheet_order_form_excel(order_id=order_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "order not found":
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"order form saved sheet build failed: {exc}") from exc
+    logger.info("Output download", order_id=order_id, output="order_form_saved_sheet", path=path)
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
     )
 
 

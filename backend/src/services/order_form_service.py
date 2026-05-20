@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import os
 import re
-import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,7 +15,10 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
 
-from src.services import config_service, menu_service
+from src.db import session_scope
+from src.models.order import Order
+from src.services import config_service, draft_sheet_service, menu_service, sheet_week_service
+from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
     get_default_output_bucket,
     load_bytes_from_uri,
@@ -714,6 +716,125 @@ def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
     return written_rows
 
 
+def _sheet_field_indexes(fields: list[Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for idx, field in enumerate(fields):
+        normalized = str(field or "").strip()
+        if normalized and normalized not in result:
+            result[normalized] = idx
+    return result
+
+
+def _first_field_index(field_indexes: dict[str, int], candidates: tuple[str, ...]) -> int | None:
+    for candidate in candidates:
+        if candidate in field_indexes:
+            return field_indexes[candidate]
+    return None
+
+
+def _sheet_cell(row: list[Any], idx: int | None) -> object:
+    if idx is None or idx < 0 or idx >= len(row):
+        return None
+    return row[idx]
+
+
+def _coerce_quantity_cell(value: object) -> object:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace(",", "")
+    try:
+        number = float(normalized)
+    except ValueError:
+        return text
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def _write_to_cell_or_merged_anchor(worksheet, *, row_idx: int, col_idx: int, value: object) -> None:
+    cell = worksheet.cell(row=row_idx, column=col_idx)
+    if not isinstance(cell, MergedCell):
+        cell.value = value
+        return
+    for merged_range in worksheet.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        if min_row <= row_idx <= max_row and min_col <= col_idx <= max_col:
+            anchor = worksheet.cell(row=min_row, column=min_col)
+            if anchor.value in (None, "") or anchor.value == value:
+                anchor.value = value
+            return
+
+
+def _write_saved_sheet_rows_to_order_form(
+    worksheet,
+    *,
+    fields: list[Any],
+    rows: list[Any],
+    received_at: datetime,
+) -> int:
+    field_indexes = _sheet_field_indexes(fields)
+    date_idx = _first_field_index(field_indexes, ("date", "menu_date", "日付"))
+    daypart_idx = _first_field_index(field_indexes, ("daypart", "meal", "区分"))
+    category_idx = _first_field_index(field_indexes, ("category", "menu_category", "献立区分"))
+    menu_idx = _first_field_index(field_indexes, ("menu_name", "name", "menu", "献立", "メニュー"))
+    quantity_field_indexes = [
+        idx
+        for idx, field in enumerate(fields)
+        if str(field or "").strip().startswith("qty.")
+    ]
+    if not quantity_field_indexes:
+        quantity_field_indexes = [
+            idx
+            for idx, field in enumerate(fields)
+            if idx not in {date_idx, daypart_idx, category_idx, menu_idx}
+        ]
+    quantity_columns = sorted(_worksheet_quantity_column_indexes(worksheet))
+    if not quantity_columns:
+        raise ValueError("order form quantity columns not found")
+    row_idx = _ORDER_FORM_BODY_START_ROW
+    current_date: date | None = None
+    date_start_row = _ORDER_FORM_BODY_START_ROW
+    current_daypart = ""
+    written_rows = 0
+    for raw_row in rows:
+        if not isinstance(raw_row, list):
+            continue
+        if row_idx > _ORDER_FORM_BODY_END_ROW:
+            raise ValueError("saved sheet exceeds supported template rows")
+        date_value = _sheet_cell(raw_row, date_idx)
+        parsed_date = parse_date_string(str(date_value or ""), received_at) if date_value not in (None, "") else None
+        daypart = str(_sheet_cell(raw_row, daypart_idx) or "").strip()
+        category = str(_sheet_cell(raw_row, category_idx) or "").strip()
+        menu_name = str(_sheet_cell(raw_row, menu_idx) or "").strip()
+        if not any([parsed_date, daypart, category, menu_name]) and not any(
+            str(_sheet_cell(raw_row, idx) or "").strip()
+            for idx in quantity_field_indexes
+        ):
+            continue
+        if parsed_date and current_date != parsed_date:
+            if current_date is not None and row_idx - 1 > date_start_row:
+                worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+            current_date = parsed_date
+            date_start_row = row_idx
+            current_daypart = ""
+            worksheet.cell(row=row_idx, column=1, value=parsed_date)
+        worksheet.cell(row=row_idx, column=2, value=daypart if daypart and current_daypart != daypart else None)
+        worksheet.cell(row=row_idx, column=3, value=category or None)
+        worksheet.cell(row=row_idx, column=4, value=menu_name or None)
+        for qty_idx, col_idx in zip(quantity_field_indexes, quantity_columns, strict=False):
+            value = _coerce_quantity_cell(_sheet_cell(raw_row, qty_idx))
+            if value is not None:
+                _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=col_idx, value=value)
+        if daypart:
+            current_daypart = daypart
+        row_idx += 1
+        written_rows += 1
+    if current_date is not None and row_idx - 1 > date_start_row:
+        worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+    return written_rows
+
+
 def _set_deadline_text_for_week(worksheet, start_date: date) -> None:
     deadline = start_date - timedelta(days=16)
     deadline_text = f"締切日{deadline.month}月{deadline.day}日まで"
@@ -846,6 +967,136 @@ def build_order_form_excel(
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     output = _OUTPUT_DIR / f"order_form_{facility_id}_{normalized_month}_{file_pattern}_{stamp}.xlsx"
     wb.save(output)
+    return output
+
+
+def _dates_from_saved_sheet(fields: list[Any], rows: list[Any], received_at: datetime) -> list[date]:
+    field_indexes = _sheet_field_indexes(fields)
+    date_idx = _first_field_index(field_indexes, ("date", "menu_date", "日付"))
+    if date_idx is None:
+        return []
+    dates: list[date] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        parsed = parse_date_string(str(_sheet_cell(row, date_idx) or ""), received_at)
+        if parsed:
+            dates.append(parsed)
+    return dates
+
+
+def _resolve_week_range_for_saved_sheet(
+    *,
+    week_code: object,
+    fields: list[Any],
+    rows: list[Any],
+    received_at: datetime,
+) -> tuple[str, date, date]:
+    month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_code)
+    if month_id and isinstance(start_date, date) and isinstance(end_date, date):
+        return month_id, start_date, end_date
+    saved_dates = _dates_from_saved_sheet(fields, rows, received_at)
+    if saved_dates:
+        first_date = min(saved_dates)
+        for candidate_start, candidate_end in _build_week_ranges_for_month(first_date.strftime("%Y-%m")):
+            if candidate_start <= first_date <= candidate_end:
+                return candidate_start.strftime("%Y-%m"), candidate_start, candidate_end
+    if month_id:
+        ranges = _build_week_ranges_for_month(month_id)
+        if ranges:
+            start, end = ranges[0]
+            return month_id, start, end
+    raise ValueError("order week is unresolved")
+
+
+def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        raise ValueError("order_id is required")
+    with session_scope() as session:
+        order = session.get(Order, normalized_order_id)
+        if not order:
+            raise ValueError("order not found")
+        facility_id = str(order.facility_code or "").strip()
+        week_code = order.week_code
+        received_at = order.received_at or datetime.utcnow()
+    if not facility_id:
+        raise ValueError("facility missing")
+
+    draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
+    draft_payload = draft.get("draft_sheet_json") if isinstance(draft, dict) else None
+    if not isinstance(draft_payload, dict):
+        raise ValueError("saved sheet not found")
+    fields = draft_payload.get("fields")
+    rows = draft_payload.get("rows")
+    if not isinstance(fields, list) or not isinstance(rows, list) or not rows:
+        raise ValueError("saved sheet rows not found")
+
+    facility = _resolve_facility(facility_id)
+    fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
+    if not fax_template_id:
+        raise ValueError("facility fax_template_id not found")
+    spec = _resolve_fax_family_spec(fax_template_id)
+    month_id, week_start, week_end = _resolve_week_range_for_saved_sheet(
+        week_code=week_code,
+        fields=fields,
+        rows=rows,
+        received_at=received_at,
+    )
+    week_sheet_name = _format_week_sheet_name(week_start, week_end)
+    source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
+    source_path = _resolve_source_workbook_path(source_workbook_name)
+    workbook = load_workbook(source_path)
+    if week_sheet_name not in workbook.sheetnames:
+        raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
+    _keep_only_target_sheet(workbook, week_sheet_name)
+    worksheet = workbook[week_sheet_name]
+
+    facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
+    _clear_week_sheet_body(worksheet)
+    _write_facility_name(worksheet, facility_name)
+    _write_facility_name_in_box(worksheet, facility_name)
+    _set_deadline_text_for_week(worksheet, week_start)
+    written_rows = _write_saved_sheet_rows_to_order_form(
+        worksheet,
+        fields=fields,
+        rows=rows,
+        received_at=received_at,
+    )
+    if written_rows <= 0:
+        raise ValueError("saved sheet has no writable rows")
+    _apply_fax_metadata_header(
+        worksheet,
+        fax_template_id=fax_template_id,
+        facility_id=facility_id,
+        facility_name=facility_name,
+        week_sheet_name=week_sheet_name,
+        family_label=str(spec["family_label"]),
+    )
+    _apply_fax_markers(worksheet)
+    _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="saved_sheet")
+    _extend_print_area(worksheet, bottom_row=_BOTTOM_MARKER_ROW)
+    _append_hidden_metadata_sheet(
+        workbook,
+        source_workbook_name=source_workbook_name,
+        facility_id=facility_id,
+        facility_name=facility_name,
+        fax_template_id=fax_template_id,
+        family_label=str(spec["family_label"]),
+        week_sheet_name=week_sheet_name,
+        base_label="saved_sheet",
+    )
+    metadata = workbook["設定"]
+    metadata.append(["order_id", normalized_order_id])
+    metadata.append(["month_id", month_id])
+    metadata.append(["saved_sheet_draft_id", str(draft.get("id") or "") if isinstance(draft, dict) else ""])
+    metadata.append(["saved_sheet_row_count", written_rows])
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_facility_id = _sanitize_filename_fragment(facility_id)
+    safe_week = _sanitize_filename_fragment(week_sheet_name)
+    output = _OUTPUT_DIR / f"order_form_saved_sheet_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
+    workbook.save(output)
     return output
 
 
