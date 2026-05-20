@@ -3929,6 +3929,15 @@ def _weekly_weight_sheet_title(week_start: dt_date) -> str:
     return f"{week_start.month}月{week_start.day}日～{week_end.month}月{week_end.day}日"
 
 
+def _weekly_weight_reference_layout_path() -> Path | None:
+    relative_path = Path("input_example") / "2026.0512" / "May 10-16 2026 Weight.xlsx"
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / relative_path
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _normalize_weekly_weight_slot(value: Any) -> str:
     text = str(value or "").strip()
     compact = re.sub(r"\s+", "", text)
@@ -4111,10 +4120,8 @@ def _build_weekly_weight_workbook_shell(week_start: dt_date) -> Workbook:
     from openpyxl.cell.cell import MergedCell
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-    reference_layout = (
-        Path(__file__).resolve().parents[4] / "input_example" / "2026.0512" / "May 10-16 2026 Weight.xlsx"
-    )
-    if reference_layout.exists():
+    reference_layout = _weekly_weight_reference_layout_path()
+    if reference_layout is not None:
         workbook = load_workbook(reference_layout)
         ws = workbook.worksheets[0]
         ws.title = _weekly_weight_sheet_title(week_start)
