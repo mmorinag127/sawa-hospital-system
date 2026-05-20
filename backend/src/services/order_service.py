@@ -23,11 +23,13 @@ from loguru import logger
 from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 import pandas as pd
-from sqlalchemy import select, delete, func, or_
+from sqlalchemy import select, delete, func, or_, update
+from sqlalchemy.orm import object_session
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.document import OrderDocument
+from src.models.order_version import OrderVersion
 from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_revision import OrderOcrRevision  # noqa: F401
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: F401
@@ -662,6 +664,7 @@ def clear_all():
         session.execute(delete(OrderOcrEvidenceRun))
         session.execute(delete(OrderOcrRevision))
         session.execute(delete(OrderOcrCache))
+        session.execute(delete(OrderVersion))
         session.execute(delete(OrderDocument))
         session.execute(delete(OrderLine))
         session.execute(delete(OrderMenuSnapshot))
@@ -695,6 +698,7 @@ def delete_orders_by_message_prefix(prefix: str) -> int:
             session.execute(delete(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id == order.id))
             session.execute(delete(OrderOcrRevision).where(OrderOcrRevision.order_id == order.id))
             session.execute(delete(OrderOcrCache).where(OrderOcrCache.order_id == order.id))
+            session.execute(delete(OrderVersion).where(OrderVersion.order_id == order.id))
             session.execute(delete(OrderDocument).where(OrderDocument.order_id == order.id))
             session.execute(delete(OrderMenuSnapshot).where(OrderMenuSnapshot.order_id == order.id))
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
@@ -743,6 +747,10 @@ def _make_order_id() -> str:
 
 def _make_document_id() -> str:
     return f"DOC{uuid4().hex[:8]}"
+
+
+def _make_order_version_id() -> str:
+    return f"ORV{uuid4().hex[:8]}"
 
 
 def _make_line_id() -> str:
@@ -4350,6 +4358,137 @@ def preview_existing_order_for_ingest(payload: IngestEmailPayload) -> dict[str, 
         )
 
 
+def _snapshot_order_lines(session, order_id: str) -> list[dict[str, Any]]:
+    rows = session.execute(
+        select(OrderLine)
+        .where(OrderLine.order_id == order_id)
+        .order_by(OrderLine.date, OrderLine.daypart, OrderLine.id)
+    ).scalars().all()
+    return [
+        {
+            "id": line.id,
+            "line_id": line.line_id,
+            "date": line.date.isoformat() if line.date else None,
+            "daypart": line.daypart,
+            "menu_name": line.menu_name,
+            "diet_type": line.diet_type,
+            "area_id": line.area_id,
+            "bag_type": line.bag_type,
+            "quantity_original": line.quantity_original,
+            "quantity_corrected": line.quantity_corrected,
+            "change_note": line.change_note,
+        }
+        for line in rows
+    ]
+
+
+def _next_order_version_no(session, order_id: str) -> int:
+    current = session.execute(
+        select(func.max(OrderVersion.version_no)).where(OrderVersion.order_id == order_id)
+    ).scalar()
+    return int(current or 0) + 1
+
+
+def _ensure_legacy_current_order_version(session, order: Order) -> None:
+    if not str(order.current_document_id or "").strip():
+        return
+    existing = session.execute(
+        select(OrderVersion.id).where(OrderVersion.order_id == order.id).limit(1)
+    ).scalar()
+    if existing:
+        return
+    session.add(
+        OrderVersion(
+            id=_make_order_version_id(),
+            order_id=order.id,
+            version_no=1,
+            document_id=order.current_document_id,
+            message_id=order.message_id,
+            storage_uri=order.document_uri,
+            facility_code=order.facility_code,
+            week_code=order.week_code,
+            received_at=_normalize_received_at(order.received_at),
+            line_snapshot=_snapshot_order_lines(session, order.id),
+            is_current=True,
+            created_at=datetime.utcnow(),
+        )
+    )
+    session.flush()
+
+
+def _record_current_order_version(session, order: Order, document: OrderDocument) -> None:
+    existing = session.execute(
+        select(OrderVersion).where(OrderVersion.document_id == document.id)
+    ).scalars().first()
+    if existing is not None:
+        existing.order_id = order.id
+        existing.message_id = document.source_email_id
+        existing.storage_uri = document.storage_uri
+        existing.facility_code = order.facility_code
+        existing.week_code = order.week_code
+        existing.received_at = _normalize_received_at(document.received_at)
+        existing.line_snapshot = _snapshot_order_lines(session, order.id)
+        existing.is_current = True
+    else:
+        session.execute(
+            update(OrderVersion)
+            .where(OrderVersion.order_id == order.id)
+            .values(is_current=False)
+        )
+        session.add(
+            OrderVersion(
+                id=_make_order_version_id(),
+                order_id=order.id,
+                version_no=_next_order_version_no(session, order.id),
+                document_id=document.id,
+                message_id=document.source_email_id,
+                storage_uri=document.storage_uri,
+                facility_code=order.facility_code,
+                week_code=order.week_code,
+                received_at=_normalize_received_at(document.received_at),
+                line_snapshot=_snapshot_order_lines(session, order.id),
+                is_current=True,
+                created_at=datetime.utcnow(),
+            )
+        )
+    session.flush()
+
+
+def _serialize_order_version(version: OrderVersion) -> dict[str, Any]:
+    return {
+        "id": version.id,
+        "order_id": version.order_id,
+        "version_no": version.version_no,
+        "document_id": version.document_id,
+        "message_id": version.message_id,
+        "storage_uri": version.storage_uri,
+        "facility_code": version.facility_code,
+        "week_code": version.week_code,
+        "received_at": version.received_at,
+        "line_snapshot": version.line_snapshot or [],
+        "line_count": len(version.line_snapshot or []),
+        "is_current": bool(version.is_current),
+        "created_at": version.created_at,
+    }
+
+
+def _list_order_versions(session, order_id: str) -> list[dict[str, Any]]:
+    rows = session.execute(
+        select(OrderVersion)
+        .where(OrderVersion.order_id == order_id)
+        .order_by(OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc())
+    ).scalars().all()
+    return [_serialize_order_version(row) for row in rows]
+
+
+def _list_order_versions_for_serialization(order: Order) -> list[dict[str, Any]]:
+    session = object_session(order)
+    if session is not None:
+        return _list_order_versions(session, order.id)
+    with session_scope() as scoped_session:
+        return _list_order_versions(scoped_session, order.id)
+
+
 def create_order_from_ingest(
     payload: IngestEmailPayload,
     lines: Optional[list[dict]] = None,
@@ -4380,6 +4519,7 @@ def create_order_from_ingest(
         )
         if existing:
             order = existing
+            _ensure_legacy_current_order_version(session, order)
             if order.current_document_id:
                 prior = order.superseded_document_ids or []
                 order.superseded_document_ids = prior + [order.current_document_id]
@@ -4436,6 +4576,8 @@ def create_order_from_ingest(
                     )
                 )
             order.lines_updated_at = datetime.utcnow()
+        session.flush()
+        _record_current_order_version(session, order, document)
         session.refresh(order)
         serialized = serialize_order(order)
     _invalidate_orders_cache()
@@ -35767,6 +35909,7 @@ def serialize_order(order: Order):
     week_month_id = _to_sheet_month_id(order.week_code)
     week_value = _normalize_sheet_week_value(order.week_code) or week_month_id
     week_label = _format_sheet_week_label(order.week_code) or week_month_id
+    versions = _list_order_versions_for_serialization(order)
 
     return {
         "id": order.id,
@@ -35782,6 +35925,9 @@ def serialize_order(order: Order):
         "received_at": order.received_at,
         "document_id": order.current_document_id,
         "superseded_document_ids": order.superseded_document_ids or [],
+        "versions": versions,
+        "version_count": len(versions),
+        "current_version": next((version for version in versions if version.get("is_current")), None),
         "lines_updated_at": order.lines_updated_at,
         "archived_at": order.archived_at,
         "archived_by": order.archived_by,
@@ -35795,6 +35941,7 @@ def serialize_order_summary(order: Order):
     week_month_id = _to_sheet_month_id(order.week_code)
     week_value = _normalize_sheet_week_value(order.week_code) or week_month_id
     week_label = _format_sheet_week_label(order.week_code) or week_month_id
+    versions = _list_order_versions_for_serialization(order)
     return {
         "id": order.id,
         "ocr_job_id": f"OCR-{order.id}",
@@ -35809,6 +35956,9 @@ def serialize_order_summary(order: Order):
         "received_at": order.received_at,
         "document_id": order.current_document_id,
         "superseded_document_ids": order.superseded_document_ids or [],
+        "versions": versions,
+        "version_count": len(versions),
+        "current_version": next((version for version in versions if version.get("is_current")), None),
         "lines_updated_at": order.lines_updated_at,
         "archived_at": order.archived_at,
         "archived_by": order.archived_by,
