@@ -8,6 +8,60 @@ from src.workers.ingest_mail_adapter import IngestEmailPayload
 from src.services import order_service
 
 
+def test_ingest_supersede_records_upload_time_versions_and_line_snapshots():
+    order_service.clear_all()
+    first = IngestEmailPayload(
+        message_id="msg-version-1",
+        pdf_uri="file://version1.pdf",
+        received_at="2025-12-23T10:00:00",
+        facility_hint="FAC001",
+        week_hint="WEK2025W52",
+    )
+    second = IngestEmailPayload(
+        message_id="msg-version-2",
+        pdf_uri="file://version2.pdf",
+        received_at="2025-12-23T11:00:00",
+        facility_hint="FAC001",
+        week_hint="WEK2025W52",
+    )
+
+    created = order_service.create_order_from_ingest(
+        first,
+        lines=[
+            {
+                "line_id": "first-line",
+                "date": "2025-12-23",
+                "daypart": "昼",
+                "menu_name": "初回メニュー",
+                "quantity_original": 3,
+            }
+        ],
+    )
+    updated = order_service.create_order_from_ingest(
+        second,
+        lines=[
+            {
+                "line_id": "second-line",
+                "date": "2025-12-24",
+                "daypart": "夕",
+                "menu_name": "変更後メニュー",
+                "quantity_original": 7,
+            }
+        ],
+    )
+
+    assert updated["id"] == created["id"]
+    assert updated["document"] == "file://version2.pdf"
+    assert updated["version_count"] == 2
+    assert [version["version_no"] for version in updated["versions"]] == [2, 1]
+    assert [version["message_id"] for version in updated["versions"]] == ["msg-version-2", "msg-version-1"]
+    assert updated["current_version"]["message_id"] == "msg-version-2"
+    assert updated["versions"][0]["received_at"].isoformat() == "2025-12-23T11:00:00"
+    assert updated["versions"][1]["received_at"].isoformat() == "2025-12-23T10:00:00"
+    assert updated["versions"][0]["line_snapshot"][0]["menu_name"] == "変更後メニュー"
+    assert updated["versions"][1]["line_snapshot"][0]["menu_name"] == "初回メニュー"
+
+
 def test_ingest_supersede_replaces_prior():
     order_service.clear_all()
     first = IngestEmailPayload(
