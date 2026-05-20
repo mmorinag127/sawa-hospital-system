@@ -224,7 +224,7 @@
       "phone": "0886-663-966",
       "areas": [],
       "facility_id": "FAC00001",
-      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_id": "大和なでしこ",
       "fax_template_override": {
         "columns": [
           {
@@ -376,7 +376,10 @@
             "column_index": 8
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "大和なでしこ"
+      ]
     },
     {
       "facility_name": "シルバーホームなごみ",
@@ -531,7 +534,10 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_regular_forbidden_v1"
+      "fax_template_id": "シルバーホームなごみ",
+      "fax_template_ids": [
+        "シルバーホームなごみ"
+      ]
     },
     {
       "facility_name": "春日苑 松茂",
@@ -542,10 +548,9 @@
       "phone": "080-6919-5523",
       "areas": [],
       "facility_id": "FAC00003",
-      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_id": "春日苑 松茂",
       "fax_template_ids": [
-        "fax_layout_floor_2f3f_v1",
-        "fax_layout_regular_forbidden_v1"
+        "春日苑 松茂"
       ],
       "invoice_template": {
         "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
@@ -695,10 +700,9 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
+      "fax_template_id": "介護老人保健施設ふれあいの丘",
       "fax_template_ids": [
-        "fax_layout_regular_staff_daycare_other_forbidden_v1",
-        "fax_layout_regular_staff_daycare_v1"
+        "介護老人保健施設ふれあいの丘"
       ],
       "fax_template_override": {
         "columns_authoritative": true,
@@ -868,10 +872,9 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_soft_packaging_forbidden_v1",
+      "fax_template_id": "池袋病院内事業所 傑合同会社",
       "fax_template_ids": [
-        "fax_layout_soft_packaging_forbidden_v1",
-        "fax_layout_regular_forbidden_v1"
+        "池袋病院内事業所 傑合同会社"
       ],
       "label_profile_override": {
         "expiry_offset_months": 3
@@ -980,7 +983,7 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+      "fax_template_id": "藍TERRACE",
       "fax_template_override": {
         "columns_authoritative": true,
         "main_ocr_row_fields": [
@@ -1097,7 +1100,7 @@
         ]
       },
       "fax_template_ids": [
-        "fax_layout_regular_soft_mixer_forbidden_v1"
+        "藍TERRACE"
       ]
     },
     {
@@ -1178,10 +1181,9 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_id": "ゆうゆう（株）百々家",
       "fax_template_ids": [
-        "fax_layout_regular_forbidden_v1",
-        "fax_layout_floor_2f3f_v1"
+        "ゆうゆう（株）百々家"
       ],
       "fax_template_override": {
         "columns_authoritative": true,
@@ -1257,7 +1259,7 @@
       "phone": "0886-113-630",
       "areas": [],
       "facility_id": "FAC00008",
-      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_id": "佐古",
       "invoice_template": {
         "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1326,7 +1328,10 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "佐古"
+      ]
     },
     {
       "facility_name": "グループホームそよかぜ",
@@ -1338,7 +1343,7 @@
       "phone": "0886-837-888",
       "areas": [],
       "facility_id": "FAC00009",
-      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_id": "グループホームそよかぜ",
       "invoice_template": {
         "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1407,7 +1412,10 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "グループホームそよかぜ"
+      ]
     },
     {
       "facility_name": "山城",
@@ -1420,7 +1428,7 @@
       "phone": "088-657-6567",
       "areas": [],
       "facility_id": "FAC00010",
-      "fax_template_id": "fax_layout_floor_2f3f_v1",
+      "fax_template_id": "山城",
       "fax_template_override": {
         "grid_line_scale_horizontal": 20
       },
@@ -1492,7 +1500,10 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "山城"
+      ]
     },
     {
       "facility_name": "ケアハウス四万十",
@@ -1503,7 +1514,7 @@
       "phone": "0880-229-508",
       "areas": [],
       "facility_id": "FAC00011",
-      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_id": "ケアハウス四万十",
       "invoice_template": {
         "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
         "sheet_name": "松岡会",
@@ -1572,7 +1583,10 @@
             "column_index": 9
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "ケアハウス四万十"
+      ]
     },
     {
       "facility_name": "グランフォレスト方上",
@@ -1726,7 +1740,10 @@
           }
         ]
       },
-      "fax_template_id": "fax_layout_regular_forbidden_v1"
+      "fax_template_id": "グランフォレスト方上",
+      "fax_template_ids": [
+        "グランフォレスト方上"
+      ]
     },
     {
       "facility_name": "いこいの森",
@@ -1737,9 +1754,9 @@
       "phone": "088-8567-012",
       "areas": [],
       "facility_id": "FAC00013",
-      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_id": "いこいの森",
       "fax_template_ids": [
-        "fax_layout_regular_forbidden_v1"
+        "いこいの森"
       ],
       "fax_template_override": {
         "columns_authoritative": true,
@@ -1857,10 +1874,9 @@
       ],
       "areas": [],
       "facility_id": "FAC00014",
-      "fax_template_id": "fax_layout_regular_staff_daycare_v1",
+      "fax_template_id": "湘南さくら病院",
       "fax_template_ids": [
-        "fax_layout_regular_staff_daycare_v1",
-        "fax_layout_regular_forbidden_v1"
+        "湘南さくら病院"
       ],
       "fax_template_override": {
         "columns_authoritative": true,
@@ -2027,7 +2043,7 @@
       ],
       "areas": [],
       "facility_id": "FAC00015",
-      "fax_template_id": "fax_layout_regular_forbidden_v1",
+      "fax_template_id": "ケアハウス四万十ピア",
       "fax_template_override": {
         "columns": [
           {
@@ -2183,7 +2199,10 @@
             "column_index": 10
           }
         ]
-      }
+      },
+      "fax_template_ids": [
+        "ケアハウス四万十ピア"
+      ]
     },
     {
       "facility_name": "いこいの森プラス",
@@ -2192,10 +2211,9 @@
       ],
       "areas": [],
       "facility_id": "FAC00016",
-      "fax_template_id": "fax_layout_regular_diabetes_v1",
+      "fax_template_id": "いこいの森プラス",
       "fax_template_ids": [
-        "fax_layout_regular_diabetes_v1",
-        "fax_layout_regular_forbidden_v1"
+        "いこいの森プラス"
       ],
       "fax_template_override": {
         "columns_authoritative": true,
