@@ -1,6 +1,7 @@
 import pathlib
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -24,6 +25,22 @@ def _build_source_workbook(path: pathlib.Path, sheet_name: str) -> None:
     worksheet["A4"] = ""
     worksheet["D7"] = "献立"
     workbook.save(path)
+
+
+class _FakeSessionScope:
+    def __init__(self, order):
+        self.order = order
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, _model, order_id):
+        if self.order and self.order.id == order_id:
+            return self.order
+        return None
 
 
 def test_build_week_ranges_for_month_matches_real_sample_boundaries() -> None:
@@ -177,6 +194,78 @@ def test_build_order_form_excel_creates_weekly_sheets_and_metadata(tmp_path, mon
     assert rows["entry_count"] == 5
     assert rows["week_1_sheet_name"] == "3月1日～3月7日"
     assert workbook["設定"].sheet_state == "hidden"
+
+
+def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form(tmp_path, monkeypatch):
+    source_name = "saved-source.xlsx"
+    week_sheet = "3月1日～3月7日"
+    _build_source_workbook(tmp_path / source_name, week_sheet)
+    source_workbook = load_workbook(tmp_path / source_name)
+    source_ws = source_workbook[week_sheet]
+    source_ws["E7"] = "常食"
+    source_ws["F7"] = "肉禁"
+    source_workbook.save(tmp_path / source_name)
+
+    order = SimpleNamespace(
+        id="ORD-SAVED-SHEET-001",
+        facility_code="FACTEST01",
+        week_code="2026-03@2026-03-01~2026-03-07",
+        received_at=datetime(2026, 3, 1, 9, 0, 0),
+    )
+    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
+    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(order))
+    monkeypatch.setitem(
+        order_form_service._FAX_FAMILY_SOURCE_MAP,
+        "fax_layout_regular_forbidden_v1",
+        {
+            "source_workbook": source_name,
+            "family_label": "共通・禁食2種",
+        },
+    )
+    monkeypatch.setattr(
+        order_form_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "facility_name": "保存済み施設",
+            "fax_template_id": "fax_layout_regular_forbidden_v1",
+            "order_form_source_workbook": source_name,
+        },
+    )
+    monkeypatch.setattr(
+        order_form_service.draft_sheet_service,
+        "get_latest_sheet_draft",
+        lambda order_id: {
+            "id": "ODR-DRAFT-001",
+            "draft_sheet_json": {
+                "fields": ["date", "daypart", "category", "menu_name", "qty.regular_x", "qty.no_meat_x"],
+                "rows": [
+                    ["3/1", "朝", "主", "テスト献立A", "12", "3"],
+                    ["3/1", "昼", "副", "テスト献立B", "4", ""],
+                ],
+            },
+        },
+    )
+
+    output = order_form_service.build_saved_sheet_order_form_excel(order_id=order.id)
+
+    workbook = load_workbook(output)
+    worksheet = workbook[week_sheet]
+    metadata = _metadata_rows(workbook)
+    assert worksheet["A4"].value == "保存済み施設"
+    assert worksheet["A11"].value.date() == datetime(2026, 3, 1).date()
+    assert worksheet["B11"].value == "朝"
+    assert worksheet["C11"].value == "主"
+    assert worksheet["D11"].value == "テスト献立A"
+    assert worksheet["E11"].value == 12
+    assert worksheet["F11"].value == 3
+    assert worksheet["B12"].value == "昼"
+    assert worksheet["D12"].value == "テスト献立B"
+    assert worksheet["E12"].value == 4
+    assert metadata["mode"] == "saved_sheet"
+    assert metadata["order_id"] == order.id
+    assert metadata["saved_sheet_draft_id"] == "ODR-DRAFT-001"
 
 
 def test_clear_week_sheet_body_preserves_quantity_body_merges_for_diabetes_template() -> None:
