@@ -4,7 +4,43 @@ import Link from "next/link";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 
-const todayIso = () => new Date().toISOString().slice(0, 10);
+const isoDate = (date: Date) => date.toISOString().slice(0, 10);
+
+const mondayForDate = (dateText: string) => {
+  const parsed = new Date(`${dateText}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const day = parsed.getDay();
+  const monday = new Date(parsed);
+  monday.setDate(parsed.getDate() + (day === 0 ? -6 : 1 - day));
+  return isoDate(monday);
+};
+
+const dateToWeekValue = (dateText: string) => {
+  const mondayText = mondayForDate(dateText);
+  if (!mondayText) return "";
+  const monday = new Date(`${mondayText}T00:00:00`);
+  const thursday = new Date(monday);
+  thursday.setDate(monday.getDate() + 3);
+  const yearStart = new Date(thursday.getFullYear(), 0, 1);
+  const weekNumber = Math.ceil(((thursday.getTime() - yearStart.getTime()) / 86400000 + yearStart.getDay() + 1) / 7);
+  return `${thursday.getFullYear()}-W${String(weekNumber).padStart(2, "0")}`;
+};
+
+const weekValueToMonday = (weekValue: string) => {
+  const match = weekValue.match(/^(\d{4})-W(\d{2})$/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  const janFourth = new Date(year, 0, 4);
+  const janFourthDay = janFourth.getDay() || 7;
+  const firstMonday = new Date(janFourth);
+  firstMonday.setDate(janFourth.getDate() - janFourthDay + 1);
+  const monday = new Date(firstMonday);
+  monday.setDate(firstMonday.getDate() + (week - 1) * 7);
+  return isoDate(monday);
+};
+
+const todayWeek = () => dateToWeekValue(isoDate(new Date()));
 
 const queryValue = (value: string | string[] | undefined) => {
   if (Array.isArray(value)) return value[0] || "";
@@ -38,9 +74,18 @@ type OrderSummary = {
   id: string;
   facility?: string | null;
   week?: string | null;
+  week_value?: string | null;
+  week_label?: string | null;
   status?: string | null;
   received_at?: string | null;
   line_count?: number | null;
+};
+
+type WeekHistoryItem = {
+  week: string;
+  label: string;
+  orderCount: number;
+  latestReceivedAt: string;
 };
 
 const formatTimestamp = (value?: string | null) => {
@@ -56,34 +101,47 @@ const formatTimestamp = (value?: string | null) => {
   });
 };
 
+const weekHistoryFromOrder = (order: OrderSummary) => {
+  const weekValue = String(order.week_value || order.week || "").trim();
+  const explicitRange = weekValue.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+  if (!explicitRange) return null;
+  return {
+    week: dateToWeekValue(explicitRange[2]),
+    label: order.week_label || `${explicitRange[2].slice(5).replace("-", "/")} - ${explicitRange[3].slice(5).replace("-", "/")}`,
+    receivedAt: order.received_at || "",
+  };
+};
+
 export default function WeeklyWeightOutputPage() {
   const router = useRouter();
-  const [date, setDate] = useState(todayIso());
+  const [week, setWeek] = useState(todayWeek());
   const [status, setStatus] = useState("");
   const [message, setMessage] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [weekHistory, setWeekHistory] = useState<WeekHistoryItem[]>([]);
 
   useEffect(() => {
     if (!router.isReady) return;
     const queryDate = queryValue(router.query.date);
+    const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    if (queryDate) setDate(queryDate);
+    if (queryWeek) setWeek(queryWeek);
+    else if (queryDate) setWeek(dateToWeekValue(queryDate));
     if (queryStatus) setStatus(queryStatus);
-  }, [router.isReady, router.query.date, router.query.status]);
+  }, [router.isReady, router.query.date, router.query.status, router.query.week]);
+
+  const date = useMemo(() => weekValueToMonday(week), [week]);
 
   const weekDates = useMemo(() => {
-    const parsed = new Date(`${date}T00:00:00`);
-    if (Number.isNaN(parsed.getTime())) return [];
-    const day = parsed.getDay();
-    const offset = day === 0 ? -6 : 1 - day;
-    const monday = new Date(parsed);
-    monday.setDate(parsed.getDate() + offset);
+    if (!date) return [];
+    const monday = new Date(`${date}T00:00:00`);
+    if (Number.isNaN(monday.getTime())) return [];
     return Array.from({ length: 7 }, (_, index) => {
       const item = new Date(monday);
       item.setDate(monday.getDate() + index);
-      return item.toISOString().slice(0, 10);
+      return isoDate(item);
     });
   }, [date]);
 
@@ -91,6 +149,37 @@ export default function WeeklyWeightOutputPage() {
     if (weekDates.length === 0) return "";
     return `${weekDates[0]} から ${weekDates[6]}`;
   }, [weekDates]);
+
+  const loadWeekHistory = async () => {
+    try {
+      const response = await apiClient.get("/orders", { params: { include_ocr: false, limit: 500 } });
+      const grouped = new Map<string, WeekHistoryItem>();
+      (response.data?.orders || []).forEach((order: OrderSummary) => {
+        const history = weekHistoryFromOrder(order);
+        if (!history?.week) return;
+        const current = grouped.get(history.week);
+        const latestReceivedAt = [current?.latestReceivedAt || "", history.receivedAt]
+          .filter(Boolean)
+          .sort()
+          .at(-1) || "";
+        grouped.set(history.week, {
+          week: history.week,
+          label: history.label,
+          orderCount: (current?.orderCount || 0) + 1,
+          latestReceivedAt,
+        });
+      });
+      setWeekHistory(
+        Array.from(grouped.values()).sort((left, right) => {
+          const leftMonday = weekValueToMonday(left.week);
+          const rightMonday = weekValueToMonday(right.week);
+          return rightMonday.localeCompare(leftMonday);
+        }),
+      );
+    } catch {
+      setWeekHistory([]);
+    }
+  };
 
   const loadWeeklyOrders = async () => {
     if (weekDates.length === 0) {
@@ -126,9 +215,13 @@ export default function WeeklyWeightOutputPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekLabel, status]);
 
+  useEffect(() => {
+    loadWeekHistory();
+  }, []);
+
   const downloadWeeklyWeight = async () => {
     if (!date) {
-      setMessage("日付を指定してください。");
+      setMessage("週を指定してください。");
       return;
     }
     setDownloading(true);
@@ -177,8 +270,8 @@ export default function WeeklyWeightOutputPage() {
         </header>
         <div className="filters">
           <label className="field">
-            <span className="field-label">日付</span>
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <span className="field-label">週</span>
+            <input className="input" type="week" value={week} onChange={(e) => setWeek(e.target.value)} />
           </label>
           <label className="field">
             <span className="field-label">ステータス</span>
@@ -198,8 +291,32 @@ export default function WeeklyWeightOutputPage() {
           </Link>
         </div>
         <p className="subtle helper-text">
-          対象週: {weekLabel || "-"}。注文一覧は日付・ステータスの変更に合わせて自動更新されます。
+          対象週: {weekLabel || "-"}。注文一覧は週・ステータスの変更に合わせて自動更新されます。
         </p>
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>過去の週次</h2>
+          <span className="badge">{weekHistory.length} 週</span>
+        </header>
+        <div className="week-history">
+          {weekHistory.length === 0 ? (
+            <p className="subtle">履歴なし</p>
+          ) : (
+            weekHistory.map((item) => (
+              <button
+                className={`week-chip${item.week === week ? " active" : ""}`}
+                key={item.week}
+                type="button"
+                onClick={() => setWeek(item.week)}
+              >
+                <span>{item.label}</span>
+                <small>{item.orderCount}件</small>
+              </button>
+            ))
+          )}
+        </div>
       </section>
 
       {message ? <p className="message">{message}</p> : null}
@@ -376,6 +493,39 @@ export default function WeeklyWeightOutputPage() {
           background: #eff7f4;
           border: 1px solid rgba(31, 42, 42, 0.1);
           color: #1f2a2a;
+        }
+        .week-history {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 10px;
+        }
+        .week-chip {
+          min-height: 58px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 12px;
+          background: #fbfbf9;
+          color: #1f2a2a;
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          gap: 4px;
+          padding: 10px 12px;
+          text-align: left;
+        }
+        .week-chip.active {
+          background: #1f2a2a;
+          border-color: #1f2a2a;
+          color: #f7f2e7;
+        }
+        .week-chip span {
+          font-size: 13px;
+          font-weight: 800;
+        }
+        .week-chip small {
+          color: inherit;
+          font-size: 12px;
+          opacity: 0.75;
         }
         .table-wrap {
           overflow-x: auto;
