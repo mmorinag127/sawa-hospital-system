@@ -74,6 +74,7 @@ def _format_generated_at(value: datetime | None = None) -> str:
 def _current_order_version_metadata(session, order_id: str) -> dict[str, Any]:
     if not hasattr(session, "execute"):
         return {}
+    order = session.get(Order, order_id) if hasattr(session, "get") else None
     try:
         rows = (
             session.execute(
@@ -87,7 +88,16 @@ def _current_order_version_metadata(session, order_id: str) -> dict[str, Any]:
     except Exception:
         return {}
     if not rows:
-        return {}
+        if order is None or not str(getattr(order, "current_document_id", "") or "").strip():
+            return {}
+        received_at = getattr(order, "received_at", None)
+        return {
+            "fax_version_no": 1,
+            "fax_version_count": 1,
+            "fax_version_document_id": getattr(order, "current_document_id", "") or "",
+            "fax_version_message_id": getattr(order, "message_id", "") or "",
+            "fax_version_received_at": received_at.isoformat() if hasattr(received_at, "isoformat") else "",
+        }
     current = next((row for row in rows if bool(row.is_current)), rows[0])
     return {
         "fax_version_no": int(current.version_no or 0),
