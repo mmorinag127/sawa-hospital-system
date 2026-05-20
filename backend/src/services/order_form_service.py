@@ -691,16 +691,6 @@ def _ensure_workbook_sheet_count(workbook: Workbook, template_sheet_name: str, t
 
 
 def _clear_week_sheet_body(worksheet) -> None:
-    quantity_columns = _worksheet_quantity_column_indexes(worksheet)
-    for merged_range in list(worksheet.merged_cells.ranges):
-        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-        if max_row < _ORDER_FORM_BODY_START_ROW or min_row > _ORDER_FORM_BODY_END_ROW:
-            continue
-        if any(col_idx in quantity_columns for col_idx in range(min_col, max_col + 1)):
-            # Quantity columns may intentionally span a date/daypart block.
-            # Keep those merges and only clear their anchor values below.
-            continue
-        worksheet.unmerge_cells(str(merged_range))
     for row in worksheet.iter_rows(
         min_row=_ORDER_FORM_BODY_START_ROW,
         max_row=_ORDER_FORM_BODY_END_ROW,
@@ -758,22 +748,37 @@ def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
 
         if current_date != menu_date:
             if current_date is not None and row_idx - 1 > date_start_row:
-                worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+                _write_to_cell_or_merged_anchor(
+                    worksheet,
+                    row_idx=row_idx - 1,
+                    col_idx=1,
+                    value=_weekday_label(current_date),
+                )
             current_date = menu_date
             date_start_row = row_idx
             current_daypart = ""
-            worksheet.cell(row=row_idx, column=1, value=menu_date)
+            _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=1, value=menu_date)
 
-        worksheet.cell(row=row_idx, column=2, value=daypart if current_daypart != daypart else None)
-        worksheet.cell(row=row_idx, column=3, value=category)
-        worksheet.cell(row=row_idx, column=4, value=menu_name)
+        _write_to_cell_or_merged_anchor(
+            worksheet,
+            row_idx=row_idx,
+            col_idx=2,
+            value=daypart if current_daypart != daypart else None,
+        )
+        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=3, value=category)
+        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=4, value=menu_name)
 
         current_daypart = daypart
         row_idx += 1
         written_rows += 1
 
     if current_date is not None and row_idx - 1 > date_start_row:
-        worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+        _write_to_cell_or_merged_anchor(
+            worksheet,
+            row_idx=row_idx - 1,
+            col_idx=1,
+            value=_weekday_label(current_date),
+        )
     return written_rows
 
 
@@ -941,14 +946,24 @@ def _write_saved_sheet_rows_to_order_form(
             continue
         if parsed_date and current_date != parsed_date:
             if current_date is not None and row_idx - 1 > date_start_row:
-                worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+                _write_to_cell_or_merged_anchor(
+                    worksheet,
+                    row_idx=row_idx - 1,
+                    col_idx=1,
+                    value=_weekday_label(current_date),
+                )
             current_date = parsed_date
             date_start_row = row_idx
             current_daypart = ""
-            worksheet.cell(row=row_idx, column=1, value=parsed_date)
-        worksheet.cell(row=row_idx, column=2, value=daypart if daypart and current_daypart != daypart else None)
-        worksheet.cell(row=row_idx, column=3, value=category or None)
-        worksheet.cell(row=row_idx, column=4, value=menu_name or None)
+            _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=1, value=parsed_date)
+        _write_to_cell_or_merged_anchor(
+            worksheet,
+            row_idx=row_idx,
+            col_idx=2,
+            value=daypart if daypart and current_daypart != daypart else None,
+        )
+        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=3, value=category or None)
+        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=4, value=menu_name or None)
         for qty_idx, role in quantity_field_roles:
             col_idx = quantity_columns_by_role.get(role)
             if col_idx is None:
@@ -961,7 +976,12 @@ def _write_saved_sheet_rows_to_order_form(
         row_idx += 1
         written_rows += 1
     if current_date is not None and row_idx - 1 > date_start_row:
-        worksheet.cell(row=row_idx - 1, column=1, value=_weekday_label(current_date))
+        _write_to_cell_or_merged_anchor(
+            worksheet,
+            row_idx=row_idx - 1,
+            col_idx=1,
+            value=_weekday_label(current_date),
+        )
     return written_rows
 
 
@@ -1496,16 +1516,18 @@ def _apply_fax_metadata_header(
     week_sheet_name: str,
     family_label: str,
 ) -> None:
+    _ = fax_template_id
+    _ = facility_id
+    _ = facility_name
+    _ = week_sheet_name
+    _ = family_label
     worksheet.row_dimensions[1].height = 18
     _safe_merge(worksheet, "B1:K1")
     header_cell = worksheet["B1"]
-    header_cell.value = (
-        f"TEMPLATE={fax_template_id} | FAMILY={family_label} | "
-        f"FACILITY={facility_id}:{facility_name} | WEEK={week_sheet_name} | PAGE=1/1"
-    )
+    header_cell.value = None
     header_cell.font = Font(name="Meiryo", size=8, bold=True)
     header_cell.alignment = Alignment(horizontal="center", vertical="center")
-    header_cell.fill = _META_FILL
+    header_cell.fill = PatternFill(fill_type=None)
     header_cell.border = _THIN_BORDER
 
 
@@ -1519,15 +1541,14 @@ def _apply_fax_markers(worksheet) -> None:
 
 
 def _apply_bottom_instruction_strip(worksheet, *, fax_template_id: str, base_label: str) -> None:
+    _ = fax_template_id
+    _ = base_label
     _safe_merge(worksheet, f"B{_BOTTOM_MARKER_ROW}:K{_BOTTOM_MARKER_ROW}")
     info_cell = worksheet[f"B{_BOTTOM_MARKER_ROW}"]
-    info_cell.value = (
-        "OCR補助: 枠内に濃く記入 / 訂正は右側へ追記 / "
-        f"template={fax_template_id} / mode={base_label}"
-    )
+    info_cell.value = None
     info_cell.font = Font(name="Meiryo", size=8, bold=True)
     info_cell.alignment = Alignment(horizontal="center", vertical="center")
-    info_cell.fill = _META_FILL
+    info_cell.fill = PatternFill(fill_type=None)
     info_cell.border = _THIN_BORDER
 
 
