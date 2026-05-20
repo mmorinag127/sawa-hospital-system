@@ -28,6 +28,35 @@ STATUS_SHIPPED = "発送済み"
 STATUS_NOT_SHIPPED = "発送しなかった"
 
 
+def _ensure_shipping_tracking_schema() -> None:
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+
+    with engine.begin() as conn:
+        if "shipping_tracking_logs" in table_names:
+            log_columns = {column["name"] for column in inspector.get_columns("shipping_tracking_logs")}
+            if "ship_date" not in log_columns:
+                conn.execute(text("ALTER TABLE shipping_tracking_logs ADD COLUMN ship_date DATE"))
+        ShippingTrackingCurrent.__table__.create(bind=conn, checkfirst=True)
+        ShippingTrackingEvent.__table__.create(bind=conn, checkfirst=True)
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_shipping_tracking_logs_ship_date "
+                "ON shipping_tracking_logs (ship_date)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_shipping_tracking_events_tracking_key_order "
+                "ON shipping_tracking_events (tracking_key, event_order)"
+            )
+        )
+
+
+_ensure_shipping_tracking_schema()
+
+
 def _status_to_dict(item: object) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
