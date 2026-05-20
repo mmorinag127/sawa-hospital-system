@@ -11,7 +11,6 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
 from src.services.output_builder import (
-    build_outputs,
     build_output_preview,
     build_delivery_preview,
     build_daily_output_bundle,
@@ -27,13 +26,13 @@ _PREVIEW_LIMIT_DEFAULT = 10
 
 def _output_file_for_type(order_id: str, output_type: str) -> tuple[Path, str]:
     if output_type == "labels":
-        outputs = build_outputs(order_id)
+        outputs = build_output_preview(order_id, "labels")
         return Path(outputs["labels"]), "ラベルCSV"
     if output_type == "delivery":
-        outputs = build_outputs(order_id)
+        outputs = build_output_preview(order_id, "delivery")
         return Path(outputs["delivery_note"]), "納品書Excel"
     if output_type == "aggregate":
-        outputs = build_outputs(order_id)
+        outputs = build_output_preview(order_id, "aggregate")
         return Path(outputs["aggregate"]), "総量CSV"
     if output_type == "order_form_saved_sheet":
         return order_form_service.build_saved_sheet_order_form_excel(order_id=order_id), "発注書Excel"
@@ -189,7 +188,7 @@ def _parse_iso_date(value: str) -> dt_date:
 
 @router.get("/labels", dependencies=[Depends(require_role("operator"))])
 def download_labels(order_id: str):
-    outputs = build_outputs(order_id)
+    outputs = build_output_preview(order_id, "labels")
     path = outputs["labels"]
     logger.info("Output download", order_id=order_id, output="labels", path=path)
     return FileResponse(path, media_type="text/csv", filename=f"{order_id}_labels.csv")
@@ -197,7 +196,7 @@ def download_labels(order_id: str):
 
 @router.get("/delivery-notes", dependencies=[Depends(require_role("operator"))])
 def download_delivery(order_id: str):
-    outputs = build_outputs(order_id)
+    outputs = build_output_preview(order_id, "delivery")
     path = outputs["delivery_note"]
     logger.info("Output download", order_id=order_id, output="delivery", path=path)
     return FileResponse(
@@ -228,7 +227,7 @@ def download_order_form_saved_sheet(order_id: str):
 
 @router.get("/manufacturing-aggregate", dependencies=[Depends(require_role("operator"))])
 def download_aggregate(order_id: str):
-    outputs = build_outputs(order_id)
+    outputs = build_output_preview(order_id, "aggregate")
     path = outputs["aggregate"]
     logger.info("Output download", order_id=order_id, output="aggregate", path=path)
     return FileResponse(path, media_type="text/csv", filename=f"{order_id}_aggregate.csv")
