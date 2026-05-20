@@ -14,9 +14,11 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
+from sqlalchemy import select
 
 from src.db import session_scope
 from src.models.order import Order
+from src.models.order_version import OrderVersion
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service, draft_sheet_service, menu_service, sheet_week_service
@@ -63,6 +65,37 @@ def _resolve_fax_source_template_dir() -> Path:
     if configured:
         return Path(configured)
     return _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR
+
+
+def _format_generated_at(value: datetime | None = None) -> str:
+    return (value or datetime.utcnow()).strftime("%Y-%m-%d %H:%M")
+
+
+def _current_order_version_metadata(session, order_id: str) -> dict[str, Any]:
+    if not hasattr(session, "execute"):
+        return {}
+    try:
+        rows = (
+            session.execute(
+                select(OrderVersion)
+                .where(OrderVersion.order_id == order_id)
+                .order_by(OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc())
+            )
+            .scalars()
+            .all()
+        )
+    except Exception:
+        return {}
+    if not rows:
+        return {}
+    current = next((row for row in rows if bool(row.is_current)), rows[0])
+    return {
+        "fax_version_no": int(current.version_no or 0),
+        "fax_version_count": len(rows),
+        "fax_version_document_id": current.document_id,
+        "fax_version_message_id": current.message_id,
+        "fax_version_received_at": current.received_at.isoformat() if current.received_at else "",
+    }
 
 
 def _load_fax_source_manifest() -> dict[str, dict]:
@@ -1202,10 +1235,13 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         raise ValueError("order_id is required")
+    generated_at = datetime.utcnow()
+    fax_version: dict[str, Any] = {}
     with session_scope() as session:
         order = session.get(Order, normalized_order_id)
         if not order:
             raise ValueError("order not found")
+        fax_version = _current_order_version_metadata(session, normalized_order_id)
         facility_id = str(order.facility_code or "").strip()
         week_code = order.week_code
         received_at = order.received_at or datetime.utcnow()
@@ -1282,6 +1318,9 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         facility_name=facility_name,
         week_sheet_name=week_sheet_name,
         family_label=str(spec["family_label"]),
+        generated_at=generated_at,
+        label="FAX読取シートExcel作成",
+        fax_version=fax_version,
     )
     _apply_fax_markers(worksheet)
     _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="saved_sheet")
@@ -1295,6 +1334,8 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         family_label=str(spec["family_label"]),
         week_sheet_name=week_sheet_name,
         base_label="saved_sheet",
+        generated_at=generated_at,
+        fax_version=fax_version,
     )
     metadata = workbook["設定"]
     metadata.append(["order_id", normalized_order_id])
@@ -1305,7 +1346,7 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_facility_id = _sanitize_filename_fragment(facility_id)
     safe_week = _sanitize_filename_fragment(week_sheet_name)
-    output = _OUTPUT_DIR / f"order_form_saved_sheet_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
+    output = _OUTPUT_DIR / f"fax_read_sheet_excel_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
     workbook.save(output)
     return output
 
@@ -1554,16 +1595,22 @@ def _apply_fax_metadata_header(
     facility_name: str,
     week_sheet_name: str,
     family_label: str,
+    generated_at: datetime | None = None,
+    label: str = "発注書作成",
+    fax_version: dict[str, Any] | None = None,
 ) -> None:
     _ = fax_template_id
     _ = facility_id
     _ = facility_name
     _ = week_sheet_name
     _ = family_label
+    version_text = ""
+    if isinstance(fax_version, dict) and fax_version.get("fax_version_no"):
+        version_text = f" / FAX v{fax_version.get('fax_version_no')} of {fax_version.get('fax_version_count') or 1}"
     worksheet.row_dimensions[1].height = 18
     _safe_merge(worksheet, "B1:K1")
     header_cell = worksheet["B1"]
-    header_cell.value = None
+    header_cell.value = f"{label}: {_format_generated_at(generated_at)}{version_text}"
     header_cell.font = Font(name="Meiryo", size=8, bold=True)
     header_cell.alignment = Alignment(horizontal="center", vertical="center")
     header_cell.fill = PatternFill(fill_type=None)
@@ -1614,13 +1661,16 @@ def _append_hidden_metadata_sheet(
     family_label: str,
     week_sheet_name: str,
     base_label: str,
+    generated_at: datetime | None = None,
+    fax_version: dict[str, Any] | None = None,
 ) -> None:
     if "設定" in workbook.sheetnames:
         del workbook["設定"]
     meta = workbook.create_sheet("設定")
     meta.sheet_state = "hidden"
     meta.append(["key", "value"])
-    meta.append(["generated_at_utc", datetime.utcnow().isoformat()])
+    generated_at_value = generated_at or datetime.utcnow()
+    meta.append(["generated_at_utc", generated_at_value.isoformat()])
     meta.append(["source_workbook", source_workbook_name])
     meta.append(["facility_id", facility_id])
     meta.append(["facility_name", facility_name])
@@ -1628,6 +1678,16 @@ def _append_hidden_metadata_sheet(
     meta.append(["family_label", family_label])
     meta.append(["week_sheet_name", week_sheet_name])
     meta.append(["mode", base_label])
+    if isinstance(fax_version, dict):
+        for key in (
+            "fax_version_no",
+            "fax_version_count",
+            "fax_version_document_id",
+            "fax_version_message_id",
+            "fax_version_received_at",
+        ):
+            if fax_version.get(key) not in (None, ""):
+                meta.append([key, fax_version.get(key)])
 
 
 def _safe_merge(worksheet, cell_range: str) -> None:

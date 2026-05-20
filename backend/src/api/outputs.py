@@ -35,7 +35,7 @@ def _output_file_for_type(order_id: str, output_type: str) -> tuple[Path, str]:
         outputs = build_output_preview(order_id, "aggregate")
         return Path(outputs["aggregate"]), "総量CSV"
     if output_type == "order_form_saved_sheet":
-        return order_form_service.build_saved_sheet_order_form_excel(order_id=order_id), "発注書Excel"
+        return order_form_service.build_saved_sheet_order_form_excel(order_id=order_id), "FAX読取シートExcel"
     raise ValueError("invalid output type")
 
 

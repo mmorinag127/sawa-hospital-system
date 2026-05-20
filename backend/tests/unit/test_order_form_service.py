@@ -97,7 +97,7 @@ def test_build_fax_base_template_excel_adds_guides_and_keeps_logo(tmp_path):
 
     assert "A1" in {cell.coordinate for row in worksheet["A1:L1"] for cell in row if cell.fill.fill_type}
     assert worksheet["A3"].value == "施設名記入欄"
-    assert worksheet["B1"].value is None
+    assert str(worksheet["B1"].value).startswith("発注書作成: ")
     assert "$L$69" in str(worksheet.print_area)
     assert len(getattr(worksheet, "_images", [])) == 1
     assert workbook["設定"].sheet_state == "hidden"
@@ -126,7 +126,7 @@ def test_build_fax_order_form_excel_uses_facility_config_and_hidden_metadata(tmp
     rows = {key: value for key, value in metadata.iter_rows(min_row=2, values_only=True)}
 
     assert worksheet["A3"].value == "テスト施設"
-    assert worksheet["B1"].value is None
+    assert str(worksheet["B1"].value).startswith("発注書作成: ")
     assert rows["facility_id"] == "FACTEST01"
     assert rows["facility_name"] == "テスト施設"
     assert rows["fax_template_id"] == "fax_layout_regular_diabetes_v1"
@@ -185,7 +185,7 @@ def test_build_order_form_excel_creates_weekly_sheets_and_metadata(tmp_path, mon
     rows = _metadata_rows(workbook)
 
     assert first_sheet["A4"].value == "週次テスト施設"
-    assert first_sheet["B1"].value is None
+    assert str(first_sheet["B1"].value).startswith("発注書作成: ")
     assert first_sheet["A11"].value.date() == datetime(2026, 3, 1).date()
     assert first_sheet["B11"].value == "朝"
     assert first_sheet["C12"].value == "主"
@@ -267,6 +267,7 @@ def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form
     assert worksheet["B12"].value == "昼"
     assert worksheet["D12"].value == "テスト献立B"
     assert worksheet["E12"].value == 4
+    assert str(worksheet["B1"].value).startswith("FAX読取シートExcel作成: ")
     assert metadata["mode"] == "saved_sheet"
     assert metadata["order_id"] == order.id
     assert metadata["saved_sheet_draft_id"] == "ODR-DRAFT-001"
@@ -752,7 +753,7 @@ def test_build_order_form_excel_supports_all_fax_families(tmp_path, monkeypatch,
         "3月29日～3月31日",
     ]
     assert workbook[workbook.sheetnames[0]]["A4"].value == facility_name
-    assert workbook[workbook.sheetnames[0]]["B1"].value is None
+    assert str(workbook[workbook.sheetnames[0]]["B1"].value).startswith("発注書作成: ")
 
 
 def test_infer_fax_template_id_from_facility_falls_back_from_invoice_columns() -> None:

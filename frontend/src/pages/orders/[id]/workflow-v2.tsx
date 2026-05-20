@@ -58,6 +58,21 @@ type WorkflowV2 = {
   } | null;
 };
 
+type OrderVersion = {
+  version_no?: number | null;
+  document_id?: string | null;
+  message_id?: string | null;
+  received_at?: string | null;
+  is_current?: boolean | null;
+};
+
+type OrderDetail = {
+  id?: string | null;
+  version_count?: number | null;
+  current_version?: OrderVersion | null;
+  versions?: OrderVersion[] | null;
+};
+
 type PreSaveCheckEntry = {
   confirmed?: boolean;
   sheet_hash?: string | null;
@@ -1099,6 +1114,7 @@ export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
+  const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
   const [contextForm, setContextForm] = useState(emptyContext);
@@ -1621,12 +1637,14 @@ export default function OrderWorkflowV2Page() {
 
   const refreshAll = async () => {
     if (!orderId) return;
-    const [workflowRes, ocrRes, inspectionRes] = await Promise.all([
+    const [workflowRes, ocrRes, inspectionRes, orderRes] = await Promise.all([
       apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`),
       apiClient.get<{ results: OcrResult[] }>(`/orders/${orderId}/workflow-v2/ocr-results`),
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
+      apiClient.get<OrderDetail>(`/orders/${orderId}`),
     ]);
     setWorkflow(workflowRes.data);
+    setOrderDetail(orderRes.data);
     applyPreSaveState(
       inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
       inspectionRes.data.pre_save_status || null,
@@ -2909,7 +2927,7 @@ export default function OrderWorkflowV2Page() {
   const outputPreviewLabels: Record<OutputPreviewType, string> = {
     labels: "ラベルCSV",
     delivery: "納品書Excel",
-    order_form_saved_sheet: "発注書Excel",
+    order_form_saved_sheet: "FAX読取シートExcel",
     aggregate: "総量CSV",
   };
 
@@ -3028,6 +3046,11 @@ export default function OrderWorkflowV2Page() {
   const headerAxisCountWarning = headerAxisExpectedCount > 0 && headerAxisXs.length !== headerAxisExpectedCount
     ? `ヘッダー縦軸の本数がテンプレート期待値と一致していません。期待 ${headerAxisExpectedCount} 本 / 現在 ${headerAxisXs.length} 本。`
     : "";
+  const currentFaxVersion = orderDetail?.current_version || null;
+  const faxVersionCount = Number(orderDetail?.version_count || orderDetail?.versions?.length || 0);
+  const faxVersionLabel = currentFaxVersion?.version_no
+    ? `v${currentFaxVersion.version_no}${faxVersionCount ? ` / ${faxVersionCount}版` : ""}`
+    : "-";
 
   return (
     <main className="page workflow-v2-page">
@@ -3079,6 +3102,11 @@ export default function OrderWorkflowV2Page() {
           <div className="summary-primary-card">
             <span className="field-label">シート最終保存</span>
             <p className="summary-value">{formatDateTime(inspection?.saved_sheet?.edited_at || inspection?.saved_sheet?.created_at)}</p>
+          </div>
+          <div className="summary-primary-card">
+            <span className="field-label">FAX version</span>
+            <p className="summary-value">{faxVersionLabel}</p>
+            <p className="summary-subline">{formatDateTime(currentFaxVersion?.received_at || null)}</p>
           </div>
         </div>
         <div className="state-actions">
@@ -4598,8 +4626,8 @@ export default function OrderWorkflowV2Page() {
                   </button>
                 </div>
                 <div className="output-card">
-                  <span className="output-link">発注書Excel</span>
-                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "発注書Excel")}>
+                  <span className="output-link">FAX読取シートExcel</span>
+                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "FAX読取シートExcel")}>
                     ダウンロード
                   </button>
                   <button className="btn ghost" type="button" onClick={() => loadOutputPreview("order_form_saved_sheet")} disabled={outputPreviewLoading}>
