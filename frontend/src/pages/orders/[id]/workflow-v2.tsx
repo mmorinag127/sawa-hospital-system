@@ -2884,41 +2884,25 @@ export default function OrderWorkflowV2Page() {
   const openOutput = async (path: string, label: string) => {
     const timestamp = new Date().toLocaleString("ja-JP");
     setDownloadMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
-    let popup: Window | null = null;
-    try {
-      popup = window.open("", "_blank");
-      if (popup) {
-        popup.document.title = `${label} ダウンロード`;
-        popup.document.body.innerHTML = "<p>ダウンロードを準備中...</p>";
-      }
-    } catch {
-      popup = null;
-    }
     try {
       const res = await apiClient.get(path, { responseType: "blob" });
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
       const filename = extractFilename(contentDisposition) || "output";
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
-      if (popup) {
-        popup.location.href = url;
-      } else {
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-      }
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
       setDownloadMessage(`${label}をダウンロードしました。 (${timestamp})`);
     } catch (err: any) {
       const status = err?.response?.status;
       const suffix = status ? ` (${status})` : "";
       setDownloadMessage(`${label}のダウンロードに失敗しました。${suffix}`);
-      if (popup) {
-        popup.close();
-      }
     }
   };
 
