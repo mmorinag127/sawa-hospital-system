@@ -2918,8 +2918,42 @@ export default function OrderWorkflowV2Page() {
     setOutputPreviewLoading(true);
     setOutputPreview(null);
     setOutputPreviewMessage("プレビューを開いています...");
+    let popup: Window | null = null;
+    const escapeHtml = (value: string) => value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+    const writePopupMessage = (title: string, message: string) => {
+      if (!popup) return;
+      const safeTitle = escapeHtml(title);
+      const safeMessage = escapeHtml(message);
+      popup.document.open();
+      popup.document.write(`<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <style>
+    body { background:#f3f1ea; color:#1f2a2a; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; margin:0; padding:20px; }
+    .message { background:white; border:1px solid #d8d2c4; padding:16px; }
+    h1 { font-size:18px; margin:0 0 12px; }
+    p { margin:0; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="message">
+    <h1>${safeTitle}</h1>
+    <p>${safeMessage}</p>
+  </div>
+</body>
+</html>`);
+      popup.document.close();
+      popup.focus();
+    };
     try {
-      const popup = window.open("", "_blank", "popup=yes,width=1180,height=840");
+      popup = window.open("", "_blank", "popup=yes,width=1180,height=840");
       if (popup) {
         popup.document.title = `${outputPreviewLabels[type]} プレビュー`;
         popup.document.body.innerHTML = "<p>プレビューを読み込み中...</p>";
@@ -2947,8 +2981,21 @@ export default function OrderWorkflowV2Page() {
         window.setTimeout(() => URL.revokeObjectURL(url), 10000);
         setOutputPreviewMessage("");
       }
-    } catch {
-      setOutputPreviewMessage("プレビューの取得に失敗しました。");
+    } catch (err: any) {
+      const status = err?.response?.status;
+      let detail = err?.response?.data?.detail || "";
+      if (!detail && typeof err?.response?.data === "string") {
+        try {
+          detail = JSON.parse(err.response.data)?.detail || err.response.data;
+        } catch {
+          detail = err.response.data;
+        }
+      }
+      detail = detail || err?.message || "";
+      const suffix = status ? ` (${status})` : "";
+      const message = `${outputPreviewLabels[type]}のプレビュー取得に失敗しました。${suffix}${detail ? `\n${detail}` : ""}`;
+      writePopupMessage(`${outputPreviewLabels[type]} プレビュー`, message);
+      setOutputPreviewMessage(message);
     } finally {
       setOutputPreviewLoading(false);
     }
