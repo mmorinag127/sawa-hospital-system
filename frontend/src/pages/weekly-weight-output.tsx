@@ -96,18 +96,14 @@ export default function WeeklyWeightOutputPage() {
 
   return (
     <main className="page">
-      <TopNav />
-
-      <section className="panel hero">
+      <header className="hero">
         <div>
-          <p className="eyebrow">週別出力</p>
+          <p className="eyebrow">Weekly Outputs</p>
           <h1>週別重量表</h1>
           <p className="subtle">指定日の週に含まれる注文から、週別の重量表Excelだけを出力します。</p>
         </div>
-        <Link href="/daily-delivery-notes" className="btn ghost">
-          日別出力へ
-        </Link>
-      </section>
+        <TopNav />
+      </header>
 
       <section className="panel">
         <header className="panel-header">
@@ -115,6 +111,9 @@ export default function WeeklyWeightOutputPage() {
             <h2>出力条件</h2>
             <p className="subtle">対象週: {weekLabel || "-"}</p>
           </div>
+          <Link href="/daily-delivery-notes" className="ghost-link">
+            日別出力へ
+          </Link>
         </header>
         <div className="filters">
           <label className="field">
@@ -148,16 +147,13 @@ export default function WeeklyWeightOutputPage() {
           color: #1f2a2a;
           font-family: "Manrope", "Noto Sans JP", sans-serif;
         }
-
         :global(*) {
           box-sizing: border-box;
         }
-
         :global(a) {
           color: inherit;
           text-decoration: none;
         }
-
         .page {
           min-height: 100vh;
           padding: 48px 6vw 80px;
@@ -201,74 +197,82 @@ export default function WeeklyWeightOutputPage() {
         .panel-header {
           display: flex;
           justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
           gap: 12px;
+          align-items: flex-start;
+          margin-bottom: 16px;
+        }
+        .ghost-link {
+          color: #5f7b74;
+          font-size: 13px;
+          white-space: nowrap;
+          font-weight: 700;
         }
         .filters {
-          display: grid;
-          gap: 16px;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          align-items: flex-end;
         }
         .field {
-          display: flex;
-          flex-direction: column;
+          display: grid;
           gap: 6px;
-          font-size: 13px;
         }
         .field-label {
           color: #5f7b74;
-          font-size: 12px;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
+          font-size: 13px;
+          font-weight: 700;
         }
         .input {
-          border: 1px solid rgba(25, 32, 30, 0.14);
-          border-radius: 10px;
+          min-height: 40px;
+          border: 1px solid rgba(31, 42, 42, 0.2);
+          border-radius: 12px;
           padding: 8px 10px;
-          background: #fbfbf9;
+          background: #fbfaf7;
+          font-size: 14px;
         }
         .btn {
-          border: none;
+          min-height: 40px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
           border-radius: 999px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
           padding: 8px 14px;
-          background: #e6ebe9;
-          color: #1f2a2a;
-          font-weight: 600;
+          font-size: 14px;
+          font-weight: 700;
+          text-decoration: none;
           cursor: pointer;
-          justify-self: start;
         }
         .btn.primary {
           background: #1f2a2a;
           color: #f7f2e7;
-        }
-        .btn.ghost {
-          background: #eef2f0;
-          color: #1f2a2a;
-          border: 1px solid rgba(25, 32, 30, 0.12);
+          border-color: #1f2a2a;
         }
         .btn:disabled {
-          opacity: 0.6;
+          opacity: 0.55;
           cursor: not-allowed;
         }
         .helper-text {
           margin-top: 12px;
         }
         .message {
-          margin-top: 12px;
-          padding: 8px 12px;
-          border-radius: 10px;
-          background: #f0f4f2;
-          font-size: 13px;
+          margin-top: 16px;
+          padding: 12px 14px;
+          border-radius: 14px;
+          background: #eef3f1;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          color: #1f2a2a;
+          font-weight: 700;
         }
         @media (max-width: 720px) {
           .page {
-            padding: 28px 18px 56px;
+            padding: 32px 18px 56px;
           }
           .hero {
             display: grid;
           }
+          .filters,
+          .field,
           .btn {
             width: 100%;
           }

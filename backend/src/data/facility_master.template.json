@@ -2935,6 +2935,277 @@
           }
         ]
       }
+    },
+    {
+      "facility_name": "ケアホーム長生庵",
+      "aliases": [
+        "長生庵",
+        "ケアホーム長生庵"
+      ],
+      "areas": [],
+      "facility_id": "FAC636208",
+      "fax_template_id": "fax_fac00002_v1",
+      "fax_template_ids": [
+        "fax_fac00002_v1"
+      ],
+      "daily_label_comparable_diet_types": [
+        "mixer",
+        "no_meat",
+        "no_fish"
+      ],
+      "fax_template_override": {
+        "columns_authoritative": true,
+        "columns": [
+          {
+            "index": 0,
+            "role": "date",
+            "source_index": 0,
+            "header": "日付",
+            "column_id": "col_000_date",
+            "semantic": {
+              "role": "date",
+              "aggregation_role": "exclude"
+            },
+            "read_target": false
+          },
+          {
+            "index": 1,
+            "role": "daypart",
+            "source_index": 1,
+            "header": "区分",
+            "column_id": "col_001_daypart",
+            "semantic": {
+              "role": "daypart",
+              "aggregation_role": "exclude"
+            },
+            "read_target": false
+          },
+          {
+            "index": 2,
+            "role": "menu_name",
+            "source_index": 3,
+            "header": "メニュー",
+            "column_id": "col_003_menu_name",
+            "semantic": {
+              "role": "menu_name",
+              "aggregation_role": "exclude"
+            },
+            "read_target": false
+          },
+          {
+            "index": 3,
+            "role": "quantity",
+            "source_index": 4,
+            "header": "常食",
+            "diet_type": "regular",
+            "area_id": "X",
+            "name": "qty.regular_x",
+            "column_id": "col_004_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "regular",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 4,
+            "role": "quantity",
+            "source_index": 5,
+            "header": "ミキサー",
+            "diet_type": "mixer",
+            "area_id": "X",
+            "name": "qty.mixer_x",
+            "column_id": "col_005_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "mixer",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 5,
+            "role": "quantity",
+            "source_index": 6,
+            "header": "肉禁",
+            "header_group": "禁食",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "name": "qty.no_meat_x",
+            "column_id": "col_006_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "no_meat",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 6,
+            "role": "quantity",
+            "source_index": 7,
+            "header": "魚禁",
+            "header_group": "禁食",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "name": "qty.no_fish_x",
+            "column_id": "col_007_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "no_fish",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 7,
+            "role": "quantity",
+            "source_index": 8,
+            "header": "変更1",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "name": "qty.change_1_x",
+            "column_id": "col_008_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "change_1",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 8,
+            "role": "quantity",
+            "source_index": 9,
+            "header": "変更2",
+            "diet_type": "change_2",
+            "area_id": "X",
+            "name": "qty.change_2_x",
+            "column_id": "col_009_quantity",
+            "semantic": {
+              "role": "quantity",
+              "diet_type": "change_2",
+              "area_id": "X",
+              "bag_type": null,
+              "aggregation_role": "include"
+            },
+            "read_target": true
+          },
+          {
+            "index": 9,
+            "role": "note",
+            "source_index": 10,
+            "header": "備考",
+            "column_id": "col_010_note",
+            "semantic": {
+              "role": "note",
+              "aggregation_role": "exclude"
+            },
+            "read_target": true
+          }
+        ],
+        "main_ocr_row_fields": [
+          "date_mmdd",
+          "daypart",
+          "menu",
+          "qty.regular_x",
+          "qty.mixer_x",
+          "qty.no_meat_x",
+          "qty.no_fish_x",
+          "qty.change_1_x",
+          "qty.change_2_x",
+          "remarks"
+        ]
+      },
+      "invoice_template": {
+        "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
+        "sheet_name": "松岡会",
+        "include_menu_name": false,
+        "columns": [
+          {
+            "name": "日付",
+            "source": "date",
+            "header": "日付",
+            "column_index": 1
+          },
+          {
+            "name": "区分",
+            "source": "daypart",
+            "header": "区分",
+            "column_index": 2
+          },
+          {
+            "name": "献立",
+            "source": "menu_display",
+            "column_index": 3
+          },
+          {
+            "name": "常食",
+            "source": "quantity",
+            "diet_type": "regular",
+            "area_id": "X",
+            "header": "常食",
+            "column_index": 4
+          },
+          {
+            "name": "ミキサー",
+            "source": "quantity",
+            "diet_type": "mixer",
+            "area_id": "X",
+            "header": "ミキサー",
+            "column_index": 5
+          },
+          {
+            "name": "肉禁",
+            "source": "quantity",
+            "diet_type": "no_meat",
+            "area_id": "X",
+            "header": "肉禁",
+            "column_index": 6
+          },
+          {
+            "name": "魚禁",
+            "source": "quantity",
+            "diet_type": "no_fish",
+            "area_id": "X",
+            "header": "魚禁",
+            "column_index": 7
+          },
+          {
+            "name": "変更1",
+            "source": "quantity",
+            "diet_type": "change_1",
+            "area_id": "X",
+            "header": "変更1",
+            "column_index": 8
+          },
+          {
+            "name": "変更2",
+            "source": "quantity",
+            "diet_type": "change_2",
+            "area_id": "X",
+            "header": "変更2",
+            "column_index": 9
+          },
+          {
+            "name": "備考",
+            "source": "note",
+            "header": "備考欄",
+            "column_index": 10
+          }
+        ]
+      }
     }
   ]
 }
