@@ -190,18 +190,15 @@ export default function WeeklyWeightOutputPage() {
               <option value="エラー">エラー</option>
             </select>
           </label>
-          <button className="btn primary" type="button" onClick={loadWeeklyOrders} disabled={loading}>
-            {loading ? "取得中..." : "取得"}
-          </button>
           <button className="btn primary" type="button" onClick={downloadWeeklyWeight} disabled={downloading}>
-            {downloading ? "作成中..." : "週別重量表Excel"}
+            {downloading ? "出力中..." : "Excel出力"}
           </button>
           <Link href="/daily-delivery-notes" className="btn ghost">
             日別出力へ
           </Link>
         </div>
         <p className="subtle helper-text">
-          対象週: {weekLabel || "-"}。対象データがない週でも空の重量表Excelを出力します。
+          対象週: {weekLabel || "-"}。注文一覧は日付・ステータスの変更に合わせて自動更新されます。
         </p>
       </section>
 
@@ -210,6 +207,7 @@ export default function WeeklyWeightOutputPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>対象週の注文一覧</h2>
+          <span className="badge">{loading ? "更新中" : "自動更新"}</span>
         </header>
         <div className="table-wrap">
           <table>
