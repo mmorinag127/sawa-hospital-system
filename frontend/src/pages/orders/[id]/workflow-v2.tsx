@@ -4550,6 +4550,12 @@ export default function OrderWorkflowV2Page() {
                   </button>
                 </div>
                 <div className="output-card">
+                  <span className="output-link">発注書Excel</span>
+                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "発注書Excel")}>
+                    ダウンロード
+                  </button>
+                </div>
+                <div className="output-card">
                   <span className="output-link">総量CSV</span>
                   <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${orderId}`, "総量CSV")}>
                     ダウンロード
