@@ -268,6 +268,71 @@ def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form
     assert metadata["saved_sheet_draft_id"] == "ODR-DRAFT-001"
 
 
+def test_build_saved_sheet_order_form_excel_clones_template_when_week_sheet_missing(tmp_path, monkeypatch):
+    source_name = "saved-source.xlsx"
+    source_week_sheet = "3月1日～3月7日"
+    target_week_sheet = "3月8日～3月14日"
+    _build_source_workbook(tmp_path / source_name, source_week_sheet)
+    source_workbook = load_workbook(tmp_path / source_name)
+    source_ws = source_workbook[source_week_sheet]
+    source_ws["E7"] = "常食"
+    source_ws["F7"] = "肉禁"
+    source_workbook.save(tmp_path / source_name)
+
+    order = SimpleNamespace(
+        id="ORD-SAVED-SHEET-MISSING-WEEK",
+        facility_code="FACTEST02",
+        week_code="2026-03@2026-03-08~2026-03-14",
+        received_at=datetime(2026, 3, 8, 9, 0, 0),
+    )
+    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
+    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(order))
+    monkeypatch.setitem(
+        order_form_service._FAX_FAMILY_SOURCE_MAP,
+        "fax_layout_regular_forbidden_v1",
+        {
+            "month_sources": {"2026-03": source_name},
+            "source_workbook": "",
+            "family_label": "共通・禁食2種",
+        },
+    )
+    monkeypatch.setattr(
+        order_form_service.config_service,
+        "get_facility_config",
+        lambda facility_id: {
+            "facility_id": facility_id,
+            "facility_name": "週欠損施設",
+            "fax_template_id": "fax_layout_regular_forbidden_v1",
+        },
+    )
+    monkeypatch.setattr(
+        order_form_service.draft_sheet_service,
+        "get_latest_sheet_draft",
+        lambda order_id: {
+            "id": "ODR-DRAFT-MISSING-WEEK",
+            "draft_sheet_json": {
+                "fields": ["date", "daypart", "category", "menu_name", "qty.regular_x", "qty.no_meat_x"],
+                "rows": [["3/8", "朝", "主", "欠損週献立", "8", "2"]],
+            },
+        },
+    )
+
+    output = order_form_service.build_saved_sheet_order_form_excel(order_id=order.id)
+
+    workbook = load_workbook(output)
+    worksheet = workbook[target_week_sheet]
+    metadata = _metadata_rows(workbook)
+    assert workbook.sheetnames == [target_week_sheet, "設定"]
+    assert worksheet["A4"].value == "週欠損施設"
+    assert worksheet["A11"].value.date() == datetime(2026, 3, 8).date()
+    assert worksheet["D11"].value == "欠損週献立"
+    assert worksheet["E11"].value == 8
+    assert worksheet["F11"].value == 2
+    assert metadata["source_workbook"] == source_name
+    assert metadata["week_sheet_name"] == target_week_sheet
+
+
 def test_clear_week_sheet_body_preserves_quantity_body_merges_for_diabetes_template() -> None:
     source_path = order_form_service._resolve_source_workbook_path("いこいの森プラス　2604.xlsx")
     workbook = load_workbook(source_path)

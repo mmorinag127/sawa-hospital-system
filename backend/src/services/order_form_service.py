@@ -1044,11 +1044,19 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         received_at=received_at,
     )
     week_sheet_name = _format_week_sheet_name(week_start, week_end)
-    source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
+    try:
+        source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
+    except ValueError as exc:
+        if "week sheet not configured" not in str(exc):
+            raise
+        source_workbook_name = _resolve_facility_source_workbook_name_for_month(
+            facility,
+            fax_template_id=fax_template_id,
+            month_id=month_id,
+        )
     source_path = _resolve_source_workbook_path(source_workbook_name)
     workbook = load_workbook(source_path)
-    if week_sheet_name not in workbook.sheetnames:
-        raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
+    _ensure_week_sheet_from_template(workbook, week_sheet_name)
     _keep_only_target_sheet(workbook, week_sheet_name)
     worksheet = workbook[week_sheet_name]
 
@@ -1318,6 +1326,16 @@ def _keep_only_target_sheet(workbook: Workbook, week_sheet_name: str) -> None:
             continue
         del workbook[sheet_name]
     workbook.active = 0
+
+
+def _ensure_week_sheet_from_template(workbook: Workbook, week_sheet_name: str) -> None:
+    if week_sheet_name in workbook.sheetnames:
+        return
+    template_sheet_name = _DEFAULT_WEEK_SHEET if _DEFAULT_WEEK_SHEET in workbook.sheetnames else workbook.sheetnames[0]
+    template_sheet = workbook[template_sheet_name]
+    copied = workbook.copy_worksheet(template_sheet)
+    _clone_sheet_images(template_sheet, copied)
+    copied.title = week_sheet_name
 
 
 def _write_facility_name(worksheet, facility_name: str) -> None:
