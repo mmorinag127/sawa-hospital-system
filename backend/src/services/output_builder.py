@@ -2338,8 +2338,6 @@ def _is_blank_cell_value(value: Any) -> bool:
 
 def _format_reference_quantity_value(value: Any, original_value: Any) -> Any:
     if _is_blank_cell_value(value):
-        if original_value == 0:
-            return 0
         return value
     if not isinstance(value, (int, float)):
         return value
@@ -3504,7 +3502,7 @@ def _set_xml_cell_value(cell, value: Any) -> None:
 
 
 def _is_delivery_static_artifact_value(value: Any) -> bool:
-    if value in {"v", "V", 0, "0"}:
+    if value in {"v", "V", 0, "0", "./"}:
         return True
     return False
 
@@ -3591,11 +3589,7 @@ def _save_reference_daily_delivery_workbook_preserving_template_package(
     workbook: Workbook,
     output_path: Path,
 ) -> None:
-    _patch_template_package_with_workbook_values(
-        workbook,
-        template_bytes=DAILY_DELIVERY_REFERENCE_TEMPLATE.read_bytes(),
-        output_path=output_path,
-    )
+    workbook.save(output_path)
 
 
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
@@ -3668,7 +3662,7 @@ def _write_reference_daily_delivery_sheet(
                 continue
             original_value = display_ws.cell(row=row_idx, column=col_idx).value if display_ws is not None else None
             if not row_payload:
-                cell.value = 0 if original_value == 0 else None
+                cell.value = None
                 continue
             value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
             if source == "quantity":
