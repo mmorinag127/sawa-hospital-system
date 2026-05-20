@@ -9,6 +9,7 @@ sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
 from src.api import outputs as outputs_api  # noqa: E402
+from src.services import output_builder  # noqa: E402
 
 
 def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
@@ -69,6 +70,24 @@ def test_weekly_weight_returns_xlsx(monkeypatch, tmp_path):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert "May%2023-29%202026%20Weight.xlsx" in response.headers["content-disposition"]
+
+
+def test_weekly_weight_returns_empty_xlsx_when_no_rows(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    monkeypatch.setattr(outputs_api, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(output_builder, "_weekly_weight_collect_rows", lambda target_date, status=None: {})
+
+    client = TestClient(app)
+    response = client.get(
+        "/outputs/weekly-weight",
+        params={"date": "2026-05-24"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 def test_daily_bundle_returns_400_when_no_rows(monkeypatch):

@@ -316,8 +316,6 @@ def download_weekly_weight(date: str, status: str | None = None):
         weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"weekly weight build failed: {exc}") from exc
-    if weight_path is None:
-        raise HTTPException(status_code=400, detail="対象週の重量表出力対象がありません")
     return FileResponse(
         str(weight_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
