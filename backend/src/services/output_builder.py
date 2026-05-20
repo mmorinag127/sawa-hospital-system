@@ -4335,7 +4335,12 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             ws.cell(row=day_start + 5, column=1).value = weekdays[current_date.weekday()]
     output_path = OUTPUT_DIR / f"{_weekly_weight_sheet_title(week_start)} Weight.xlsx"
     workbook.save(output_path)
-    _patch_weekly_weight_package(output_path, sheet_title=_weekly_weight_sheet_title(week_start))
+    try:
+        _patch_weekly_weight_package(output_path, sheet_title=_weekly_weight_sheet_title(week_start))
+    except Exception:
+        if rows_by_key:
+            raise
+        logger.warning("weekly weight package patch failed for empty workbook; returning saved workbook")
     return output_path
 
 

@@ -90,6 +90,25 @@ def test_weekly_weight_returns_empty_xlsx_when_no_rows(monkeypatch, tmp_path):
     )
 
 
+def test_weekly_weight_returns_empty_xlsx_when_empty_package_patch_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    monkeypatch.setattr(outputs_api, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(output_builder, "_weekly_weight_collect_rows", lambda target_date, status=None: {})
+    monkeypatch.setattr(output_builder, "_patch_weekly_weight_package", lambda path, sheet_title: (_ for _ in ()).throw(KeyError(4)))
+
+    client = TestClient(app)
+    response = client.get(
+        "/outputs/weekly-weight",
+        params={"date": "2026-05-24"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 def test_daily_bundle_returns_400_when_no_rows(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     monkeypatch.setattr(
