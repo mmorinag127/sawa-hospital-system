@@ -30,6 +30,7 @@ from src.services import (
     order_service,
     daily_output_override_service,
 )
+from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
@@ -3958,8 +3959,26 @@ def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
         return literal
     if not amounts:
         return None
+    main_unit = amounts.get("__main_unit__")
+    main_count = amounts.get("__main_count__")
+    garnish_amount = amounts.get("__garnish_amount__")
+    if main_unit not in (None, "") and main_count not in (None, ""):
+        main = f"{_format_number(float(main_count))}{main_unit}"
+        try:
+            garnish_value = float(garnish_amount)
+        except (TypeError, ValueError):
+            garnish_value = 0.0
+        if math.isfinite(garnish_value) and garnish_value > 0:
+            garnish_unit = str(amounts.get("__garnish_unit__") or "g")
+            display_value = round(garnish_value / 1000, 1) if garnish_unit == "g" else garnish_value
+            garnish_label = str(amounts.get("__garnish_label__") or "")
+            separator = str(amounts.get("__garnish_separator__") or "、")
+            return f"{main}{separator}{garnish_label}{_format_number(display_value)}"
+        return main
     parts: list[str] = []
     for unit, raw_value in sorted(amounts.items(), key=lambda item: item[0]):
+        if str(unit).startswith("__"):
+            continue
         try:
             value = float(raw_value)
         except (TypeError, ValueError):
@@ -3977,10 +3996,41 @@ def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
     return "、".join(str(part) for part in parts)
 
 
+def _weekly_weight_rule_garnish_label(menu_name: str, diet: str) -> tuple[str, str]:
+    separator = "、" if diet in {"soft", "mixer", "soft_mixer"} else "＋"
+    if "煮込みハンバーグ" in menu_name:
+        return ("", "、") if diet in {"soft", "mixer", "soft_mixer"} else ("ソース", "＋")
+    if "アジのちゃんちゃん焼き" in menu_name:
+        return "野菜", separator
+    if any(name in menu_name for name in ("鶏唐揚げ", "サバの塩焼き", "チキンカツ")):
+        return "添", "、"
+    return "", separator
+
+
 def _weekly_weight_add_amount(target: dict[str, float], line: dict, quantity: float) -> None:
     literal = line.get("actual_amount_label") or line.get("weekly_weight_amount_label")
     if literal not in (None, ""):
         target["__literal__"] = str(literal)
+        return
+    rule_amounts = order_service._daily_bag_rule_amounts(line, quantity)  # noqa: SLF001
+    if rule_amounts:
+        main_items = [(unit, value) for unit, value in rule_amounts.items() if unit != "g"]
+        if main_items:
+            main_unit, main_count = main_items[0]
+            target["__main_unit__"] = str(main_unit)
+            target["__main_count__"] = round(float(target.get("__main_count__", 0.0)) + float(main_count), 4)
+            if "g" in rule_amounts:
+                target["__garnish_unit__"] = "g"
+                target["__garnish_amount__"] = round(float(target.get("__garnish_amount__", 0.0)) + float(rule_amounts["g"]), 4)
+                garnish_label, separator = _weekly_weight_rule_garnish_label(
+                    str(line.get("menu_name") or ""),
+                    bucket_diet_type_for_aggregation(line.get("diet_type")) or "",
+                )
+                target["__garnish_label__"] = garnish_label
+                target["__garnish_separator__"] = separator
+            return
+        for unit, amount in rule_amounts.items():
+            target[unit] = round(target.get(unit, 0.0) + float(amount), 4)
         return
     unit = _normalize_unit_type(line.get("menu_unit_type") or line.get("actual_unit_type"))
     if not unit:
@@ -4252,10 +4302,8 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
     return rows
 
 
-def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path | None:
+def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path:
     rows_by_key = _weekly_weight_collect_rows(target_date, status=status)
-    if not rows_by_key:
-        return None
     week_start = _weekly_weight_start(target_date)
     workbook = _build_weekly_weight_workbook_shell(week_start)
     ws = workbook.worksheets[0]

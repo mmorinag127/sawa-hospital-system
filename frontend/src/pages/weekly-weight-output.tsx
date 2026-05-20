@@ -96,17 +96,33 @@ export default function WeeklyWeightOutputPage() {
 
   return (
     <main className="page">
-      <TopNav />
-
-      <section className="panel hero">
+      <header className="hero">
         <div>
           <p className="eyebrow">週別出力</p>
           <h1>週別重量表</h1>
-          <p className="subtle">指定日の週に含まれる注文から、週別の重量表Excelだけを出力します。</p>
+          <p className="subtle">指定日の週に含まれる注文から、週別の重量表Excelを出力します。</p>
         </div>
-        <Link href="/daily-delivery-notes" className="btn ghost">
-          日別出力へ
-        </Link>
+        <TopNav />
+      </header>
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>この画面で見ること</h2>
+        </header>
+        <div className="guide-grid">
+          <article className="guide-card">
+            <p className="guide-title">週単位で出力</p>
+            <p className="guide-text">選択した日付を含む週の重量表Excelを作成します。</p>
+          </article>
+          <article className="guide-card">
+            <p className="guide-title">日別出力と連動</p>
+            <p className="guide-text">日別出力画面のフィルタから同じ日付とステータスを引き継げます。</p>
+          </article>
+          <article className="guide-card">
+            <p className="guide-title">空週も出力</p>
+            <p className="guide-text">対象データがない週でも、確認用の空フォーマットを出力します。</p>
+          </article>
+        </div>
       </section>
 
       <section className="panel">
@@ -115,6 +131,9 @@ export default function WeeklyWeightOutputPage() {
             <h2>出力条件</h2>
             <p className="subtle">対象週: {weekLabel || "-"}</p>
           </div>
+          <Link href="/daily-delivery-notes" className="btn ghost">
+            日別出力へ
+          </Link>
         </header>
         <div className="filters">
           <label className="field">
@@ -145,88 +164,125 @@ export default function WeeklyWeightOutputPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #f5f7fb;
-          color: #1f2937;
-          padding: 24px;
+          padding: 48px 6vw 80px;
         }
-        .panel {
-          background: #ffffff;
-          border: 1px solid #d8dee9;
-          border-radius: 8px;
-          padding: 18px;
-          margin-top: 16px;
+        :global(body) {
+          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
+          color: #1f2a2a;
+          font-family: "Manrope", "Noto Sans JP", sans-serif;
+        }
+        :global(*) {
+          box-sizing: border-box;
         }
         .hero {
           display: flex;
+          flex-wrap: wrap;
           justify-content: space-between;
-          gap: 16px;
-          align-items: flex-start;
+          gap: 24px;
+          align-items: center;
+          margin-bottom: 32px;
         }
         .eyebrow {
-          margin: 0 0 6px;
-          color: #4b5563;
-          font-size: 13px;
-          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          font-size: 12px;
+          color: #5f7b74;
+          margin: 0 0 8px;
         }
         h1,
         h2 {
           margin: 0;
         }
+        h1 {
+          font-size: clamp(26px, 4vw, 36px);
+          margin-bottom: 12px;
+        }
+        h2 {
+          font-size: 18px;
+        }
         .subtle {
-          color: #667085;
-          margin: 8px 0 0;
+          color: #51615c;
+          margin: 0;
+        }
+        .panel {
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 20px;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
+          margin-bottom: 20px;
         }
         .panel-header {
           display: flex;
           justify-content: space-between;
           gap: 16px;
-          align-items: flex-start;
-          margin-bottom: 14px;
+          align-items: center;
+          margin-bottom: 16px;
+        }
+        .guide-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 14px;
+        }
+        .guide-card {
+          border-radius: 16px;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          background: #fcfbf7;
+          padding: 16px;
+        }
+        .guide-title {
+          margin: 0 0 8px;
+          font-weight: 800;
+        }
+        .guide-text {
+          margin: 0;
+          color: #51615c;
+          line-height: 1.6;
         }
         .filters {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          align-items: flex-end;
+          display: grid;
+          gap: 16px;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          align-items: center;
         }
         .field {
-          display: grid;
+          display: flex;
+          flex-direction: column;
           gap: 6px;
+          font-size: 13px;
         }
         .field-label {
-          color: #344054;
-          font-size: 13px;
-          font-weight: 700;
+          color: #5f7b74;
+          font-size: 12px;
+          font-weight: 800;
         }
         .input {
-          min-height: 40px;
-          border: 1px solid #cbd5e1;
-          border-radius: 6px;
-          padding: 8px 10px;
-          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.14);
+          border-radius: 10px;
           font-size: 14px;
+          min-height: 40px;
+          padding: 8px 10px;
         }
         .btn {
           min-height: 40px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border-radius: 6px;
-          border: 1px solid #cbd5e1;
-          padding: 8px 14px;
+          border-radius: 999px;
+          border: none;
+          padding: 0 14px;
           font-size: 14px;
           font-weight: 700;
           text-decoration: none;
           cursor: pointer;
         }
         .btn.primary {
-          background: #2563eb;
-          color: #ffffff;
-          border-color: #2563eb;
+          background: #1f2a2a;
+          color: #f7f2e7;
         }
         .btn.ghost {
-          background: #ffffff;
-          color: #1f2937;
+          background: #e6ebe9;
+          color: #1f2a2a;
         }
         .btn:disabled {
           opacity: 0.55;
@@ -236,19 +292,23 @@ export default function WeeklyWeightOutputPage() {
           margin-top: 12px;
         }
         .message {
-          margin-top: 16px;
+          margin: 0 0 20px;
           padding: 12px 14px;
-          border-radius: 8px;
-          background: #eff6ff;
-          border: 1px solid #bfdbfe;
-          color: #1e40af;
+          border-radius: 12px;
+          background: #eff7f4;
+          border: 1px solid rgba(31, 42, 42, 0.1);
+          color: #1f2a2a;
         }
         @media (max-width: 720px) {
           .page {
-            padding: 14px;
+            padding: 28px 16px 48px;
           }
           .hero {
             display: grid;
+          }
+          .panel-header {
+            align-items: flex-start;
+            flex-direction: column;
           }
           .filters,
           .field,
