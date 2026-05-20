@@ -218,6 +218,25 @@ def _resolve_source_workbook_name_for_month(fax_template_id: str, month_id: str)
     )
 
 
+def _resolve_source_workbook_name_for_template_clone(fax_template_id: str, month_id: str) -> str:
+    spec = _resolve_fax_family_spec(fax_template_id)
+    month_sources = spec.get("month_sources") or {}
+    normalized_month = _normalize_month_id(month_id)
+    if normalized_month in month_sources:
+        return str(month_sources[normalized_month])
+    earlier_months = [source_month for source_month in month_sources if source_month <= normalized_month]
+    if earlier_months:
+        return str(month_sources[sorted(earlier_months)[-1]])
+    if month_sources:
+        return str(month_sources[sorted(month_sources)[-1]])
+    source_workbook = str(spec.get("source_workbook") or "").strip()
+    if source_workbook:
+        return source_workbook
+    raise ValueError(
+        f"source workbook not configured for fax_template_id={fax_template_id} month_id={normalized_month}"
+    )
+
+
 def _facility_source_workbook_names(facility: dict | None) -> list[str]:
     if not isinstance(facility, dict):
         return []
@@ -274,6 +293,46 @@ def _resolve_facility_source_workbook_name_for_month(
     if source_workbook_uri:
         return source_workbook_uri
     return _resolve_source_workbook_name_for_month(fax_template_id, normalized_month)
+
+
+def _resolve_facility_source_workbook_name_for_template_clone(
+    facility: dict,
+    *,
+    fax_template_id: str,
+    month_id: str,
+) -> str:
+    normalized_month = _normalize_month_id(month_id)
+    raw_month_sources = facility.get("order_form_month_sources")
+    if isinstance(raw_month_sources, dict):
+        source_workbook = str(raw_month_sources.get(normalized_month) or "").strip()
+        if source_workbook:
+            return source_workbook
+        earlier_months = [
+            str(source_month)
+            for source_month, source_name in raw_month_sources.items()
+            if str(source_month) <= normalized_month and str(source_name or "").strip()
+        ]
+        if earlier_months:
+            return str(raw_month_sources[sorted(earlier_months)[-1]])
+    raw_month_source_uris = facility.get("order_form_month_source_uris")
+    if isinstance(raw_month_source_uris, dict):
+        source_workbook = str(raw_month_source_uris.get(normalized_month) or "").strip()
+        if source_workbook:
+            return source_workbook
+        earlier_months = [
+            str(source_month)
+            for source_month, source_name in raw_month_source_uris.items()
+            if str(source_month) <= normalized_month and str(source_name or "").strip()
+        ]
+        if earlier_months:
+            return str(raw_month_source_uris[sorted(earlier_months)[-1]])
+    source_workbook = str(facility.get("order_form_source_workbook") or "").strip()
+    if source_workbook:
+        return source_workbook
+    source_workbook_uri = str(facility.get("order_form_source_workbook_uri") or "").strip()
+    if source_workbook_uri:
+        return source_workbook_uri
+    return _resolve_source_workbook_name_for_template_clone(fax_template_id, normalized_month)
 
 
 def _source_workbook_sheetnames(source_workbook_name: str) -> tuple[str, ...]:
@@ -1049,7 +1108,7 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     except ValueError as exc:
         if "week sheet not configured" not in str(exc):
             raise
-        source_workbook_name = _resolve_facility_source_workbook_name_for_month(
+        source_workbook_name = _resolve_facility_source_workbook_name_for_template_clone(
             facility,
             fax_template_id=fax_template_id,
             month_id=month_id,
