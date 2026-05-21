@@ -142,16 +142,10 @@ def update_config(
 ) -> bool:
     updated = False
     with session_scope() as session:
-        fac = session.get(Facility, facility_id)
+        fac = ensure_facility_materialized(session, facility_id)
         if not fac:
             return False
         current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
-        if _contains_template_definition_change(current_config, config):
-            logger.warning(
-                "Blocked direct facility template definition update outside versioned template path",
-                fac=facility_id,
-            )
-            return False
         sanitized_config = config_service.sanitize_facility_config_for_storage(
             facility_id,
             config,

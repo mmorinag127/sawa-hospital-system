@@ -161,11 +161,14 @@ jobs:
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           tag="stg-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
+          deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build \
             --build-arg "NEXT_PUBLIC_API_BASE_URL=/api" \
             --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=" \
+            --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
+            --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
             -t "$image" \
             "$deploy_dir"
           docker push "$image"

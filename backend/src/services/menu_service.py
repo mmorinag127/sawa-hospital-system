@@ -1553,7 +1553,7 @@ def _build_master_defaults_index(
         for field in _MASTER_FIELDS:
             value = None
             if override is not None:
-                override_value = getattr(override, field)
+                override_value = getattr(override, field, None)
                 if not _is_blank_value(override_value):
                     value = override_value
             if value is None:

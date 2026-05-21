@@ -73,4 +73,7 @@ def test_confirm_endpoint_triggers_outputs(monkeypatch):
         },
     )
     res2 = client.post(f"/orders/{order['id']}/confirm")
-    assert res2.status_code == 202
+    assert res2.status_code == 410
+    detail = res2.json()["detail"]
+    assert detail["error"] == "legacy_order_workflow_disabled"
+    assert detail["replacement"] == "workflow-v2"

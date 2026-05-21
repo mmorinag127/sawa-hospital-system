@@ -472,14 +472,14 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
         "日付",
         "区分",
         "メニュー",
-        "常食1回目",
-        "常食2回目",
-        "常食3回目",
-        "常食袋分け",
+        "1回目",
+        "2回目",
+        "3回目",
+        "袋分け",
         "軟菜",
         "ミキサー",
-        "禁食肉禁",
-        "禁食魚禁",
+        "肉禁",
+        "魚禁",
         "備考欄",
     ]
     assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -542,8 +542,8 @@ def test_fac00012_preserves_placeholder_spacer_and_source_indexes_from_master():
         "qty.change_2_x",
     ]
     assert [column.get("source_index") for column in columns] == [
-        None,
-        None,
+        0,
+        1,
         3,
         4,
         5,
@@ -669,6 +669,7 @@ def test_fac00007_uses_regular_forbidden_plus_change_columns():
         "daypart",
         "menu",
         "qty.regular_x",
+        "qty.placeholder_x",
         "qty.no_meat_x",
         "qty.no_fish_x",
         "qty.change_1_x",
@@ -853,7 +854,7 @@ def test_fac00014_update_config_sanitizes_stale_override_before_storage():
     ]
 
 
-def test_save_order_facility_template_columns_persists_deleted_column_authoritatively():
+def test_save_order_facility_template_columns_rejects_legacy_column_removal():
     _clear_facilities()
     facility_service.list_facilities()
     order_service.clear_all()
@@ -884,19 +885,8 @@ def test_save_order_facility_template_columns_persists_deleted_column_authoritat
         columns_without_change_1,
     )
 
-    assert error is None
-    assert result is not None
-    stored = facility_service.get_facility_config("FAC00014")
-    assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    assert override.get("columns_authoritative") is True
-    stored_columns = override.get("columns") or []
-    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in stored_columns)
-
-    refreshed = config_service.get_facility_config("FAC00014")
-    assert refreshed is not None
-    refreshed_columns = ((refreshed.get("fax_template") or {}).get("columns") or [])
-    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in refreshed_columns)
+    assert result is None
+    assert error == "legacy_facility_template_columns_removed"
 
 
 def test_save_order_facility_template_columns_derives_mapping_from_visible_labels_only():
@@ -946,32 +936,8 @@ def test_save_order_facility_template_columns_derives_mapping_from_visible_label
             ],
         )
 
-        assert error is None
-        assert result is not None
-        resolved = config_service.get_facility_config("FAC00010")
-        assert resolved is not None
-        columns = (resolved.get("fax_template") or {}).get("columns") or []
-        quantity = next(column for column in columns if column.get("index") == 3)
-        assert quantity.get("header") == "常食2F"
-        assert quantity.get("name") == "qty.regular_2f"
-        assert quantity.get("diet_type") == "regular"
-        assert quantity.get("area_id") == "2F"
-        assert "name_locked" not in quantity
-        assert "diet_type_locked" not in quantity
-        assert "area_id_locked" not in quantity
-
-        note = next(column for column in columns if column.get("index") == 4)
-        assert note.get("role") == "note"
-        assert note.get("header") == "不明"
-        assert "name" not in note
-
-        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_2f",
-            "remarks",
-        ]
+        assert result is None
+        assert error == "legacy_facility_template_columns_removed"
     finally:
         assert facility_service.update_config("FAC00010", previous_config)
 
@@ -1044,17 +1010,17 @@ def test_generic_update_config_keeps_order_authored_authoritative_columns():
         columns_without_change_1,
     )
 
-    assert error is None
-    assert result is not None
+    assert result is None
+    assert error == "legacy_facility_template_columns_removed"
     assert facility_service.update_config("FAC00014", {"menu_override_tags": ["keep-authored-columns"]})
 
     stored = facility_service.get_facility_config("FAC00014")
     assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    assert override.get("columns_authoritative") is True
     assert stored.get("menu_override_tags") == ["keep-authored-columns"]
-    stored_columns = override.get("columns") or []
-    assert not any(str(column.get("diet_type") or "").strip() == "change_1" for column in stored_columns)
+    refreshed = config_service.get_facility_config("FAC00014")
+    assert refreshed is not None
+    refreshed_columns = ((refreshed.get("fax_template") or {}).get("columns") or [])
+    assert any(str(column.get("diet_type") or "").strip() == "change_1" for column in refreshed_columns)
 
 
 def test_reconcile_fax_override_keeps_current_when_quantity_families_differ():
@@ -1369,7 +1335,8 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
     assert resolved is not None
     assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
     template = resolved.get("fax_template") or {}
-    assert resolved.get("fax_template_override") == {"grid_line_scale_horizontal": 20}
+    assert (resolved.get("fax_template_override") or {}).get("grid_line_scale_horizontal") == 20
+    assert (resolved.get("fax_template_override") or {}).get("columns_authoritative") is True
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",

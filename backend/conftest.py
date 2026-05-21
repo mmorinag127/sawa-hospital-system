@@ -3,6 +3,9 @@ import os
 
 import pytest
 
+from src.db import Base, engine
+import src.models  # noqa: F401
+
 
 # Keep the existing test suite behavior stable while production defaults fail closed.
 os.environ.setdefault("AUTH_DISABLED", "true")
@@ -10,6 +13,8 @@ os.environ.setdefault("OPERATOR_USER", "operator")
 os.environ.setdefault("OPERATOR_PASSWORD", "operator-pass")
 os.environ.setdefault("ADMIN_USER", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "admin-pass")
+
+Base.metadata.create_all(bind=engine)
 
 
 def _basic_auth_headers(username: str, password: str) -> dict[str, str]:

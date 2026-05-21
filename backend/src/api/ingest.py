@@ -241,9 +241,10 @@ async def ingest_upload(
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)
     skip_ocr_value = _parse_form_bool(skip_ocr, default=False)
-    results = await asyncio.gather(
-        *[
-            _handle_uploaded_pdf(
+    results: list[dict[str, Any]] = []
+    for current_file in upload_files:
+        results.append(
+            await _handle_uploaded_pdf(
                 pdf_file=current_file,
                 facility_hint=facility_hint,
                 week_hint=week_hint,
@@ -252,9 +253,7 @@ async def ingest_upload(
                 force_value=force_value,
                 skip_ocr_value=skip_ocr_value,
             )
-            for current_file in upload_files
-        ]
-    )
+        )
     items: list[dict[str, Any]] = []
     for result in results:
         nested_items = result.get("items")
