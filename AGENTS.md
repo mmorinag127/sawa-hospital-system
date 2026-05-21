@@ -21,6 +21,7 @@ tests/
 - Frontend dev (Cloud Run proxy): `task frontend_run_cloudrun_proxy`
 - Backend tests: `task backend_test_us_all` or `task backend_test`
 - Frontend E2E: `task frontend_test_e2e`
+- Deploy quick reference: read `docs/deploy_agent_quick_reference.md` before any deploy, release, or CI/CD change.
 
 ## Code Style
 
@@ -80,6 +81,7 @@ tests/
   - the explicit stop/block behavior when the invariant cannot be satisfied
 
 ## Git/JJ Release Source Discipline
+- Before any deploy, release, or CI/CD change, read `docs/deploy_agent_quick_reference.md`.
 - Failure class: deploy source of truth mismatch. This means a fix exists in a jj working-copy commit, sibling git commit, detached worktree, deploy copy, or old integration tree, but the service is built from another HEAD that does not contain that fix.
 - Treat deploy source selection as a hard correctness gate, not as an operational detail.
 - Do not deploy Sawa stg or prod from detached HEAD. Create or use a named release branch first.
