@@ -7,6 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.db import session_scope  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
+from src.models.order import Order  # noqa: E402
 from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
@@ -51,6 +53,44 @@ def _seed_order(
     return order_service.create_order_from_ingest(payload, lines=None)
 
 
+def _attach_active_template_version(order_id: str, facility_id: str = "FAC00001") -> str:
+    template_version_id = f"FTV{order_id[-10:]}"
+    with session_scope() as session:
+        session.add(
+            FacilityTemplateVersion(
+                id=template_version_id,
+                facility_id=facility_id,
+                version="test-active",
+                status="active",
+                template_id="fax_layout_regular_soft_mixer_forbidden_v1",
+                source="test",
+                columns_json=[
+                    {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+                    {"index": 1, "role": "daypart", "header": "区分", "source_index": 1},
+                    {"index": 2, "role": "menu_name", "header": "メニュー", "source_index": 2},
+                    {
+                        "index": 3,
+                        "role": "quantity",
+                        "header": "常食2F",
+                        "diet_type": "regular",
+                        "area_id": "2F",
+                        "source_index": 3,
+                    },
+                ],
+                cells_json=[],
+                template_digest=f"digest-{template_version_id}",
+                validation_json={"errors": [], "warnings": []},
+                created_by="test",
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+        order = session.get(Order, order_id)
+        assert order is not None
+        order.template_version_id = template_version_id
+    return template_version_id
+
+
 def _persist_evidence(
     order_id: str,
     *,
@@ -58,6 +98,7 @@ def _persist_evidence(
     degraded: bool = False,
     extra_payload: dict | None = None,
 ) -> dict:
+    _attach_active_template_version(order_id)
     payload = {
         "input_reference": "gs://bucket/orders/order.pdf",
         "pages": [

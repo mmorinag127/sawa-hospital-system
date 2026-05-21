@@ -16,6 +16,7 @@ from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services import config_service  # noqa: E402
 from src.services import facility_service  # noqa: E402
+from src.services import facility_template_version_service  # noqa: E402
 from src.services import ocr_evidence_service  # noqa: E402
 from src.services import fax_parser  # noqa: E402
 from src.services import fax_extractor  # noqa: E402
@@ -58,6 +59,24 @@ def _seed_monthly_menu_2026_01() -> None:
             )
 
 
+def _save_facility_template_columns(facility_id: str, columns: list[dict]) -> None:
+    seed_order = _seed_order(
+        message_id=f"msg-template-columns-{facility_id}",
+        facility_hint=facility_id,
+    )
+    with session_scope() as session:
+        order = session.get(Order, seed_order["id"])
+        assert order is not None
+        result, error = facility_template_version_service.save_columns_for_order(
+            session,
+            order=order,
+            columns=columns,
+            actor="test-versioned-template-columns",
+        )
+        assert error is None
+        assert isinstance(result, dict)
+
+
 def _seed_monthly_menu_custom_entries(
     *,
     month_id: str,
@@ -88,13 +107,13 @@ def _seed_monthly_menu_custom_entries(
             )
 
 
-def _seed_order(*, message_id: str):
+def _seed_order(*, message_id: str, facility_hint: str = "FAC00001"):
     _seed_monthly_menu_2026_01()
     payload = IngestEmailPayload(
         message_id=message_id,
         pdf_uri="file://dummy.pdf",
         received_at=datetime(2026, 1, 8, 9, 0, 0),
-        facility_hint="FAC00001",
+        facility_hint=facility_hint,
         week_hint=None,
     )
     lines = [
@@ -385,20 +404,22 @@ def test_set_facility_keeps_saved_sheet_until_operator_resolves_context_change()
     order_service.clear_all()
     order = _seed_order(message_id="msg-set-facility-schema-refresh-001")
     facility = facility_service.create_facility("Facility Switch Target", [])
-    assert facility_service.update_config(
+    _save_facility_template_columns(
         facility["id"],
-        {
-            "fax_template_override": {
-                "columns_authoritative": True,
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "menu_name", "header": "メニュー"},
-                    {"index": 3, "role": "quantity", "header": "施設常食", "diet_type": "regular", "area_id": "X"},
-                    {"index": 4, "role": "note", "header": "備考"},
-                ],
-            }
-        },
+        [
+            {"index": 0, "source_index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "source_index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "source_index": 2, "role": "menu_name", "header": "メニュー"},
+            {
+                "index": 3,
+                "source_index": 3,
+                "role": "quantity",
+                "header": "施設常食",
+                "diet_type": "regular",
+                "area_id": "X",
+            },
+            {"index": 4, "source_index": 4, "role": "note", "header": "備考"},
+        ],
     )
     seeded = order_service.persist_sheet_draft(
         order_id=order["id"],
@@ -457,20 +478,22 @@ def test_set_facility_does_not_mutate_clean_saved_sheet_header_when_fields_match
     order_service.clear_all()
     order = _seed_order(message_id="msg-set-facility-header-stable-001")
     facility = facility_service.create_facility("Facility Same Field Header", [])
-    assert facility_service.update_config(
+    _save_facility_template_columns(
         facility["id"],
-        {
-            "fax_template_override": {
-                "columns_authoritative": True,
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "menu_name", "header": "メニュー"},
-                    {"index": 3, "role": "quantity", "header": "別名常食2F", "diet_type": "regular", "area_id": "2F"},
-                    {"index": 4, "role": "note", "header": "備考"},
-                ],
-            }
-        },
+        [
+            {"index": 0, "source_index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+            {"index": 1, "source_index": 1, "role": "daypart", "header": "区分"},
+            {"index": 2, "source_index": 2, "role": "menu_name", "header": "メニュー"},
+            {
+                "index": 3,
+                "source_index": 3,
+                "role": "quantity",
+                "header": "別名常食2F",
+                "diet_type": "regular",
+                "area_id": "2F",
+            },
+            {"index": 4, "source_index": 4, "role": "note", "header": "備考"},
+        ],
     )
     seeded = order_service.persist_sheet_draft(
         order_id=order["id"],
