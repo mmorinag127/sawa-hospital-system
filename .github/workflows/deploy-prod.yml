@@ -73,13 +73,25 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
       - uses: google-github-actions/setup-gcloud@v2
-      - id: build
-        name: Build backend image
+      - id: fingerprint
+        name: Validate backend base fingerprint
         run: |
           set -euo pipefail
           current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)"
           test "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT"
+          echo "current_base_fingerprint=$current_base_fingerprint" >> "$GITHUB_OUTPUT"
+      - id: prepare
+        name: Prepare backend deploy source
+        run: |
+          set -euo pipefail
           deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh ci-prod-backend)"
+          echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
+      - id: build
+        name: Submit backend Cloud Build
+        run: |
+          set -euo pipefail
+          deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
+          current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
           tag="prod-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
           build_config="$(mktemp)"
@@ -107,12 +119,18 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
       - uses: google-github-actions/setup-gcloud@v2
-      - id: build
-        name: Build frontend image
+      - id: prepare
+        name: Prepare frontend deploy source
         run: |
           set -euo pipefail
           deploy_dir="$(WEB_DEPLOY_LABEL=ci-prod-web ./scripts/prepare_web_deploy_source.sh ci-prod-web)"
           ./scripts/validate_web_deploy_source.sh "$deploy_dir"
+          echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
+      - id: build
+        name: Submit frontend Cloud Build
+        run: |
+          set -euo pipefail
+          deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           tag="prod-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
           build_config="$(mktemp)"
