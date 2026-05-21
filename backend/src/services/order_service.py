@@ -9498,6 +9498,22 @@ def persist_ocr_evidence_run(
     source: str | None = None,
     refresh_workflow: bool = True,
 ) -> Optional[dict]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        facility_id = str(getattr(order, "facility_code", "") or "").strip() if order is not None else ""
+        if order is not None and facility_id and not str(order.template_version_id or "").strip():
+            from src.services import facility_service, facility_template_version_service
+
+            facility_service.ensure_facility_materialized(session, facility_id)
+            facility_config = config_service.get_facility_config(facility_id)
+            version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
+                session,
+                facility_id=facility_id,
+                facility_config=facility_config if isinstance(facility_config, dict) else None,
+                created_by="ocr-evidence-template-lineage",
+            )
+            if version is not None:
+                order.template_version_id = version.id
     prepared_payload = dict(payload) if isinstance(payload, dict) else payload
     template = _resolve_order_fax_template(order_id)
     if isinstance(prepared_payload, dict):
@@ -12291,6 +12307,8 @@ def _draft_record_requires_current_sheet_semantic_rebase(
     draft_state = str(draft_record.get("draft_state") or "").strip().lower()
     current_blockers = _dedupe_str_tokens(draft_record.get("blockers_json") or [])
     if draft_state == "auto_apply_blocked" or current_blockers:
+        return False, rebuilt_sheet
+    if apply_gate_service.has_clean_saved_draft(draft_record):
         return False, rebuilt_sheet
     schema_rebase_required = _draft_requires_authoritative_schema_upgrade(
         draft_sheet_json,
@@ -27945,7 +27963,7 @@ def get_ocr_sheet(
             order_id,
             edited_by="auto-hakodate-evidence-ocr-sheet",
         )
-        if hakodate_draft_error and hakodate_draft_error != "already_current":
+        if hakodate_draft_error and hakodate_draft_error not in {"already_current", "hakodate_ocr_evidence_missing"}:
             return build_recoverable_ocr_sheet_payload(
                 order_id,
                 hakodate_draft_error,
