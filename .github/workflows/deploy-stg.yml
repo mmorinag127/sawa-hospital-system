@@ -183,6 +183,7 @@ jobs:
     if: |
       always() &&
       needs.source-gate.outputs.frontend_changed == 'true' &&
+      needs.build-frontend.result == 'success' &&
       (needs.deploy-backend.result == 'success' || needs.deploy-backend.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:

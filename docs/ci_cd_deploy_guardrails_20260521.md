@@ -113,6 +113,9 @@ for SA in sawa-github-deploy-stg sawa-github-deploy-prod; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOY_SA}" \
     --role="roles/artifactregistry.writer"
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${DEPLOY_SA}" \
+    --role="roles/storage.objectAdmin"
 done
 ```
 
@@ -266,4 +269,3 @@ This uses GitHub-hosted runners plus existing Cloud Build/Cloud Run flow.
 - prod: full backend/frontend build plus one Environment approval wait
 
 GitHub Actions cost is usually small for this repo shape because only deploy-relevant pushes trigger stg deploy, and prod is manual. GCP cost is mainly Cloud Build minutes and Artifact Registry storage for the built images. Exact monthly cost depends on deploy frequency and build duration.
-
