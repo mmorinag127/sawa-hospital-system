@@ -176,6 +176,22 @@ fi
 
 echo "[3/7] deploy ${WEB_SERVICE}"
 gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" --quiet
+gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
+
+LATEST_READY_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)' || true)"
+TRAFFIC_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.traffic[0].revisionName)' || true)"
+TRAFFIC_IMAGE=""
+if [[ -n "${TRAFFIC_REVISION}" ]]; then
+  TRAFFIC_IMAGE="$(gcloud run revisions describe "${TRAFFIC_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(spec.containers[0].image)' || true)"
+fi
+if [[ -z "${LATEST_READY_REVISION}" || -z "${TRAFFIC_REVISION}" || "${LATEST_READY_REVISION}" != "${TRAFFIC_REVISION}" ]]; then
+  echo "deploy mismatch: latestReady=${LATEST_READY_REVISION:-unknown} traffic=${TRAFFIC_REVISION:-unknown}" >&2
+  exit 1
+fi
+if [[ "${TRAFFIC_IMAGE}" != "${IMAGE}" && "${TRAFFIC_IMAGE}" != "${IMAGE_REPO}@sha256:"* ]]; then
+  echo "deploy mismatch: traffic image is ${TRAFFIC_IMAGE:-unknown}, expected ${IMAGE}" >&2
+  exit 1
+fi
 
 echo "[4/7] run postdeploy env checks"
 WEB_URL="$WEB_URL" \
