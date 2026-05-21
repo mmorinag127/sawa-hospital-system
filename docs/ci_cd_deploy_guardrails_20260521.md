@@ -194,6 +194,10 @@ gcloud iam service-accounts add-iam-policy-binding \
   --project "$PROJECT_ID" \
   --role "roles/iam.workloadIdentityUser" \
   --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-actions/attribute.repository/${REPO}"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --role "roles/serviceusage.serviceUsageConsumer" \
+  --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-actions/attribute.repository/${REPO}"
 ```
 
 Set the GitHub provider secrets to:
