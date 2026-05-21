@@ -131,6 +131,12 @@ export default function TopNav() {
           minRole: "admin",
         },
         {
+          href: "/system-process-logs",
+          label: "処理ログ",
+          isActive: (path) => path.startsWith("/system-process-logs"),
+          minRole: "admin",
+        },
+        {
           href: "/users",
           label: "ユーザー管理",
           isActive: (path) => path.startsWith("/users"),

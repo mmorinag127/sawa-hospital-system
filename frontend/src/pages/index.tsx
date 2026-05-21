@@ -513,6 +513,9 @@ export default function HomePage() {
             <Link href="/system-status" className="ghost-link">
               管理画面
             </Link>
+            <Link href="/system-process-logs" className="ghost-link">
+              処理ログ
+            </Link>
           </header>
           <div className="system-grid">
             <div className="system-card">
