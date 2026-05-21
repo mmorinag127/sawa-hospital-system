@@ -116,6 +116,12 @@ for SA in sawa-github-deploy-stg sawa-github-deploy-prod; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOY_SA}" \
     --role="roles/storage.objectAdmin"
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${DEPLOY_SA}" \
+    --role="roles/serviceusage.serviceUsageConsumer"
+  gcloud storage buckets add-iam-policy-binding "gs://${PROJECT_ID}_cloudbuild" \
+    --member="serviceAccount:${DEPLOY_SA}" \
+    --role="roles/storage.legacyBucketReader"
 done
 ```
 
