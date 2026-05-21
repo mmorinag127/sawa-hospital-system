@@ -111,6 +111,7 @@ jobs:
         name: Submit backend Cloud Build
         run: |
           set -euo pipefail
+          gcloud --quiet config set builds/use_kaniko False >/dev/null
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
           tag="stg-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
@@ -152,6 +153,7 @@ jobs:
         name: Submit frontend Cloud Build
         run: |
           set -euo pipefail
+          gcloud --quiet config set builds/use_kaniko False >/dev/null
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           tag="stg-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
