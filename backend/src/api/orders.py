@@ -70,6 +70,7 @@ class WorkflowV2OcrRunBody(BaseModel):
     stale_action: str | None = None
     force: bool = False
     mode: str | None = None
+    document_id: str | None = None
     ocr_prompt: str | None = None
     prompt_preset: str | None = None
     ocr_provider: str | None = None
@@ -678,14 +679,11 @@ def _enqueue_order_reparse_job(
     force: bool = False,
     stale_action: str = "retry",
     request_mode: str | None = None,
+    selected_document_id: str | None = None,
 ) -> dict:
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
+    order, selected_version = _resolve_order_document_version(order_id, selected_document_id)
     if not order.get("facility"):
         raise HTTPException(status_code=400, detail="facility missing")
-    if not order.get("document"):
-        raise HTTPException(status_code=404, detail="document not found")
     if not config_service.get_facility_config(order.get("facility")):
         raise HTTPException(status_code=404, detail="facility not found")
 
@@ -728,7 +726,8 @@ def _enqueue_order_reparse_job(
             },
         )
 
-    input_reference = str(order.get("document") or "")
+    input_reference = str(selected_version.get("storage_uri") or "").strip()
+    selected_document_metrics = _document_selection_metrics(selected_version)
     workflow_for_lineage, _workflow_error = order_workflow_v2_service.get_workflow(order_id)
     workflow_template_version_id = (
         str((workflow_for_lineage or {}).get("template_version_id") or "").strip()
@@ -777,6 +776,7 @@ def _enqueue_order_reparse_job(
             ).strip()
             or ("llm_reparse" if llm_assist else "ocr_reparse"),
             "status": "running",
+            **selected_document_metrics,
         },
         input_reference=input_reference,
     )
@@ -788,6 +788,7 @@ def _enqueue_order_reparse_job(
         ocr_provider,
         ocr_model,
         llm_assist,
+        selected_document_id,
     )
     return {"accepted": True, "ocr_job_id": ocr_job_id}
 
@@ -799,6 +800,7 @@ def _run_reparse_background(
     ocr_provider: str | None = None,
     ocr_model: str | None = None,
     llm_assist: bool = False,
+    selected_document_id: str | None = None,
 ) -> None:
     try:
         _, error = order_service.reparse_order(
@@ -808,6 +810,7 @@ def _run_reparse_background(
             ocr_provider=ocr_provider,
             ocr_model=ocr_model,
             llm_assist=llm_assist,
+            selected_document_id=selected_document_id,
         )
         if error:
             logger.warning("Reparse background failed", order_id=order_id, error=error)
@@ -832,7 +835,7 @@ def _run_reparse_background(
         logger.exception("Reparse background crashed", order_id=order_id, error=str(exc))
 
 
-def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
+def _run_ocr_rerun_background(order_id: str, ocr_job_id: str, selected_document_id: str | None = None) -> None:
     def _patch_job_metrics(patch: dict) -> None:
         existing_job = get_ocr_job(ocr_job_id) or {}
         metrics = dict(existing_job.get("metrics") or {})
@@ -868,6 +871,7 @@ def _run_ocr_rerun_background(order_id: str, ocr_job_id: str) -> None:
                 job_id=ocr_job_id,
                 project_sheet=False,
                 refresh_workflow=False,
+                selected_document_id=selected_document_id,
             )
         if error:
             logger.warning("OCR evidence-only rerun failed", order_id=order_id, error=error)
@@ -1446,11 +1450,9 @@ def get_order_shipping_statuses(order_id: str, limit: int = 10, max_age_days: in
 
 
 @router.get("/{order_id}/document", dependencies=[Depends(require_role("operator"))])
-def download_document(order_id: str):
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-    uri = order.get("document")
+def download_document(order_id: str, document_id: str | None = None):
+    _order, selected_version = _resolve_order_document_version(order_id, document_id)
+    uri = selected_version.get("storage_uri")
     if not uri:
         raise HTTPException(status_code=404, detail="document not found")
     try:
@@ -1466,6 +1468,8 @@ def download_document(order_id: str):
         headers={
             "X-Sawa-Document-Source": source_kind,
             "X-Sawa-Document-Variant": source_variant,
+            "X-Sawa-Document-Id": str(selected_version.get("document_id") or ""),
+            "X-Sawa-Document-Version": str(selected_version.get("version_no") or ""),
         },
     )
 
@@ -1589,12 +1593,48 @@ def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
     )
 
 
+def _resolve_order_document_version(order_id: str, document_id: str | None = None) -> tuple[dict, dict]:
+    order = order_service.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    selected_document_id = str(document_id or "").strip()
+    versions = [item for item in (order.get("versions") or []) if isinstance(item, dict)]
+    if selected_document_id:
+        for version in versions:
+            if str(version.get("document_id") or "").strip() == selected_document_id:
+                if not str(version.get("storage_uri") or "").strip():
+                    raise HTTPException(status_code=404, detail="document not found")
+                return order, version
+        raise HTTPException(status_code=404, detail="document version not found")
+    current_version = order.get("current_version") if isinstance(order.get("current_version"), dict) else None
+    if current_version and str(current_version.get("storage_uri") or "").strip():
+        return order, current_version
+    uri = str(order.get("document") or "").strip()
+    if not uri:
+        raise HTTPException(status_code=404, detail="document not found")
+    return order, {
+        "document_id": order.get("document_id"),
+        "version_no": None,
+        "storage_uri": uri,
+        "is_current": True,
+    }
+
+
+def _document_selection_metrics(version: dict) -> dict:
+    return {
+        "selected_document_id": str(version.get("document_id") or "").strip() or None,
+        "selected_document_version": version.get("version_no"),
+        "selected_document_is_current": bool(version.get("is_current")),
+    }
+
+
 def _enqueue_workflow_v2_evidence_rerun(
     order_id: str,
     background_tasks: BackgroundTasks,
     *,
     stale_action: str = "retry",
     force: bool = False,
+    selected_document_id: str | None = None,
 ) -> dict:
     workflow = _workflow_v2_or_404(order_workflow_v2_service.get_workflow(order_id))
     if not workflow.get("facility_id") or not workflow.get("week_start") or not workflow.get("week_end"):
@@ -1604,13 +1644,9 @@ def _enqueue_workflow_v2_evidence_rerun(
     if stale_action not in {"retry", "wait"}:
         raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
 
-    order = order_service.get_order_by_id(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
+    order, selected_version = _resolve_order_document_version(order_id, selected_document_id)
     if not order.get("facility"):
         raise HTTPException(status_code=400, detail="facility missing")
-    if not order.get("document"):
-        raise HTTPException(status_code=404, detail="document not found")
     if not config_service.get_facility_config(order.get("facility")):
         raise HTTPException(status_code=404, detail="facility not found")
 
@@ -1649,7 +1685,8 @@ def _enqueue_workflow_v2_evidence_rerun(
             },
         )
 
-    input_reference = str(order.get("document") or "")
+    input_reference = str(selected_version.get("storage_uri") or "").strip()
+    selected_document_metrics = _document_selection_metrics(selected_version)
     run_requested_at = datetime.utcnow().isoformat()
     workflow_template_version_id = str(workflow.get("template_version_id") or "").strip() or None
     _, created = create_ocr_job(
@@ -1691,10 +1728,11 @@ def _enqueue_workflow_v2_evidence_rerun(
             "ocr_started_at": run_requested_at,
             "ocr_finished_at": None,
             "ocr_elapsed_seconds": None,
+            **selected_document_metrics,
         },
     )
     queued_workflow = _workflow_v2_or_404(order_workflow_v2_service.mark_ocr_run_queued(order_id, ocr_job_id))
-    background_tasks.add_task(_run_ocr_rerun_background, order_id, ocr_job_id)
+    background_tasks.add_task(_run_ocr_rerun_background, order_id, ocr_job_id, selected_document_id)
     return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
 
 
@@ -1740,6 +1778,7 @@ def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, 
             force=force,
             stale_action=stale_action,
             request_mode="llm_reparse",
+            selected_document_id=(body.document_id if body else None),
         )
         queued_workflow = _workflow_v2_or_404(order_workflow_v2_service.mark_ocr_run_queued(order_id, result.get("ocr_job_id")))
         result["workflow"] = queued_workflow
@@ -1750,6 +1789,7 @@ def run_order_workflow_v2_ocr(order_id: str, background_tasks: BackgroundTasks, 
         background_tasks,
         stale_action=stale_action,
         force=force,
+        selected_document_id=(body.document_id if body else None),
     )
 
 

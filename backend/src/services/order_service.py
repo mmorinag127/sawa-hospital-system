@@ -4489,6 +4489,51 @@ def _list_order_versions_for_serialization(order: Order) -> list[dict[str, Any]]
         return _list_order_versions(scoped_session, order.id)
 
 
+def _resolve_order_document_selection(
+    session,
+    order: Order,
+    selected_document_id: str | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    def _received_at_value(value: Any) -> str | None:
+        return value.isoformat() if hasattr(value, "isoformat") else (str(value).strip() or None if value else None)
+
+    normalized_document_id = str(selected_document_id or "").strip()
+    if normalized_document_id:
+        version = session.execute(
+            select(OrderVersion).where(
+                OrderVersion.order_id == order.id,
+                OrderVersion.document_id == normalized_document_id,
+            )
+        ).scalars().first()
+        if not version:
+            return None, {"error": "document_not_found"}
+        return str(version.storage_uri or "").strip() or None, {
+            "selected_document_id": str(version.document_id or "").strip() or None,
+            "selected_document_version": version.version_no,
+            "selected_document_is_current": bool(version.is_current),
+            "selected_document_received_at": _received_at_value(version.received_at),
+        }
+    current_version = session.execute(
+        select(OrderVersion).where(
+            OrderVersion.order_id == order.id,
+            OrderVersion.is_current.is_(True),
+        )
+    ).scalars().first()
+    if current_version:
+        return str(current_version.storage_uri or "").strip() or None, {
+            "selected_document_id": str(current_version.document_id or "").strip() or None,
+            "selected_document_version": current_version.version_no,
+            "selected_document_is_current": bool(current_version.is_current),
+            "selected_document_received_at": _received_at_value(current_version.received_at),
+        }
+    return str(order.document_uri or "").strip() or None, {
+        "selected_document_id": str(order.current_document_id or "").strip() or None,
+        "selected_document_version": None,
+        "selected_document_is_current": True,
+        "selected_document_received_at": _received_at_value(order.received_at),
+    }
+
+
 def create_order_from_ingest(
     payload: IngestEmailPayload,
     lines: Optional[list[dict]] = None,
@@ -8784,12 +8829,13 @@ def _build_live_hakodate_manifest_item(
     facility_id: str,
     output_dir: Path,
     render_width: int = 1864,
+    document_uri_override: str | None = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             raise ValueError("order_not_found")
-        document_uri = str(order.document_uri or "").strip()
+        document_uri = str(document_uri_override or order.document_uri or "").strip()
         week_code = str(order.week_code or "").strip()
         workflow = session.get(OrderWorkflowState, order_id)
         workflow_meta = {}
@@ -9054,6 +9100,7 @@ def _hakodate_canonical_payload_from_manifest_item(
     order_id: str,
     facility_id: str | None,
     item: dict[str, Any],
+    document_uri_override: str | None = None,
 ) -> dict[str, Any] | None:
     draft_sheet = _hakodate_best_method_draft_sheet(order_id)
     if not isinstance(draft_sheet, dict):
@@ -9069,6 +9116,7 @@ def _hakodate_canonical_payload_from_manifest_item(
                 facility_id=facility_id,
                 output_dir=output_dir,
                 render_width=1864,
+                document_uri_override=document_uri_override,
             )
         result, _review_page = hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item(
             item=runtime_item,
@@ -13322,6 +13370,7 @@ def rerun_ocr_evidence_only(
     job_id: str | None = None,
     project_sheet: bool = True,
     refresh_workflow: bool = True,
+    selected_document_id: str | None = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -13330,13 +13379,20 @@ def rerun_ocr_evidence_only(
         order_row = session.get(Order, normalized_order_id)
         if not isinstance(order_row, Order):
             return None, "order_not_found"
+        document_uri, selected_document_metadata = _resolve_order_document_selection(
+            session,
+            order_row,
+            selected_document_id,
+        )
+        if selected_document_metadata.get("error"):
+            return None, str(selected_document_metadata["error"])
         order = serialize_order(order_row)
     if not isinstance(order, dict):
         return None, "order_not_found"
     facility_id = str(order.get("facility") or "").strip() or None
     if not facility_id:
         return None, "facility_missing"
-    document_uri = str(order.get("document") or "").strip()
+    document_uri = str(document_uri or "").strip()
     if not document_uri:
         return None, "document_not_found"
 
@@ -13388,6 +13444,7 @@ def rerun_ocr_evidence_only(
     base_metrics_patch = {
         "request_mode": "ocr_rerun",
         "confirmed_lines_retained": bool(order.get("lines_updated_at")),
+        **selected_document_metadata,
     }
     pipeline_metrics_patch = {
         **base_metrics_patch,
@@ -13438,6 +13495,7 @@ def rerun_ocr_evidence_only(
             order_id=normalized_order_id,
             facility_id=facility_id,
             item={"source": "live_order_facility_source_workbook"},
+            document_uri_override=document_uri,
         )
         if isinstance(output, dict):
             output = {
@@ -33320,8 +33378,10 @@ def reparse_order(
     draft_rows_label: str | None = None,
     resume_first_pass_payload: dict[str, Any] | None = None,
     resume_first_pass_output_reference: str | None = None,
+    selected_document_id: str | None = None,
 ):
     config_service.reload_configs()
+    selected_document_requested = bool(str(selected_document_id or "").strip())
     before_count = 0
     before_digest = ""
     existing_week_code = None
@@ -33339,7 +33399,15 @@ def reparse_order(
         if not order.document_uri:
             return None, "document_missing"
         facility_id = order.facility_code
-        document_uri = order.document_uri
+        document_uri, selected_document_metadata = _resolve_order_document_selection(
+            session,
+            order,
+            selected_document_id,
+        )
+        if selected_document_metadata.get("error"):
+            return None, str(selected_document_metadata["error"])
+        if not document_uri:
+            return None, "document_missing"
         received_at = order.received_at or pd.Timestamp.utcnow()
         message_id = order.message_id
         existing_week_code = order.week_code
@@ -33486,6 +33554,7 @@ def reparse_order(
                 feedback_retry_depth=feedback_retry_depth,
             ),
             **reparse_request_metadata,
+            **selected_document_metadata,
         }
 
     llm_full_table_requested = bool(
@@ -33510,7 +33579,7 @@ def reparse_order(
         template_to_use["openai_ocr_fallback_provider"] = "none"
         template_to_use["gemini_ocr_fallback_provider"] = "none"
     existing_first_pass_payload = None
-    if requires_first_pass_context and isinstance(resume_first_pass_payload, dict):
+    if requires_first_pass_context and not selected_document_requested and isinstance(resume_first_pass_payload, dict):
         if (
             _payload_has_first_pass_ocr_content(resume_first_pass_payload)
             and _payload_first_pass_schema_matches_template(resume_first_pass_payload, template_to_use)
@@ -33519,7 +33588,7 @@ def reparse_order(
                 resume_first_pass_payload,
                 template_to_use,
             )
-    if existing_first_pass_payload is None and requires_first_pass_context:
+    if existing_first_pass_payload is None and requires_first_pass_context and not selected_document_requested:
         existing_first_pass_payload = _load_existing_first_pass_payload_for_reparse(
             order_id,
             template=template_to_use,

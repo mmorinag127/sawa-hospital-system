@@ -1170,6 +1170,7 @@ export default function OrderWorkflowV2Page() {
   const [headerAxisAddMode, setHeaderAxisAddMode] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
   const [busy, setBusy] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -1204,6 +1205,21 @@ export default function OrderWorkflowV2Page() {
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
     [ocrResults, workflow?.selected_ocr_result_id],
   );
+  const documentVersionOptions = useMemo(() => {
+    const versions = Array.isArray(orderDetail?.versions) ? orderDetail.versions : [];
+    return [...versions]
+      .filter((version) => String(version.document_id || "").trim())
+      .sort((left, right) => Number(left.version_no || 0) - Number(right.version_no || 0));
+  }, [orderDetail?.versions]);
+  const currentDocumentId = String(
+    orderDetail?.current_version?.document_id
+    || documentVersionOptions.find((version) => version.is_current)?.document_id
+    || "",
+  ).trim();
+  const effectiveSelectedDocumentId = selectedDocumentId || currentDocumentId;
+  const selectedDocumentVersion = documentVersionOptions.find(
+    (version) => String(version.document_id || "").trim() === effectiveSelectedDocumentId,
+  ) || null;
   const invalidateSheetPreSaveChecks = () => {
     setPreSaveChecks({});
     setPreSaveStatus({});
@@ -1697,6 +1713,20 @@ export default function OrderWorkflowV2Page() {
     });
   }, [router.isReady, orderId]);
 
+  useEffect(() => {
+    if (!orderDetail || !currentDocumentId) return;
+    if (!selectedDocumentId) {
+      setSelectedDocumentId(currentDocumentId);
+      return;
+    }
+    if (
+      documentVersionOptions.length
+      && !documentVersionOptions.some((version) => String(version.document_id || "").trim() === selectedDocumentId)
+    ) {
+      setSelectedDocumentId(currentDocumentId);
+    }
+  }, [currentDocumentId, documentVersionOptions, orderDetail, selectedDocumentId]);
+
   useEffect(() => () => {
     if (sheetAutoEditPollRef.current !== null) {
       window.clearTimeout(sheetAutoEditPollRef.current);
@@ -1960,7 +1990,10 @@ export default function OrderWorkflowV2Page() {
     setPdfUrl("");
     setPdfError("");
     apiClient
-      .get<Blob>(`/orders/${orderId}/document`, { responseType: "blob" })
+      .get<Blob>(`/orders/${orderId}/document`, {
+        params: effectiveSelectedDocumentId ? { document_id: effectiveSelectedDocumentId } : undefined,
+        responseType: "blob",
+      })
       .then((res) => {
         if (!active) return;
         objectUrl = URL.createObjectURL(res.data);
@@ -1975,7 +2008,7 @@ export default function OrderWorkflowV2Page() {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [router.isReady, orderId]);
+  }, [router.isReady, orderId, effectiveSelectedDocumentId]);
 
   const runAction = async (
     label: string,
@@ -2226,6 +2259,7 @@ export default function OrderWorkflowV2Page() {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
+        document_id: effectiveSelectedDocumentId || undefined,
       });
       setMessage("4点補正を保存し、OCRを再実行しました。");
       setVisibleStep(2);
@@ -2297,6 +2331,7 @@ export default function OrderWorkflowV2Page() {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
+        document_id: effectiveSelectedDocumentId || undefined,
       }, { timeout: timeoutMs });
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
@@ -2407,6 +2442,7 @@ export default function OrderWorkflowV2Page() {
         const payload: Record<string, unknown> = {
           stale_action: "retry",
           mode: ocrRunMode,
+          document_id: effectiveSelectedDocumentId || undefined,
         };
         if (ocrRunMode === "llm") {
           payload.llm_assist = true;
@@ -3051,6 +3087,9 @@ export default function OrderWorkflowV2Page() {
   const faxVersionLabel = currentFaxVersion?.version_no
     ? `v${currentFaxVersion.version_no}${faxVersionCount ? ` / ${faxVersionCount}版` : ""}`
     : "-";
+  const selectedFaxVersionLabel = selectedDocumentVersion?.version_no
+    ? `FAX v${selectedDocumentVersion.version_no}${selectedDocumentVersion.is_current ? " (現行)" : ""}`
+    : "現行FAX";
 
   return (
     <main className="page workflow-v2-page">
@@ -3168,7 +3207,7 @@ export default function OrderWorkflowV2Page() {
           <header className="panel-header">
             <div>
               <h2>注文書 (FAX PDF)</h2>
-              <p className="subtle">原本PDFを確認し、施設と週設定を完了してください。</p>
+              <p className="subtle">原本PDFを確認し、施設と週設定を完了してください。OCR再実行は選択中のFAX PDFを入力にします。</p>
             </div>
             {pdfUrl ? (
               <a className="ghost-link" href={pdfUrl} target="_blank" rel="noreferrer">
@@ -3179,6 +3218,29 @@ export default function OrderWorkflowV2Page() {
             )}
           </header>
           <div className="step1-facility-block">
+            {documentVersionOptions.length > 1 ? (
+              <label className="field">
+                <span className="field-label">OCR入力にするFAX PDF</span>
+                <select
+                  className="input"
+                  value={effectiveSelectedDocumentId}
+                  onChange={(event) => setSelectedDocumentId(event.target.value)}
+                  disabled={Boolean(busy)}
+                >
+                  {documentVersionOptions.map((version) => {
+                    const docId = String(version.document_id || "").trim();
+                    const versionLabel = version.version_no ? `FAX v${version.version_no}` : "FAX";
+                    const currentLabel = version.is_current ? " / 現行" : "";
+                    return (
+                      <option key={docId} value={docId}>
+                        {versionLabel}{currentLabel} / 受信 {formatDateTime(version.received_at || null)}
+                      </option>
+                    );
+                  })}
+                </select>
+                <span className="subtle">選択中: {selectedFaxVersionLabel}。このPDFを表示し、OCR再実行の入力にも使います。</span>
+              </label>
+            ) : null}
             <div className="step1-current-strip">
               <div className="step1-current-pills">
                 <span>現在: {workflowFacilityLabel}</span>
