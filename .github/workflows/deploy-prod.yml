@@ -89,21 +89,23 @@ jobs:
           deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh ci-prod-backend)"
           echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
       - id: build
-        name: Submit backend Cloud Build
+        name: Build and push backend image
         run: |
           set -euo pipefail
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
           tag="prod-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
-          build_config="$(mktemp)"
-          {
-            echo "steps:"
-            echo "  - name: 'gcr.io/cloud-builders/docker'"
-            echo "    args: ['build', '--build-arg', 'BASE_IMAGE=${BACKEND_BASE_IMAGE}', '--label', 'sawa.backend_base_image=${BACKEND_BASE_IMAGE}', '--label', 'sawa.backend_base_fingerprint=${current_base_fingerprint}', '--label', 'sawa.git_sha=${GITHUB_SHA}', '--label', 'sawa.release_branch=${GITHUB_REF_NAME}', '-t', '${image}', '.']"
-            echo "images: ['${image}']"
-          } > "$build_config"
-          gcloud builds submit "$deploy_dir" --project="$PROJECT_ID" --config="$build_config"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg "BASE_IMAGE=${BACKEND_BASE_IMAGE}" \
+            --label "sawa.backend_base_image=${BACKEND_BASE_IMAGE}" \
+            --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
+            --label "sawa.git_sha=${GITHUB_SHA}" \
+            --label "sawa.release_branch=${GITHUB_REF_NAME}" \
+            -t "$image" \
+            "$deploy_dir"
+          docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   build-frontend:
@@ -131,20 +133,20 @@ jobs:
           ./scripts/validate_web_deploy_source.sh "$deploy_dir"
           echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
       - id: build
-        name: Submit frontend Cloud Build
+        name: Build and push frontend image
         run: |
           set -euo pipefail
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           tag="prod-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
-          build_config="$(mktemp)"
-          {
-            echo "steps:"
-            echo "  - name: 'gcr.io/cloud-builders/docker'"
-            echo "    args: ['build', '--build-arg', 'NEXT_PUBLIC_API_BASE_URL=/api', '--build-arg', 'API_PROXY_TARGET=${WORKER_URL}', '--build-arg', 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com', '-t', '${image}', '.']"
-            echo "images: ['${image}']"
-          } > "$build_config"
-          gcloud builds submit "$deploy_dir" --project="$PROJECT_ID" --config="$build_config"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg "NEXT_PUBLIC_API_BASE_URL=/api" \
+            --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
+            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com" \
+            -t "$image" \
+            "$deploy_dir"
+          docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   production-approval:

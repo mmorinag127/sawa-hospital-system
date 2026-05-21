@@ -115,6 +115,9 @@ for SA in sawa-github-deploy-stg sawa-github-deploy-prod; do
     --role="roles/artifactregistry.writer"
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOY_SA}" \
+    --role="roles/artifactregistry.reader"
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${DEPLOY_SA}" \
     --role="roles/storage.objectAdmin"
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOY_SA}" \
