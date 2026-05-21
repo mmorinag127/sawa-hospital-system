@@ -1,0 +1,191 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      order_id:
+        description: "Production smoke order id"
+        required: false
+        default: "ORDedee3bb3"
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: sawahospitalsystem
+  REGION: asia-northeast2
+  WEB_SERVICE: web-prod
+  WORKER_SERVICE: worker-prod
+  WEB_URL: https://web-prod-avlnzjjrca-dt.a.run.app
+  WORKER_URL: https://worker-prod-avlnzjjrca-dt.a.run.app
+  BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-ecfa03d510c6-20260521-095213
+  BACKEND_BASE_FINGERPRINT: ecfa03d510c6a3cd8c769e4ed85ab418c0b242e9b651d57c3c2f7bc827e42d93
+  OPERATOR_USER: admin
+  STRICT_OCR_QUALITY: "1"
+  STRICT_OCR_SHEET_GATE: "1"
+  CHECK_WEB_PROXY: "1"
+  WORKFLOW_V2_DEPLOY_CHECK: "1"
+
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      order_id: ${{ steps.order.outputs.order_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: order
+        name: Resolve smoke order
+        run: |
+          set -euo pipefail
+          echo "order_id=${{ inputs.order_id }}" >> "$GITHUB_OUTPUT"
+      - name: Assert production release source
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            release/prod-*) ;;
+            *)
+              echo "prod deploy must run from release/prod-*; got ${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
+          test -z "$(git status --porcelain)"
+          git fetch origin \
+            "+refs/heads/develop:refs/remotes/origin/develop" \
+            "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${GITHUB_REF_NAME}")"
+          git merge-base --is-ancestor origin/develop HEAD
+
+  build-backend:
+    needs: source-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - id: build
+        name: Build backend image
+        run: |
+          set -euo pipefail
+          current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)"
+          test "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT"
+          deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh ci-prod-backend)"
+          tag="prod-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
+          build_config="$(mktemp)"
+          {
+            echo "steps:"
+            echo "  - name: 'gcr.io/cloud-builders/docker'"
+            echo "    args: ['build', '--build-arg', 'BASE_IMAGE=${BACKEND_BASE_IMAGE}', '--label', 'sawa.backend_base_image=${BACKEND_BASE_IMAGE}', '--label', 'sawa.backend_base_fingerprint=${current_base_fingerprint}', '--label', 'sawa.git_sha=${GITHUB_SHA}', '--label', 'sawa.release_branch=${GITHUB_REF_NAME}', '-t', '${image}', '.']"
+            echo "images: ['${image}']"
+          } > "$build_config"
+          gcloud builds submit "$deploy_dir" --project="$PROJECT_ID" --config="$build_config"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  build-frontend:
+    needs: source-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - id: build
+        name: Build frontend image
+        run: |
+          set -euo pipefail
+          deploy_dir="$(WEB_DEPLOY_LABEL=ci-prod-web ./scripts/prepare_web_deploy_source.sh ci-prod-web)"
+          ./scripts/validate_web_deploy_source.sh "$deploy_dir"
+          tag="prod-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
+          build_config="$(mktemp)"
+          {
+            echo "steps:"
+            echo "  - name: 'gcr.io/cloud-builders/docker'"
+            echo "    args: ['build', '--build-arg', 'NEXT_PUBLIC_API_BASE_URL=/api', '--build-arg', 'API_PROXY_TARGET=${WORKER_URL}', '--build-arg', 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com', '-t', '${image}', '.']"
+            echo "images: ['${image}']"
+          } > "$build_config"
+          gcloud builds submit "$deploy_dir" --project="$PROJECT_ID" --config="$build_config"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  production-approval:
+    needs:
+      - source-gate
+      - build-backend
+      - build-frontend
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Approved for production deploy
+        run: echo "production deploy approved"
+
+  deploy-backend:
+    needs:
+      - source-gate
+      - build-backend
+      - production-approval
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy worker-prod
+        env:
+          IMAGE: ${{ needs.build-backend.outputs.image }}
+          ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+          OPERATOR_PASSWORD: ${{ secrets.PROD_OPERATOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          OPERATOR_USER="$OPERATOR_USER" OPERATOR_PASSWORD="$OPERATOR_PASSWORD" WEB_URL="$WEB_URL" \
+          ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
+
+  deploy-frontend:
+    needs:
+      - source-gate
+      - build-frontend
+      - deploy-backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy web-prod
+        env:
+          IMAGE: ${{ needs.build-frontend.outputs.image }}
+          ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+          OPERATOR_PASSWORD: ${{ secrets.PROD_OPERATOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          OPERATOR_USER="$OPERATOR_USER" OPERATOR_PASSWORD="$OPERATOR_PASSWORD" \
+          WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
+          IMAGE="$IMAGE" ALLOW_WEB_IMAGE_PROMOTION=1 STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
+          ./scripts/deploy_web_with_checks.sh
