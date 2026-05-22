@@ -22,6 +22,9 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 from src.db import session_scope
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
+from src.models.order_output_artifact import OrderBaggingResult
+from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_workflow_state import OrderWorkflowState
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
     config_service,
@@ -29,6 +32,7 @@ from src.services import (
     menu_rule_service,
     order_service,
     daily_output_override_service,
+    order_output_artifact_service,
 )
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services.storage_service import load_bytes_from_uri
@@ -1183,6 +1187,9 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
+    workflow_v2_lines = _workflow_v2_lines_for_outputs(order, raw_lines)
+    if workflow_v2_lines is not None:
+        raw_lines = workflow_v2_lines
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False
@@ -1233,6 +1240,103 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
     return order_lines
+
+
+def _workflow_v2_lines_for_outputs(order: dict, raw_lines: object) -> list[dict] | None:
+    order_id = str(order.get("id") or "").strip()
+    if not order_id:
+        return None
+    try:
+        with session_scope() as session:
+            workflow = session.get(OrderWorkflowState, order_id)
+            if workflow is None or not workflow.draft_id:
+                return None
+            draft = session.get(OrderSheetDraft, workflow.draft_id)
+            if draft is None or draft.order_id != order_id:
+                if _workflow_v2_output_state_requires_saved_sheet(workflow.state):
+                    raise ValueError("workflow-v2 saved sheet is missing")
+                return None
+            candidate = _workflow_v2_materialization_candidate(session, order, workflow, draft)
+            if not isinstance(candidate, dict):
+                if _workflow_v2_output_state_requires_saved_sheet(workflow.state):
+                    raise ValueError("workflow-v2 saved sheet materialization is missing")
+                return None
+            error = str(candidate.get("error") or "").strip()
+            if error:
+                if _workflow_v2_output_state_requires_saved_sheet(workflow.state) or not raw_lines:
+                    raise ValueError(f"workflow-v2 saved sheet materialization failed: {error}")
+                return None
+            lines = candidate.get("lines")
+            if isinstance(lines, list) and lines:
+                return [dict(line) for line in lines if isinstance(line, dict)]
+            if _workflow_v2_output_state_requires_saved_sheet(workflow.state) or not raw_lines:
+                raise ValueError("workflow-v2 saved sheet produced no output lines")
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if not raw_lines:
+            raise ValueError(f"workflow-v2 output state lookup failed: {exc}") from exc
+        logger.warning("Workflow-v2 output state lookup skipped", order_id=order_id, error=str(exc))
+    return None
+
+
+def _workflow_v2_output_state_requires_saved_sheet(state: object) -> bool:
+    return str(state or "").strip() in {
+        "sheet_saved",
+        "bagging_ready",
+        "output_review",
+        "confirmed",
+    }
+
+
+def _workflow_v2_materialization_candidate(
+    session,
+    order: dict,
+    workflow: OrderWorkflowState,
+    draft: OrderSheetDraft,
+) -> dict | None:
+    meta = workflow.secondary_actions_json if isinstance(workflow.secondary_actions_json, dict) else {}
+    workflow_meta = meta.get("workflow_v2") if isinstance(meta.get("workflow_v2"), dict) else {}
+    workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta)
+    bagging_result = workflow_meta.get("bagging_result") if isinstance(workflow_meta.get("bagging_result"), dict) else None
+    if bagging_result is None:
+        bagging_id = str(workflow_meta.get("bagging_result_id") or "").strip()
+        if bagging_id:
+            artifact = session.get(OrderBaggingResult, bagging_id)
+            if artifact is not None and isinstance(artifact.payload_json, dict):
+                bagging_result = artifact.payload_json
+    if isinstance(bagging_result, dict):
+        source_saved_sheet_id = str(bagging_result.get("source_saved_sheet_id") or "").strip()
+        template_version_id = str(bagging_result.get("template_version_id") or "").strip()
+        draft_template_version_id = str(draft.template_version_id or "").strip()
+        if source_saved_sheet_id and source_saved_sheet_id != draft.id:
+            raise ValueError("workflow-v2 bagging result source does not match saved sheet")
+        if template_version_id and draft_template_version_id and template_version_id != draft_template_version_id:
+            raise ValueError("workflow-v2 bagging result template does not match saved sheet")
+        candidate = bagging_result.get("materialization_candidate")
+        if isinstance(candidate, dict):
+            return candidate
+    return order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+        str(order.get("id") or ""),
+        draft_record=_workflow_v2_draft_record_for_outputs(draft),
+        facility_id=order.get("facility") or order.get("facility_code"),
+        existing_week_code=order.get("stored_week_value") or order.get("week_value") or order.get("week") or order.get("week_code"),
+        received_at=order.get("received_at"),
+    )
+
+
+def _workflow_v2_draft_record_for_outputs(draft: OrderSheetDraft) -> dict:
+    return {
+        "id": draft.id,
+        "order_id": draft.order_id,
+        "base_evidence_run_id": draft.base_evidence_run_id,
+        "base_template_resolution_id": draft.base_template_resolution_id,
+        "base_menu_snapshot_id": draft.base_menu_snapshot_id,
+        "draft_sheet_json": draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
+        "draft_state": str(draft.draft_state or "saved").strip() or "saved",
+        "blockers_json": list(draft.blockers_json or []),
+        "warnings_json": list(draft.warnings_json or []),
+    }
 
 
 def _normalize_rule_text(value: str | None) -> str:
@@ -2680,6 +2784,7 @@ def _write_delivery_note(
     menu_col_idx = _resolve_delivery_menu_column(columns, column_map)
     slot_rows = _find_delivery_slot_rows(ws, menu_col_idx) if menu_col_idx else []
     if slot_rows:
+        original_sheet_count = len(workbook.worksheets)
         for name in list(workbook.sheetnames):
             if workbook[name] is not ws:
                 workbook.remove(workbook[name])
@@ -2711,11 +2816,14 @@ def _write_delivery_note(
                 if current_daypart:
                     slot_rows_by_daypart.setdefault(current_daypart, []).append(row)
         if not dates:
-            _patch_template_package_with_workbook_values(
-                workbook,
-                template_bytes=template_bytes,
-                output_path=path,
-            )
+            if len(workbook.worksheets) == original_sheet_count:
+                _patch_template_package_with_workbook_values(
+                    workbook,
+                    template_bytes=template_bytes,
+                    output_path=path,
+                )
+            else:
+                workbook.save(path)
             return
         for idx, date_val in enumerate(dates):
             target_ws = ws if idx == 0 else workbook.copy_worksheet(ws)
@@ -2763,11 +2871,14 @@ def _write_delivery_note(
                     )
                 else:
                     _clear_delivery_slot_row(target_ws, slot_row, columns, column_map, include_menu_name)
-        _patch_template_package_with_workbook_values(
-            workbook,
-            template_bytes=template_bytes,
-            output_path=path,
-        )
+        if len(workbook.worksheets) == original_sheet_count:
+            _patch_template_package_with_workbook_values(
+                workbook,
+                template_bytes=template_bytes,
+                output_path=path,
+            )
+        else:
+            workbook.save(path)
         return
 
     start_row = _delivery_start_row(ws, header_row)
