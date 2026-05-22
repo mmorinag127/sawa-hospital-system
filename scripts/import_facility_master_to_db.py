@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Import the facility master backup JSON into the canonical DB tables."""
+"""Import the facility master backup JSON into the canonical DB tables.
+
+Use this only for controlled environment bootstrap or repair.
+"""
 
 from __future__ import annotations
 
