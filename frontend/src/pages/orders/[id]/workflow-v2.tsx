@@ -1151,6 +1151,7 @@ export default function OrderWorkflowV2Page() {
   const [customWeekRangeStart, setCustomWeekRangeStart] = useState<string>("");
   const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
+  const [sheetJsonStale, setSheetJsonStale] = useState(false);
   const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
   const [quadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
@@ -1225,6 +1226,9 @@ export default function OrderWorkflowV2Page() {
   const invalidateSheetPreSaveChecks = () => {
     setPreSaveChecks({});
     setPreSaveStatus({});
+  };
+  const markSheetJsonStale = () => {
+    setSheetJsonStale(true);
   };
   const applyPreSaveState = (
     checks: PreSaveChecks | null | undefined,
@@ -1674,10 +1678,11 @@ export default function OrderWorkflowV2Page() {
     if (savedSheet) {
       const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
       setSheetPayload(normalizedSavedSheet);
-      setSheetJson(formatJson(normalizedSavedSheet || savedSheet));
+      markSheetJsonStale();
     } else {
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
     }
     const suggestion = workflowRes.data.context_suggestion || null;
     const suggestedWeekValue = contextSuggestionWeekValue(suggestion);
@@ -2180,6 +2185,7 @@ export default function OrderWorkflowV2Page() {
       setFacilityTemplateColumnDraft(resolvedColumns);
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
       setFacilityTemplateMessage(
         `施設区分列を保存しました。OCR結果を${Number(response.data?.ocr_results_cleared || 0)}件破棄したため、Step1からOCRを再実行してください。`,
       );
@@ -2204,6 +2210,7 @@ export default function OrderWorkflowV2Page() {
       setExpandedCellCopyMode(normalizeExpandedCellCopyMode(response.data?.expanded_cell_copy_mode));
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
       await refreshAll();
       if (response.data?.selected_ocr_result_id) {
         setVisibleStep(3);
@@ -2342,6 +2349,7 @@ export default function OrderWorkflowV2Page() {
       }, { timeout: timeoutMs });
       setSheetPayload(null);
       setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
       setSelectedAnomalyIndex(null);
@@ -2497,7 +2505,7 @@ export default function OrderWorkflowV2Page() {
         throw new Error("選択OCRからシートを生成できませんでした");
       }
       setSheetPayload(normalized);
-      setSheetJson(formatJson(normalized));
+      markSheetJsonStale();
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
       invalidateSheetPreSaveChecks();
@@ -2509,6 +2517,12 @@ export default function OrderWorkflowV2Page() {
     });
 
   const getSheetPayloadForAction = () => flushPendingSheetCellEdits() || sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+
+  const refreshSheetJsonForDetails = () => {
+    const latestSheet = flushPendingSheetCellEdits() || sheetPayloadRef.current || sheetPayload || defaultSheet;
+    setSheetJson(formatJson(latestSheet));
+    setSheetJsonStale(false);
+  };
 
   const flushPendingSheetCellEdits = () => {
     const edits = Array.from(pendingSheetCellEditsRef.current.values());
@@ -2527,7 +2541,7 @@ export default function OrderWorkflowV2Page() {
     sheetPayloadRef.current = nextSheet;
     pendingSheetCellEditsRef.current.clear();
     setSheetPayload(nextSheet);
-    setSheetJson(formatJson(nextSheet));
+    markSheetJsonStale();
     return nextSheet;
   };
 
@@ -2594,7 +2608,7 @@ export default function OrderWorkflowV2Page() {
       if (!current) return current;
       const rows = current.rows.map((row) => row.map((cell, idx) => (idx === colIndex ? columnFillValue : cell)));
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
   };
@@ -2617,7 +2631,7 @@ export default function OrderWorkflowV2Page() {
         return next;
       });
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
   };
@@ -2639,7 +2653,7 @@ export default function OrderWorkflowV2Page() {
         }),
       );
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
   };
@@ -2744,7 +2758,7 @@ export default function OrderWorkflowV2Page() {
         rows[patch.row_index][patch.col_index] = String(patch.suggested_value || "").trim();
       }
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
     setSheetAutoEditResult(null);
@@ -2770,7 +2784,7 @@ export default function OrderWorkflowV2Page() {
       if (!rows[patch.row_index] || patch.col_index < 0 || patch.col_index >= rows[patch.row_index].length) return current;
       rows[patch.row_index][patch.col_index] = suggestedValue;
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
     setSheetAutoEditResult((current) => {
@@ -2812,7 +2826,7 @@ export default function OrderWorkflowV2Page() {
         rows[rowIndex][colIndex] = String(warning.suggested_value || "").trim();
       }
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
     setSelectedAnomalyIndex(null);
@@ -2832,7 +2846,7 @@ export default function OrderWorkflowV2Page() {
       if (!rows[rowIndex] || colIndex < 0 || colIndex >= rows[rowIndex].length) return current;
       rows[rowIndex][colIndex] = suggestedValue;
       const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
+      markSheetJsonStale();
       return nextSheet;
     });
     const sourceReview = anomalyReview || {};
@@ -4568,13 +4582,21 @@ export default function OrderWorkflowV2Page() {
           ) : (
             <p className="subtle">Step2で正解OCRを選択してから、選択OCRだけを使ってシートを生成してください。</p>
           )}
-          <details className="json-details">
+          <details
+            className="json-details"
+            onToggle={(event) => {
+              if (event.currentTarget.open && sheetJsonStale) {
+                refreshSheetJsonForDetails();
+              }
+            }}
+          >
             <summary>保存予定JSONを確認</summary>
             <textarea
               value={sheetJson}
               onChange={(event) => {
                 const nextJson = event.target.value;
                 setSheetJson(nextJson);
+                setSheetJsonStale(false);
                 try {
                   setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));
                 } catch {
