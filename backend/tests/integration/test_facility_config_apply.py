@@ -51,7 +51,7 @@ def test_fac00002_template_columns_preserve_area_schema_without_duplicates():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00002")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert resolved.get("fax_template_id") == "シルバーホームなごみ"
     template = resolved.get("fax_template") or {}
     fields = template.get("main_ocr_row_fields") or []
     assert isinstance(fields, list)
@@ -73,7 +73,7 @@ def test_fac00010_uses_floor_2f3f_fax_template():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00010")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert resolved.get("fax_template_id") == "山城"
     fields = (resolved.get("fax_template") or {}).get("main_ocr_row_fields") or []
     assert fields == [
         "date_mmdd",
@@ -97,8 +97,8 @@ def test_fac00009_uses_floor_2f3f_fax_template_from_master():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00009")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
-    assert resolved.get("fax_template_ids") == ["fax_layout_floor_2f3f_v1"]
+    assert resolved.get("fax_template_id") == "グループホームそよかぜ"
+    assert resolved.get("fax_template_ids") == ["グループホームそよかぜ"]
     assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -126,8 +126,8 @@ def test_master_facility_template_replaces_stale_template_candidates_without_ope
         assert facility_service.update_config("FAC00009", stale_config)
         resolved = config_service.get_facility_config("FAC00009")
         assert resolved is not None
-        assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
-        assert resolved.get("fax_template_ids") == ["fax_layout_floor_2f3f_v1"]
+        assert resolved.get("fax_template_id") == "グループホームそよかぜ"
+        assert resolved.get("fax_template_ids") == ["グループホームそよかぜ"]
     finally:
         assert facility_service.update_config("FAC00009", previous_config)
 
@@ -156,11 +156,8 @@ def test_master_facility_template_wins_over_stale_db_config_without_operator_sou
         assert facility_service.update_config("FAC00016", stale_config)
         resolved = config_service.get_facility_config("FAC00016")
         assert resolved is not None
-        assert resolved.get("fax_template_id") == "fax_layout_regular_diabetes_v1"
-        assert resolved.get("fax_template_ids") == [
-            "fax_layout_regular_diabetes_v1",
-            "fax_layout_regular_forbidden_v1",
-        ]
+        assert resolved.get("fax_template_id") == "いこいの森プラス"
+        assert resolved.get("fax_template_ids") == ["いこいの森プラス"]
         assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
             "date_mmdd",
             "daypart",
@@ -447,8 +444,8 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00006")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_soft_mixer_forbidden_v1"
-    assert resolved.get("fax_template_ids") == ["fax_layout_regular_soft_mixer_forbidden_v1"]
+    assert resolved.get("fax_template_id") == "藍TERRACE"
+    assert resolved.get("fax_template_ids") == ["藍TERRACE"]
     assert ((resolved.get("fax_template") or {}).get("postprocess") or {}).get("qty_ocr_engine") == "disabled"
     template = resolved.get("fax_template") or {}
     assert template.get("main_ocr_row_fields") == [
@@ -504,7 +501,7 @@ def test_fac00012_preserves_placeholder_spacer_and_source_indexes_from_master():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00012")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert resolved.get("fax_template_id") == "グランフォレスト方上"
     override = resolved.get("fax_template_override") or {}
     assert override.get("columns_authoritative") is True
     template = resolved.get("fax_template") or {}
@@ -662,7 +659,7 @@ def test_fac00007_uses_regular_forbidden_plus_change_columns():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00007")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert resolved.get("fax_template_id") == "ゆうゆう（株）百々家"
     template = resolved.get("fax_template") or {}
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
@@ -682,7 +679,7 @@ def test_fac00004_exposes_daycare_staff_and_no_fried_columns():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00004")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_regular_staff_daycare_other_forbidden_v1"
+    assert resolved.get("fax_template_id") == "介護老人保健施設ふれあいの丘"
     template = resolved.get("fax_template") or {}
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
@@ -1297,7 +1294,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
     config_service.reload_configs()
     fac1 = config_service.get_facility_config("FAC00001")
     assert fac1 is not None
-    assert fac1.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert fac1.get("fax_template_id") == "大和なでしこ"
     assert (fac1.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -1313,7 +1310,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
 
     fac8 = config_service.get_facility_config("FAC00008")
     assert fac8 is not None
-    assert fac8.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert fac8.get("fax_template_id") == "佐古"
     assert (fac8.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -1329,11 +1326,11 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
 
     fac9 = config_service.get_facility_config("FAC00009")
     assert fac9 is not None
-    assert fac9.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert fac9.get("fax_template_id") == "グループホームそよかぜ"
 
     resolved = config_service.get_facility_config("FAC00010")
     assert resolved is not None
-    assert resolved.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
+    assert resolved.get("fax_template_id") == "山城"
     template = resolved.get("fax_template") or {}
     assert (resolved.get("fax_template_override") or {}).get("grid_line_scale_horizontal") == 20
     assert (resolved.get("fax_template_override") or {}).get("columns_authoritative") is True
@@ -1352,7 +1349,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
 
     fac11 = config_service.get_facility_config("FAC00011")
     assert fac11 is not None
-    assert fac11.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert fac11.get("fax_template_id") == "ケアハウス四万十"
 
 
 def test_all_master_facilities_have_explicit_layout_template_ids():
@@ -1373,7 +1370,7 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
 
     fac14 = config_service.get_facility_config("FAC00014")
     assert fac14 is not None
-    assert fac14.get("fax_template_id") == "fax_layout_regular_staff_daycare_v1"
+    assert fac14.get("fax_template_id") == "湘南さくら病院"
     assert (fac14.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -1409,7 +1406,7 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
 
     fac15 = config_service.get_facility_config("FAC00015")
     assert fac15 is not None
-    assert fac15.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert fac15.get("fax_template_id") == "ケアハウス四万十ピア"
     assert (fac15.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -1425,7 +1422,7 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
 
     fac16 = config_service.get_facility_config("FAC00016")
     assert fac16 is not None
-    assert fac16.get("fax_template_id") == "fax_layout_regular_diabetes_v1"
+    assert fac16.get("fax_template_id") == "いこいの森プラス"
     assert (fac16.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
@@ -1474,34 +1471,23 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
 
     fac00003 = config_service.get_facility_config("FAC00003")
     assert fac00003 is not None
-    assert fac00003.get("fax_template_id") == "fax_layout_floor_2f3f_v1"
-    assert fac00003.get("fax_template_ids") == [
-        "fax_layout_floor_2f3f_v1",
-        "fax_layout_regular_forbidden_v1",
-    ]
+    assert fac00003.get("fax_template_id") == "春日苑 松茂"
+    assert fac00003.get("fax_template_ids") == ["春日苑 松茂"]
 
     fac00013 = config_service.get_facility_config("FAC00013")
     assert fac00013 is not None
-    assert fac00013.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
-    assert fac00013.get("fax_template_ids") == [
-        "fax_layout_regular_forbidden_v1",
-    ]
+    assert fac00013.get("fax_template_id") == "いこいの森"
+    assert fac00013.get("fax_template_ids") == ["いこいの森"]
 
     fac00014 = config_service.get_facility_config("FAC00014")
     assert fac00014 is not None
-    assert fac00014.get("fax_template_id") == "fax_layout_regular_staff_daycare_v1"
-    assert fac00014.get("fax_template_ids") == [
-        "fax_layout_regular_staff_daycare_v1",
-        "fax_layout_regular_forbidden_v1",
-    ]
+    assert fac00014.get("fax_template_id") == "湘南さくら病院"
+    assert fac00014.get("fax_template_ids") == ["湘南さくら病院"]
 
     fac00016 = config_service.get_facility_config("FAC00016")
     assert fac00016 is not None
-    assert fac00016.get("fax_template_id") == "fax_layout_regular_diabetes_v1"
-    assert fac00016.get("fax_template_ids") == [
-        "fax_layout_regular_diabetes_v1",
-        "fax_layout_regular_forbidden_v1",
-    ]
+    assert fac00016.get("fax_template_id") == "いこいの森プラス"
+    assert fac00016.get("fax_template_ids") == ["いこいの森プラス"]
 
 
 def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
