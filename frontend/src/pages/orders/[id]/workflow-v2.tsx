@@ -1179,6 +1179,8 @@ export default function OrderWorkflowV2Page() {
   const [preSaveChecks, setPreSaveChecks] = useState<PreSaveChecks>({});
   const [preSaveStatus, setPreSaveStatus] = useState<PreSaveStatus>({});
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
+  const sheetPayloadRef = useRef<SheetPayload | null>(null);
+  const pendingSheetCellEditsRef = useRef<Map<string, { rowIndex: number; colIndex: number; value: string }>>(new Map());
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
   const [localAnomalyReview, setLocalAnomalyReview] = useState<Record<string, unknown> | null>(null);
@@ -1712,6 +1714,11 @@ export default function OrderWorkflowV2Page() {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
   }, [router.isReady, orderId]);
+
+  useEffect(() => {
+    sheetPayloadRef.current = sheetPayload;
+    pendingSheetCellEditsRef.current.clear();
+  }, [sheetPayload]);
 
   useEffect(() => {
     if (!orderDetail || !currentDocumentId) return;
@@ -2501,6 +2508,29 @@ export default function OrderWorkflowV2Page() {
       refreshAfter: false,
     });
 
+  const getSheetPayloadForAction = () => flushPendingSheetCellEdits() || sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+
+  const flushPendingSheetCellEdits = () => {
+    const edits = Array.from(pendingSheetCellEditsRef.current.values());
+    const baseSheet = sheetPayloadRef.current || sheetPayload;
+    if (!edits.length) return baseSheet;
+    if (!baseSheet) {
+      pendingSheetCellEditsRef.current.clear();
+      return null;
+    }
+    const rows = baseSheet.rows.map((row) => [...row]);
+    for (const edit of edits) {
+      if (!rows[edit.rowIndex] || edit.colIndex < 0 || edit.colIndex >= rows[edit.rowIndex].length) continue;
+      rows[edit.rowIndex][edit.colIndex] = edit.value;
+    }
+    const nextSheet = { ...baseSheet, rows };
+    sheetPayloadRef.current = nextSheet;
+    pendingSheetCellEditsRef.current.clear();
+    setSheetPayload(nextSheet);
+    setSheetJson(formatJson(nextSheet));
+    return nextSheet;
+  };
+
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
@@ -2514,15 +2544,7 @@ export default function OrderWorkflowV2Page() {
     });
     if (selectedAutoEditIndex !== null) setSelectedAutoEditIndex(null);
     if (selectedAnomalyIndex !== null) setSelectedAnomalyIndex(null);
-    setSheetPayload((current) => {
-      if (!current) return current;
-      const rows = current.rows.map((row, idx) => (
-        idx === rowIndex ? row.map((cell, cellIdx) => (cellIdx === colIndex ? value : cell)) : row
-      ));
-      const nextSheet = { ...current, rows };
-      setSheetJson(formatJson(nextSheet));
-      return nextSheet;
-    });
+    pendingSheetCellEditsRef.current.set(`${rowIndex}:${colIndex}`, { rowIndex, colIndex, value });
   };
 
   const focusSheetInput = (rowIndex: number, colIndex: number) => {
@@ -2537,6 +2559,7 @@ export default function OrderWorkflowV2Page() {
   const handleSheetInputKeyDown = (event: KeyboardEvent<HTMLInputElement>, rowIndex: number, colIndex: number) => {
     if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
     event.preventDefault();
+    flushPendingSheetCellEdits();
     const nextRowIndex = rowIndex + 1;
     if (!sheetPayload?.rows[nextRowIndex]) return;
     focusSheetInput(nextRowIndex, colIndex);
@@ -2561,6 +2584,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const fillQuantityColumn = () => {
+    flushPendingSheetCellEdits();
     const colIndex = Number(columnFillTarget);
     if (!sheetPayload || !Number.isInteger(colIndex) || colIndex < 0) return;
     setLocalAnomalyReview(null);
@@ -2576,6 +2600,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const swapQuantityColumns = () => {
+    flushPendingSheetCellEdits();
     const left = Number(swapLeftColumn);
     const right = Number(swapRightColumn);
     if (!sheetPayload || !Number.isInteger(left) || !Number.isInteger(right) || left === right) return;
@@ -2598,6 +2623,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const applyVisibleOcrSuggestions = () => {
+    flushPendingSheetCellEdits();
     if (!sheetPayload || !ocrOverlayItemMap.size) return;
     setLocalAnomalyReview(null);
     setSelectedAutoEditIndex(null);
@@ -2674,7 +2700,7 @@ export default function OrderWorkflowV2Page() {
 
   const proposeSheetAutoEdit = () =>
     runAction("Step3 AI auto edit", async () => {
-      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      const parsed = getSheetPayloadForAction();
       if (!parsed) {
         throw new Error("AI自動編集に渡せるシートがありません");
       }
@@ -2704,6 +2730,7 @@ export default function OrderWorkflowV2Page() {
     });
 
   const applySheetAutoEditPatches = () => {
+    flushPendingSheetCellEdits();
     const patches = autoEditPatches;
     if (!sheetPayload || !patches.length) return;
     setLocalAnomalyReview(null);
@@ -2724,6 +2751,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const applySingleSheetAutoEditPatch = (patch: SheetAutoEditPatch) => {
+    flushPendingSheetCellEdits();
     if (!sheetPayload || typeof patch.row_index !== "number" || typeof patch.col_index !== "number") return;
     const suggestedValue = String(patch.suggested_value || "").trim();
     if (!suggestedValue) return;
@@ -2767,6 +2795,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const applyAnomalyCorrections = () => {
+    flushPendingSheetCellEdits();
     const patches = anomalyWarnings.filter((warning) => (
       typeof warning.row_index === "number"
       && typeof warning.col_index === "number"
@@ -2791,6 +2820,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const applySingleAnomalyCorrection = (warning: SheetAnomalyWarning) => {
+    flushPendingSheetCellEdits();
     if (!sheetPayload || typeof warning.row_index !== "number" || typeof warning.col_index !== "number") return;
     const suggestedValue = String(warning.suggested_value || "").trim();
     if (!suggestedValue) return;
@@ -2820,7 +2850,7 @@ export default function OrderWorkflowV2Page() {
 
   const dismissSingleAnomalyWarning = (warning: SheetAnomalyWarning) =>
     runAction("Step3 anomaly warning dismiss", async () => {
-      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      const parsed = getSheetPayloadForAction();
       if (!parsed) {
         throw new Error("異常候補の却下に使えるシートがありません");
       }
@@ -2846,7 +2876,7 @@ export default function OrderWorkflowV2Page() {
         setVisibleStep(2);
         throw new Error("正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。");
       }
-      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      const parsed = getSheetPayloadForAction();
       if (!parsed) {
         throw new Error("保存できるシートがありません");
       }
@@ -2873,7 +2903,7 @@ export default function OrderWorkflowV2Page() {
 
   const runAnomalyReview = () =>
     runAction("Step3 anomaly review", async () => {
-      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      const parsed = getSheetPayloadForAction();
       if (!parsed) {
         throw new Error("数量異常チェックに渡せるシートがありません");
       }
@@ -2893,7 +2923,7 @@ export default function OrderWorkflowV2Page() {
 
   const showSheetReview = () =>
     runAction("Step3 sheet review confirm", async () => {
-      const parsed = sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+      const parsed = getSheetPayloadForAction();
       if (!parsed) {
         throw new Error("シート確認に使えるシートがありません");
       }
@@ -4514,12 +4544,14 @@ export default function OrderWorkflowV2Page() {
                                     </span>
                                   ) : null}
                                   <input
+                                    key={`${sheetPayload.row_ids?.[rowIdx] || rowIdx}:${field}:${colIdx}:${row[colIdx] || ""}`}
                                     data-sheet-row={rowIdx}
                                     data-sheet-col={colIdx}
-                                    value={row[colIdx] || ""}
+                                    defaultValue={row[colIdx] || ""}
                                     readOnly={isLockedSheetField(field)}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
                                     onKeyDown={(event) => handleSheetInputKeyDown(event, rowIdx, colIdx)}
+                                    onBlur={() => flushPendingSheetCellEdits()}
                                     onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
                                   />
                                 </div>
