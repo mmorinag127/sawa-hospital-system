@@ -2944,6 +2944,7 @@ export default function OrderDetailPage() {
   const [ocrSheetFields, setOcrSheetFields] = useState<string[]>([]);
   const [ocrSheetHeader, setOcrSheetHeader] = useState<string[]>([]);
   const [ocrSheetRows, setOcrSheetRows] = useState<string[][]>([]);
+  const ocrSheetRowsRef = useRef<string[][]>([]);
   const [ocrSheetRowIds, setOcrSheetRowIds] = useState<string[]>([]);
   const [ocrSheetCellConfidenceRows, setOcrSheetCellConfidenceRows] = useState<string[][]>([]);
   const [ocrSheetCellProvenanceRows, setOcrSheetCellProvenanceRows] = useState<string[][]>([]);
@@ -2995,6 +2996,7 @@ export default function OrderDetailPage() {
   const ocrSheetEditedSinceLoadRef = useRef<boolean>(false);
   const ocrSheetClipboardRef = useRef<string[][] | null>(null);
   const ocrSheetCellRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const pendingOcrSheetCellEditsRef = useRef<Map<string, OcrSheetTouchedCell & { value: string }>>(new Map());
   const ocrSheetSelectionPointerActiveRef = useRef<boolean>(false);
   const ocrSheetDragSelectionBoundsRef = useRef<OcrSheetSelectionBounds | null>(null);
   const ocrSwapLeftColumnRef = useRef<HTMLSelectElement | null>(null);
@@ -3337,6 +3339,8 @@ export default function OrderDetailPage() {
     setOcrTablePageIndex(null);
     setOcrSheetFields([]);
     setOcrSheetHeader([]);
+    pendingOcrSheetCellEditsRef.current.clear();
+    ocrSheetRowsRef.current = [];
     setOcrSheetRows([]);
     setOcrSheetRowIds([]);
     setOcrSheetCellConfidenceRows([]);
@@ -4096,7 +4100,10 @@ export default function OrderDetailPage() {
     const effectivePayload = applyExpandedCellCopyModeToPayload(payload);
     setOcrSheetFields(effectivePayload.fields);
     setOcrSheetHeader(effectivePayload.header);
+    pendingOcrSheetCellEditsRef.current.clear();
+    ocrSheetRowsRef.current = effectivePayload.rows;
     setOcrSheetRows(effectivePayload.rows);
+    syncOcrSheetInputsFromRows(effectivePayload.rows);
     setOcrSheetRowIds(effectivePayload.rowIds);
     setOcrSheetCellConfidenceRows(effectivePayload.cellConfidenceRows);
     setOcrSheetCellProvenanceRows(effectivePayload.cellProvenanceRows);
@@ -4114,7 +4121,10 @@ export default function OrderDetailPage() {
     const effectivePayload = applyExpandedCellCopyModeToPayload(baselinePayload, expandedCellCopyMode);
     setOcrSheetFields(effectivePayload.fields);
     setOcrSheetHeader(effectivePayload.header);
+    pendingOcrSheetCellEditsRef.current.clear();
+    ocrSheetRowsRef.current = effectivePayload.rows;
     setOcrSheetRows(effectivePayload.rows);
+    syncOcrSheetInputsFromRows(effectivePayload.rows);
     setOcrSheetRowIds(effectivePayload.rowIds);
     setOcrSheetCellConfidenceRows(effectivePayload.cellConfidenceRows);
     setOcrSheetCellProvenanceRows(effectivePayload.cellProvenanceRows);
@@ -5433,6 +5443,66 @@ export default function OrderDetailPage() {
     setOcrSheetNumericCellSummary(rebuildOcrNumericCellSummary(nextNumericItems, ocrSheetRawNumericCount));
   };
 
+  const getPendingOcrSheetCellEdits = () => Array.from(pendingOcrSheetCellEditsRef.current.values());
+
+  const mergePendingOcrSheetCellEdits = (
+    baseRows: string[][],
+    edits: Array<OcrSheetTouchedCell & { value: string }> = getPendingOcrSheetCellEdits(),
+  ) => {
+    if (!edits.length) return baseRows;
+    const next = baseRows.map((row) => [...row]);
+    for (const { rowIndex, cellIndex, value } of edits) {
+      while (next.length <= rowIndex) {
+        next.push([]);
+      }
+      while (next[rowIndex].length <= cellIndex) {
+        next[rowIndex].push("");
+      }
+      next[rowIndex][cellIndex] = value;
+    }
+    return next;
+  };
+
+  const syncOcrSheetInputsFromRows = (rows: string[][]) => {
+    requestAnimationFrame(() => {
+      Object.entries(ocrSheetCellRefs.current).forEach(([key, input]) => {
+        if (!input || pendingOcrSheetCellEditsRef.current.has(key)) return;
+        const [rowIndexText, cellIndexText] = key.split(":");
+        const rowIndex = Number.parseInt(rowIndexText || "", 10);
+        const cellIndex = Number.parseInt(cellIndexText || "", 10);
+        if (!Number.isInteger(rowIndex) || !Number.isInteger(cellIndex)) return;
+        const nextValue = rows[rowIndex]?.[cellIndex] ?? "";
+        if (input.value !== nextValue) {
+          input.value = nextValue;
+        }
+      });
+    });
+  };
+
+  const flushPendingOcrSheetCellEdits = () => {
+    const edits = getPendingOcrSheetCellEdits();
+    if (!edits.length) return ocrSheetRowsRef.current;
+    pendingOcrSheetCellEditsRef.current.clear();
+    ocrSheetEditedSinceLoadRef.current = true;
+    const nextRows = mergePendingOcrSheetCellEdits(ocrSheetRowsRef.current, edits);
+    ocrSheetRowsRef.current = nextRows;
+    updateOcrSheetTouchedCellMetadata(edits);
+    setOcrSheetRowsAndSyncInputs(nextRows);
+    syncOcrSheetInputsFromRows(nextRows);
+    return nextRows;
+  };
+
+  const setOcrSheetRowsAndSyncInputs = (updater: string[][] | ((prev: string[][]) => string[][])) => {
+    pendingOcrSheetCellEditsRef.current.clear();
+    setOcrSheetRows((prev) => {
+      const currentRows = ocrSheetRowsRef.current.length ? ocrSheetRowsRef.current : prev;
+      const nextRows = typeof updater === "function" ? updater(currentRows) : updater;
+      ocrSheetRowsRef.current = nextRows;
+      syncOcrSheetInputsFromRows(nextRows);
+      return nextRows;
+    });
+  };
+
   const clearOcrSheetOverlayState = () => {
     ocrSheetEditedSinceLoadRef.current = true;
     setOcrSheetCellConfidenceRows([]);
@@ -5550,36 +5620,27 @@ export default function OrderDetailPage() {
     cellIndex: number,
     value: string,
   ) => {
-    markOcrSheetEdited({ preserveOverlay: true, touchedCells: [{ rowIndex, cellIndex }] });
-    setOcrSheetRows((prev) => {
-      const next = prev.map((row) => [...row]);
-      while (next.length <= rowIndex) {
-        next.push([]);
-      }
-      while (next[rowIndex].length <= cellIndex) {
-        next[rowIndex].push("");
-      }
-      next[rowIndex][cellIndex] = value;
-      return next;
-    });
+    ocrSheetEditedSinceLoadRef.current = true;
+    pendingOcrSheetCellEditsRef.current.set(`${rowIndex}:${cellIndex}`, { rowIndex, cellIndex, value });
   };
 
   const applySelectedOcrSheetColumnFill = () => {
+    const activeRows = flushPendingOcrSheetCellEdits();
     const targetColumnIndex = Number(ocrSheetColumnFillTarget);
     const fillValue = String(ocrSheetColumnFillValue ?? "").trim();
-    if (!Number.isInteger(targetColumnIndex) || targetColumnIndex < 0 || !ocrSheetRows.length || !fillValue) {
+    if (!Number.isInteger(targetColumnIndex) || targetColumnIndex < 0 || !activeRows.length || !fillValue) {
       return false;
     }
-    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, activeRows), 1);
     if (targetColumnIndex >= columnCount) {
       return false;
     }
-    const touchedCells = Array.from({ length: ocrSheetRows.length }, (_, rowIndex) => ({
+    const touchedCells = Array.from({ length: activeRows.length }, (_, rowIndex) => ({
       rowIndex,
       cellIndex: targetColumnIndex,
     }));
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) =>
+    setOcrSheetRowsAndSyncInputs((prev) =>
       prev.map((row) => {
         const clone = [...row];
         while (clone.length < columnCount) clone.push("");
@@ -5711,13 +5772,14 @@ export default function OrderDetailPage() {
   const readOcrSheetSelectionMatrix = (selection: OcrSheetCellSelection | null) => {
     const selectionBounds = getOcrSheetSelectionBounds(selection);
     if (!selectionBounds) return null;
-    const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
+    const activeRows = mergePendingOcrSheetCellEdits(ocrSheetRowsRef.current);
+    const columnCount = Math.max(getColumnCount(ocrSheetHeader, activeRows), 1);
     return Array.from({ length: selectionBounds.rowCount }, (_, rowOffset) =>
       Array.from({ length: selectionBounds.cellCount }, (_, cellOffset) => {
         const sourceRow = selectionBounds.topRowIndex + rowOffset;
         const sourceCell = selectionBounds.leftCellIndex + cellOffset;
-        if (sourceRow >= ocrSheetRows.length || sourceCell >= columnCount) return "";
-        return ocrSheetRows[sourceRow]?.[sourceCell] ?? "";
+        if (sourceRow >= activeRows.length || sourceCell >= columnCount) return "";
+        return activeRows[sourceRow]?.[sourceCell] ?? "";
       }),
     );
   };
@@ -5761,6 +5823,7 @@ export default function OrderDetailPage() {
   };
 
   const clearOcrSheetSelectionContents = (message: string = "選択範囲をクリアしました。") => {
+    flushPendingOcrSheetCellEdits();
     const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
     if (!selectionBounds) return false;
     const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
@@ -5771,7 +5834,7 @@ export default function OrderDetailPage() {
       })),
     ).flat();
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) =>
+    setOcrSheetRowsAndSyncInputs((prev) =>
       prev.map((row, rowIndex) => {
         const clone = [...row];
         while (clone.length < columnCount) clone.push("");
@@ -5811,6 +5874,7 @@ export default function OrderDetailPage() {
     targetCellIndex: number,
     successMessage: string,
   ) => {
+    flushPendingOcrSheetCellEdits();
     if (!matrix.length) return false;
     const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
     if (targetRowIndex >= ocrSheetRows.length || targetCellIndex >= columnCount) return false;
@@ -5828,9 +5892,9 @@ export default function OrderDetailPage() {
           && rowIndex < ocrSheetRows.length
           && cellIndex >= 0
           && cellIndex < columnCount,
-      );
+    );
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) =>
+    setOcrSheetRowsAndSyncInputs((prev) =>
       prev.map((row, rowIndex) => {
         const clone = [...row];
         while (clone.length < columnCount) clone.push("");
@@ -5877,6 +5941,7 @@ export default function OrderDetailPage() {
   };
 
   const fillOcrSheetSelectionDown = () => {
+    flushPendingOcrSheetCellEdits();
     const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
     if (!selectionBounds || selectionBounds.rowCount < 2) return false;
     const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
@@ -5887,7 +5952,7 @@ export default function OrderDetailPage() {
       })),
     ).flat();
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) => {
+    setOcrSheetRowsAndSyncInputs((prev) => {
       const next = prev.map((row) => {
         const clone = [...row];
         while (clone.length < columnCount) clone.push("");
@@ -5909,6 +5974,7 @@ export default function OrderDetailPage() {
   };
 
   const fillOcrSheetSelectionRight = () => {
+    flushPendingOcrSheetCellEdits();
     const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
     if (!selectionBounds || selectionBounds.cellCount < 2) return false;
     const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
@@ -5919,7 +5985,7 @@ export default function OrderDetailPage() {
       })),
     ).flat();
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) => {
+    setOcrSheetRowsAndSyncInputs((prev) => {
       const next = prev.map((row) => {
         const clone = [...row];
         while (clone.length < columnCount) clone.push("");
@@ -5966,6 +6032,7 @@ export default function OrderDetailPage() {
     }
     if (event.key === "Tab") {
       event.preventDefault();
+      flushPendingOcrSheetCellEdits();
       moveFocusedOcrSheetCell(event.shiftKey ? -1 : 1, 0);
       return;
     }
@@ -6006,6 +6073,7 @@ export default function OrderDetailPage() {
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      flushPendingOcrSheetCellEdits();
       if (event.altKey) {
         moveFocusedOcrSheetCell(0, event.shiftKey ? -1 : 1);
         return;
@@ -6094,6 +6162,7 @@ export default function OrderDetailPage() {
   };
 
   const moveOcrSheetSelectionTo = (targetRowIndex: number, targetCellIndex: number) => {
+    flushPendingOcrSheetCellEdits();
     const selectionBounds = getOcrSheetSelectionBounds(ocrSheetSelection);
     if (!selectionBounds) return false;
     const columnCount = Math.max(getColumnCount(ocrSheetHeader, ocrSheetRows), 1);
@@ -6127,7 +6196,7 @@ export default function OrderDetailPage() {
       ).flat(),
     ];
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) => {
+    setOcrSheetRowsAndSyncInputs((prev) => {
       const next = prev.map((row) => {
         const clone = [...row];
         while (clone.length < columnCount) {
@@ -6233,6 +6302,7 @@ export default function OrderDetailPage() {
     const pastedText = event.clipboardData?.getData("text/plain") || "";
     if (!pastedText) return;
     event.preventDefault();
+    flushPendingOcrSheetCellEdits();
     focusOcrSheetCell(rowIndex, cellIndex, false);
     await pasteOcrSheetSelection(pastedText);
   };
@@ -6610,9 +6680,10 @@ export default function OrderDetailPage() {
       setOcrTableMessage("現在は基盤復旧待ちのため、行の追加操作を止めています。");
       return;
     }
-    const columnCount = getColumnCount(ocrSheetHeader, ocrSheetRows);
+    const activeRows = flushPendingOcrSheetCellEdits();
+    const columnCount = getColumnCount(ocrSheetHeader, activeRows);
     markOcrSheetEdited();
-    setOcrSheetRows((prev) => [...prev, Array.from({ length: columnCount }, () => "")]);
+    setOcrSheetRowsAndSyncInputs([...activeRows, Array.from({ length: columnCount }, () => "")]);
     setOcrSheetRowIds((prev) => [...prev, makeSheetRowId("manual")]);
   };
 
@@ -6621,8 +6692,9 @@ export default function OrderDetailPage() {
       setOcrTableMessage("現在は基盤復旧待ちのため、行の複製操作を止めています。");
       return;
     }
+    flushPendingOcrSheetCellEdits();
     markOcrSheetEdited();
-    setOcrSheetRows((prev) => {
+    setOcrSheetRowsAndSyncInputs((prev) => {
       const next = prev.map((row) => [...row]);
       const row = next[rowIndex];
       if (!row) return prev;
@@ -6642,8 +6714,9 @@ export default function OrderDetailPage() {
       setOcrTableMessage("現在は基盤復旧待ちのため、行の削除操作を止めています。");
       return;
     }
+    flushPendingOcrSheetCellEdits();
     markOcrSheetEdited();
-    setOcrSheetRows((prev) => prev.filter((_, idx) => idx !== rowIndex));
+    setOcrSheetRowsAndSyncInputs((prev) => prev.filter((_, idx) => idx !== rowIndex));
     setOcrSheetRowIds((prev) => prev.filter((_, idx) => idx !== rowIndex));
   };
 
@@ -6653,7 +6726,8 @@ export default function OrderDetailPage() {
       return;
     }
     if (!offset) return;
-    const totalRows = ocrSheetRows.length;
+    const activeRows = flushPendingOcrSheetCellEdits();
+    const totalRows = activeRows.length;
     if (!totalRows) {
       setOcrTableMessage("シフトできる行がありません。");
       return;
@@ -6678,7 +6752,7 @@ export default function OrderDetailPage() {
       })),
     ).flat();
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) => {
+    setOcrSheetRowsAndSyncInputs((prev) => {
       const next = prev.map((row) => [...row]);
       quantityColumnIndexes.forEach((colIdx) => {
         const values = [];
@@ -6718,13 +6792,14 @@ export default function OrderDetailPage() {
       setOcrTableMessage("数量列だけを入れ替えられます。");
       return;
     }
+    const activeRows = flushPendingOcrSheetCellEdits();
     const maxIndex = Math.max(leftIndex, rightIndex);
-    const touchedCells = Array.from({ length: ocrSheetRows.length }, (_, rowIndex) => [
+    const touchedCells = Array.from({ length: activeRows.length }, (_, rowIndex) => [
       { rowIndex, cellIndex: leftIndex },
       { rowIndex, cellIndex: rightIndex },
     ]).flat();
     markOcrSheetEdited({ preserveOverlay: true, touchedCells });
-    setOcrSheetRows((prev) =>
+    setOcrSheetRowsAndSyncInputs((prev) =>
       prev.map((row) => {
         const next = [...row];
         while (next.length <= maxIndex) {
@@ -6836,8 +6911,9 @@ export default function OrderDetailPage() {
       setOcrTableMessage(message);
       return { ok: false, message };
     }
+    const flushedRows = flushPendingOcrSheetCellEdits();
     let targetHeader = ocrSheetHeader;
-    let targetRows = ocrSheetRows;
+    let targetRows = flushedRows;
     let targetFields = ocrSheetFields;
     let targetRowIds = ocrSheetRowIds;
 
@@ -6922,8 +6998,9 @@ export default function OrderDetailPage() {
       setOcrTableMessage(message);
       return { ok: false, message };
     }
+    const flushedRows = flushPendingOcrSheetCellEdits();
     let targetHeader = ocrSheetHeader;
-    let targetRows = ocrSheetRows;
+    let targetRows = flushedRows;
     let targetFields = ocrSheetFields;
     let targetRowIds = ocrSheetRowIds;
 
@@ -7097,7 +7174,7 @@ export default function OrderDetailPage() {
       setActionMessage("メニュー枠はありますが、数量はまだ信用できません。Step2 で OCR 基盤を整えてから明細へ反映してください。");
       return;
     }
-    let activeRows = ocrSheetRows;
+    let activeRows = flushPendingOcrSheetCellEdits();
     if (!activeRows.length) {
       const loaded = await loadOcrSheet({ silent: true });
       if (loaded) {
@@ -12453,12 +12530,13 @@ export default function OrderDetailPage() {
                                             data-confidence-visible={confidenceTier ? String(!belowConfidenceThreshold) : undefined}
                                             data-provenance={provenance || undefined}
                                             data-overlay-classification={overlayClassification || undefined}
-                                            value={row[cellIdx] ?? ""}
+                                            defaultValue={row[cellIdx] ?? ""}
                                             draggable={Boolean(ocrSheetSelectionBounds && selected)}
-	                                            onMouseDown={(event) => handleOcrSheetCellMouseDown(event, rowIdx, cellIdx)}
-	                                            onFocus={() => handleOcrSheetCellFocus(rowIdx, cellIdx)}
-	                                            onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
-	                                            onKeyDown={(event) => handleOcrSheetCellKeyDown(event, rowIdx, cellIdx)}
+		                                            onMouseDown={(event) => handleOcrSheetCellMouseDown(event, rowIdx, cellIdx)}
+		                                            onFocus={() => handleOcrSheetCellFocus(rowIdx, cellIdx)}
+		                                            onChange={(e) => updateOcrTableCell(rowIdx, cellIdx, e.target.value)}
+		                                            onBlur={() => flushPendingOcrSheetCellEdits()}
+		                                            onKeyDown={(event) => handleOcrSheetCellKeyDown(event, rowIdx, cellIdx)}
 	                                            onPaste={(event) => void handleOcrSheetCellPaste(event, rowIdx, cellIdx)}
 	                                            onDragStart={(event) => handleOcrSheetSelectionDragStart(event, rowIdx, cellIdx)}
 	                                            onDragEnd={handleOcrSheetSelectionDragEnd}
