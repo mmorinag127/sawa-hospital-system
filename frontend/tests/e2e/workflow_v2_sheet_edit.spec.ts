@@ -178,3 +178,19 @@ test("workflow-v2 sheet edits stay local while typing and flush on save", async 
   expect(savePayload.edited_by).toBe("operator");
   await expect(page.getByText("シートを保存しました")).toBeVisible();
 });
+
+test("workflow-v2 sheet helper displays use the latest blurred cell edits", async ({ page }) => {
+  await mountWorkflowV2SheetPage(page);
+
+  await expect(page.getByRole("heading", { name: "選択 OCR からシート作成 / 編集 / 保存" })).toBeVisible();
+  const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
+  await firstQuantity.fill("789");
+  await page.getByRole("button", { name: "シート確認", exact: true }).click();
+  await expect(firstQuantity).toHaveValue("789");
+
+  await firstQuantity.fill("987");
+  const sheetJsonDetails = page.locator(".json-details").filter({ hasText: "保存予定JSONを確認" });
+  await sheetJsonDetails.click();
+  await expect(sheetJsonDetails.locator("textarea")).toHaveValue(/"987"/);
+  await expect(sheetJsonDetails.locator("textarea")).not.toHaveValue(/"789"/);
+});
