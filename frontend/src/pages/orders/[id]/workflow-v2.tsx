@@ -4563,6 +4563,9 @@ export default function OrderWorkflowV2Page() {
                                     defaultValue={row[colIdx] || ""}
                                     readOnly={isLockedSheetField(field)}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
+                                    onBlur={() => {
+                                      flushPendingSheetCellEdits();
+                                    }}
                                     onKeyDown={(event) => handleSheetInputKeyDown(event, rowIdx, colIdx)}
                                     onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
                                   />

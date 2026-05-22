@@ -33,12 +33,16 @@ def _parse_emails(env_key: str) -> set[str]:
 
 
 ALLOWED_EMAILS = _parse_emails("ALLOWED_EMAILS")
-ADMIN_EMAILS = _parse_emails("ADMIN_EMAILS") or ALLOWED_EMAILS
+ADMIN_EMAILS = _parse_emails("ADMIN_EMAILS")
 ADMIN_SERVICE_ACCOUNTS = _parse_emails("ADMIN_SERVICE_ACCOUNTS")
 _USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
 _USER_ROLE_CACHE_LOCK = threading.Lock()
 _USER_ROLE_CACHE_EXPIRES_AT = 0.0
 _USER_ROLE_CACHE: dict[str, str] = {}
+
+
+class UserRoleLookupError(RuntimeError):
+    pass
 
 
 def is_auth_disabled() -> bool:
@@ -60,8 +64,8 @@ def _load_active_user_roles() -> dict[str, str]:
         if now < _USER_ROLE_CACHE_EXPIRES_AT:
             return dict(_USER_ROLE_CACHE)
 
-    roles: dict[str, str] = {}
     try:
+        roles: dict[str, str] = {}
         with session_scope() as session:
             users = session.execute(select(User)).scalars().all()
             for user in users:
@@ -75,13 +79,20 @@ def _load_active_user_roles() -> dict[str, str]:
                 if roles.get(account) == "admin":
                     continue
                 roles[account] = role
-    except Exception:  # noqa: BLE001
-        roles = {}
+    except Exception as exc:  # noqa: BLE001
+        raise UserRoleLookupError("Failed to load active user roles") from exc
 
     with _USER_ROLE_CACHE_LOCK:
         _USER_ROLE_CACHE = roles
         _USER_ROLE_CACHE_EXPIRES_AT = now + _USER_ROLE_CACHE_TTL_SECONDS
     return dict(roles)
+
+
+def _raise_role_lookup_unavailable():
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="User role lookup unavailable",
+    )
 
 
 def _auth_header(request: Request) -> str:
@@ -188,13 +199,16 @@ def get_current_admin(request: Request) -> UserContext:
     if google_email:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
             return UserContext(role="admin")
-        active_roles = _load_active_user_roles()
+        try:
+            active_roles = _load_active_user_roles()
+        except UserRoleLookupError:
+            _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role == "admin":
             return UserContext(role="admin")
         if registered_role in {"operator"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        if not ADMIN_EMAILS or google_email in ADMIN_EMAILS:
+        if google_email in ADMIN_EMAILS:
             return UserContext(role="admin")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
@@ -219,13 +233,16 @@ def get_current_operator(request: Request) -> UserContext:
     if google_email:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
             return UserContext(role="operator")
-        active_roles = _load_active_user_roles()
+        try:
+            active_roles = _load_active_user_roles()
+        except UserRoleLookupError:
+            _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role in {"admin", "operator"}:
             return UserContext(role="operator")
-        if ALLOWED_EMAILS and google_email not in ALLOWED_EMAILS:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        return UserContext(role="operator")
+        if google_email in ALLOWED_EMAILS:
+            return UserContext(role="operator")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
     admin_user = os.getenv("ADMIN_USER")
     admin_pass = os.getenv("ADMIN_PASSWORD")
