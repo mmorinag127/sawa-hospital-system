@@ -15,6 +15,7 @@ def get_facility_master():
         "facility_master": master,
         "validation": validation,
         "path": str(facility_master_service.get_master_path()),
+        "source": "db" if master.get("facilities") else "json_backup",
     }
 
 
@@ -29,9 +30,12 @@ def update_facility_master(body: dict):
     if validation["errors"]:
         raise HTTPException(status_code=400, detail={"errors": validation["errors"]})
     facility_master_service.save_master(master)
+    saved_master = facility_master_service.get_master()
+    saved_validation = validate_facility_master(saved_master)
     return {
-        "facility_master": master,
-        "validation": validation,
+        "facility_master": saved_master,
+        "validation": saved_validation,
         "path": str(facility_master_service.get_master_path()),
+        "source": "db",
         "updated": True,
     }

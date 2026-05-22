@@ -1,6 +1,7 @@
 import sys
 import pathlib
 import json
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
@@ -12,6 +13,12 @@ from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
 from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
 from src.services import config_service, facility_service, facility_template_version_service  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reload_config_cache_after_test():
+    yield
+    config_service.reload_configs()
 
 
 def _clear_facilities():
@@ -138,6 +145,43 @@ def test_facility_master_save_materializes_new_facility_rows(monkeypatch, tmp_pa
         assert facility is not None
         assert facility.name == "ケアホーム長生苑"
         assert [area.name for area in facility.areas] == ["2F"]
+
+
+def test_facility_master_save_materializes_facility_config(monkeypatch, tmp_path):
+    _clear_facilities()
+    source = config_service.load_facility_master()
+    master_path = tmp_path / "facility_master.template.json"
+    master_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
+    config_service.reload_configs()
+    client = TestClient(app)
+
+    next_master = {
+        **source,
+        "facilities": [
+            {
+                "facility_id": "FAC99993",
+                "facility_name": "ケアホーム長生庵",
+                "aliases": ["長生庵"],
+                "areas": [{"id": "ARE001", "name": "本館"}],
+                "fax_template_id": "fax_fac00002_v1",
+                "fax_template_ids": ["fax_fac00002_v1"],
+            },
+        ],
+    }
+    saved = client.put("/facility-master", json=next_master)
+    fetched = client.get("/facilities/FAC99993")
+
+    assert saved.status_code == 200
+    assert saved.json()["source"] == "db"
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    assert payload["config"]["fax_template_id"] == "fax_fac00002_v1"
+    assert payload["resolved_config"]["fax_template_id"] == "fax_fac00002_v1"
+    with session_scope() as session:
+        config = session.get(FacilityConfig, "FAC99993")
+        assert config is not None
+        assert config.config_json["facility_template_source"] == "db_override"
 
 
 def test_facility_get_does_not_create_template_version_from_resolved_config():

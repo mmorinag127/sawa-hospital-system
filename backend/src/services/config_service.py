@@ -1177,7 +1177,12 @@ def get_facility_by_id(facility_id: str) -> Optional[dict]:
             master = load_facility_master()
             for fac_master in master.get("facilities", []):
                 if fac_master.get("facility_id") == facility_id:
-                    prefer_master_template = not _facility_template_operator_override_enabled(facility)
+                    prefer_master_template = (
+                        not _facility_template_operator_override_enabled(facility)
+                        and not facility.get("fax_template_id")
+                        and not facility.get("fax_template_ids")
+                        and not facility.get("fax_template_override")
+                    )
                     if prefer_master_template:
                         master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
                         if master_template_id:

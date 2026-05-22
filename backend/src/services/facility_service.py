@@ -247,6 +247,54 @@ def upsert_facility_rows_from_master(session, master: dict) -> None:
             session.add(FacilityArea(id=area["id"], facility_id=facility_id, name=area["name"]))
 
 
+def _facility_config_from_master_entry(entry: dict) -> dict:
+    config = {
+        key: value
+        for key, value in entry.items()
+        if key not in {"facility_id", "facility_name", "name", "areas"}
+    }
+    if config:
+        config.setdefault("facility_template_source", "db_override")
+    return config
+
+
+def upsert_facilities_and_configs_from_master(session, master: dict) -> None:
+    upsert_facility_rows_from_master(session, master)
+    facilities = master.get("facilities") if isinstance(master, dict) else None
+    if not isinstance(facilities, list):
+        return
+    for entry in facilities:
+        if not isinstance(entry, dict):
+            continue
+        facility_id = str(entry.get("facility_id") or "").strip()
+        if not facility_id:
+            continue
+        config = _facility_config_from_master_entry(entry)
+        session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
+        if config:
+            session.add(FacilityConfig(facility_id=facility_id, config_json=config))
+
+
+def build_facility_master_from_db(base_master: dict) -> dict:
+    master = dict(base_master or {})
+    facilities: list[dict] = []
+    with session_scope() as session:
+        rows = session.execute(select(Facility).order_by(Facility.id.asc())).scalars().all()
+        for fac in rows:
+            entry = {
+                "facility_id": fac.id,
+                "facility_name": fac.name,
+                "areas": [{"id": area.id, "name": area.name} for area in (fac.areas or [])],
+            }
+            if fac.config and isinstance(fac.config.config_json, dict):
+                config = dict(fac.config.config_json)
+                config.pop("facility_template_source", None)
+                entry.update(config)
+            facilities.append(entry)
+    master["facilities"] = facilities
+    return master
+
+
 def get_facility(facility_id: str) -> dict | None:
     with session_scope() as session:
         fac = session.get(Facility, facility_id)
