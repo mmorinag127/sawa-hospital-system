@@ -6,7 +6,7 @@ locals {
   worker_service_name       = var.worker_service_name != "" ? var.worker_service_name : "worker-${var.env}"
   ocr_pipeline_service_name = var.ocr_pipeline_service_name != "" ? var.ocr_pipeline_service_name : "ocr-pipeline-${var.env}"
   worker_url                = coalesce(module.cloudrun.service_urls["worker"], var.cloudrun_worker_url_override)
-  deploy_service_account    = "terraform-admin@${var.project_id}.iam.gserviceaccount.com"
+  deploy_service_account    = "sawa-github-deploy-prod@${var.project_id}.iam.gserviceaccount.com"
 }
 
 module "apis" {
@@ -228,10 +228,6 @@ module "iam" {
     {
       member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
       role   = "roles/secretmanager.secretAccessor"
-    },
-    {
-      member = "serviceAccount:${local.deploy_service_account}"
-      role   = "roles/owner"
     },
     {
       member = "serviceAccount:${local.deploy_service_account}"

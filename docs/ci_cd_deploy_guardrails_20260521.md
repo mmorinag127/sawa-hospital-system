@@ -10,6 +10,7 @@ Sawa deploy source must be constrained by the platform, not by memory or manual 
 - prod deploys only from a named `release/prod-*` branch that contains `origin/develop`.
 - prod requires GitHub Environment approval before Cloud Run is changed.
 - deploy credentials live in GitHub Actions via Google Workload Identity Federation, not in a local key file.
+- prod Cloud Run updates are not allowed from local user or service-account credentials.
 
 ## Repository changes
 
@@ -179,8 +180,8 @@ gcloud iam workload-identity-pools providers create-oidc github-prod \
   --workload-identity-pool github-actions \
   --display-name "GitHub Actions prod" \
   --issuer-uri "https://token.actions.githubusercontent.com" \
-  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
-  --attribute-condition "assertion.repository == '${REPO}' && assertion.ref.startsWith('refs/heads/release/prod-')"
+  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.workflow_ref=assertion.workflow_ref" \
+  --attribute-condition "assertion.repository == '${REPO}' && assertion.ref.startsWith('refs/heads/release/prod-') && assertion.workflow_ref.startsWith('${REPO}/.github/workflows/deploy-prod.yml@refs/heads/release/prod-')"
 ```
 
 Allow GitHub identities to impersonate the deploy service accounts:
@@ -227,7 +228,18 @@ The important enforcement point is:
 
 - day-to-day deploy permission should belong to `sawa-github-deploy-stg` and `sawa-github-deploy-prod`
 - local user credentials should not have enough permission to run `gcloud run deploy`
-- any remaining `terraform-admin` path should be treated as infra/emergency only, not normal app deploy
+- `terraform-admin` must not have prod app deploy permissions
+- project service account key creation should be disabled after the OIDC path is working
+
+Current hardening target:
+
+- `terraform-admin@sawahospitalsystem.iam.gserviceaccount.com` must not have `roles/owner`, `roles/run.admin`, or `roles/iam.serviceAccountUser` on the prod project.
+- Runtime service accounts such as `ocr-pipeline-exec-prod` must not have `roles/run.admin`.
+- `web-exec-prod`, `worker-exec-prod`, and `ocr-pipeline-exec-prod` must not grant `roles/iam.serviceAccountUser` to `terraform-admin`.
+- GitHub prod OIDC must require both `release/prod-*` and `.github/workflows/deploy-prod.yml`.
+- Log metric `prod_direct_cloudrun_deploy_attempt` should exist to detect Cloud Run prod updates by any principal other than `sawa-github-deploy-prod`.
+
+If `gcloud resource-manager org-policies enable-enforce constraints/iam.disableServiceAccountKeyCreation --project=sawahospitalsystem` fails with `setOrgPolicy` permission, run it from the human owner account. Do not restore a deploy service account key as a workaround.
 
 ## Normal operation
 

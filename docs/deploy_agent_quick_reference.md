@@ -12,29 +12,16 @@ This is the short deploy rule page for agents working in this repo.
 - Do not deploy stg/prod directly from a local worktree during normal work.
 - Do not deploy from detached HEAD.
 
-## Emergency deploy path
+## Forbidden local prod deploy path
 
-`terraform-admin@sawahospitalsystem.iam.gserviceaccount.com` is retained only as an emergency/infra break-glass path.
+Local prod deploy is forbidden for agents and humans.
 
-Important limitation:
+- Do not run `gcloud run deploy` for `web-prod`, `worker-prod`, or `ocr-pipeline-prod` from a local worktree.
+- Do not use `terraform-admin` or runtime service accounts as an app deploy identity.
+- Do not create or use service account keys for deploy.
+- If GitHub Actions is unavailable, stop and report the outage. Do not invent a local bypass.
 
-- GCP service accounts do not support per-deploy password prompts.
-- A password-like gate must be outside GCP IAM, for example an encrypted key, OS keychain access, or a local wrapper script.
-- Agents must not bypass GitHub Actions by using `terraform-admin` unless the user explicitly requests an emergency deploy for the current turn.
-
-Before any `terraform-admin` emergency deploy, state and verify:
-
-- Why GitHub Actions cannot be used.
-- Exact source commit and branch.
-- Target environment and services.
-- Current live Cloud Run revisions/images.
-- The command that will be run.
-
-After an emergency deploy:
-
-- Verify live worker/web revisions and user-visible surface.
-- Merge or record the deployed source back into the normal branch flow.
-- Report that the deploy used the emergency path.
+The only normal prod deploy path is GitHub Actions `Deploy Production` with the `production` environment approval.
 
 ## Source rules
 
@@ -47,4 +34,3 @@ After an emergency deploy:
 
 - Full CI/CD setup: `docs/ci_cd_deploy_guardrails_20260521.md`
 - Git/JJ release discipline: `AGENTS.md`
-
