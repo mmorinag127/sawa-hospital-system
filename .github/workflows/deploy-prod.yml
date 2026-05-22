@@ -1,6 +1,16 @@
 name: Deploy Production
 
 on:
+  push:
+    branches:
+      - "release/prod-*"
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "ocr_pipeline/**"
+      - "scripts/**"
+      - "Taskfile.yml"
+      - ".github/workflows/deploy-prod.yml"
   workflow_dispatch:
     inputs:
       order_id:
@@ -40,7 +50,7 @@ jobs:
         name: Resolve smoke order
         run: |
           set -euo pipefail
-          echo "order_id=${{ inputs.order_id }}" >> "$GITHUB_OUTPUT"
+          echo "order_id=${{ inputs.order_id || 'ORDc92f733e' }}" >> "$GITHUB_OUTPUT"
       - name: Assert production release source
         run: |
           set -euo pipefail
