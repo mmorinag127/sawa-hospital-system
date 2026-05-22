@@ -10,7 +10,7 @@ from src.models.order import Order
 from src.services import config_service
 from src.services import output_builder
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
-from src.services.order_service import serialize_order
+from src.services.order_serialization_service import serialize_order
 
 
 def _ensure_date(value: object) -> date | None:
