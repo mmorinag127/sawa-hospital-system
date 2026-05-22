@@ -2573,7 +2573,6 @@ export default function OrderWorkflowV2Page() {
   const handleSheetInputKeyDown = (event: KeyboardEvent<HTMLInputElement>, rowIndex: number, colIndex: number) => {
     if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    flushPendingSheetCellEdits();
     const nextRowIndex = rowIndex + 1;
     if (!sheetPayload?.rows[nextRowIndex]) return;
     focusSheetInput(nextRowIndex, colIndex);
@@ -4565,7 +4564,6 @@ export default function OrderWorkflowV2Page() {
                                     readOnly={isLockedSheetField(field)}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
                                     onKeyDown={(event) => handleSheetInputKeyDown(event, rowIdx, colIdx)}
-                                    onBlur={() => flushPendingSheetCellEdits()}
                                     onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
                                   />
                                 </div>
