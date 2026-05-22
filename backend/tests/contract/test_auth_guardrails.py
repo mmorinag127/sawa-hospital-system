@@ -18,6 +18,10 @@ def _basic_header(username: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {token}"}
 
 
+def _bearer_header(token: str = "google-token") -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_auth_default_fails_closed_when_env_missing(monkeypatch):
     monkeypatch.delenv("AUTH_DISABLED", raising=False)
     monkeypatch.delenv("ADMIN_USER", raising=False)
@@ -88,3 +92,65 @@ def test_operator_basic_cannot_access_admin_route(monkeypatch):
     client = TestClient(app)
     res = client.get("/users", headers=_basic_header("operator", "operator-secret"))
     assert res.status_code == 403
+
+
+def test_google_admin_requires_registered_role_or_admin_allowlist(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+    monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
+    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
+
+    client = TestClient(app)
+    res = client.get("/users", headers=_bearer_header())
+    assert res.status_code == 403
+
+
+def test_google_operator_requires_registered_role_or_operator_allowlist(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+    monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
+    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
+
+    client = TestClient(app)
+    res = client.get("/orders", headers=_bearer_header())
+    assert res.status_code == 403
+
+
+def test_allowed_email_does_not_grant_google_admin(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ALLOWED_EMAILS", "user@example.com")
+    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+    monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
+    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
+
+    client = TestClient(app)
+    res = client.get("/users", headers=_bearer_header())
+    assert res.status_code == 403
+
+
+def test_google_role_lookup_failure_blocks_admin_and_operator(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ADMIN_EMAILS", "admin@example.com")
+    monkeypatch.setenv("ALLOWED_EMAILS", "operator@example.com")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+    monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "admin@example.com")
+
+    def raise_lookup_failure():
+        raise auth_module.UserRoleLookupError("db unavailable")
+
+    monkeypatch.setattr(auth_module, "_load_active_user_roles", raise_lookup_failure)
+
+    client = TestClient(app)
+    admin_res = client.get("/users", headers=_bearer_header())
+    operator_res = client.get("/orders", headers=_bearer_header())
+    assert admin_res.status_code == 503
+    assert operator_res.status_code == 503
