@@ -6,6 +6,7 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-sawahospitalsystem}"
 REGION="${REGION:-asia-northeast2}"
 SERVICE="${SERVICE:-web-prod}"
+"$(cd "$(dirname "$0")" && pwd)/require_ci_cd_deploy.sh" "${SERVICE}"
 REPOSITORY="${REPOSITORY:-backend}"
 IMAGE_TAG="${IMAGE_TAG:-prod-maintenance-$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="${IMAGE:-${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/frontend:${IMAGE_TAG}}"

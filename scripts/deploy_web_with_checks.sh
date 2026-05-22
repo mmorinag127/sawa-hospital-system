@@ -33,6 +33,8 @@ PREPARE_WEB_DEPLOY_SOURCE="${PREPARE_WEB_DEPLOY_SOURCE:-$SCRIPT_DIR/prepare_web_
 VALIDATE_WEB_DEPLOY_SOURCE="${VALIDATE_WEB_DEPLOY_SOURCE:-$SCRIPT_DIR/validate_web_deploy_source.sh}"
 ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh}"
 
+"$SCRIPT_DIR/require_ci_cd_deploy.sh" "${WEB_SERVICE:-web deploy}"
+
 "$ENSURE_GCLOUD_AUTH"
 
 resolve_service_url() {

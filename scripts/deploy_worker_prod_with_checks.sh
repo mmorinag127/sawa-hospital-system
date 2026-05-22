@@ -29,6 +29,8 @@ TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-${PROJECT_ID}-${SERVICE_ENV_SUFFIX}-template
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
 ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh}"
 
+"$SCRIPT_DIR/require_ci_cd_deploy.sh" "${SERVICE}"
+
 resolve_service_url() {
   local service_name="$1"
   if [ -z "$service_name" ]; then
