@@ -17,7 +17,7 @@ type SystemStatus = {
   };
   oauth_config?: {
     configured?: boolean;
-    google_client_ids?: string[];
+    google_client_id_count?: number;
   };
   ocr_pipeline?: {
     status?: string | null;
@@ -330,7 +330,7 @@ export default function SystemStatusPage() {
         <article className="card">
           <h2>Google 認証</h2>
           <p className="value">{status?.oauth_config?.configured ? "OK" : "未設定"}</p>
-          <p className="meta">許可されたクライアントID: {(status?.oauth_config?.google_client_ids || []).join(", ") || "未取得"}</p>
+          <p className="meta">設定数: {status?.oauth_config?.google_client_id_count ?? 0}</p>
           <p className="meta">Googleログインで利用します。</p>
         </article>
         <article className="card card-wide ocr-card">

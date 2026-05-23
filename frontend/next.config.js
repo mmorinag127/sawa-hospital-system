@@ -3,6 +3,9 @@ const nextConfig = {
   experimental: {
     proxyTimeout: 900000,
   },
+  turbopack: {
+    root: __dirname,
+  },
   async headers() {
     return [
       {

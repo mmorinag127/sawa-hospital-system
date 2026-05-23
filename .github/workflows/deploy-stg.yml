@@ -92,7 +92,6 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
-          quota_project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v2
@@ -143,7 +142,6 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
-          quota_project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v2
@@ -188,7 +186,6 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
-          quota_project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v2
@@ -224,7 +221,6 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
-          quota_project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v2

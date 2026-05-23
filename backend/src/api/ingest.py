@@ -2,7 +2,9 @@ import asyncio
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status, Depends, File, Form, UploadFile
+import os
+
+from fastapi import APIRouter, HTTPException, status, Depends, File, Form, UploadFile, Request
 import time
 from sqlalchemy import desc, select
 
@@ -54,7 +56,27 @@ def _normalize_upload_files(
         files.extend(file for file in pdf_files if file is not None)
     if not files:
         raise HTTPException(status_code=400, detail="at least one pdf_file is required")
+    max_files = max(1, int(os.getenv("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
+    if len(files) > max_files:
+        raise HTTPException(status_code=413, detail=f"too many files; max is {max_files}")
     return files
+
+
+def _enforce_upload_content_length(request: Request) -> None:
+    raw_length = request.headers.get("content-length")
+    if not raw_length:
+        return
+    try:
+        content_length = int(raw_length)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid content-length") from None
+    max_mb = int(os.getenv("MANUAL_UPLOAD_MAX_MB", "20") or 20)
+    max_files = max(1, int(os.getenv("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
+    # Multipart overhead is small but non-zero, so allow a narrow envelope over
+    # the per-PDF limit while still rejecting oversized bodies before parsing.
+    max_bytes = (max_mb * max_files * 1024 * 1024) + (max_files * 1024 * 1024)
+    if content_length > max_bytes:
+        raise HTTPException(status_code=413, detail=f"upload body exceeds {max_mb}MB x {max_files} limit")
 
 
 def _parse_optional_datetime(value: str | None) -> datetime:
@@ -228,6 +250,7 @@ async def _handle_uploaded_pdf(
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
 async def ingest_upload(
+    request: Request,
     pdf_file: UploadFile | None = File(None),
     pdf_files: list[UploadFile] | None = File(None),
     facility_hint: str | None = Form(None),
@@ -237,6 +260,7 @@ async def ingest_upload(
     force: str | None = Form(None),
     skip_ocr: str | None = Form(None),
 ):
+    _enforce_upload_content_length(request)
     upload_files = _normalize_upload_files(pdf_file, pdf_files)
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)

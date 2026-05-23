@@ -44,7 +44,7 @@ def test_auth_can_be_explicitly_disabled_in_tests(monkeypatch):
     client = TestClient(app)
     res = client.get("/auth/config")
     assert res.status_code == 200
-    assert res.json()["auth_disabled"] is True
+    assert "auth_disabled" not in res.json()
 
     me_res = client.get("/auth/me")
     assert me_res.status_code == 200
@@ -92,6 +92,31 @@ def test_operator_basic_cannot_access_admin_route(monkeypatch):
     client = TestClient(app)
     res = client.get("/users", headers=_basic_header("operator", "operator-secret"))
     assert res.status_code == 403
+
+
+def test_auth_ignores_legacy_auth_header_cookie(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    token = _basic_header("operator", "secret")["Authorization"]
+    res = client.get("/orders", cookies={"auth_header": token})
+    assert res.status_code == 401
+
+
+def test_admin_token_is_not_accepted_as_static_bearer(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ADMIN_TOKEN", "static-admin-token")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    res = client.get("/users", headers=_bearer_header("static-admin-token"))
+    assert res.status_code == 401
 
 
 def test_google_admin_requires_registered_role_or_admin_allowlist(monkeypatch):

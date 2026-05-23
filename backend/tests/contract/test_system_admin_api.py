@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import base64
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -18,6 +19,11 @@ from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+
+
+def _basic_header(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def _create_seed_order(message_id: str) -> dict:
@@ -340,6 +346,19 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch):
     assert ocr.get("recent_backlog_skipped_count") == 1
     assert ocr.get("stale_count") == 1
     assert int(ocr.get("stale_oldest_seconds") or 0) > 0
+
+
+def test_health_backlog_requires_operator_when_auth_enabled(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "operator-pass")
+    client = TestClient(app)
+
+    unauth_res = client.get("/health/backlog")
+    assert unauth_res.status_code == 401
+
+    auth_res = client.get("/health/backlog", headers=_basic_header("operator", "operator-pass"))
+    assert auth_res.status_code == 200
 
 
 def test_system_status_reflects_latest_pipeline_request_in_gcs_only_mode(monkeypatch, tmp_path):

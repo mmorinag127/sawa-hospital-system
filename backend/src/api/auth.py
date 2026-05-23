@@ -96,11 +96,7 @@ def _raise_role_lookup_unavailable():
 
 
 def _auth_header(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth:
-        return auth
-    cookie_auth = request.cookies.get("auth_header", "")
-    return cookie_auth or ""
+    return request.headers.get("Authorization", "")
 
 
 def _basic_credentials(request: Request):
@@ -186,9 +182,6 @@ def _google_email_or_none(request: Request) -> str | None:
     token = _get_bearer_token(request)
     if not token:
         return None
-    admin_token = os.getenv("ADMIN_TOKEN", "")
-    if admin_token and token == admin_token:
-        return "admin-token"
     return _verify_google_token(token, request)
 
 

@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,9 +17,17 @@ from src.services.system_maintenance_service import (
     get_db_quota_status,
     get_sqlite_db_path,
 )
+from src.services.notification_service import record_event
 from src.services.system_process_log_service import list_process_logs
 
 router = APIRouter()
+
+
+def _is_production_runtime() -> bool:
+    service_name = str(os.getenv("K_SERVICE", "") or "").strip().lower()
+    app_env = str(os.getenv("APP_ENV", "") or os.getenv("ENVIRONMENT", "") or "").strip().lower()
+    return service_name.endswith("-prod") or app_env in {"prod", "production"}
+
 
 @router.get("/system/status", dependencies=[Depends(require_role("operator"))])
 def system_status():
@@ -47,8 +56,8 @@ def system_status():
     return {
         "intake": intake,
         "oauth_config": {
-            "google_client_ids": GOOGLE_OAUTH_CLIENT_IDS,
             "configured": oauth_config_ok,
+            "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS),
         },
         "ocr_pipeline": {
             "status": pipeline_state.get("status"),
@@ -99,12 +108,24 @@ def download_db(snapshot: bool = False):
     sqlite_path = get_sqlite_db_path()
     if sqlite_path and not snapshot:
         filename = sqlite_path.name or "system.db"
+        record_event(
+            "system_db_download",
+            actor="admin",
+            target="sqlite_db",
+            metadata={"snapshot": False, "filename": filename},
+        )
         return FileResponse(
             sqlite_path,
             media_type="application/x-sqlite3",
             filename=filename,
         )
     output_path, filename, media_type, _ = export_database_snapshot()
+    record_event(
+        "system_db_download",
+        actor="admin",
+        target="database_snapshot",
+        metadata={"snapshot": True, "filename": filename},
+    )
     return FileResponse(output_path, media_type=media_type, filename=filename)
 
 
@@ -114,7 +135,21 @@ def clear_all_data(body: dict | None = None):
     confirm = str(payload.get("confirm") or "").strip()
     if confirm != "CLEAR_ALL":
         raise HTTPException(status_code=400, detail="confirm must be CLEAR_ALL")
+    production_runtime = _is_production_runtime()
+    if production_runtime:
+        prod_confirm = str(payload.get("prod_confirm") or "").strip()
+        if prod_confirm != "CLEAR_ALL_PRODUCTION":
+            raise HTTPException(status_code=400, detail="prod_confirm must be CLEAR_ALL_PRODUCTION")
     include_audit_logs = bool(payload.get("include_audit_logs", True))
+    record_event(
+        "system_clear_all",
+        actor="admin",
+        target="operational_data",
+        metadata={
+            "include_audit_logs": include_audit_logs,
+            "production_runtime": production_runtime,
+        },
+    )
     result = clear_operational_data(include_audit_logs=include_audit_logs)
     return {
         "result": result,

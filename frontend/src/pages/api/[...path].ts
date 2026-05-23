@@ -1,9 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
+import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 
 const getTarget = () =>
   process.env.API_PROXY_TARGET || "https://worker-prod-avlnzjjrca-dt.a.run.app";
+const PROXY_MAX_BODY_BYTES = Number(process.env.API_PROXY_MAX_BODY_BYTES || 25 * 1024 * 1024);
+const PROXY_MAX_RESPONSE_BYTES = Number(process.env.API_PROXY_MAX_RESPONSE_BYTES || 100 * 1024 * 1024);
 
 export const config = {
   api: {
@@ -42,14 +45,38 @@ const copyResponseHeaders = (res: NextApiResponse, headers: Record<string, unkno
   }
 };
 
+const contentLengthExceeds = (value: string | string[] | undefined, limit: number) => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const parsed = Number(raw || 0);
+  return Number.isFinite(parsed) && parsed > limit;
+};
+
+const limitStream = (limit: number) => {
+  let seen = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      seen += Buffer.byteLength(chunk);
+      if (seen > limit) {
+        callback(new Error("stream_size_limit_exceeded"));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+};
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (contentLengthExceeds(req.headers["content-length"], PROXY_MAX_BODY_BYTES)) {
+    res.status(413).json({ error: "request_too_large" });
+    return;
+  }
   const target = getTarget();
   const path = Array.isArray(req.query.path) ? req.query.path.join("/") : req.query.path || "";
   const query = req.url?.split("?")[1];
   const url = `${target}/${path}${query ? `?${query}` : ""}`;
 
   const headers = copyRequestHeaders(req);
-  const data = req.method && ["GET", "HEAD"].includes(req.method) ? undefined : req;
+  const data = req.method && ["GET", "HEAD"].includes(req.method) ? undefined : req.pipe(limitStream(PROXY_MAX_BODY_BYTES));
 
   try {
     const response = await axios.request({
@@ -60,17 +87,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       responseType: "stream",
       validateStatus: () => true,
       decompress: false,
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
+      maxBodyLength: PROXY_MAX_BODY_BYTES,
+      maxContentLength: PROXY_MAX_RESPONSE_BYTES,
+      maxRedirects: 0,
     });
 
+    if (contentLengthExceeds(response.headers["content-length"] as string | string[] | undefined, PROXY_MAX_RESPONSE_BYTES)) {
+      res.status(502).json({ error: "upstream_response_too_large" });
+      return;
+    }
     res.status(response.status);
     copyResponseHeaders(res, response.headers);
     if (req.method === "HEAD") {
       res.end();
       return;
     }
-    await pipeline(response.data, res);
+    await pipeline(response.data, limitStream(PROXY_MAX_RESPONSE_BYTES), res);
   } catch (err) {
     if (res.headersSent) {
       res.end();
