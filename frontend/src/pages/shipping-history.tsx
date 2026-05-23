@@ -47,6 +47,7 @@ type TrackingDateGroup = {
   notShipped: number;
   errors: number;
   attention: number;
+  statusCounts: Record<string, number>;
   facilityGroups: TrackingFacilityGroup[];
   notFoundFacilityGroups: TrackingFacilityGroup[];
   notShippedFacilityGroups: TrackingFacilityGroup[];
@@ -337,6 +338,7 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
         notShipped: 0,
         errors: 0,
         attention: 0,
+        statusCounts: {},
         facilityGroups: [],
         notFoundFacilityGroups: [],
         notShippedFacilityGroups: [],
@@ -379,6 +381,7 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
         else current.pending += 1;
         if (item.error) current.errors += 1;
         if (reasons.length > 0) current.attention += 1;
+        current.statusCounts[item.status || "不明"] = (current.statusCounts[item.status || "不明"] || 0) + 1;
         facilityGroup.total += 1;
         if (item.delivered) facilityGroup.delivered += 1;
         else if (item.status !== "発送しなかった") facilityGroup.pending += 1;
@@ -441,6 +444,18 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
       if (right.key === "unknown" && left.key !== "unknown") return -1;
       return right.sortKey - left.sortKey;
     });
+};
+
+const orderedStatusCounts = (statusCounts: Record<string, number>) => {
+  const priority = ["該当なし", "該当無し", "保管中", "配達中", "輸送中", "発送済み", "配達完了", "発送しなかった"];
+  return Object.entries(statusCounts).sort(([leftStatus, leftCount], [rightStatus, rightCount]) => {
+    const leftIndex = priority.findIndex((status) => leftStatus.includes(status));
+    const rightIndex = priority.findIndex((status) => rightStatus.includes(status));
+    if (leftIndex !== -1 || rightIndex !== -1) {
+      return (leftIndex === -1 ? priority.length : leftIndex) - (rightIndex === -1 ? priority.length : rightIndex);
+    }
+    return rightCount - leftCount || leftStatus.localeCompare(rightStatus, "ja");
+  });
 };
 
 const buildHistoryDateGroups = (items: ShippingHistoryItem[]): TrackingDateGroup[] => {
@@ -562,6 +577,7 @@ export default function ShippingHistoryPage() {
   const [historySummary, setHistorySummary] = useState<ShippingHistorySummary | null>(null);
   const [historyQuota, setHistoryQuota] = useState<QuotaStatus | null>(null);
   const [selectedDateGroupKey, setSelectedDateGroupKey] = useState<string | null>(null);
+  const [manualStatusLoadingKey, setManualStatusLoadingKey] = useState<string | null>(null);
   const trackingDateGroups = useMemo(
     () => buildTrackingDateGroups(latest, attentionStaleHours),
     [attentionStaleHours, latest],
@@ -675,6 +691,35 @@ export default function ShippingHistoryPage() {
     }
   };
 
+  const markTrackingStatus = async (item: TrackingNumberCard, status: "発送済み" | "発送しなかった") => {
+    const trackingNumber = item.tracking_number || item.tracking_key;
+    if (!trackingNumber) return;
+    const label = status === "発送済み" ? "送り済み" : "未使用";
+    const ok = window.confirm(`${trackingNumber} を「${label}」として確定します。よろしいですか？`);
+    if (!ok) return;
+
+    const loadingKey = item.tracking_key || item.tracking_number;
+    setManualStatusLoadingKey(loadingKey);
+    setMessage(`${label}を確定中です...`);
+    try {
+      await apiClient.post("/shipping/status/manual", {
+        tracking_number: trackingNumber,
+        status,
+      });
+      setMessage(`${trackingNumber} を「${label}」に更新しました。`);
+      if (activeTab === "logs") {
+        await loadHistory();
+      } else {
+        await loadLatest(activeTab);
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setMessage(detail ? `更新に失敗しました: ${detail}` : "更新に失敗しました。");
+    } finally {
+      setManualStatusLoadingKey(null);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === "logs") {
       loadHistory();
@@ -702,6 +747,8 @@ export default function ShippingHistoryPage() {
   const renderTrackingNumberRow = (item: TrackingNumberCard) => {
     const reasons = describeAttentionReasons(item, attentionStaleHours);
     const tone = trackingTone(item, attentionStaleHours);
+    const trackingKey = item.tracking_key || item.tracking_number;
+    const manualLoading = manualStatusLoadingKey === trackingKey;
     return (
       <article
         key={item.tracking_key || item.tracking_number}
@@ -720,6 +767,24 @@ export default function ShippingHistoryPage() {
           <span className={`status-pill tone-${tone}`}>{item.status || "-"}</span>
         </div>
         <div className="tracking-card-actions">
+          <div className="manual-status-actions" aria-label="手動ステータス更新">
+            <button
+              type="button"
+              className="mini-btn"
+              onClick={() => markTrackingStatus(item, "発送済み")}
+              disabled={manualLoading || item.status === "発送済み"}
+            >
+              送り済み
+            </button>
+            <button
+              type="button"
+              className="mini-btn muted"
+              onClick={() => markTrackingStatus(item, "発送しなかった")}
+              disabled={manualLoading || item.status === "発送しなかった"}
+            >
+              未使用
+            </button>
+          </div>
           <details className="tracking-events tracking-events-compact">
             <summary className="tracking-events-summary">履歴 {item.events.length}件</summary>
             {item.events.length ? (
@@ -1081,12 +1146,13 @@ export default function ShippingHistoryPage() {
                         {group ? (
                           <>
                             <span className="calendar-day-main">{group.total}件</span>
-                            <span className="calendar-day-summary">
-                              完了 {group.delivered} / 未完了 {group.pending}
+                            <span className="calendar-status-list">
+                              {orderedStatusCounts(group.statusCounts).map(([status, count]) => (
+                                <span key={`${group.key}-${status}`} className="calendar-status-chip">
+                                  {status} {count}
+                                </span>
+                              ))}
                             </span>
-                            {group.notShipped > 0 ? (
-                              <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
-                            ) : null}
                             {group.attention > 0 || notFoundCount > 0 ? (
                               <span className="calendar-day-alert">
                                 {group.attention > 0 ? `要確認 ${group.attention}` : ""}
@@ -1125,12 +1191,13 @@ export default function ShippingHistoryPage() {
                         >
                           <span className="calendar-day-number">{group.label}</span>
                           <span className="calendar-day-main">{group.total}件</span>
-                          <span className="calendar-day-summary">
-                            完了 {group.delivered} / 未完了 {group.pending}
+                          <span className="calendar-status-list">
+                            {orderedStatusCounts(group.statusCounts).map(([status, count]) => (
+                              <span key={`${group.key}-${status}`} className="calendar-status-chip">
+                                {status} {count}
+                              </span>
+                            ))}
                           </span>
-                          {group.notShipped > 0 ? (
-                            <span className="calendar-day-summary muted">発送なし {group.notShipped}</span>
-                          ) : null}
                           {group.attention > 0 || notFoundCount > 0 ? (
                             <span className="calendar-day-alert">
                               {group.attention > 0 ? `要確認 ${group.attention}` : ""}
@@ -1454,6 +1521,36 @@ export default function ShippingHistoryPage() {
           gap: 6px;
         }
 
+        .manual-status-actions {
+          display: inline-flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          align-items: center;
+        }
+
+        .mini-btn {
+          min-height: 30px;
+          border: 1px solid rgba(31, 42, 42, 0.18);
+          border-radius: 8px;
+          background: #1f4f46;
+          color: #ffffff;
+          padding: 5px 10px;
+          font-size: 12px;
+          font-weight: 800;
+          line-height: 1.2;
+          cursor: pointer;
+        }
+
+        .mini-btn.muted {
+          background: #f6f2e8;
+          color: #4f4636;
+        }
+
+        .mini-btn:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+
         .tracking-events {
           margin: 0;
           padding-top: 0;
@@ -1705,6 +1802,28 @@ export default function ShippingHistoryPage() {
           font-size: 12px;
           line-height: 1.35;
           color: #41514d;
+        }
+
+        .calendar-status-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+          align-content: flex-start;
+        }
+
+        .calendar-status-chip {
+          display: inline-flex;
+          align-items: center;
+          max-width: 100%;
+          min-height: 22px;
+          padding: 3px 7px;
+          border-radius: 999px;
+          background: #edf3f1;
+          color: #31423f;
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1.2;
+          word-break: keep-all;
         }
 
         .calendar-day-summary.muted {
@@ -2012,6 +2131,17 @@ export default function ShippingHistoryPage() {
         .shipping-number-list {
           display: grid;
           gap: 8px;
+          max-height: 280px;
+          overflow-y: auto;
+          padding-right: 4px;
+          overscroll-behavior: contain;
+        }
+
+        :global(.shipping-history-page .shipping-number-list) {
+          max-height: 280px;
+          overflow-y: auto;
+          padding-right: 4px;
+          overscroll-behavior: contain;
         }
 
         .shipping-tracking-card {

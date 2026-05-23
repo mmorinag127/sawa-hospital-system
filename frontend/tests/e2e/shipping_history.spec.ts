@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("shipping history groups rows by date, nests numbers under facility cards, and keeps not-found rows inside each date group", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+  const manualStatusRequests: any[] = [];
 
   await page.addInitScript(() => {
     window.localStorage.setItem("auth_header", "Bearer e2e-token");
@@ -58,6 +59,17 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
               delivered: false,
               source: "shipping_pdf_parse",
               looked_up_at: "2026-03-30T03:10:00Z",
+              ship_date: "2026-03-30",
+              events: [],
+            },
+            {
+              tracking_key: "111111111113",
+              tracking_number: "1111-1111-1113",
+              facility_name: "いこいの森",
+              status: "保管中",
+              delivered: false,
+              source: "shipping_pdf_parse",
+              looked_up_at: "2026-03-30T03:20:00Z",
               ship_date: "2026-03-30",
               events: [],
             },
@@ -130,6 +142,25 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
       return;
     }
 
+    if (path.endsWith("/shipping/status/manual") && method === "POST") {
+      const body = route.request().postDataJSON();
+      manualStatusRequests.push(body);
+      await route.fulfill({
+        status: 200,
+        json: {
+          item: {
+            tracking_key: body?.tracking_number,
+            tracking_number: body?.tracking_number,
+            status: body?.status,
+            delivered: body?.status === "発送済み",
+            arrival_text: null,
+            error: null,
+          },
+        },
+      });
+      return;
+    }
+
     await route.fulfill({ status: 200, json: {} });
   });
 
@@ -140,11 +171,13 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
   await expect(page.locator(".calendar-weekdays")).toContainText("日月火水木金土");
   await expect(page.getByTestId("shipping-empty-day").first()).toContainText("0件");
   await expect(page.getByTestId("shipping-empty-day").first()).toContainText("完了 0 / 未完了 0");
-  const firstDateGroup = page.getByTestId("shipping-date-group").filter({ hasText: "3件" }).first();
+  const firstDateGroup = page.getByTestId("shipping-date-group").filter({ hasText: "4件" }).first();
   await expect(page.getByTestId("shipping-date-group").filter({ hasText: "1件" })).toBeVisible();
-  await expect(firstDateGroup).toContainText("3件");
-  await expect(firstDateGroup).toContainText("完了 1 / 未完了 1");
-  await expect(firstDateGroup).toContainText("発送なし 1");
+  await expect(firstDateGroup).toContainText("4件");
+  await expect(firstDateGroup).toContainText("配達完了 1");
+  await expect(firstDateGroup).toContainText("発送しなかった 1");
+  await expect(firstDateGroup).toContainText("保管中 1");
+  await expect(firstDateGroup).toContainText("該当なし 1");
   await expect(page.getByText("1111-1111-1111")).toHaveCount(0);
   await expect(page.getByText("2222-2222-2222")).toHaveCount(0);
   await firstDateGroup.click();
@@ -163,6 +196,7 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
     .first();
   await expect(groupedFacilityCard).toBeVisible();
   await expect(page.getByText("1111-1111-1111")).toBeVisible();
+  await expect(page.getByText("1111-1111-1113")).toBeVisible();
   await expect(page.getByText("1111-1111-1112")).not.toBeVisible();
   await expect(page.getByText("2222-2222-2222")).toBeVisible();
   const eventTrackingCard = groupedFacilityCard
@@ -170,7 +204,15 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
     .filter({ hasText: "1111-1111-1111" })
     .first();
   await expect(eventTrackingCard).toBeVisible();
-  await expect(groupedFacilityCard.getByTestId("shipping-tracking-card")).toHaveCount(1);
+  await expect(eventTrackingCard.getByRole("button", { name: "送り済み" })).toBeVisible();
+  await expect(eventTrackingCard.getByRole("button", { name: "未使用" })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await eventTrackingCard.getByRole("button", { name: "未使用" }).click();
+  expect(manualStatusRequests.at(-1)).toMatchObject({
+    tracking_number: "1111-1111-1111",
+    status: "発送しなかった",
+  });
+  await expect(groupedFacilityCard.getByTestId("shipping-tracking-card")).toHaveCount(2);
   await expect(groupedFacilityCard).not.toContainText("2222-2222-2222");
   const notShippedSection = dialog.getByTestId("not-shipped-minimized");
   await expect(notShippedSection).toContainText("発送しなかった番号 1件");
@@ -181,22 +223,28 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
     const grid = node.querySelector(".facility-slot-grid");
     const facilityCard = node.querySelector('[data-testid="shipping-facility-card"]');
     const trackingCard = node.querySelector('[data-testid="shipping-tracking-card"]');
-    if (!grid || !facilityCard || !trackingCard) {
+    const numberList = node.querySelector(".shipping-number-list");
+    if (!grid || !facilityCard || !trackingCard || !numberList) {
       return null;
     }
     const gridStyle = window.getComputedStyle(grid);
     const facilityStyle = window.getComputedStyle(facilityCard);
     const trackingStyle = window.getComputedStyle(trackingCard);
+    const numberListStyle = window.getComputedStyle(numberList);
     return {
       gridAlignItems: gridStyle.alignItems,
       facilityBackground: facilityStyle.backgroundColor,
       trackingMinHeight: trackingStyle.minHeight,
+      numberListMaxHeight: numberListStyle.maxHeight,
+      numberListOverflowY: numberListStyle.overflowY,
     };
   });
   expect(layoutMetrics).not.toBeNull();
   expect(layoutMetrics?.gridAlignItems).toBe("start");
   expect(layoutMetrics?.facilityBackground).not.toBe("rgba(0, 0, 0, 0)");
   expect(layoutMetrics?.trackingMinHeight).toBe("0px");
+  expect(layoutMetrics?.numberListMaxHeight).toBe("280px");
+  expect(layoutMetrics?.numberListOverflowY).toBe("auto");
   await page.getByRole("button", { name: "閉じる" }).first().click();
   await expect(page.getByText("1111-1111-1111")).toHaveCount(0);
 
