@@ -1,0 +1,4 @@
+release_branch=release/prod-shipping-history-actions-20260523
+source_sha=7e47b4adc972
+reason=shipping-history-actions-prod-deploy
+created_at=2026-05-23T11:25:00+09:00
