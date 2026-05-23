@@ -78,7 +78,7 @@ check_http_code_any "web_root" "$WEB_URL/" "200,308" ""
 check_http_code_any "web_login" "$WEB_URL/login" "200,308" ""
 
 check_http_code_any "worker_health" "$WORKER_URL/health" "200" ""
-check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" ""
+check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
 
 check_http_code_any "worker_orders" "$WORKER_URL/orders?include_ocr=false" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
 check_http_code_any "worker_system_status" "$WORKER_URL/system/status" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
