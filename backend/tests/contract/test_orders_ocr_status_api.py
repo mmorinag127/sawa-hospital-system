@@ -894,6 +894,27 @@ def test_list_orders_is_stably_sorted_by_received_at_and_id():
     assert ids == expected
 
 
+def test_list_orders_applies_limit_after_database_ordering():
+    order_service.clear_all()
+    with session_scope() as session:
+        for index in range(3):
+            session.add(
+                Order(
+                    id=f"ORDlimit{index}",
+                    facility_code="FAC00001",
+                    week_code="2026-02",
+                    status="要確認",
+                    document_uri=f"file://dummy-limit-{index}.pdf",
+                    message_id=f"msg-status-api-limit-{index}",
+                    received_at=datetime(2026, 2, 15, 9, index, 0),
+                )
+            )
+
+    rows = order_service.list_orders(include_archived=False, limit=2)
+
+    assert [row.get("id") for row in rows] == ["ORDlimit2", "ORDlimit1"]
+
+
 def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-confirm-block")

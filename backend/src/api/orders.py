@@ -1089,26 +1089,41 @@ def list_orders(
     limit: int | None = Query(default=None, ge=1, le=1000),
 ):
     include_archived_flag = True if include_archived is None else include_archived
-    orders = order_service.list_orders(status=status, include_archived=include_archived_flag)
-    if limit is not None:
-        orders = orders[:limit]
+    orders = order_service.list_orders(
+        status=status,
+        include_archived=include_archived_flag,
+        limit=limit,
+    )
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return {"orders": orders}
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
-    cache_map = order_service._load_order_ocr_cache_map(order_ids)
     lightweight_mode = include_ocr is False
+    cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
     if lightweight_mode:
         workflow_map = workflow_state_service.list_workflow_states(order_ids)
+        reparse_jobs = get_ocr_jobs([f"OCR-{order_id}" for order_id in order_ids])
         for order in orders:
             order_id = str(order.get("id") or "").strip()
             cached_payload = cache_map.get(order_id)
             workflow = workflow_map.get(order_id)
             if isinstance(workflow, dict):
                 order["workflow_state"] = workflow
-            cached_status = _derive_status_from_payload(cached_payload)
-            if cached_status and not order.get("ocr_status"):
-                order["ocr_status"] = cached_status
+            review_job = reparse_jobs.get(f"OCR-{order_id}")
+            if review_job:
+                error_message = review_job.get("error_message")
+                if review_job.get("status") == "failed" and _is_read_timeout_error(error_message):
+                    order["ocr_status"] = "running"
+                else:
+                    order["ocr_status"] = review_job.get("status")
+                    if error_message:
+                        order["ocr_error"] = error_message
+                if review_job.get("updated_at"):
+                    order["ocr_updated_at"] = review_job.get("updated_at")
+            elif cached_payload:
+                cached_status = _derive_status_from_payload(cached_payload)
+                if cached_status and not order.get("ocr_status"):
+                    order["ocr_status"] = cached_status
             if isinstance(cached_payload, dict):
                 pages = cached_payload.get("pages")
                 if isinstance(pages, list) and pages:
@@ -1141,7 +1156,7 @@ def list_orders(
                 order["ocr_updated_at"] = job.get("updated_at")
             job = _apply_cached_status_override(order, str(order.get("id") or ""), job)
             job = _apply_stale_ocr_status(order, job)
-    reparse_jobs = get_ocr_jobs(
+    reparse_jobs = {} if lightweight_mode else get_ocr_jobs(
         list(
             {
                 token

@@ -4689,7 +4689,25 @@ def _invalidate_current_sheet_state_after_order_lines_write(order_id: str) -> No
     order_current_state_service.delete_current_state(normalized_order_id)
 
 
-def _fetch_orders(status: Optional[str], *, include_archived: bool = True) -> list[dict]:
+def _normalize_order_list_limit(limit: int | None) -> int | None:
+    if limit is None:
+        return None
+    try:
+        normalized = int(limit)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return min(normalized, 1000)
+
+
+def _fetch_orders(
+    status: Optional[str],
+    *,
+    include_archived: bool = True,
+    limit: int | None = None,
+) -> list[dict]:
+    normalized_limit = _normalize_order_list_limit(limit)
     with session_scope() as session:
         query = select(
             Order.id,
@@ -4709,6 +4727,9 @@ def _fetch_orders(status: Optional[str], *, include_archived: bool = True) -> li
             query = query.where(Order.status == status)
         if not include_archived:
             query = query.where(Order.archived_at.is_(None))
+        query = query.order_by(Order.received_at.desc(), Order.id.desc())
+        if normalized_limit is not None:
+            query = query.limit(normalized_limit)
         rows = session.execute(query).mappings().all()
         payloads: list[dict[str, Any]] = []
         for row in rows:
@@ -4758,7 +4779,7 @@ def _fetch_orders(status: Optional[str], *, include_archived: bool = True) -> li
                     )
                     .where(UploadedPdf.current_order_id.is_(None))
                     .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
-                    .limit(200)
+                    .limit(min(200, normalized_limit) if normalized_limit is not None else 200)
                 )
                 .mappings()
                 .all()
@@ -4811,18 +4832,33 @@ def _fetch_orders(status: Optional[str], *, include_archived: bool = True) -> li
                         "original_filename": upload["original_filename"],
                     }
                 )
-        payloads.sort(
-            key=lambda item: (
-                item.get("received_at") or datetime.min,
-                str(item.get("id") or ""),
-            ),
-            reverse=True,
-        )
+        payloads.sort(key=_order_list_sort_key, reverse=True)
+        if normalized_limit is not None:
+            payloads = payloads[:normalized_limit]
         return payloads
 
 
-def list_orders(status: Optional[str] = None, *, include_archived: bool = True):
-    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}"
+def _order_list_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
+    received_at = item.get("received_at")
+    if isinstance(received_at, str):
+        try:
+            received_at = datetime.fromisoformat(received_at)
+        except ValueError:
+            received_at = None
+    return (
+        received_at if isinstance(received_at, datetime) else datetime.min,
+        str(item.get("id") or ""),
+    )
+
+
+def list_orders(
+    status: Optional[str] = None,
+    *,
+    include_archived: bool = True,
+    limit: int | None = None,
+):
+    normalized_limit = _normalize_order_list_limit(limit)
+    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}|limit:{normalized_limit or 'all'}"
     now = time.time()
     cached: list[dict] | None = None
     cached_at = 0.0
@@ -4833,7 +4869,7 @@ def list_orders(status: Optional[str] = None, *, include_archived: bool = True):
     if cached is not None and now - cached_at < 30:
         return cached
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_fetch_orders, status, include_archived=include_archived)
+        future = executor.submit(_fetch_orders, status, include_archived=include_archived, limit=normalized_limit)
         try:
             orders = future.result(timeout=5)
         except TimeoutError:
@@ -4845,9 +4881,15 @@ def list_orders(status: Optional[str] = None, *, include_archived: bool = True):
     return orders
 
 
-def refresh_orders_cache(status: Optional[str] = None, *, include_archived: bool = True) -> int:
-    orders = _fetch_orders(status, include_archived=include_archived)
-    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}"
+def refresh_orders_cache(
+    status: Optional[str] = None,
+    *,
+    include_archived: bool = True,
+    limit: int | None = None,
+) -> int:
+    normalized_limit = _normalize_order_list_limit(limit)
+    orders = _fetch_orders(status, include_archived=include_archived, limit=normalized_limit)
+    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}|limit:{normalized_limit or 'all'}"
     with _orders_cache_lock:
         _orders_cache[key] = (time.time(), orders)
     return len(orders)

@@ -18,7 +18,7 @@ def test_list_orders_default_is_lightweight_without_runtime(monkeypatch) -> None
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
-        lambda status=None, include_archived=False: [
+        lambda status=None, include_archived=False, limit=None: [
             {
                 "id": "ORD-LIST-DEFAULT-001",
                 "status": "要確認",
@@ -180,7 +180,7 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
-        lambda status=None, include_archived=False: [
+        lambda status=None, include_archived=False, limit=None: [
             {
                 "id": "ORD-LIST-001",
                 "facility": None,
@@ -278,7 +278,7 @@ def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypat
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
-        lambda status=None, include_archived=False: [
+        lambda status=None, include_archived=False, limit=None: [
             {
                 "id": "ORD-LIST-NO-CANDIDATE-001",
                 "facility": None,
@@ -291,7 +291,13 @@ def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypat
             }
         ],
     )
-    monkeypatch.setattr(orders_api.order_service, "_load_order_ocr_cache_map", lambda order_ids: {})
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "_load_order_ocr_cache_map",
+        lambda order_ids: (_ for _ in ()).throw(
+            AssertionError("OCR cache payload must not be loaded for default lightweight list hydration")
+        ),
+    )
     monkeypatch.setattr(orders_api.workflow_state_service, "list_workflow_states", lambda order_ids: {})
     monkeypatch.setattr(
         orders_api.candidate_resolution_service,
@@ -313,7 +319,7 @@ def test_list_orders_without_ocr_uses_uploaded_pdf_week_hint_when_order_week_mis
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
-        lambda status=None, include_archived=False: [
+        lambda status=None, include_archived=False, limit=None: [
             {
                 "id": "ORD-LIST-002",
                 "facility": None,
