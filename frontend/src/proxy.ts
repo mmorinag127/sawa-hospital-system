@@ -5,7 +5,7 @@ import type { NextRequest } from "next/server";
 const CANONICAL_HOST = "web-prod-avlnzjjrca-dt.a.run.app";
 const ALT_HOSTS = new Set(["web-prod-167795504375.asia-northeast2.run.app"]);
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const host = (request.headers.get("host") || "").split(":")[0];
   if (ALT_HOSTS.has(host)) {
     const url = request.nextUrl.clone();
