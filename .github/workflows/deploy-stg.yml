@@ -96,12 +96,31 @@ jobs:
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v3
       - id: fingerprint
-        name: Validate backend base fingerprint
+        name: Resolve backend base fingerprint
         run: |
           set -euo pipefail
           current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)"
-          test "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT"
           echo "current_base_fingerprint=$current_base_fingerprint" >> "$GITHUB_OUTPUT"
+      - id: base
+        name: Ensure backend base image
+        run: |
+          set -euo pipefail
+          current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
+          if [ "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT" ]; then
+            echo "image=$BACKEND_BASE_IMAGE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          short_fingerprint="${current_base_fingerprint:0:12}"
+          tag="stg-backend-base-yomitoku-cpu-${short_fingerprint}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            -f backend/Dockerfile.base \
+            --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
+            -t "$image" \
+            backend
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
       - id: prepare
         name: Prepare backend deploy source
         run: |
@@ -114,12 +133,13 @@ jobs:
           set -euo pipefail
           deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
           current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
+          base_image="${{ steps.base.outputs.image }}"
           tag="stg-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
           image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build \
-            --build-arg "BASE_IMAGE=${BACKEND_BASE_IMAGE}" \
-            --label "sawa.backend_base_image=${BACKEND_BASE_IMAGE}" \
+            --build-arg "BASE_IMAGE=${base_image}" \
+            --label "sawa.backend_base_image=${base_image}" \
             --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
             --label "sawa.git_sha=${GITHUB_SHA}" \
             --label "sawa.release_branch=develop" \
