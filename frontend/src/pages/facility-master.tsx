@@ -739,7 +739,7 @@ export default function FacilityMasterPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>施設一覧</h2>
-          <button className="btn" onClick={addFacility} disabled={isEditing}>
+          <button className="btn" onClick={addFacility} disabled={!master || isEditing}>
             新規追加
           </button>
         </header>
@@ -762,7 +762,7 @@ export default function FacilityMasterPage() {
                       <p className="list-title">{name}</p>
                       <p className="list-meta">{id}</p>
                     </div>
-                    <span className="ghost-link">選択</span>
+                    <span className="ghost-link">{isActive ? "選択中" : "選択"}</span>
                   </button>
                 );
               })}
@@ -772,7 +772,11 @@ export default function FacilityMasterPage() {
                 <div className="section-title-row">
                   <div>
                     <h3>基本情報</h3>
-                    <p className="mode-text">{isEditing ? "編集中" : "閲覧中"}</p>
+                    <p className="mode-text">
+                      {isEditing
+                        ? "編集中です。変更後は保存するかキャンセルしてください。"
+                        : "閲覧中です。入力や削除は編集開始後にできます。"}
+                    </p>
                   </div>
                   {isEditing ? (
                     <div className="actions compact-actions">
@@ -780,12 +784,12 @@ export default function FacilityMasterPage() {
                         キャンセル
                       </button>
                       <button className="btn primary compact" onClick={saveMaster}>
-                        保存する
+                        変更を保存
                       </button>
                     </div>
                   ) : (
-                    <button className="btn compact" onClick={beginEdit} disabled={!selectedFacility}>
-                      編集する
+                    <button className="btn primary edit-start-button" onClick={beginEdit} disabled={!selectedFacility}>
+                      この施設の編集を開始
                     </button>
                   )}
                 </div>
@@ -1241,13 +1245,14 @@ export default function FacilityMasterPage() {
         <details className="json-panel">
           <summary>Master JSON (上級)</summary>
           <div className="actions">
-            <button className="btn ghost" onClick={applyMasterJson}>
+            <button className="btn ghost" onClick={applyMasterJson} disabled={!isEditing}>
               JSON を反映
             </button>
           </div>
           <textarea
             className="textarea json-textarea"
             value={masterText}
+            disabled={!isEditing}
             onChange={(e) => setMasterText(e.target.value)}
             rows={16}
             wrap="soft"
@@ -1474,6 +1479,8 @@ export default function FacilityMasterPage() {
           color: #5f7b74;
           font-size: 12px;
           font-weight: 600;
+          max-width: 520px;
+          line-height: 1.6;
         }
 
         .section-help {
@@ -1635,10 +1642,15 @@ export default function FacilityMasterPage() {
         }
 
         .input:disabled,
-        .table-input:disabled {
+        .table-input:disabled,
+        .textarea:disabled {
           background: #f4f5f3;
           border-color: rgba(31, 42, 42, 0.08);
           cursor: default;
+        }
+
+        .textarea:disabled {
+          color: #4c5955;
         }
 
         .check-field {
@@ -1744,6 +1756,13 @@ export default function FacilityMasterPage() {
         .btn.primary {
           background: #1f2a2a;
           color: #f7f2e7;
+        }
+
+        .edit-start-button {
+          min-width: 220px;
+          min-height: 46px;
+          border-radius: 10px;
+          box-shadow: 0 8px 18px rgba(31, 42, 42, 0.16);
         }
 
         .btn.compact {
