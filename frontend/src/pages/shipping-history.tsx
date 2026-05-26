@@ -278,6 +278,26 @@ const addMonths = (monthValue: string, months: number) => {
   return toMonthInput(next);
 };
 
+const formatMonthOptionLabel = (monthValue: string) => {
+  const date = parseMonthInput(monthValue);
+  if (!date) return monthValue;
+  return date.toLocaleDateString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+  });
+};
+
+const buildRecentMonthOptions = (selectedMonth: string, count = 12) => {
+  const currentMonth = toMonthInput(new Date());
+  const options = new Set<string>();
+  for (let offset = 0; offset < count; offset += 1) {
+    options.add(addMonths(currentMonth, -offset));
+  }
+  options.add(selectedMonth);
+  return [...options].sort((left, right) => (left < right ? 1 : left > right ? -1 : 0));
+};
+
 const monthCenterDate = (monthValue: string) => {
   const monthStart = parseMonthInput(monthValue) || new Date();
   return toDateInput(new Date(monthStart.getFullYear(), monthStart.getMonth(), 15));
@@ -654,7 +674,7 @@ export default function ShippingHistoryPage() {
       setLatest(normalized);
       setMessage(
         view === "recent"
-          ? `基準日 ${baseDate} の±${normalized.window_days}日を取得しました。`
+          ? `基準日 ${nextBaseDate} の±${normalized.window_days}日を取得しました。`
           : `集約済みの追跡状況を取得しました（${normalized.summary.total}件）。`,
       );
     } catch (err: any) {
@@ -807,6 +827,7 @@ export default function ShippingHistoryPage() {
       }),
     [activeTab, baseDate, dateFrom, dateTo, selectedMonth, visibleDateGroups],
   );
+  const recentMonthOptions = useMemo(() => buildRecentMonthOptions(calendarMonth.monthValue), [calendarMonth.monthValue]);
 
   const renderTrackingNumberRow = (item: TrackingNumberCard) => {
     const reasons = describeAttentionReasons(item, attentionStaleHours);
@@ -1184,13 +1205,28 @@ export default function ShippingHistoryPage() {
                 </button>
                 <label className="field month-field">
                   <span className="field-label">表示月</span>
-                  <input
+                  <select
                     className="input"
+                    value={calendarMonth.monthValue}
+                    onChange={(event) => {
+                      if (event.target.value) void loadSelectedMonth(event.target.value);
+                    }}
+                    disabled={loading}
+                  >
+                    {recentMonthOptions.map((monthValue) => (
+                      <option key={monthValue} value={monthValue}>
+                        {formatMonthOptionLabel(monthValue)}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="input month-input"
                     type="month"
                     value={calendarMonth.monthValue}
                     onChange={(event) => {
                       if (event.target.value) void loadSelectedMonth(event.target.value);
                     }}
+                    disabled={loading}
                   />
                 </label>
                 <button
