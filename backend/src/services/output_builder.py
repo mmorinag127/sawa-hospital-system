@@ -1947,9 +1947,48 @@ def _apply_delivery_configured_headers(
             continue
         header = col.get("header") or name
         cell = _resolve_merged_cell(ws, header_row, col_idx)
+        merged = next(
+            (
+                merged
+                for merged in ws.merged_cells.ranges
+                if merged.min_row <= header_row <= merged.max_row
+                and merged.min_col <= col_idx <= merged.max_col
+            ),
+            None,
+        )
+        if merged:
+            covered = [
+                configured_col
+                for configured_col in configured_indexes
+                if merged.min_col <= configured_col <= merged.max_col
+            ]
+            if len(covered) > 1:
+                continue
         if not isinstance(cell, MergedCell):
             cell.value = header
     start_row = data_start_row or _delivery_start_row(ws, header_row)
+    intended_headers_by_col = {
+        int(col.get("column_index")): _normalize_cell_text(col.get("header") or col.get("name"))
+        for col in columns
+        if isinstance(col.get("column_index"), int) and int(col.get("column_index")) > 0
+    }
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row >= header_row or merged.max_row >= start_row:
+            continue
+        covered = [
+            col_idx
+            for col_idx in configured_indexes
+            if merged.min_col <= col_idx <= merged.max_col
+        ]
+        if not covered:
+            continue
+        cell = ws.cell(row=merged.min_row, column=merged.min_col)
+        cell_text = _normalize_cell_text(cell.value)
+        if not cell_text:
+            continue
+        intended = {intended_headers_by_col.get(col_idx, "") for col_idx in covered}
+        if cell_text not in intended:
+            cell.value = ""
     for row_idx in range(header_row + 1, start_row):
         for col_idx in configured_indexes:
             cell = _resolve_merged_cell(ws, row_idx, col_idx)

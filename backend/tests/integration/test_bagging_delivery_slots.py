@@ -294,6 +294,8 @@ def test_delivery_slot_template_applies_configured_headers(tmp_path):
     ws.cell(row=1, column=6, value="軟菜")
     ws.cell(row=2, column=5, value="2F")
     ws.cell(row=2, column=6, value="3F")
+    ws.merge_cells(start_row=1, start_column=7, end_row=2, end_column=8)
+    ws.cell(row=1, column=7, value="ミキサー")
     ws.cell(row=3, column=2, value="朝")
     ws.cell(row=3, column=3, value="主菜")
     wb.save(template_path)
@@ -316,6 +318,8 @@ def test_delivery_slot_template_applies_configured_headers(tmp_path):
             {"name": "常食", "source": "quantity", "header": "常食", "column_index": 4},
             {"name": "肉禁", "source": "quantity", "header": "肉禁", "column_index": 5},
             {"name": "魚禁", "source": "quantity", "header": "魚禁", "column_index": 6},
+            {"name": "変更1", "source": "quantity", "header": "変更1", "column_index": 7},
+            {"name": "変更2", "source": "quantity", "header": "変更2", "column_index": 8},
         ],
         template_path.as_uri(),
         False,
@@ -328,6 +332,7 @@ def test_delivery_slot_template_applies_configured_headers(tmp_path):
     assert ws_out.cell(row=2, column=4).value == "常食"
     assert ws_out.cell(row=2, column=5).value == "肉禁"
     assert ws_out.cell(row=2, column=6).value == "魚禁"
+    assert ws_out.cell(row=1, column=7).value in ("", None)
 
 
 def test_ikebukuro_label_expiry_is_plus_three_months_and_content_amount_fallbacks():
