@@ -1178,7 +1178,12 @@ def _apply_bagging_exceptions(lines: list[dict], facility_config: dict | None) -
     return enriched
 
 
-def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = True) -> list[dict]:
+def build_order_lines_for_outputs(
+    order: dict,
+    *,
+    include_expanded_copy: bool = True,
+    allow_stale_draft_lines: bool = False,
+) -> list[dict]:
     facility_id = order.get("facility")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
@@ -1189,9 +1194,41 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
     )
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
     raw_lines = order.get("lines", [])
-    workflow_v2_lines = _workflow_v2_lines_for_outputs(order, raw_lines)
-    if workflow_v2_lines is not None:
-        raw_lines = workflow_v2_lines
+    order_id = order.get("id")
+    workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
+    workflow_warnings = {
+        str(item).strip()
+        for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or [])
+        if str(item).strip()
+    }
+    workflow_blockers = {
+        str(item).strip()
+        for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or [])
+        if str(item).strip()
+    }
+    draft_newer_than_lines = bool(
+        workflow_state.get("ocr_draft_newer_than_lines")
+        or workflow_state.get("draft_newer_than_lines")
+        or "draft_newer_than_lines" in workflow_warnings
+        or "draft_newer_than_lines" in workflow_blockers
+    )
+    use_existing_lines_for_stale_draft = (
+        allow_stale_draft_lines
+        and draft_newer_than_lines
+        and isinstance(raw_lines, list)
+        and bool(raw_lines)
+    )
+    if use_existing_lines_for_stale_draft:
+        logger.warning(
+            "Daily output read used existing order lines without workflow draft materialization",
+            order_id=order_id,
+            facility_id=facility_id,
+            workflow_state=workflow_state.get("state"),
+        )
+    else:
+        workflow_v2_lines = _workflow_v2_lines_for_outputs(order, raw_lines)
+        if workflow_v2_lines is not None:
+            raw_lines = workflow_v2_lines
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False
@@ -1205,7 +1242,6 @@ def build_order_lines_for_outputs(order: dict, *, include_expanded_copy: bool = 
             )
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
-        order_id = order.get("id")
         if order_id:
             materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
             candidate_lines = (

@@ -425,6 +425,43 @@ def test_build_order_lines_for_outputs_can_allow_stale_lines_for_audit(monkeypat
     assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("current", 4)]
 
 
+def test_build_order_lines_for_outputs_accepts_stale_lines_keyword_without_materializing(monkeypatch):
+    order = {
+        "id": "ORD-DAILY-STABLE",
+        "facility": "FAC001",
+        "lines": [
+            {
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_name": "current",
+                "diet_type": "regular",
+                "area_id": "X",
+                "quantity_original": 4,
+            }
+        ],
+        "workflow_state": {"warnings": ["draft_newer_than_lines"]},
+    }
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
+    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
+    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
+    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
+    monkeypatch.setattr(
+        output_builder,
+        "_workflow_v2_lines_for_outputs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale audit path must not materialize")),
+    )
+
+    lines = output_builder.build_order_lines_for_outputs(
+        order,
+        include_expanded_copy=False,
+        allow_stale_draft_lines=True,
+    )
+
+    assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("current", 4)]
+
+
 def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
