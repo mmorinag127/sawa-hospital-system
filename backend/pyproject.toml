@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "Backend API and workers for hospital order system"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.110.0",
+    "fastapi==0.136.1",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.6.0",
     "sqlalchemy>=2.0.0",
