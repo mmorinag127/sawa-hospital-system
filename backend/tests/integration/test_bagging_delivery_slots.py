@@ -325,11 +325,9 @@ def test_delivery_slot_template_applies_configured_headers(tmp_path):
 
     actual = load_workbook(output_path)
     ws_out = actual["2026-05-24"]
-    assert ws_out.cell(row=1, column=4).value == "常食"
-    assert ws_out.cell(row=1, column=5).value == "肉禁"
-    assert ws_out.cell(row=1, column=6).value == "魚禁"
-    assert ws_out.cell(row=2, column=5).value in ("", None)
-    assert ws_out.cell(row=2, column=6).value in ("", None)
+    assert ws_out.cell(row=2, column=4).value == "常食"
+    assert ws_out.cell(row=2, column=5).value == "肉禁"
+    assert ws_out.cell(row=2, column=6).value == "魚禁"
 
 
 def test_ikebukuro_label_expiry_is_plus_three_months_and_content_amount_fallbacks():

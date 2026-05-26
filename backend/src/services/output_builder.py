@@ -2821,6 +2821,10 @@ def _write_delivery_note(
     column_map = _build_delivery_column_map(ws, header_row, columns)
     menu_col_idx = _resolve_delivery_menu_column(columns, column_map)
     slot_rows = _find_delivery_slot_rows(ws, menu_col_idx) if menu_col_idx else []
+    if slot_rows:
+        # Slot templates keep the editable column labels immediately above the
+        # first menu row; fixed title/company rows can otherwise win detection.
+        header_row = max(1, min(slot_rows) - 1)
     _apply_delivery_configured_headers(
         ws,
         header_row,
