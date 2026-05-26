@@ -48,6 +48,8 @@ export type ShippingHistoryEvent = {
 
 export type ShippingFacilityGroup = {
   ship_date?: string | null;
+  group_date?: string | null;
+  reference_date?: string | null;
   facility_name?: string | null;
   facility_name_source?: string | null;
   item_count: number;
@@ -59,6 +61,8 @@ export type ShippingFacilityGroup = {
 
 export type ShippingDateGroup = {
   ship_date?: string | null;
+  group_date?: string | null;
+  reference_date?: string | null;
   item_count: number;
   pending_count: number;
   delivered_count: number;
@@ -217,6 +221,15 @@ const normalizeLatestItem = (
   };
 };
 
+const normalizeGroupDate = (value: unknown) => normalizeOptionalText(value);
+
+const dateFromRawGroup = (rawGroup: any, fallback?: string | null) =>
+  normalizeGroupDate(rawGroup?.ship_date) ||
+  normalizeGroupDate(rawGroup?.group_date) ||
+  normalizeGroupDate(rawGroup?.reference_date) ||
+  fallback ||
+  null;
+
 const describeAttentionReasonsFromShape = (item: ShippingLatestItem, staleHours = 24) => {
   const reasons = [...(item.attention_reasons || [])];
   if (item.error) reasons.push("照会失敗");
@@ -264,8 +277,9 @@ const buildFacilityGroup = (
   rawGroup?: any,
   defaults: Partial<Pick<ShippingLatestItem, "ship_date" | "facility_name" | "facility_name_source">> = {},
 ): ShippingFacilityGroup => {
+  const groupDate = dateFromRawGroup(rawGroup, defaults.ship_date || null);
   const normalizedItems = items
-    .map((item) => normalizeLatestItem(item, defaults))
+    .map((item) => normalizeLatestItem(item, { ...defaults, ship_date: groupDate }))
     .filter((item) => Boolean(item.tracking_key || item.tracking_number))
     .sort((left, right) => compareLookedUpAtDesc(left.looked_up_at, right.looked_up_at));
   const summary = summarizeItems(normalizedItems);
@@ -274,7 +288,9 @@ const buildFacilityGroup = (
     return compareLookedUpAtDesc(item.looked_up_at, latest) < 0 ? item.looked_up_at : latest;
   }, null);
   return {
-    ship_date: normalizeOptionalText(rawGroup?.ship_date ?? defaults.ship_date),
+    ship_date: normalizeOptionalText(rawGroup?.ship_date) || groupDate,
+    group_date: normalizeOptionalText(rawGroup?.group_date) || groupDate,
+    reference_date: normalizeOptionalText(rawGroup?.reference_date) || groupDate,
     facility_name: normalizeOptionalText(rawGroup?.facility_name ?? defaults.facility_name),
     facility_name_source: normalizeOptionalText(
       rawGroup?.facility_name_source ?? defaults.facility_name_source,
@@ -314,13 +330,13 @@ const groupFlatItems = (items: any[]) => {
 const buildDateGroups = (facilityGroups: ShippingFacilityGroup[]) => {
   const grouped = new Map<string, ShippingFacilityGroup[]>();
   facilityGroups.forEach((group) => {
-    const shipDate = group.ship_date || "";
-    const bucket = grouped.get(shipDate) || [];
+    const groupDate = group.ship_date || group.group_date || group.reference_date || "";
+    const bucket = grouped.get(groupDate) || [];
     bucket.push(group);
-    grouped.set(shipDate, bucket);
+    grouped.set(groupDate, bucket);
   });
   return Array.from(grouped.entries())
-    .map(([shipDate, facilities]) => {
+    .map(([groupDate, facilities]) => {
       const itemCount = facilities.reduce((total, item) => total + item.item_count, 0);
       const pendingCount = facilities.reduce((total, item) => total + item.pending_count, 0);
       const deliveredCount = facilities.reduce((total, item) => total + item.delivered_count, 0);
@@ -331,7 +347,9 @@ const buildDateGroups = (facilityGroups: ShippingFacilityGroup[]) => {
           : latest;
       }, null);
       return {
-        ship_date: shipDate || null,
+        ship_date: groupDate || null,
+        group_date: groupDate || null,
+        reference_date: groupDate || null,
         item_count: itemCount,
         pending_count: pendingCount,
         delivered_count: deliveredCount,
@@ -344,7 +362,12 @@ const buildDateGroups = (facilityGroups: ShippingFacilityGroup[]) => {
         }),
       } satisfies ShippingDateGroup;
     })
-    .sort((left, right) => compareDateValueAsc(left.ship_date, right.ship_date));
+    .sort((left, right) =>
+      compareDateValueAsc(
+        left.ship_date || left.group_date || left.reference_date,
+        right.ship_date || right.group_date || right.reference_date,
+      ),
+    );
 };
 
 const normalizeQuota = (value: any): QuotaStatus | null => {
@@ -373,7 +396,7 @@ export const normalizeLatestResponse = (
   const facilityGroups = (rawGroups.length
     ? rawGroups.map((group) =>
         buildFacilityGroup(Array.isArray(group?.items) ? group.items : [], group, {
-          ship_date: normalizeOptionalText(group?.ship_date),
+          ship_date: dateFromRawGroup(group),
           facility_name: normalizeOptionalText(group?.facility_name),
           facility_name_source: normalizeOptionalText(group?.facility_name_source),
         }),
@@ -383,7 +406,10 @@ export const normalizeLatestResponse = (
     .filter((group) => group.items.length > 0)
     .sort((left, right) => {
       return (
-        compareDateValueAsc(left.ship_date, right.ship_date) ||
+        compareDateValueAsc(
+          left.ship_date || left.group_date || left.reference_date,
+          right.ship_date || right.group_date || right.reference_date,
+        ) ||
         compareTextAsc(left.facility_name, right.facility_name) ||
         compareLookedUpAtDesc(left.latest_looked_up_at, right.latest_looked_up_at)
       );

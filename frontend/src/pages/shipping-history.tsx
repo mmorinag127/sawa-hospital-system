@@ -82,6 +82,7 @@ type CalendarDayCell = {
 
 type CalendarMonth = {
   label: string;
+  monthValue: string;
   weeks: CalendarDayCell[][];
 };
 
@@ -263,6 +264,25 @@ const buildDefaultRange = () => {
   return { start: toDateInput(start), end: toDateInput(end) };
 };
 
+const toMonthInput = (date: Date) => toDateInput(date).slice(0, 7);
+
+const parseMonthInput = (value?: string | null) => {
+  if (!value || !/^\d{4}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}-01T00:00:00+09:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const addMonths = (monthValue: string, months: number) => {
+  const current = parseMonthInput(monthValue) || new Date();
+  const next = new Date(current.getFullYear(), current.getMonth() + months, 1);
+  return toMonthInput(next);
+};
+
+const monthCenterDate = (monthValue: string) => {
+  const monthStart = parseMonthInput(monthValue) || new Date();
+  return toDateInput(new Date(monthStart.getFullYear(), monthStart.getMonth(), 15));
+};
+
 const parseFacilityFilter = (value: string) =>
   value
     .split(/[,\n、]+/)
@@ -326,7 +346,9 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
     }
   >();
   response.date_groups.forEach((dateGroup: LatestShippingDateGroup) => {
-    const key = String(dateGroup.ship_date || "").trim() || lookedUpDateKey(dateGroup.latest_looked_up_at);
+    const key =
+      String(dateGroup.ship_date || dateGroup.group_date || dateGroup.reference_date || "").trim() ||
+      lookedUpDateKey(dateGroup.latest_looked_up_at);
     const current =
       grouped.get(key) || {
         key,
@@ -350,7 +372,15 @@ const buildTrackingDateGroups = (response: ShippingLatestResponse | null, staleH
       const displayGroup = normalizeTrackingFacilityDisplayGroup(facilityGroupSource.facility_name);
       facilityGroupSource.items.forEach((rawItem) => {
         const item = toTrackingNumberCard(rawItem, {
-          ship_date: rawItem.ship_date || facilityGroupSource.ship_date || dateGroup.ship_date || null,
+          ship_date:
+            rawItem.ship_date ||
+            facilityGroupSource.ship_date ||
+            facilityGroupSource.group_date ||
+            facilityGroupSource.reference_date ||
+            dateGroup.ship_date ||
+            dateGroup.group_date ||
+            dateGroup.reference_date ||
+            null,
           facility_name: rawItem.facility_name || facilityGroupSource.facility_name || null,
           facility_name_source:
             rawItem.facility_name_source || facilityGroupSource.facility_name_source || null,
@@ -523,6 +553,7 @@ const addDays = (date: Date, days: number) => {
 const buildCalendarMonth = (params: {
   groups: TrackingDateGroup[];
   fallbackDate: string;
+  selectedMonth?: string;
 }): CalendarMonth => {
   const groupByDate = new Map(
     params.groups
@@ -530,8 +561,9 @@ const buildCalendarMonth = (params: {
       .map((group) => [group.key, group] as const),
   );
   const firstGroupDate = params.groups.map((group) => parseDateKey(group.key)).find(Boolean);
+  const selectedMonth = parseMonthInput(params.selectedMonth);
   const fallback = parseDateKey(params.fallbackDate) || new Date();
-  const anchor = firstGroupDate || fallback;
+  const anchor = selectedMonth || firstGroupDate || fallback;
   const monthStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
   const monthEnd = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
   const gridStart = addDays(monthStart, -monthStart.getDay());
@@ -554,6 +586,7 @@ const buildCalendarMonth = (params: {
   }
   return {
     label: formatCalendarMonthLabel(monthStart),
+    monthValue: toMonthInput(monthStart),
     weeks,
   };
 };
@@ -561,10 +594,11 @@ const buildCalendarMonth = (params: {
 export default function ShippingHistoryPage() {
   const { isAdmin } = useCurrentUserRole();
   const defaultRange = buildDefaultRange();
-  const [activeTab, setActiveTab] = useState<HistoryTab>("active");
+  const [activeTab, setActiveTab] = useState<HistoryTab>("recent");
   const [limit, setLimit] = useState<number>(200);
-  const [baseDate, setBaseDate] = useState<string>(defaultRange.end);
-  const [windowDays, setWindowDays] = useState<number>(3);
+  const [selectedMonth, setSelectedMonth] = useState<string>(toMonthInput(new Date()));
+  const [baseDate, setBaseDate] = useState<string>(monthCenterDate(toMonthInput(new Date())));
+  const [windowDays, setWindowDays] = useState<number>(31);
   const [facilityFilter, setFacilityFilter] = useState<string>("");
   const [source, setSource] = useState<string>("");
   const [attentionStaleHours, setAttentionStaleHours] = useState<number>(24);
@@ -584,26 +618,38 @@ export default function ShippingHistoryPage() {
   );
   const historyDateGroups = useMemo(() => buildHistoryDateGroups(historyItems), [historyItems]);
 
-  const loadLatest = async (viewOverride?: ShippingLatestView) => {
+  const loadLatest = async (
+    viewOverride?: ShippingLatestView,
+    options?: Partial<{
+      limit: number;
+      baseDate: string;
+      windowDays: number;
+      facilityFilter: string;
+      source: string;
+      attentionStaleHours: number;
+    }>,
+  ) => {
     const view = viewOverride || (activeTab === "logs" ? "active" : activeTab);
+    const nextBaseDate = options?.baseDate ?? baseDate;
+    const nextWindowDays = options?.windowDays ?? windowDays;
     setLoading(true);
     setMessage("集約済みの追跡状況を取得中です...");
     try {
       const res = await apiClient.get(
         buildLatestPath({
           view,
-          limit,
-          baseDate,
-          windowDays,
-          facilityFilter,
-          source,
-          attentionStaleHours,
+          limit: options?.limit ?? limit,
+          baseDate: nextBaseDate,
+          windowDays: nextWindowDays,
+          facilityFilter: options?.facilityFilter ?? facilityFilter,
+          source: options?.source ?? source,
+          attentionStaleHours: options?.attentionStaleHours ?? attentionStaleHours,
         }),
       );
       const normalized = normalizeLatestResponse(res.data, {
         view,
-        base_date: baseDate,
-        window_days: windowDays,
+        base_date: nextBaseDate,
+        window_days: nextWindowDays,
       });
       setLatest(normalized);
       setMessage(
@@ -618,6 +664,23 @@ export default function ShippingHistoryPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadSelectedMonth = async (monthValue: string) => {
+    const nextBaseDate = monthCenterDate(monthValue);
+    setSelectedMonth(monthValue);
+    setActiveTab("recent");
+    setBaseDate(nextBaseDate);
+    setWindowDays(31);
+    setSelectedDateGroupKey(null);
+    await loadLatest("recent", {
+      baseDate: nextBaseDate,
+      windowDays: 31,
+      limit,
+      facilityFilter,
+      source,
+      attentionStaleHours,
+    });
   };
 
   const loadHistory = async () => {
@@ -740,8 +803,9 @@ export default function ShippingHistoryPage() {
       buildCalendarMonth({
         groups: visibleDateGroups,
         fallbackDate: activeTab === "logs" ? dateTo || dateFrom : baseDate,
+        selectedMonth: activeTab === "logs" ? undefined : selectedMonth,
       }),
-    [activeTab, baseDate, dateFrom, dateTo, visibleDateGroups],
+    [activeTab, baseDate, dateFrom, dateTo, selectedMonth, visibleDateGroups],
   );
 
   const renderTrackingNumberRow = (item: TrackingNumberCard) => {
@@ -1108,6 +1172,45 @@ export default function ShippingHistoryPage() {
                   : nonLogDateCopy}
               </p>
             </div>
+            {activeTab !== "logs" ? (
+              <div className="calendar-month-controls" aria-label="表示月">
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => void loadSelectedMonth(addMonths(calendarMonth.monthValue, -1))}
+                  disabled={loading}
+                >
+                  前月
+                </button>
+                <label className="field month-field">
+                  <span className="field-label">表示月</span>
+                  <input
+                    className="input"
+                    type="month"
+                    value={calendarMonth.monthValue}
+                    onChange={(event) => {
+                      if (event.target.value) void loadSelectedMonth(event.target.value);
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => void loadSelectedMonth(toMonthInput(new Date()))}
+                  disabled={loading}
+                >
+                  今月
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => void loadSelectedMonth(addMonths(calendarMonth.monthValue, 1))}
+                  disabled={loading}
+                >
+                  翌月
+                </button>
+              </div>
+            ) : null}
           </header>
 
           {calendarMonth.weeks.length ? (
@@ -1391,6 +1494,18 @@ export default function ShippingHistoryPage() {
           gap: 16px;
           grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
           align-items: end;
+        }
+
+        .calendar-month-controls {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: end;
+          justify-content: flex-end;
+          gap: 10px;
+        }
+
+        .month-field {
+          min-width: 180px;
         }
 
         .field {
@@ -2246,6 +2361,11 @@ export default function ShippingHistoryPage() {
           .panel-header,
           .week-group-header {
             flex-direction: column;
+          }
+
+          .calendar-month-controls {
+            width: 100%;
+            justify-content: flex-start;
           }
 
           .field.narrow {
