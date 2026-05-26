@@ -100,6 +100,54 @@ def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
     assert rows[0]["menu_display"] == "主菜 Menu A"
 
 
+def test_menu_entry_override_does_not_replace_existing_daypart_or_category():
+    rows = output_builder._apply_menu_entry_overrides(
+        [
+            {
+                "date": date(2026, 5, 24),
+                "daypart": "夕",
+                "menu_category": "主菜",
+                "menu_name": "Menu A",
+                "quantity_original": 1,
+            }
+        ],
+        [
+            {
+                "menu_date": "2026-05-24",
+                "daypart": "昼",
+                "category": "副菜",
+                "name": "Menu A",
+            }
+        ],
+    )
+
+    assert rows[0]["daypart"] == "夕"
+    assert rows[0]["menu_category"] == "主菜"
+
+
+def test_menu_entry_override_fills_missing_daypart_and_category():
+    rows = output_builder._apply_menu_entry_overrides(
+        [
+            {
+                "date": date(2026, 5, 24),
+                "menu_name": "Menu A",
+                "quantity_original": 1,
+            }
+        ],
+        [
+            {
+                "menu_date": "2026-05-24",
+                "daypart": "昼",
+                "category": "副菜",
+                "name": "Menu A",
+            }
+        ],
+    )
+
+    assert rows[0]["daypart"] == "昼"
+    assert rows[0]["menu_category"] == "副菜"
+
+
 def test_build_pipeline_match_text_includes_structured_rows_for_facility_match():
     match_text = ingest_worker._build_pipeline_match_text(
         {

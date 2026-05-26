@@ -1,7 +1,7 @@
 import pathlib
 import sys
 import csv
-from datetime import datetime
+from datetime import date, datetime
 from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
@@ -13,7 +13,7 @@ sys.path.append(str(ROOT))
 from src.db import session_scope
 from src.models.menu import MonthlyMenu, MonthlyMenuItem
 from src.models.output import Bag
-from src.services import config_service, facility_service, menu_service, order_service
+from src.services import config_service, facility_service, menu_service, order_service, output_builder
 from src.services.output_builder import build_outputs, rebuild_bags
 from src.workers.ingest_mail_adapter import IngestEmailPayload
 
@@ -279,6 +279,57 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_pa
     assert ws_out.cell(row=4, column=4).value == 7
     assert ws_out.cell(row=3, column=3).value in ("", None)
     assert ws_out.cell(row=3, column=4).value in ("", None)
+
+
+def test_delivery_slot_template_applies_configured_headers(tmp_path):
+    template_path = tmp_path / "delivery_slot_headers.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Template"
+    ws.cell(row=1, column=1, value="日付")
+    ws.cell(row=1, column=2, value="区分")
+    ws.cell(row=1, column=3, value="献立")
+    ws.cell(row=1, column=4, value="常食2F")
+    ws.cell(row=1, column=5, value="常食3F")
+    ws.cell(row=1, column=6, value="軟菜")
+    ws.cell(row=2, column=5, value="2F")
+    ws.cell(row=2, column=6, value="3F")
+    ws.cell(row=3, column=2, value="朝")
+    ws.cell(row=3, column=3, value="主菜")
+    wb.save(template_path)
+
+    output_path = tmp_path / "delivery_out.xlsx"
+    output_builder._write_delivery_note(
+        output_path,
+        [
+            {
+                "date": date(2026, 5, 24),
+                "daypart": "朝",
+                "menu_display": "主菜 Menu A",
+                "常食": 48,
+            }
+        ],
+        [
+            {"name": "日付", "source": "date", "header": "日付", "column_index": 1},
+            {"name": "区分", "source": "daypart", "header": "区分", "column_index": 2},
+            {"name": "献立", "source": "menu_display", "header": "献立", "column_index": 3},
+            {"name": "常食", "source": "quantity", "header": "常食", "column_index": 4},
+            {"name": "肉禁", "source": "quantity", "header": "肉禁", "column_index": 5},
+            {"name": "魚禁", "source": "quantity", "header": "魚禁", "column_index": 6},
+        ],
+        template_path.as_uri(),
+        False,
+        "Template",
+        "Facility",
+    )
+
+    actual = load_workbook(output_path)
+    ws_out = actual["2026-05-24"]
+    assert ws_out.cell(row=1, column=4).value == "常食"
+    assert ws_out.cell(row=1, column=5).value == "肉禁"
+    assert ws_out.cell(row=1, column=6).value == "魚禁"
+    assert ws_out.cell(row=2, column=5).value in ("", None)
+    assert ws_out.cell(row=2, column=6).value in ("", None)
 
 
 def test_ikebukuro_label_expiry_is_plus_three_months_and_content_amount_fallbacks():

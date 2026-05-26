@@ -675,6 +675,8 @@ def _safe_qty(line: dict, zero_as_empty: bool) -> float | None:
     if qty is None:
         qty = line.get("quantity_original")
     if qty is None:
+        qty = line.get("quantity")
+    if qty is None:
         return None
     if zero_as_empty and qty <= 0:
         return None
@@ -930,9 +932,9 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
             enriched.append(line)
             continue
         updated = dict(line)
-        if entry.get("daypart"):
+        if entry.get("daypart") and not daypart:
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
-        if entry.get("category"):
+        if entry.get("category") and not updated.get("menu_category"):
             updated["menu_category"] = entry.get("category")
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
@@ -1919,6 +1921,42 @@ def _build_delivery_column_map(ws, header_row: int, columns: list[dict]) -> dict
     return column_map
 
 
+def _apply_delivery_configured_headers(
+    ws,
+    header_row: int,
+    columns: list[dict],
+    column_map: dict[str, int],
+    *,
+    data_start_row: int | None = None,
+) -> None:
+    if header_row < 1:
+        return
+    configured_indexes = {
+        int(col.get("column_index"))
+        for col in columns
+        if isinstance(col.get("column_index"), int) and int(col.get("column_index")) > 0
+    }
+    if not configured_indexes:
+        return
+    for col in columns:
+        name = col.get("name")
+        if not name:
+            continue
+        col_idx = column_map.get(name)
+        if not col_idx:
+            continue
+        header = col.get("header") or name
+        cell = _resolve_merged_cell(ws, header_row, col_idx)
+        if not isinstance(cell, MergedCell):
+            cell.value = header
+    start_row = data_start_row or _delivery_start_row(ws, header_row)
+    for row_idx in range(header_row + 1, start_row):
+        for col_idx in configured_indexes:
+            cell = _resolve_merged_cell(ws, row_idx, col_idx)
+            if not isinstance(cell, MergedCell):
+                cell.value = ""
+
+
 def _delivery_start_row(ws, header_row: int) -> int:
     max_row = header_row
     for merged in ws.merged_cells.ranges:
@@ -2783,6 +2821,13 @@ def _write_delivery_note(
     column_map = _build_delivery_column_map(ws, header_row, columns)
     menu_col_idx = _resolve_delivery_menu_column(columns, column_map)
     slot_rows = _find_delivery_slot_rows(ws, menu_col_idx) if menu_col_idx else []
+    _apply_delivery_configured_headers(
+        ws,
+        header_row,
+        columns,
+        column_map,
+        data_start_row=min(slot_rows) if slot_rows else None,
+    )
     if slot_rows:
         original_sheet_count = len(workbook.worksheets)
         for name in list(workbook.sheetnames):
@@ -2944,51 +2989,6 @@ def _build_delivery_rows(
     if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
         menu_meta = _build_ocr_menu_meta(order, facility_config)
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
-    if entries and prefer_ocr_rows:
-        menu_names = [entry.get("menu_name") for entry in entries if entry.get("menu_name")]
-        condiment_map = _build_condiment_map(menu_names, facility_id)
-        ocr_rows: list[dict] = []
-        for entry in entries:
-            date_val = entry.get("date")
-            menu_name = entry.get("menu_name")
-            if not date_val or not menu_name:
-                continue
-            row = {
-                "date": date_val,
-                "daypart": entry.get("daypart"),
-                "menu_category": entry.get("category"),
-                "menu_name": menu_name,
-                "menu_display": "",
-                "_order_index": entry.get("index"),
-                "note": entry.get("note"),
-            }
-            for col in quantity_columns:
-                name = col.get("name")
-                if not name:
-                    continue
-                diet_key = col.get("diet_key")
-                area_key = col.get("area_key")
-                qty = _lookup_ocr_entry_quantity(entry, diet_key, area_key)
-                if qty is None:
-                    continue
-                if _safe_qty({"quantity_original": qty, "quantity_corrected": None}, zero_as_empty) is None:
-                    continue
-                row[name] = qty
-            condiments = condiment_map.get(menu_name, [])
-            _apply_condiment_note(row, condiments)
-            if row.get("menu_category"):
-                row["menu_display"] = f"{row.get('menu_category')} {row.get('menu_name')}".strip()
-            else:
-                row["menu_display"] = row.get("menu_name") or ""
-            ocr_rows.append(row)
-        ocr_rows.sort(
-            key=lambda row: (
-                row.get("date") or "",
-                row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
-            )
-        )
-        return ocr_rows
-
     rows: dict[tuple, dict] = {}
     menu_names = []
     for line in order.get("lines", []):

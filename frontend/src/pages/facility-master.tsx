@@ -361,6 +361,7 @@ export default function FacilityMasterPage() {
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [path, setPath] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const facilities = useMemo(() => {
     if (!master?.facilities || !Array.isArray(master.facilities)) return [];
@@ -655,8 +656,10 @@ export default function FacilityMasterPage() {
   };
 
   const saveMaster = async () => {
-    if (!master) return;
+    if (!master || saving) return;
     const payload = sanitizeMasterForSave(master);
+    setSaving(true);
+    setMessage("保存中です...");
     try {
       const res = await apiClient.put("/facility-master", payload);
       const updatedMaster = res.data.facility_master as FacilityMaster;
@@ -666,7 +669,7 @@ export default function FacilityMasterPage() {
       setPath(res.data.path || path);
       setEditingIndex(-1);
       setEditBaseline(null);
-      setMessage("Facility master を保存しました。");
+      setMessage("保存しました。画面の内容は本番に反映済みです。");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       if (detail?.errors) {
@@ -674,7 +677,10 @@ export default function FacilityMasterPage() {
         setMessage("Facility master の検証に失敗しました。");
         return;
       }
-      setMessage("Facility master の保存に失敗しました。");
+      const status = err?.response?.status;
+      setMessage(status ? `保存に失敗しました。HTTP ${status}` : "保存に失敗しました。通信状態を確認してください。");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -780,11 +786,11 @@ export default function FacilityMasterPage() {
                   </div>
                   {isEditing ? (
                     <div className="actions compact-actions">
-                      <button className="btn ghost compact" onClick={cancelEdit}>
+                      <button className="btn ghost compact" onClick={cancelEdit} disabled={saving}>
                         キャンセル
                       </button>
-                      <button className="btn primary compact" onClick={saveMaster}>
-                        変更を保存
+                      <button className="btn primary compact" onClick={saveMaster} disabled={saving}>
+                        {saving ? "保存中..." : "変更を保存"}
                       </button>
                     </div>
                   ) : (
@@ -1228,11 +1234,11 @@ export default function FacilityMasterPage() {
               </div>
               {isEditing && (
                 <div className="actions save-actions">
-                  <button className="btn ghost" onClick={cancelEdit}>
+                  <button className="btn ghost" onClick={cancelEdit} disabled={saving}>
                     キャンセル
                   </button>
-                  <button className="btn primary" onClick={saveMaster}>
-                    保存する
+                  <button className="btn primary" onClick={saveMaster} disabled={saving}>
+                    {saving ? "保存中..." : "保存する"}
                   </button>
                 </div>
               )}
