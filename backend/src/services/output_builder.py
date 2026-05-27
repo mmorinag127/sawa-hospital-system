@@ -66,7 +66,7 @@ DAILY_DELIVERY_SHEET_BY_FACILITY_ID = {
     "FAC00014": "さくら",
     "FAC00015": "四万十ピア",
     "FAC00016": "いこいの森",
-    "FAC636208": "長生庵",
+    "FAC636208": "長生苑",
 }
 
 DAILY_LABEL_SHEET_BY_FACILITY_ID = {
@@ -84,7 +84,7 @@ DAILY_LABEL_SHEET_BY_FACILITY_ID = {
     "FAC00014": "湘南さくら病院",
     "FAC00015": "四万十ピア",
     "FAC00016": "いこいの森",
-    "FAC636208": "ケアホーム長生庵",
+    "FAC636208": "ケアホーム長生苑",
 }
 
 DAILY_LABEL_SHEET_ORDER = [
@@ -103,7 +103,7 @@ DAILY_LABEL_SHEET_ORDER = [
     "グランフォレスト",
     "ふれあいの丘",
     "湘南さくら病院",
-    "ケアホーム長生庵",
+    "ケアホーム長生苑",
 ]
 
 DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID = {
@@ -185,7 +185,7 @@ DAILY_LABEL_SHEET_MAX_ROWS = {
     "グランフォレスト": 622,
     "ふれあいの丘": 629,
     "湘南さくら病院": 627,
-    "ケアホーム長生庵": 621,
+    "ケアホーム長生苑": 621,
 }
 
 DAILY_LABEL_MENU_ROWS = [
@@ -534,9 +534,15 @@ def _format_servings(quantity: float | int | None) -> str:
     return f"{_format_number(quantity)}人前"
 
 
-def _label_area_suffix(area_id: Any) -> str:
+def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
     text = str(area_id or "").strip()
     normalized = _normalize_area_id(text)
+    facility = str(facility_id or "").strip()
+    if facility in {"FAC00008", "FAC00009", "FAC00010"}:
+        if normalized == "2F":
+            return "2階"
+        if normalized == "3F":
+            return "3階"
     if normalized == "2F":
         return "花"
     if normalized == "3F":
@@ -632,9 +638,21 @@ def _append_daily_label_category_suffix(category: str, suffix: str) -> str:
     return f"{category}（{suffix}）"
 
 
+def _normalize_daily_label_category_text(category: str) -> str:
+    text = str(category or "").strip()
+    if text in {"主", "主菜", "主Ａ", "主A"}:
+        return "主菜"
+    if text in {"副", "副①", "副1", "副菜1", "副菜①"}:
+        return "副菜①"
+    if text in {"副②", "副2", "副菜2", "副菜②"}:
+        return "副菜②"
+    return text
+
+
 def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
     _daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(product_name)
     category = str(bag.get("menu_category") or default_category or "").strip()
+    category = _normalize_daily_label_category_text(category)
     if category == "副菜":
         category = default_category or category
     if not category:
@@ -658,10 +676,12 @@ def _daily_label_display_product(product_name: str, diet_type: str) -> str:
 def _daily_label_amount_cell(amount: float | None, unit: str | None) -> Any:
     if amount is None:
         return ""
-    normalized_unit = _normalize_unit_type(unit)
-    if normalized_unit == "g":
-        return amount
     return _format_amount(amount, unit)
+
+
+def _is_daily_label_excluded_bag(bag: dict) -> bool:
+    diet_key = _daily_label_display_diet_key(bag)
+    return diet_key in {"no_meat", "no_fish", "no_fried", "forbidden_other", "forbidden"}
 
 
 def _resolve_label_fields(label_profile: dict) -> tuple[list[str], str]:
@@ -1028,6 +1048,7 @@ def _build_condiment_map(menu_names: list[str], facility_id: str | None) -> dict
 def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
     if not condiments:
         return row
+    row["_delivery_condiments"] = condiments
     note = row.get("note") or ""
     if any("ソース" in label for label in condiments):
         if "ソース" not in note:
@@ -1035,6 +1056,16 @@ def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
     if note:
         row["note"] = note
     return row
+
+
+def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
+    text = str(menu_name or "").strip()
+    condiment_labels = _normalize_condiments(condiments)
+    if not text or not condiment_labels:
+        return text
+    if "添" in text:
+        return text
+    return f"{text} 添）{'、'.join(condiment_labels)}"
 
 
 def _resolve_bag_types(facility_config: dict | None) -> list[dict]:
@@ -1782,7 +1813,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     total_amount = _daily_label_amount_cell(total_qty, unit)
     if not total_amount and servings not in (None, ""):
         total_amount = _format_number(servings)
-    area_suffix = _label_area_suffix(bag.get("area_id"))
+    area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
     time_value = str(bag.get("daypart") or default_daypart or "").strip()
     if area_suffix:
         time_value = f"{time_value}　{area_suffix}".strip()
@@ -1797,7 +1828,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
         "商品名２": "",
         "内容量": total_amount,
         "内容詳細": _daily_label_amount_cell(per_qty, unit),
-        "": servings,
+        "": _format_servings(servings),
     }
 
 
@@ -3128,10 +3159,14 @@ def _build_delivery_rows(
     for row in result:
         condiments = condiment_map.get(row.get("menu_name") or "", [])
         _apply_condiment_note(row, condiments)
+        delivery_menu_name = _append_condiments_to_delivery_menu_name(
+            row.get("menu_name"),
+            row.get("_delivery_condiments"),
+        )
         if row.get("menu_category"):
-            row["menu_display"] = f"{row.get('menu_category')} {row.get('menu_name')}".strip()
+            row["menu_display"] = f"{row.get('menu_category')} {delivery_menu_name}".strip()
         else:
-            row["menu_display"] = row.get("menu_name") or ""
+            row["menu_display"] = delivery_menu_name
     return result
 
 
@@ -3166,9 +3201,13 @@ def _build_label_rows(
 ) -> tuple[list[dict], list[str], str]:
     label_fields, label_format = _resolve_label_fields(label_profile)
     if label_format == "legacy":
-        labels = [_label_payload_legacy(bag, label_profile, facility_name) for bag in bags]
+        labels = [
+            _label_payload_legacy(bag, label_profile, facility_name)
+            for bag in bags
+            if not _is_daily_label_excluded_bag(bag)
+        ]
         return labels, label_fields, label_format
-    labels = [_label_payload_jp(bag, label_profile) for bag in bags]
+    labels = [_label_payload_jp(bag, label_profile) for bag in bags if not _is_daily_label_excluded_bag(bag)]
     merged = _merge_label_rows(labels, label_fields)
     return merged, label_fields, label_format
 
@@ -3380,6 +3419,13 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
     return columns
 
 
+def _daily_delivery_table_max_column(ws) -> int:
+    columns = _daily_delivery_column_meta(ws)
+    if not columns:
+        return 4
+    return max(int(col.get("column_index") or 0) for col in columns)
+
+
 def _clear_daily_delivery_sheet_data(ws) -> None:
     note_columns = {
         int(col.get("column_index"))
@@ -3426,6 +3472,26 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
                 continue
             source = template_ws.cell(row=row_idx, column=col_idx)
             target.border = copy(source.border)
+
+
+def _fix_daily_delivery_evening_daypart_border(ws) -> None:
+    cell = ws["B17"]
+    if isinstance(cell, MergedCell):
+        return
+    border = cell.border
+    cell.border = Border(
+        left=copy(border.left),
+        right=copy(border.right),
+        top=copy(border.top),
+        bottom=Side(style="thin", color="000000"),
+        diagonal=copy(border.diagonal),
+        diagonal_direction=border.diagonal_direction,
+        diagonalUp=border.diagonalUp,
+        diagonalDown=border.diagonalDown,
+        outline=border.outline,
+        vertical=copy(border.vertical),
+        horizontal=copy(border.horizontal),
+    )
 
 
 def _xlsx_tag(name: str) -> str:
@@ -3512,6 +3578,20 @@ def _remove_xml_attr_text(attrs: str, name: str) -> str:
     return re.sub(rf'\s{name}="[^"]*"', "", attrs)
 
 
+def _patch_sheet_column_width_xml_text(sheet_xml: str, column_index: int, width: float | None) -> str:
+    if not width:
+        return sheet_xml
+    pattern = re.compile(r'(<col\b[^>]*\bmin="' + str(column_index) + r'"[^>]*\bmax="' + str(column_index) + r'"[^>]*)/?>')
+
+    def repl(match: re.Match[str]) -> str:
+        attrs = match.group(1).rstrip("/")
+        attrs = _set_xml_attr_text(attrs, "width", _format_number(width))
+        attrs = _set_xml_attr_text(attrs, "customWidth", "1")
+        return f"{attrs}/>"
+
+    return pattern.sub(repl, sheet_xml, count=1)
+
+
 def _xml_cell_inner_value(value: Any) -> tuple[str | None, str]:
     if _is_blank_cell_value(value):
         return None, ""
@@ -3562,6 +3642,92 @@ def _replace_xml_cell_value(sheet_xml: str, coordinate: str, value: Any) -> str:
         + new_cell
         + sheet_xml[row_match.end("body") :]
     )
+
+
+def _ensure_xlsx_style_with_bottom_border(
+    xlsx_parts: dict[str, bytes],
+    *,
+    base_style_id: int,
+    bottom_style: str,
+) -> int | None:
+    data = xlsx_parts.get("xl/styles.xml")
+    if not data:
+        return None
+    root = ET.fromstring(data)
+    borders_node = root.find(_xlsx_tag("borders"))
+    cell_xfs_node = root.find(_xlsx_tag("cellXfs"))
+    if borders_node is None or cell_xfs_node is None:
+        return None
+    xfs = list(cell_xfs_node)
+    if base_style_id < 0 or base_style_id >= len(xfs):
+        return None
+    base_xf = xfs[base_style_id]
+    base_border_id_text = base_xf.attrib.get("borderId")
+    if not base_border_id_text or not base_border_id_text.isdigit():
+        return None
+    base_border_id = int(base_border_id_text)
+    borders = list(borders_node)
+    if base_border_id >= len(borders):
+        return None
+
+    target_border = copy(borders[base_border_id])
+    bottom = target_border.find(_xlsx_tag("bottom"))
+    if bottom is None:
+        bottom = ET.SubElement(target_border, _xlsx_tag("bottom"))
+    bottom.attrib["style"] = bottom_style
+    if bottom.find(_xlsx_tag("color")) is None:
+        ET.SubElement(bottom, _xlsx_tag("color"), {"rgb": "FF000000"})
+
+    for border_idx, existing_border in enumerate(borders):
+        if ET.tostring(existing_border) == ET.tostring(target_border):
+            target_border_id = border_idx
+            break
+    else:
+        target_border_id = len(borders)
+        borders_node.append(target_border)
+        borders_node.attrib["count"] = str(target_border_id + 1)
+
+    for style_idx, existing_xf in enumerate(list(cell_xfs_node)):
+        if (
+            existing_xf.attrib.get("borderId") == str(target_border_id)
+            and {k: v for k, v in existing_xf.attrib.items() if k not in {"borderId", "applyBorder"}}
+            == {k: v for k, v in base_xf.attrib.items() if k not in {"borderId", "applyBorder"}}
+        ):
+            return style_idx
+
+    target_xf = copy(base_xf)
+    target_xf.attrib["borderId"] = str(target_border_id)
+    target_xf.attrib["applyBorder"] = "1"
+    new_style_id = len(list(cell_xfs_node))
+    cell_xfs_node.append(target_xf)
+    cell_xfs_node.attrib["count"] = str(new_style_id + 1)
+    xlsx_parts["xl/styles.xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    return new_style_id
+
+
+def _patch_daily_delivery_evening_daypart_border_xml_text(
+    sheet_xml: str,
+    xlsx_parts: dict[str, bytes],
+) -> str:
+    # The reference workbook has a dotted bottom border directly under the
+    # evening daypart label. Keep the template package intact and patch only
+    # that shared output style at serialization time.
+    match = re.search(r'<c(?P<attrs>[^>]*\br="B17"[^>]*)(?:/>|>.*?</c>)', sheet_xml, re.DOTALL)
+    if match is None:
+        return sheet_xml
+    attrs = match.group("attrs")
+    style_match = re.search(r'\bs="([^"]+)"', attrs)
+    if not style_match or not style_match.group(1).isdigit():
+        return sheet_xml
+    patched_style_id = _ensure_xlsx_style_with_bottom_border(
+        xlsx_parts,
+        base_style_id=int(style_match.group(1)),
+        bottom_style="thin",
+    )
+    if patched_style_id is None:
+        return sheet_xml
+    patched_attrs = _set_xml_attr_text(attrs, "s", str(patched_style_id))
+    return sheet_xml[: match.start("attrs")] + patched_attrs + sheet_xml[match.end("attrs") :]
 
 
 def _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml: str, bottom_style_ids: set[int]) -> str:
@@ -3771,6 +3937,10 @@ def _patch_template_package_with_workbook_values(
             for col_idx in range(1, ws.max_column + 1):
                 coordinate = f"{get_column_letter(col_idx)}{row_idx}"
                 sheet_xml = _replace_xml_cell_value(sheet_xml, coordinate, ws.cell(row=row_idx, column=col_idx).value)
+        for col_key, dim in ws.column_dimensions.items():
+            col_idx = column_index_from_string(col_key)
+            sheet_xml = _patch_sheet_column_width_xml_text(sheet_xml, col_idx, dim.width)
+        sheet_xml = _patch_daily_delivery_evening_daypart_border_xml_text(sheet_xml, parts)
         sheet_xml = _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml, bottom_style_ids)
         parts[sheet_path] = sheet_xml.encode("utf-8")
     if workbook_xml_changed:
@@ -3868,6 +4038,7 @@ def _write_reference_daily_delivery_sheet(
                 continue
             cell.value = "" if value is None else value
     _restore_daily_delivery_table_borders(ws, display_ws)
+    _fix_daily_delivery_evening_daypart_border(ws)
 
 
 def _create_reference_daily_delivery_workbook(
@@ -3881,6 +4052,8 @@ def _create_reference_daily_delivery_workbook(
     display_workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=True)
     _remove_delivery_static_artifacts(workbook)
     for ws in workbook.worksheets:
+        ws.column_dimensions["D"].width = max(ws.column_dimensions["D"].width or 0, 36)
+        _fix_daily_delivery_evening_daypart_border(ws)
         _clear_daily_delivery_sheet_data(ws)
     for group in grouped_outputs.values():
         sheet_name = _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
@@ -4684,7 +4857,7 @@ def build_daily_output_bundle(
                 }
             )
 
-    use_reference_daily_delivery = normalized_type == "delivery" and any(
+    use_reference_daily_delivery = normalized_type in {"delivery", "both"} and any(
         _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
         for group in grouped_outputs.values()
     )
@@ -4693,7 +4866,28 @@ def build_daily_output_bundle(
             target_date=target_date,
             grouped_outputs=grouped_outputs,
         )
-        _save_reference_daily_delivery_workbook_preserving_template_package(workbook, bundle_path)
+        if normalized_type == "both":
+            used_titles = set(workbook.sheetnames)
+            if "メニュー" not in workbook.sheetnames:
+                menu_ws = workbook.create_sheet(title="メニュー", index=0)
+                _populate_daily_label_menu_sheet(menu_ws, target_date)
+                used_titles.add("メニュー")
+            for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
+                filtered_bags = group.get("bags") or []
+                if not filtered_bags:
+                    continue
+                sheet_name = _create_daily_labels_sheet(
+                    workbook,
+                    used_titles,
+                    title_seed=f"ラベル_{_daily_label_sheet_name(group.get('facility_code'), group.get('facility_name'))}",
+                    bags=filtered_bags,
+                    label_profile=group["label_profile"],
+                    facility_name=group["facility_config"].get("facility_name"),
+                )
+                group.setdefault("_reference_bundle_label_sheets", []).append(sheet_name)
+            workbook.save(bundle_path)
+        else:
+            _save_reference_daily_delivery_workbook_preserving_template_package(workbook, bundle_path)
         manifest_items.extend(
             {
                 "order_ids": list(group["order_ids"]),
@@ -4701,7 +4895,12 @@ def build_daily_output_bundle(
                 "facility_name": group["facility_name"],
                 "status": "ok",
                 "files": [
-                    _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
+                    item
+                    for item in [
+                        _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name")),
+                        *list(group.get("_reference_bundle_label_sheets") or []),
+                    ]
+                    if item
                 ],
             }
             for group in grouped_outputs.values()

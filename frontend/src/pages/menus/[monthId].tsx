@@ -267,10 +267,29 @@ const buildMenuSheetGrid = (
 const normalizeValue = (value?: string | null) => (value || "").trim();
 
 const formatErrorDetail = (detail: unknown, fallback: string) => {
-  if (typeof detail === "string" && detail.trim()) return detail;
+  const translate = (message: string) => {
+    const text = message.trim();
+    if (!text) return fallback;
+    if (text.startsWith("menu_month_mismatch:")) {
+      return "アップロードしたファイルの対象月が、開いている月と一致していません。月次メニューの月を確認してください。";
+    }
+    if (text === "weekday columns not found") {
+      return "曜日列を読み取れませんでした。月次メニューのシート名、またはファイル形式を確認してください。";
+    }
+    if (text === "no menu items found" || text === "menu file is empty") {
+      return "メニュー行を読み取れませんでした。対象シートと入力済み範囲を確認してください。";
+    }
+    if (text === "invalid menu file") {
+      return "月次メニューファイルを読み取れませんでした。Excel形式のファイルを指定してください。";
+    }
+    return text;
+  };
+  if (typeof detail === "string" && detail.trim()) return translate(detail);
   if (detail && typeof detail === "object") {
     const message = (detail as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) return message;
+    if (typeof message === "string" && message.trim()) return translate(message);
+    const code = (detail as { code?: unknown }).code;
+    if (typeof code === "string" && code.trim()) return translate(code);
   }
   return fallback;
 };

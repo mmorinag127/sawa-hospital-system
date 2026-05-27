@@ -4,6 +4,7 @@ from datetime import date as dt_date
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -967,7 +968,7 @@ def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
 
-    saved = load_workbook(output_path, data_only=True)
+    saved = load_workbook(output_path, data_only=False)
     ws = saved["いこいの森"]
 
     assert ws["A17"].value == "(日)"
@@ -999,24 +1000,11 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     for sheet_name in actual.sheetnames:
         assert sheet_name in actual.sheetnames
         actual_ws = actual[sheet_name]
-        table_max_col = output_builder._daily_delivery_table_max_column(actual_ws)  # noqa: SLF001
-        for col_idx in range(1, actual_ws.max_column + 1):
-            actual_cell = actual_ws.cell(row=19, column=col_idx)
-            row_after_table_cell = actual_ws.cell(row=20, column=col_idx)
-            if col_idx <= table_max_col:
-                assert actual_cell.border.bottom.style == "medium", (
-                    f"{sheet_name}!{actual_cell.coordinate} must have evening bottom border"
-                )
-                assert row_after_table_cell.border.top.style == "medium", (
-                    f"{sheet_name}!{row_after_table_cell.coordinate} must preserve evening bottom as visible top edge"
-                )
-            else:
-                assert actual_cell.border.bottom.style != "medium", (
-                    f"{sheet_name}!{actual_cell.coordinate} must not extend evening bottom outside table"
-                )
-                assert row_after_table_cell.border.top.style != "medium", (
-                    f"{sheet_name}!{row_after_table_cell.coordinate} must not extend evening top edge outside table"
-                )
+        evening_label_cell = actual_ws.cell(row=17, column=2)
+        assert not isinstance(evening_label_cell, MergedCell)
+        assert evening_label_cell.border.bottom.style == "thin", (
+            f"{sheet_name}!{evening_label_cell.coordinate} must not use dotted evening label underline"
+        )
 
 
 def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
@@ -1042,6 +1030,99 @@ def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
     assert "ふれあいの丘" in saved.sheetnames
 
 
+def test_daily_label_jp_keeps_units_servings_and_facility_floor_suffix():
+    rows, fields, label_format = output_builder._build_label_rows(  # noqa: SLF001
+        [
+            {
+                "facility": "FAC00009",
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_name": "ごぼうと竹輪の煮物",
+                "menu_category": "副菜①",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 70,
+                "menu_temp_type": "温菜",
+                "quantity": 3,
+            }
+        ],
+        {},
+        "グループホームそよかぜ",
+    )
+
+    assert label_format == "jp"
+    assert fields[-1] == ""
+    assert rows[0]["時間"] == "朝　2階"
+    assert rows[0]["内容量"] == "210g"
+    assert rows[0]["内容詳細"] == "70g"
+    assert rows[0][""] == "3人前"
+
+
+def test_daily_label_jp_excludes_forbidden_diets():
+    rows, _fields, _label_format = output_builder._build_label_rows(  # noqa: SLF001
+        [
+            {
+                "facility": "FAC00009",
+                "date": TARGET_DATE,
+                "daypart": "昼",
+                "menu_name": "豚肉と白菜のすき煮",
+                "menu_category": "主菜",
+                "diet_type": "no_fish",
+                "area_id": "2F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 100,
+                "menu_temp_type": "温菜",
+                "quantity": 1,
+            }
+        ],
+        {},
+        "グループホームそよかぜ",
+    )
+
+    assert rows == []
+
+
+def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
+    monkeypatch.setattr(
+        output_builder.menu_service,
+        "resolve_menu_defaults",
+        lambda menu_names, facility_id: {"主菜A": {"condiments": ["キャベツ"]}},
+    )
+
+    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+        {
+            "id": "ORD-condiment",
+            "facility": "FAC00009",
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_category": "主Ａ",
+                    "menu_name": "主菜A",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 1,
+                }
+            ],
+        },
+        {
+            "columns": [
+                {"name": "日付", "source": "date"},
+                {"name": "区分", "source": "daypart"},
+                {"name": "メニュー名", "source": "menu_display"},
+                {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+            ]
+        },
+        {"zero_as_empty": True},
+        {"facility_name": "グループホームそよかぜ"},
+        {},
+        allow_ocr_menu_meta=False,
+    )
+
+    assert rows[0]["menu_display"] == "主Ａ 主菜A 添）キャベツ"
+
+
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 10),
@@ -1053,7 +1134,7 @@ def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
         output_path,
     )
 
-    saved = load_workbook(output_path, data_only=True)
+    saved = load_workbook(output_path, data_only=False)
     assert saved["山城"]["C27"].value is None
     for ws in saved.worksheets:
         for col_idx in range(1, ws.max_column + 1):
@@ -1063,6 +1144,86 @@ def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
     for row_idx in range(12, 20):
         assert saved["池袋病院"].cell(row=row_idx, column=5).value is None
         assert saved["池袋病院"].cell(row=row_idx, column=6).value is None
+
+
+def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    order_id = "ORD-both"
+    facility_code = "FAC00009"
+    facility_name = "グループホームそよかぜ"
+    order_lines = [
+        {
+            "date": TARGET_DATE,
+            "daypart": "朝",
+            "menu_category": "副①",
+            "menu_name": "ごぼうと竹輪の煮物",
+            "diet_type": "regular",
+            "area_id": "2F",
+            "quantity_original": 3,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 70,
+            "menu_temp_type": "温菜",
+        },
+        {
+            "date": TARGET_DATE,
+            "daypart": "朝",
+            "menu_category": "副①",
+            "menu_name": "ごぼうと竹輪の煮物",
+            "diet_type": "no_fish",
+            "area_id": "2F",
+            "quantity_original": 1,
+            "menu_unit_type": "g",
+            "menu_qty_per_serving": 70,
+            "menu_temp_type": "温菜",
+        },
+    ]
+    context = {
+        "order": {"id": order_id, "facility": facility_code},
+        "order_lines": order_lines,
+        "order_for_outputs": {"id": order_id, "facility": facility_code, "lines": order_lines},
+        "bags": output_builder.build_bag_rows_for_outputs(
+            {"id": order_id, "facility": facility_code, "lines": order_lines},
+            order_lines=order_lines,
+            facility_config={"facility_name": facility_name},
+        ),
+        "label_profile": {},
+        "facility_config": {"facility_name": facility_name},
+        "invoice_template": {},
+        "quantity_rules": {"zero_as_empty": True},
+        "ocr_menu_meta": {},
+    }
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda target_date, status=None: [{"id": order_id, "facility": facility_code}],
+    )
+    monkeypatch.setattr(
+        output_builder.config_service,
+        "get_facility_config",
+        lambda code: {"facility_name": facility_name},
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context_for_bundle",
+        lambda order_id, **kwargs: context,
+    )
+
+    output_path, manifest = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="both", status="confirmed")
+    saved = load_workbook(output_path, data_only=False)
+
+    assert manifest["success_orders"] == 1
+    assert "そよかぜ" in saved.sheetnames
+    label_sheets = [name for name in saved.sheetnames if name.startswith("ラベル_そよかぜ")]
+    assert label_sheets
+    label_ws = saved[label_sheets[0]]
+    assert label_ws["D2"].value == "朝　2階"
+    assert label_ws["E2"].value == "副菜①"
+    assert label_ws["I2"].value == "210g"
+    assert label_ws["J2"].value == "70g"
+    assert label_ws["K2"].value == "3人前"
+    assert saved["そよかぜ"]["E12"].value == 3
+    assert saved["そよかぜ"]["L12"].value in (None, "")
+    assert saved["そよかぜ"]["B17"].border.bottom.style == "thin"
 
 
 def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
