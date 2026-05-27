@@ -977,6 +977,72 @@ def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
     assert ws["D19"].value == "ほうれん草の和え物"
 
 
+def test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date(tmp_path):
+    grouped_outputs = {
+        "FAC00007": {
+            "facility_code": "FAC00007",
+            "facility_name": "アイテラス",
+            "invoice_template": {},
+            "contexts": [
+                {
+                    "order_for_outputs": {
+                        "id": "ORD-menu-static",
+                        "facility": "FAC00007",
+                        "lines": [
+                            {
+                                "date": dt_date(2026, 5, 26),
+                                "daypart": "朝",
+                                "menu_category": "副①",
+                                "menu_name": "厚揚げと竹輪の煮物",
+                                "diet_type": "regular",
+                                "quantity_original": 15,
+                            }
+                        ],
+                    },
+                    "quantity_rules": {"zero_as_empty": True},
+                    "facility_config": {"facility_name": "アイテラス"},
+                    "ocr_menu_meta": {},
+                }
+            ],
+        }
+    }
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=dt_date(2026, 5, 26),
+        grouped_outputs=grouped_outputs,
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    workbook.save(output_path)
+
+    saved = load_workbook(output_path, data_only=False)
+    assert saved["山城"]["A12"].value.date() == dt_date(2026, 5, 26)
+    assert saved["山城"]["D12"].value == "副① 厚揚げと竹輪の煮物"
+    assert saved["山城"]["A17"].value == "(火)"
+
+
+def test_menu_master_defaults_fill_missing_temperature(monkeypatch):
+    monkeypatch.setattr(
+        output_builder.menu_service,
+        "resolve_menu_defaults",
+        lambda menu_names, facility_id: {
+            "ポークチャップ": {
+                "unit_type": "g",
+                "qty_per_serving": 100,
+                "temp_type": "温菜",
+                "category": "主菜",
+            }
+        },
+    )
+
+    rows = output_builder._apply_menu_master_defaults(  # noqa: SLF001
+        [{"date": TARGET_DATE, "daypart": "昼", "menu_name": "ポークチャップ", "menu_category": "主菜"}],
+        "FAC00009",
+    )
+
+    assert rows[0]["menu_temp_type"] == "温菜"
+    assert rows[0]["menu_qty_per_serving"] == 100
+    assert rows[0]["menu_unit_type"] == "g"
+
+
 def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     grouped_outputs = {
         "FAC00012": {

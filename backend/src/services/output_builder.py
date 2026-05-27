@@ -999,6 +999,30 @@ def _apply_garnish_defaults(lines: list[dict]) -> list[dict]:
     return enriched
 
 
+def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> list[dict]:
+    menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
+    defaults = menu_service.resolve_menu_defaults(menu_names, facility_id)
+    if not defaults:
+        return lines
+    enriched: list[dict] = []
+    for line in lines:
+        payload = defaults.get(str(line.get("menu_name") or "").strip()) or {}
+        if not payload:
+            enriched.append(line)
+            continue
+        updated = dict(line)
+        if not updated.get("menu_unit_type") and payload.get("unit_type"):
+            updated["menu_unit_type"] = payload.get("unit_type")
+        if updated.get("menu_qty_per_serving") is None and payload.get("qty_per_serving") is not None:
+            updated["menu_qty_per_serving"] = payload.get("qty_per_serving")
+        if not updated.get("menu_temp_type") and payload.get("temp_type"):
+            updated["menu_temp_type"] = payload.get("temp_type")
+        if not updated.get("menu_category") and payload.get("category"):
+            updated["menu_category"] = payload.get("category")
+        enriched.append(updated)
+    return enriched
+
+
 def _normalize_condiments(value: object) -> list[str]:
     if not value:
         return []
@@ -1302,6 +1326,7 @@ def build_order_lines_for_outputs(
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id)
     order_lines = _apply_garnish_defaults(order_lines)
+    order_lines = _apply_menu_master_defaults(order_lines, facility_id)
     order_lines = _apply_builtin_menu_defaults(order_lines)
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
@@ -4018,6 +4043,33 @@ def _write_reference_daily_delivery_sheet(
         row_payload = assignments.get(row_idx)
         for col in columns:
             source = col.get("source")
+            if source not in {"date", "daypart", "menu_category", "menu_display"}:
+                continue
+            col_idx = int(col.get("column_index") or 0)
+            if not col_idx:
+                continue
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            display_value = display_ws.cell(row=row_idx, column=col_idx).value if display_ws is not None else cell.value
+            if source == "date":
+                if row_idx == slot_rows[0]:
+                    cell.value = target_date
+                elif isinstance(display_value, str) and re.fullmatch(r"\([月火水木金土日]\)", display_value.strip()):
+                    cell.value = _format_delivery_weekday(target_date)
+                continue
+            if not row_payload:
+                continue
+            if source == "daypart":
+                if _is_blank_cell_value(display_value):
+                    continue
+                cell.value = _normalize_delivery_daypart(row_payload.get("daypart"))
+            elif source == "menu_category":
+                cell.value = row_payload.get("menu_category") or ""
+            elif source == "menu_display":
+                cell.value = row_payload.get("menu_display") or row_payload.get("menu_name") or ""
+        for col in columns:
+            source = col.get("source")
             if source not in {"quantity", "note"}:
                 continue
             name = str(col.get("name") or "")
@@ -4055,6 +4107,8 @@ def _create_reference_daily_delivery_workbook(
         ws.column_dimensions["D"].width = max(ws.column_dimensions["D"].width or 0, 36)
         _fix_daily_delivery_evening_daypart_border(ws)
         _clear_daily_delivery_sheet_data(ws)
+    rows_by_sheet: dict[str, list[dict]] = {}
+    all_rows: list[dict] = []
     for group in grouped_outputs.values():
         sheet_name = _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
         if not sheet_name or sheet_name not in workbook.sheetnames:
@@ -4077,8 +4131,28 @@ def _create_reference_daily_delivery_workbook(
                 )
             )
         merged_rows = _merge_delivery_bundle_rows(rows, sheet_template)
-        display_ws = display_workbook[sheet_name] if sheet_name in display_workbook.sheetnames else None
-        _write_reference_daily_delivery_sheet(ws, rows=merged_rows, target_date=target_date, display_ws=display_ws)
+        rows_by_sheet[sheet_name] = merged_rows
+        all_rows.extend(merged_rows)
+    menu_only_rows = [
+        {
+            "date": row.get("date"),
+            "daypart": row.get("daypart"),
+            "menu_name": row.get("menu_name"),
+            "menu_category": row.get("menu_category"),
+            "menu_display": row.get("menu_display"),
+            "_order_index": row.get("_order_index"),
+        }
+        for row in _merge_delivery_bundle_rows(all_rows, {"columns": []})
+        if _ensure_date(row.get("date")) == target_date
+    ]
+    for ws in workbook.worksheets:
+        display_ws = display_workbook[ws.title] if ws.title in display_workbook.sheetnames else None
+        _write_reference_daily_delivery_sheet(
+            ws,
+            rows=rows_by_sheet.get(ws.title) or menu_only_rows,
+            target_date=target_date,
+            display_ws=display_ws,
+        )
     return workbook
 
 
