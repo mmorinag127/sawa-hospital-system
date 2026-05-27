@@ -1,0 +1,17 @@
+{
+  "url": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORD93dbb006/workflow-v2?manual_step15=20260527",
+  "capturedAt": "2026-05-27T07:05:31.134Z",
+  "orderId": "ORD93dbb006",
+  "headerButtonBox": {
+    "x": 1248.75,
+    "y": 983.046875,
+    "width": 124.25,
+    "height": 40
+  },
+  "saveHeaderButtonBox": {
+    "x": 1153.390625,
+    "y": 1193.546875,
+    "width": 219.609375,
+    "height": 42
+  }
+}
