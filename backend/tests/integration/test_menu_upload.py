@@ -15,6 +15,32 @@ from src.models.facility import Facility, FacilityConfig
 from src.models.user import AuditLog
 
 
+def test_infer_temp_type_covers_daily_label_main_dishes():
+    assert menu_service._infer_temp_type("ポークチャップ") == "hot"  # noqa: SLF001
+    assert menu_service._infer_temp_type("オムレツのカニ玉風") == "hot"  # noqa: SLF001
+
+
+def test_resolve_menu_defaults_infers_temp_when_master_temp_is_blank():
+    with session_scope() as session:
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.add(
+            MenuMaster(
+                id="master-pork-chap",
+                name="ポークチャップ",
+                normalized_name=menu_service._normalize_menu_name("ポークチャップ"),  # noqa: SLF001
+                unit_type="g",
+                qty_per_serving=100,
+                temp_type=None,
+            )
+        )
+
+    defaults = menu_service.resolve_menu_defaults(["ポークチャップ"])
+
+    assert defaults["ポークチャップ"]["temp_type"] == "hot"
+    assert defaults["ポークチャップ"]["unit_type"] == "g"
+
+
 def _create_resolution(name: str, *, unit_type: str = "g", qty_per_serving: float = 40):
     return {
         "source_name": name,

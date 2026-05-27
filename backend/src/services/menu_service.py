@@ -196,6 +196,7 @@ _TEMP_HOT_HINTS = (
     "焼",
     "揚",
     "炒",
+    "チャップ",
     "フライ",
     "ソテー",
     "天ぷら",
@@ -206,6 +207,7 @@ _TEMP_HOT_HINTS = (
     "カレー",
     "グラタン",
     "卵とじ",
+    "オムレツ",
     "蒸",
 )
 
@@ -1568,6 +1570,10 @@ def _build_master_defaults_index(
                 payload[field] = value
         if master.condiments:
             payload["condiments"] = list(master.condiments)
+        if not payload.get("temp_type"):
+            inferred_temp = _infer_temp_type(master.name)
+            if inferred_temp:
+                payload["temp_type"] = inferred_temp
         defaults_by_id[master.id] = payload
         defaults_by_normalized[master.normalized_name] = payload
 
