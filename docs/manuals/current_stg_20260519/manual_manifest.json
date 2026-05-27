@@ -1,5 +1,5 @@
 {
-  "version": "v2026.05.19-current-stg",
+  "version": "v2026.05.27-current-stg",
   "created": "2026-05-19 09:20 JST",
   "screenshotSource": "current stg live workflow-v2",
   "manuals": [
@@ -7,13 +7,14 @@
       "key": "order_processing",
       "title": "注文処理 workflow-v2 マニュアル",
       "kind": "detail",
-      "md": "order_processing_detail_workflow_v2_current_stg_20260519_1030.md",
-      "pdf": "order_processing_detail_workflow_v2_current_stg_20260519_1030.pdf",
-      "sourceUrl": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORDb1702157/workflow-v2",
-      "capturedAt": "2026-05-19 10:30 JST",
+      "md": "order_processing_detail_workflow_v2_current_stg_20260527_1610.md",
+      "pdf": "order_processing_detail_workflow_v2_current_stg_20260527_1610.pdf",
+      "sourceUrl": "https://web-stg-avlnzjjrca-dt.a.run.app/orders/ORD93dbb006/workflow-v2",
+      "capturedAt": "2026-05-27 16:10 JST",
       "cloudRunRevision": "web-stg-00206-rxc",
       "buildId": "hU_EpWS8vP9LhGph2MCQk",
-      "updatedAt": "2026-05-19 10:30 JST"
+      "updatedAt": "2026-05-27 16:10 JST",
+      "sourceProdUrl": "https://web-prod-avlnzjjrca-dt.a.run.app/orders/ORD58676ddd/workflow-v2"
     },
     {
       "key": "order_processing",
@@ -112,5 +113,5 @@
       "pdf": "shipping_quick_current_stg_20260519_0805.pdf"
     }
   ],
-  "updated": "2026-05-19 10:45 JST"
+  "updated": "2026-05-27 16:10 JST"
 }

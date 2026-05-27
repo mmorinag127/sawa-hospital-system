@@ -1,8 +1,8 @@
 import Link from "next/link";
 import TopNav from "../components/TopNav";
 
-const version = "v2026.05.19-current-stg";
-const updatedAt = "2026-05-19 10:45 JST";
+const version = "v2026.05.27-current-stg";
+const updatedAt = "2026-05-27 16:10 JST";
 const groups = [
   {
     "key": "order_processing",
@@ -12,7 +12,7 @@ const groups = [
       {
         "kind": "detail",
         "label": "詳細版",
-        "href": "/manuals/current-stg-20260519/order_processing_detail_workflow_v2_current_stg_20260519_1030.pdf"
+        "href": "/manuals/current-stg-20260519/order_processing_detail_workflow_v2_current_stg_20260527_1610.pdf"
       },
       {
         "kind": "quick",
