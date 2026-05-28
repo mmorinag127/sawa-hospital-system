@@ -94,6 +94,12 @@ tests/
 - Generated artifacts and production-code changes must not be treated as one release unit. Separate production-code changes from generated verification artifacts before release judgment.
 - Always create a fresh deploy copy after the final release commit. Do not reuse an old deploy copy or old generated deploy source.
 - Before claiming deploy completion, verify Cloud Run worker and web revisions/images and verify the exact user-visible live surface after deploy.
+- Failure class: verified artifact commit mismatch. This means a file, screenshot, workbook, or other generated artifact was shown as proof of a fix, but the code that generated that proof was not the same commit lineage later merged to `develop`, deployed to stg, or released to prod.
+- Any artifact used as proof must be tied to artifact absolute path, SHA256, generation command or downloaded URL, generating git commit, deploy target branch HEAD, and Cloud Run revision/image when downloaded from stg/prod.
+- Before citing an artifact as verification, prove `git merge-base --is-ancestor <proof_commit> <target_head>` or prove the exact required diff is present in the target HEAD. A non-zero result is a hard deploy blocker.
+- When multiple same-title or same-parent sibling commits exist for the same issue, list the sibling commits and prove which one contains each required fix with `git show`, `git diff`, `git log -S`, or equivalent git evidence.
+- A previous visual confirmation does not count unless artifact lineage is recorded. If lineage is missing, regenerate the artifact from the current deploy target after deploy and verify that artifact instead.
+- Do not claim that a fix regressed or was reverted until git evidence identifies the exact commit that removed it. If the evidence instead shows the fix was never in the deploy target, report it as an integration/source-selection failure.
 - Do not run one-off verification or reconstruction code via `python - <<'PY'` or equivalent heredoc. Save reusable verification code as a tracked or intentionally ignored file, then execute that file so the source can be reviewed and reproduced.
 - Before promoting stg to prod, compare stg/prod Cloud Run revisions, source archives, facility configs, and data counts. If prod has existing order data, do not run stg cleanup/reset procedures against prod.
 - Facility template drift is a deploy blocker. If a facility resolves to different quantity fields between stg and prod, explicitly choose the canonical source before deploy instead of assuming stg data can be copied to prod.

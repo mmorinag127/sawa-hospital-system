@@ -4,7 +4,7 @@ import math
 import calendar
 import re
 import zipfile
-from copy import copy, deepcopy
+from copy import copy
 from datetime import date as dt_date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -3545,36 +3545,6 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
             target.border = copy(source.border)
 
 
-def _fix_daily_delivery_evening_daypart_border(ws) -> None:
-    max_col = max(ws.max_column, 12)
-    for col_idx in range(2, max_col + 1):
-        cell = ws.cell(row=17, column=col_idx)
-        if isinstance(cell, MergedCell):
-            continue
-        if col_idx != 2 and cell.border.bottom.style != "dotted":
-            continue
-        _set_cell_bottom_border(cell, "thin")
-
-
-def _set_cell_bottom_border(cell, bottom_style: str) -> None:
-    if isinstance(cell, MergedCell):
-        return
-    border = cell.border
-    cell.border = Border(
-        left=copy(border.left),
-        right=copy(border.right),
-        top=copy(border.top),
-        bottom=Side(style=bottom_style, color="000000"),
-        diagonal=copy(border.diagonal),
-        diagonal_direction=border.diagonal_direction,
-        diagonalUp=border.diagonalUp,
-        diagonalDown=border.diagonalDown,
-        outline=border.outline,
-        vertical=copy(border.vertical),
-        horizontal=copy(border.horizontal),
-    )
-
-
 def _xlsx_tag(name: str) -> str:
     return f"{{{_XLSX_MAIN_NS}}}{name}"
 
@@ -3723,100 +3693,6 @@ def _replace_xml_cell_value(sheet_xml: str, coordinate: str, value: Any) -> str:
         + new_cell
         + sheet_xml[row_match.end("body") :]
     )
-
-
-def _ensure_xlsx_style_with_bottom_border(
-    xlsx_parts: dict[str, bytes],
-    *,
-    base_style_id: int,
-    bottom_style: str,
-) -> int | None:
-    data = xlsx_parts.get("xl/styles.xml")
-    if not data:
-        return None
-    root = ET.fromstring(data)
-    borders_node = root.find(_xlsx_tag("borders"))
-    cell_xfs_node = root.find(_xlsx_tag("cellXfs"))
-    if borders_node is None or cell_xfs_node is None:
-        return None
-    xfs = list(cell_xfs_node)
-    if base_style_id < 0 or base_style_id >= len(xfs):
-        return None
-    base_xf = xfs[base_style_id]
-    base_border_id_text = base_xf.attrib.get("borderId")
-    if not base_border_id_text or not base_border_id_text.isdigit():
-        return None
-    base_border_id = int(base_border_id_text)
-    borders = list(borders_node)
-    if base_border_id >= len(borders):
-        return None
-
-    target_border = deepcopy(borders[base_border_id])
-    bottom = target_border.find(_xlsx_tag("bottom"))
-    if bottom is None:
-        bottom = ET.SubElement(target_border, _xlsx_tag("bottom"))
-    bottom.attrib["style"] = bottom_style
-    if bottom.find(_xlsx_tag("color")) is None:
-        ET.SubElement(bottom, _xlsx_tag("color"), {"rgb": "FF000000"})
-
-    for border_idx, existing_border in enumerate(borders):
-        if ET.tostring(existing_border) == ET.tostring(target_border):
-            target_border_id = border_idx
-            break
-    else:
-        target_border_id = len(borders)
-        borders_node.append(target_border)
-        borders_node.attrib["count"] = str(target_border_id + 1)
-
-    for style_idx, existing_xf in enumerate(list(cell_xfs_node)):
-        if (
-            existing_xf.attrib.get("borderId") == str(target_border_id)
-            and {k: v for k, v in existing_xf.attrib.items() if k not in {"borderId", "applyBorder"}}
-            == {k: v for k, v in base_xf.attrib.items() if k not in {"borderId", "applyBorder"}}
-        ):
-            return style_idx
-
-    target_xf = copy(base_xf)
-    target_xf.attrib["borderId"] = str(target_border_id)
-    target_xf.attrib["applyBorder"] = "1"
-    new_style_id = len(list(cell_xfs_node))
-    cell_xfs_node.append(target_xf)
-    cell_xfs_node.attrib["count"] = str(new_style_id + 1)
-    xlsx_parts["xl/styles.xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    return new_style_id
-
-
-def _patch_daily_delivery_evening_daypart_border_xml_text(
-    sheet_xml: str,
-    xlsx_parts: dict[str, bytes],
-) -> str:
-    # The reference workbook has a dotted bottom border directly under the
-    # first evening row. Keep the template package intact and patch that
-    # generated row style at serialization time.
-    root = ET.fromstring(sheet_xml.encode("utf-8"))
-    changed = False
-    for cell in root.findall(f".//{_xlsx_tag('c')}"):
-        coordinate = str(cell.attrib.get("r") or "")
-        if not coordinate.endswith("17"):
-            continue
-        col_idx = _cell_column_index(coordinate)
-        if col_idx is None or col_idx < 2:
-            continue
-        style_text = cell.attrib.get("s")
-        if not style_text or not style_text.isdigit():
-            continue
-        patched_style_id = _ensure_xlsx_style_with_bottom_border(
-            xlsx_parts,
-            base_style_id=int(style_text),
-            bottom_style="thin",
-        )
-        if patched_style_id is None:
-            continue
-        cell.attrib["s"] = str(patched_style_id)
-        changed = True
-    if not changed:
-        return sheet_xml
-    return ET.tostring(root, encoding="unicode")
 
 
 def _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml: str, bottom_style_ids: set[int]) -> str:
@@ -4029,7 +3905,6 @@ def _patch_template_package_with_workbook_values(
         for col_key, dim in ws.column_dimensions.items():
             col_idx = column_index_from_string(col_key)
             sheet_xml = _patch_sheet_column_width_xml_text(sheet_xml, col_idx, dim.width)
-        sheet_xml = _patch_daily_delivery_evening_daypart_border_xml_text(sheet_xml, parts)
         sheet_xml = _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml, bottom_style_ids)
         parts[sheet_path] = sheet_xml.encode("utf-8")
     if workbook_xml_changed:
@@ -4154,7 +4029,6 @@ def _write_reference_daily_delivery_sheet(
                 continue
             cell.value = "" if value is None else value
     _restore_daily_delivery_table_borders(ws, display_ws)
-    _fix_daily_delivery_evening_daypart_border(ws)
 
 
 def _create_reference_daily_delivery_workbook(
@@ -4169,7 +4043,6 @@ def _create_reference_daily_delivery_workbook(
     _remove_delivery_static_artifacts(workbook)
     for ws in workbook.worksheets:
         ws.column_dimensions["D"].width = max(ws.column_dimensions["D"].width or 0, 36)
-        _fix_daily_delivery_evening_daypart_border(ws)
         _clear_daily_delivery_sheet_data(ws)
     rows_by_sheet: dict[str, list[dict]] = {}
     all_rows: list[dict] = []

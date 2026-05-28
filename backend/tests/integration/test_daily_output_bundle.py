@@ -59,6 +59,20 @@ def _cell_excel_signature(cell) -> tuple:
     )
 
 
+def _dotted_table_border_cells(ws) -> list[str]:
+    dotted_cells = []
+    max_col = output_builder._daily_delivery_table_max_column(ws)  # noqa: SLF001
+    for row_idx in range(12, min(ws.max_row, 19) + 1):
+        for col_idx in range(1, max_col + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            border = cell.border
+            if any(side.style == "dotted" for side in (border.left, border.right, border.top, border.bottom)):
+                dotted_cells.append(cell.coordinate)
+    return dotted_cells
+
+
 def _dimension_signature(ws) -> tuple:
     return (
         tuple((key, item.width, item.hidden) for key, item in sorted(ws.column_dimensions.items())),
@@ -1066,15 +1080,9 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     for sheet_name in actual.sheetnames:
         assert sheet_name in actual.sheetnames
         actual_ws = actual[sheet_name]
-        dotted_cells = []
-        for col_idx in range(2, min(actual_ws.max_column, 12) + 1):
-            cell = actual_ws.cell(row=17, column=col_idx)
-            if isinstance(cell, MergedCell):
-                continue
-            if cell.border.bottom.style == "dotted":
-                dotted_cells.append(cell.coordinate)
+        dotted_cells = _dotted_table_border_cells(actual_ws)
         assert not dotted_cells, (
-            f"{sheet_name} first evening row must not keep dotted underline: {dotted_cells}"
+            f"{sheet_name} daily delivery table must not keep dotted borders: {dotted_cells}"
         )
 
 
@@ -1364,7 +1372,7 @@ def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_pat
     assert label_ws["K2"].value == "3人前"
     assert saved["そよかぜ"]["E12"].value == 3
     assert saved["そよかぜ"]["L12"].value in (None, "")
-    assert saved["そよかぜ"]["B17"].border.bottom.style == "thin"
+    assert not _dotted_table_border_cells(saved["そよかぜ"])
 
 
 def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
