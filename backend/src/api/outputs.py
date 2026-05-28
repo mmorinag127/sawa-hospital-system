@@ -1,5 +1,5 @@
 import csv
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from datetime import date as dt_date
 from html import escape
 from pathlib import Path
@@ -365,65 +365,17 @@ def _render_editable_daily_delivery_note_html(
     status: str | None = None,
 ) -> tuple[str, dict]:
     orders = order_service.list_orders_by_line_date(target_date, status=status)
-    sections: list[str] = []
-    style_text = ""
-    errors: list[dict] = []
-
-    def build_section(order_summary: dict) -> tuple[str, str | None, dict | None]:
-        order_id = str(order_summary.get("id") or "").strip()
-        if not order_id:
-            return "", None, None
-        try:
-            preview = build_delivery_preview(order_id, include_diagnostics=False)
-            order_html = _render_editable_delivery_note_html(
-                order_id,
-                f"{order_id} 納品書",
-                preview.get("headers", []),
-                preview.get("rows", []),
-                _delivery_facility_name(order_id),
-            )
-            sheet_title, sheet_html = _extract_delivery_note_sheet(order_html)
-            section = (
-                '<section class="bundle-page" data-order-id="'
-                f'{escape(order_id)}"><div class="bundle-title" contenteditable="true">'
-                f'{escape(sheet_title)}</div>{sheet_html}</section>'
-            )
-            return section, _extract_delivery_note_style(order_html), None
-        except Exception as exc:  # noqa: BLE001
-            return "", None, {"order_id": order_id, "error": str(exc)}
-
-    max_workers = min(8, max(1, len(orders)))
-    indexed_results: dict[int, tuple[str, str | None, dict | None]] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(build_section, order_summary): index
-            for index, order_summary in enumerate(orders)
-        }
-        for future in as_completed(future_map):
-            indexed_results[future_map[future]] = future.result()
-
-    for index in range(len(orders)):
-        section, section_style, error = indexed_results.get(index, ("", None, None))
-        if error:
-            errors.append(error)
-            continue
-        if section:
-            sections.append(section)
-            if not style_text and section_style:
-                style_text = section_style
-
-    if not sections:
+    order_ids = [
+        str(order_summary.get("id") or "").strip()
+        for order_summary in orders
+        if str(order_summary.get("id") or "").strip()
+    ]
+    if not order_ids:
         raise ValueError("対象日の納品書出力対象がありません")
 
     safe_date = escape(target_date.isoformat())
     safe_status = escape(status or "全て")
-    error_html = ""
-    if errors:
-        error_rows = "".join(
-            f"<li>{escape(item['order_id'])}: {escape(item['error'])}</li>"
-            for item in errors
-        )
-        error_html = f'<details class="build-errors"><summary>生成できなかった注文 {len(errors)}件</summary><ul>{error_rows}</ul></details>'
+    order_ids_json = json.dumps(order_ids, ensure_ascii=False)
     html = f"""<!doctype html>
 <html lang="ja">
 <head>
@@ -431,28 +383,142 @@ def _render_editable_daily_delivery_note_html(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{safe_date} 当日納品書HTML</title>
   <style>
-    {style_text}
+    @page {{ size: A4 landscape; margin: 8mm; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #e9ecef;
+      color: #111827;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+      font-size: 12px;
+    }}
+    .toolbar {{
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #ffffff;
+      border-bottom: 1px solid #cbd5e1;
+    }}
+    .toolbar-title {{ font-weight: 700; margin-right: auto; }}
+    button {{
+      border: 1px solid #64748b;
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 6px;
+      padding: 7px 12px;
+      font: inherit;
+      cursor: pointer;
+    }}
+    button.primary {{ background: #0f172a; color: #ffffff; border-color: #0f172a; }}
+    button:disabled {{ opacity: 0.45; cursor: wait; }}
+    .status-line {{
+      max-width: 297mm;
+      margin: 10px auto;
+      padding: 8px 12px;
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+    }}
+    .sheet {{
+      width: 297mm;
+      min-height: 210mm;
+      margin: 12px auto;
+      padding: 9mm;
+      background: #ffffff;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+    }}
+    .company {{ display: grid; grid-template-columns: 1fr 1.4fr; gap: 8mm; margin-bottom: 8mm; }}
+    .doc-title {{ font-size: 24px; font-weight: 800; margin: 0 0 5mm; }}
+    .facility-label {{ font-weight: 700; border-bottom: 2px solid #111827; display: inline-block; margin-bottom: 3mm; }}
+    .facility-box {{ border: 2px solid #111827; min-height: 18mm; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; padding: 4mm; }}
+    .company-name {{ font-size: 18px; font-weight: 800; margin-bottom: 5mm; }}
+    .company-line {{ font-size: 10px; font-weight: 700; margin: 0 0 3mm; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; background: #ffffff; }}
+    th, td {{ border: 1px solid #111827; min-height: 7mm; height: 7mm; padding: 2px 4px; text-align: center; vertical-align: middle; white-space: pre-wrap; word-break: break-word; }}
+    th {{ font-weight: 400; font-size: 14px; }}
+    td.menu-cell {{ text-align: left; font-weight: 700; }}
+    [contenteditable="true"] {{ cursor: text; }}
+    [contenteditable="true"]:focus {{ outline: 2px solid #2563eb; outline-offset: -2px; background: #eff6ff; }}
     .bundle-page {{ break-after: page; page-break-after: always; }}
     .bundle-page:last-child {{ break-after: auto; page-break-after: auto; }}
     .bundle-title {{ display: none; }}
     .build-errors {{ max-width: 297mm; margin: 10px auto; padding: 8px 12px; background: #fff7ed; border: 1px solid #fed7aa; }}
     @media print {{
+      body {{ background: #ffffff; }}
+      .toolbar, .status-line, .build-errors {{ display: none; }}
+      .sheet {{ width: auto; min-height: auto; margin: 0; padding: 0; box-shadow: none; }}
       .bundle-page {{ break-after: page; page-break-after: always; }}
       .bundle-page:last-child {{ break-after: auto; page-break-after: auto; }}
-      .build-errors {{ display: none; }}
     }}
   </style>
 </head>
 <body>
   <div class="toolbar">
-    <div class="toolbar-title">{safe_date} 当日納品書HTML / ステータス: {safe_status} / {len(sections)}件</div>
-    <button type="button" class="primary" onclick="window.print()">印刷/PDF保存</button>
+    <div class="toolbar-title">{safe_date} 当日納品書HTML / ステータス: {safe_status} / {len(order_ids)}件</div>
+    <button type="button" id="print-note" class="primary" disabled>読み込み中</button>
   </div>
-  {error_html}
-  {''.join(sections)}
+  <div class="status-line" id="load-status">納品書を読み込んでいます: 0 / {len(order_ids)}件</div>
+  <div id="build-errors" class="build-errors" hidden></div>
+  <div id="daily-sheets"></div>
+  <script>
+    (() => {{
+      const orderIds = {order_ids_json};
+      const root = document.getElementById("daily-sheets");
+      const status = document.getElementById("load-status");
+      const errors = document.getElementById("build-errors");
+      const printButton = document.getElementById("print-note");
+      let done = 0;
+      let failed = 0;
+      const parser = new DOMParser();
+      const updateStatus = () => {{
+        status.textContent = `納品書を読み込んでいます: ${{done}} / ${{orderIds.length}}件`;
+        if (done >= orderIds.length) {{
+          status.textContent = failed ? `読み込み完了: ${{orderIds.length - failed}}件 / 失敗 ${{failed}}件` : `読み込み完了: ${{orderIds.length}}件`;
+          printButton.textContent = "印刷/PDF保存";
+          printButton.disabled = false;
+        }}
+      }};
+      const appendError = (orderId, message) => {{
+        failed += 1;
+        errors.hidden = false;
+        const line = document.createElement("div");
+        line.textContent = `${{orderId}}: ${{message}}`;
+        errors.appendChild(line);
+      }};
+      const loadOne = async (orderId, index) => {{
+        try {{
+          const response = await fetch(`/api/outputs/delivery-notes/html?order_id=${{encodeURIComponent(orderId)}}`);
+          if (!response.ok) {{
+            throw new Error(await response.text());
+          }}
+          const doc = parser.parseFromString(await response.text(), "text/html");
+          const sheet = doc.querySelector(".sheet");
+          if (!sheet) {{
+            throw new Error("納品書本体が見つかりません");
+          }}
+          const section = document.createElement("section");
+          section.className = "bundle-page";
+          section.dataset.orderId = orderId;
+          section.appendChild(sheet);
+          root.appendChild(section);
+        }} catch (error) {{
+          appendError(orderId, error instanceof Error ? error.message : String(error));
+        }} finally {{
+          done += 1;
+          updateStatus();
+        }}
+      }};
+      printButton.addEventListener("click", () => window.print());
+      orderIds.forEach((orderId, index) => loadOne(orderId, index));
+      updateStatus();
+    }})();
+  </script>
 </body>
 </html>"""
-    return html, {"total_orders": len(orders), "success_orders": len(sections), "error_orders": len(errors)}
+    return html, {"total_orders": len(orders), "success_orders": len(order_ids), "error_orders": 0}
 
 
 def _delivery_facility_name(order_id: str) -> str:
