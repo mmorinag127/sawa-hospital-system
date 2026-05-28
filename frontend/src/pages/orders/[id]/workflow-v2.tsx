@@ -3003,9 +3003,30 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
+  const openHtmlOutput = async (path: string, label: string) => {
+    const timestamp = new Date().toLocaleString("ja-JP");
+    setDownloadMessage(`${label}を開きます。 (${timestamp})`);
+    try {
+      const res = await apiClient.get(path, { responseType: "text", timeout: 0 });
+      const win = window.open("", "_blank");
+      if (!win) {
+        setDownloadMessage("ブラウザで新しいタブを許可してください。");
+        return;
+      }
+      win.document.open();
+      win.document.write(String(res.data || ""));
+      win.document.close();
+      setDownloadMessage(`${label}を別タブで開きました。`);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const suffix = status ? ` (${status})` : "";
+      setDownloadMessage(`${label}を開けませんでした。${suffix}`);
+    }
+  };
+
   const outputPreviewLabels: Record<OutputPreviewType, string> = {
     labels: "ラベルCSV",
-    delivery: "納品書Excel",
+    delivery: "納品書HTML",
     order_form_saved_sheet: "FAX読取シートExcel",
     aggregate: "総量CSV",
   };
@@ -4734,9 +4755,9 @@ export default function OrderWorkflowV2Page() {
                   </button>
                 </div>
                 <div className="output-card">
-                  <span className="output-link">納品書Excel</span>
-                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/delivery-notes?order_id=${orderId}`, "納品書Excel")}>
-                    ダウンロード
+                  <span className="output-link">納品書HTML</span>
+                  <button className="btn primary" type="button" onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${orderId}`, "納品書HTML")}>
+                    開く
                   </button>
                   <button className="btn ghost" type="button" onClick={() => loadOutputPreview("delivery")} disabled={outputPreviewLoading}>
                     プレビュー

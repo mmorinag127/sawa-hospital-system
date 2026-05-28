@@ -8405,9 +8405,34 @@ export default function OrderDetailPage() {
     }
   };
 
+  const openHtmlOutput = async (path: string, label: string) => {
+    const timestamp = new Date().toLocaleString("ja-JP");
+    setActionMessage(`${label}を開きます。 (${timestamp})`);
+    setDownloadMessage(`${label}を開きます。 (${timestamp})`);
+    try {
+      const res = await apiClient.get(path, { responseType: "text", timeout: 0 });
+      const win = window.open("", "_blank");
+      if (!win) {
+        setActionMessage("ブラウザで新しいタブを許可してください。");
+        setDownloadMessage("ブラウザで新しいタブを許可してください。");
+        return;
+      }
+      win.document.open();
+      win.document.write(String(res.data || ""));
+      win.document.close();
+      setActionMessage(`${label}を別タブで開きました。`);
+      setDownloadMessage(`${label}を別タブで開きました。`);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const suffix = status ? ` (${status})` : "";
+      setActionMessage(`${label}を開けませんでした。${suffix}`);
+      setDownloadMessage(`${label}を開けませんでした。${suffix}`);
+    }
+  };
+
   const outputPreviewLabels: Record<OutputPreview["type"], string> = {
     labels: "ラベルCSV",
-    delivery: "納品書Excel",
+    delivery: "納品書HTML",
     aggregate: "総量CSV",
   };
 
@@ -13253,13 +13278,13 @@ export default function OrderDetailPage() {
                 </button>
               </div>
               <div className="output-card">
-                <span className="output-link">納品書Excel</span>
+                <span className="output-link">納品書HTML</span>
                 <button
                   className="btn primary"
                   type="button"
-                  onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`, "納品書Excel")}
+                  onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${order.id}`, "納品書HTML")}
                 >
-                  ダウンロード
+                  開く
                 </button>
                 <button
                   className="btn ghost"

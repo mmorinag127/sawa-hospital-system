@@ -914,17 +914,77 @@ export default function DailyDeliveryNotesPage() {
     }
   };
 
-  const downloadDailyBundle = async (bundleType: "labels" | "delivery" | "both") => {
+  const openHtmlOutput = async (path: string, label: string) => {
+    const timestamp = new Date().toLocaleString("ja-JP");
+    setMessage(`${label}を開きます。 (${timestamp})`);
+    try {
+      const res = await apiClient.get(path, { responseType: "text", timeout: 0 });
+      const win = window.open("", "_blank");
+      if (!win) {
+        setMessage("ブラウザで新しいタブを許可してください。");
+        return;
+      }
+      win.document.open();
+      win.document.write(String(res.data || ""));
+      win.document.close();
+      setMessage(`${label}を別タブで開きました。`);
+    } catch (err: any) {
+      const detail = await extractErrorDetail(err);
+      setMessage(detail ? `${label}を開けませんでした: ${detail}` : `${label}を開けませんでした。`);
+    }
+  };
+
+  const openDailyDeliveryHtml = async () => {
+    if (!orders.length) {
+      setMessage("表示中の注文がありません。");
+      return;
+    }
+    setMessage("当日納品書HTMLを作成中です...");
+    try {
+      const escapeHtml = (value: string) =>
+        value
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      const responses = await Promise.all(
+        orders.map((order) => apiClient.get(`/outputs/delivery-notes/html?order_id=${order.id}`, { responseType: "text", timeout: 0 })),
+      );
+      const parser = new DOMParser();
+      let styleText = "";
+      const sheets = responses.map((res, index) => {
+        const doc = parser.parseFromString(String(res.data || ""), "text/html");
+        if (!styleText) {
+          styleText = doc.querySelector("style")?.textContent || "";
+        }
+        const sheet = doc.querySelector(".sheet");
+        const title = doc.querySelector("title")?.textContent || orders[index]?.id || `納品書${index + 1}`;
+        return `<section class="bundle-page"><div class="bundle-title" contenteditable="true">${escapeHtml(title)}</div>${sheet?.outerHTML || ""}</section>`;
+      });
+      const safeDate = escapeHtml(date);
+      const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8" /><title>${safeDate} 当日納品書HTML</title><style>${styleText}.bundle-page{break-after:page;page-break-after:always}.bundle-title{display:none}@media print{.bundle-page{break-after:page;page-break-after:always}}</style></head><body><div class="toolbar"><div class="toolbar-title">${safeDate} 当日納品書HTML</div><button type="button" class="primary" onclick="window.print()">印刷/PDF保存</button></div>${sheets.join("")}</body></html>`;
+      const win = window.open("", "_blank");
+      if (!win) {
+        setMessage("ブラウザで新しいタブを許可してください。");
+        return;
+      }
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      setMessage("当日納品書HTMLを別タブで開きました。");
+    } catch (err: any) {
+      const detail = await extractErrorDetail(err);
+      setMessage(detail ? `当日納品書HTMLを開けませんでした: ${detail}` : "当日納品書HTMLを開けませんでした。");
+    }
+  };
+
+  const downloadDailyBundle = async (bundleType: "labels") => {
     if (!date) {
       setMessage("日付を指定してください。");
       return;
     }
-    const label =
-      bundleType === "labels"
-        ? "当日ラベルExcel"
-        : bundleType === "delivery"
-          ? "当日納品書Excel"
-          : "当日一括Excel（ラベル+納品書）";
+    const label = "当日ラベルExcel";
     setMessage(`${label}を作成中です...`);
     try {
       const res = await apiClient.get("/outputs/daily-bundle", {
@@ -1046,11 +1106,8 @@ export default function DailyDeliveryNotesPage() {
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels")} disabled={loading}>
             当日ラベルExcel
           </button>
-          <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("delivery")} disabled={loading}>
-            当日納品書Excel
-          </button>
-          <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("both")} disabled={loading}>
-            当日一括Excel
+          <button className="btn ghost" type="button" onClick={openDailyDeliveryHtml} disabled={loading}>
+            当日納品書HTML
           </button>
           <Link className="btn ghost" href={`/weekly-weight-output?date=${encodeURIComponent(date)}${status ? `&status=${encodeURIComponent(status)}` : ""}`}>
             週別重量表
@@ -1103,7 +1160,7 @@ export default function DailyDeliveryNotesPage() {
                       <button
                         className="btn ghost"
                         type="button"
-                        onClick={() => openOutput(`/outputs/delivery-notes?order_id=${order.id}`, "納品書Excel")}
+                        onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${order.id}`, "納品書HTML")}
                       >
                         納品書
                       </button>

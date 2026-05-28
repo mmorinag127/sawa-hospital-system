@@ -16,7 +16,9 @@ from src.services.output_builder import (
     build_daily_output_bundle,
     build_weekly_weight_summary_workbook,
 )
-from src.services import order_form_service
+from src.db import session_scope
+from src.models.order import Order
+from src.services import order_form_service, facility_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -146,6 +148,207 @@ def _wrap_preview_html(title: str, body: str) -> str:
 </html>"""
 
 
+def _render_editable_delivery_note_html(
+    order_id: str,
+    title: str,
+    headers: list,
+    rows: list,
+    facility_name: str | None = None,
+) -> str:
+    header_html = "".join(
+        f'<th contenteditable="true" data-edit="h-{idx}">{escape(str(header or ""))}</th>'
+        for idx, header in enumerate(headers)
+    )
+    row_html: list[str] = []
+    for row_idx, row in enumerate(rows):
+        cells = row if isinstance(row, list) else []
+        cell_html = []
+        for col_idx in range(len(headers)):
+            value = cells[col_idx] if col_idx < len(cells) else ""
+            class_name = "menu-cell" if col_idx == 2 else ""
+            cell_html.append(
+                f'<td class="{class_name}" contenteditable="true" data-edit="r-{row_idx}-c-{col_idx}">'
+                f"{escape(str(value or ''))}</td>"
+            )
+        row_html.append(f"<tr>{''.join(cell_html)}</tr>")
+    body_html = "".join(row_html)
+    safe_title = escape(title)
+    safe_order_id = escape(order_id)
+    safe_facility_name = escape(facility_name or "")
+    return f"""<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{safe_title}</title>
+  <style>
+    @page {{ size: A4 landscape; margin: 8mm; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #e9ecef;
+      color: #111827;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+      font-size: 12px;
+    }}
+    .toolbar {{
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #ffffff;
+      border-bottom: 1px solid #cbd5e1;
+    }}
+    .toolbar-title {{ font-weight: 700; margin-right: auto; }}
+    button {{
+      border: 1px solid #64748b;
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 6px;
+      padding: 7px 12px;
+      font: inherit;
+      cursor: pointer;
+    }}
+    button.primary {{ background: #0f172a; color: #ffffff; border-color: #0f172a; }}
+    .sheet {{
+      width: 297mm;
+      min-height: 210mm;
+      margin: 12px auto;
+      padding: 9mm;
+      background: #ffffff;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+    }}
+    .company {{
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 8mm;
+      margin-bottom: 8mm;
+    }}
+    .doc-title {{ font-size: 24px; font-weight: 800; margin: 0 0 5mm; }}
+    .facility-label {{ font-weight: 700; border-bottom: 2px solid #111827; display: inline-block; margin-bottom: 3mm; }}
+    .facility-box {{
+      border: 2px solid #111827;
+      min-height: 18mm;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      font-weight: 700;
+      padding: 4mm;
+    }}
+    .company-name {{ font-size: 18px; font-weight: 800; margin-bottom: 5mm; }}
+    .company-line {{ font-size: 10px; font-weight: 700; margin: 0 0 3mm; }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      background: #ffffff;
+    }}
+    th, td {{
+      border: 1px solid #111827;
+      min-height: 7mm;
+      height: 7mm;
+      padding: 2px 4px;
+      text-align: center;
+      vertical-align: middle;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    th {{ font-weight: 400; font-size: 14px; }}
+    td.menu-cell {{ text-align: left; font-weight: 700; }}
+    [contenteditable="true"] {{ cursor: text; }}
+    [contenteditable="true"]:focus {{
+      outline: 2px solid #2563eb;
+      outline-offset: -2px;
+      background: #eff6ff;
+    }}
+    @media print {{
+      body {{ background: #ffffff; }}
+      .toolbar {{ display: none; }}
+      .sheet {{
+        width: auto;
+        min-height: auto;
+        margin: 0;
+        padding: 0;
+        box-shadow: none;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="toolbar-title">{safe_title}</div>
+    <button type="button" id="reset-edits">編集をリセット</button>
+    <button type="button" class="primary" id="print-note">印刷/PDF保存</button>
+  </div>
+  <main class="sheet">
+    <section class="company">
+      <div>
+        <h1 class="doc-title">【納品書】</h1>
+        <div class="facility-label">施設名</div>
+        <div class="facility-box" contenteditable="true" data-edit="facility-name">{safe_facility_name}</div>
+      </div>
+      <div>
+        <div class="company-name" contenteditable="true" data-edit="company-name">株式会社アドオンミール</div>
+        <p class="company-line" contenteditable="true" data-edit="company-1">福岡本社: 〒810-0001</p>
+        <p class="company-line" contenteditable="true" data-edit="company-2">福岡県福岡市中央区天神２丁目３番１０号　天神パインクレスト719</p>
+        <p class="company-line" contenteditable="true" data-edit="company-3">電話0120-907-056　Fax050-3092-0899</p>
+      </div>
+    </section>
+    <table aria-label="納品書">
+      <thead><tr>{header_html}</tr></thead>
+      <tbody>{body_html}</tbody>
+    </table>
+  </main>
+  <script>
+    (() => {{
+      const storageKey = "delivery-note-html:{safe_order_id}";
+      const saved = JSON.parse(localStorage.getItem(storageKey) || "{{}}");
+      const initial = {{}};
+      const persist = () => localStorage.setItem(storageKey, JSON.stringify(saved));
+      document.querySelectorAll("[data-edit]").forEach((node) => {{
+        const key = node.getAttribute("data-edit");
+        initial[key] = node.textContent || "";
+        if (Object.prototype.hasOwnProperty.call(saved, key)) {{
+          node.textContent = saved[key];
+        }}
+        node.addEventListener("input", () => {{
+          saved[key] = node.textContent || "";
+          persist();
+        }});
+      }});
+      document.getElementById("print-note")?.addEventListener("click", () => window.print());
+      document.getElementById("reset-edits")?.addEventListener("click", () => {{
+        if (window.confirm("この画面で保存された編集内容をリセットします。")) {{
+          localStorage.removeItem(storageKey);
+          Object.keys(saved).forEach((key) => delete saved[key]);
+          document.querySelectorAll("[data-edit]").forEach((node) => {{
+            const key = node.getAttribute("data-edit");
+            node.textContent = initial[key] || "";
+          }});
+        }}
+      }});
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+def _delivery_facility_name(order_id: str) -> str:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        facility_id = str(getattr(order, "facility", "") or "").strip() if order else ""
+    if not facility_id:
+        return ""
+    facility = facility_service.get_facility(facility_id)
+    if isinstance(facility, dict):
+        return str(facility.get("name") or facility.get("facility_name") or facility_id)
+    return facility_id
+
+
 def _preview_csv(path: str, encoding: str, limit: int) -> dict:
     with open(path, newline="", encoding=encoding, errors="replace") as f:
         reader = csv.reader(f)
@@ -204,6 +407,28 @@ def download_delivery(order_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{order_id}_delivery.xlsx",
     )
+
+
+@router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
+def view_delivery_note_html(order_id: str):
+    try:
+        preview = build_delivery_preview(order_id)
+        headers = preview.get("headers", [])
+        rows = preview.get("rows", [])
+        facility_name = _delivery_facility_name(order_id)
+        html = _render_editable_delivery_note_html(
+            order_id,
+            f"{order_id} 納品書",
+            headers,
+            rows,
+            facility_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"delivery note html build failed: {exc}") from exc
+    logger.info("Output html view", order_id=order_id, output="delivery")
+    return HTMLResponse(html)
 
 
 @router.get("/order-form-saved-sheet", dependencies=[Depends(require_role("operator"))])
