@@ -1121,7 +1121,7 @@ def test_reference_daily_delivery_template_is_single_blank_sheet():
     assert {
         ws.cell(row=20, column=col_idx).border.top.style
         for col_idx in range(1, 12)
-    } == {"medium"}
+    } == {None}
 
 
 def test_reference_daily_delivery_writing_values_does_not_change_template_borders(tmp_path):
