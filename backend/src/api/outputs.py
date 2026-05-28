@@ -18,7 +18,7 @@ from src.services.output_builder import (
 )
 from src.db import session_scope
 from src.models.order import Order
-from src.services import order_form_service, facility_service
+from src.services import order_form_service, facility_service, order_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -337,6 +337,104 @@ def _render_editable_delivery_note_html(
 </html>"""
 
 
+def _extract_delivery_note_sheet(html: str) -> tuple[str, str]:
+    title_start = html.find("<title>")
+    title_end = html.find("</title>")
+    title = html[title_start + len("<title>") : title_end] if title_start >= 0 and title_end > title_start else "納品書"
+    sheet_start = html.find('<main class="sheet"')
+    if sheet_start < 0:
+        sheet_start = html.find('<main class="sheet">')
+    sheet_end = html.find("</main>", sheet_start)
+    if sheet_start < 0 or sheet_end < 0:
+        raise ValueError("delivery note sheet not found")
+    return title, html[sheet_start : sheet_end + len("</main>")]
+
+
+def _extract_delivery_note_style(html: str) -> str:
+    style_start = html.find("<style>")
+    style_end = html.find("</style>", style_start)
+    if style_start < 0 or style_end < 0:
+        return ""
+    return html[style_start + len("<style>") : style_end]
+
+
+def _render_editable_daily_delivery_note_html(
+    target_date: dt_date,
+    *,
+    status: str | None = None,
+) -> tuple[str, dict]:
+    orders = order_service.list_orders_by_line_date(target_date, status=status)
+    sections: list[str] = []
+    style_text = ""
+    errors: list[dict] = []
+
+    for order_summary in orders:
+        order_id = str(order_summary.get("id") or "").strip()
+        if not order_id:
+            continue
+        try:
+            preview = build_delivery_preview(order_id)
+            order_html = _render_editable_delivery_note_html(
+                order_id,
+                f"{order_id} 納品書",
+                preview.get("headers", []),
+                preview.get("rows", []),
+                _delivery_facility_name(order_id),
+            )
+            if not style_text:
+                style_text = _extract_delivery_note_style(order_html)
+            sheet_title, sheet_html = _extract_delivery_note_sheet(order_html)
+            sections.append(
+                '<section class="bundle-page" data-order-id="'
+                f'{escape(order_id)}"><div class="bundle-title" contenteditable="true">'
+                f'{escape(sheet_title)}</div>{sheet_html}</section>'
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"order_id": order_id, "error": str(exc)})
+
+    if not sections:
+        raise ValueError("対象日の納品書出力対象がありません")
+
+    safe_date = escape(target_date.isoformat())
+    safe_status = escape(status or "全て")
+    error_html = ""
+    if errors:
+        error_rows = "".join(
+            f"<li>{escape(item['order_id'])}: {escape(item['error'])}</li>"
+            for item in errors
+        )
+        error_html = f'<details class="build-errors"><summary>生成できなかった注文 {len(errors)}件</summary><ul>{error_rows}</ul></details>'
+    html = f"""<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{safe_date} 当日納品書HTML</title>
+  <style>
+    {style_text}
+    .bundle-page {{ break-after: page; page-break-after: always; }}
+    .bundle-page:last-child {{ break-after: auto; page-break-after: auto; }}
+    .bundle-title {{ display: none; }}
+    .build-errors {{ max-width: 297mm; margin: 10px auto; padding: 8px 12px; background: #fff7ed; border: 1px solid #fed7aa; }}
+    @media print {{
+      .bundle-page {{ break-after: page; page-break-after: always; }}
+      .bundle-page:last-child {{ break-after: auto; page-break-after: auto; }}
+      .build-errors {{ display: none; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="toolbar-title">{safe_date} 当日納品書HTML / ステータス: {safe_status} / {len(sections)}件</div>
+    <button type="button" class="primary" onclick="window.print()">印刷/PDF保存</button>
+  </div>
+  {error_html}
+  {''.join(sections)}
+</body>
+</html>"""
+    return html, {"total_orders": len(orders), "success_orders": len(sections), "error_orders": len(errors)}
+
+
 def _delivery_facility_name(order_id: str) -> str:
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -429,6 +527,33 @@ def view_delivery_note_html(order_id: str):
         raise HTTPException(status_code=500, detail=f"delivery note html build failed: {exc}") from exc
     logger.info("Output html view", order_id=order_id, output="delivery")
     return HTMLResponse(html)
+
+
+@router.get("/daily-delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
+def view_daily_delivery_note_html(date: str, status: str | None = None):
+    target_date = _parse_iso_date(date)
+    try:
+        html, summary = _render_editable_daily_delivery_note_html(target_date, status=status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"daily delivery note html build failed: {exc}") from exc
+    logger.info(
+        "Daily output html view",
+        date=target_date.isoformat(),
+        output="delivery",
+        total_orders=summary.get("total_orders"),
+        success_orders=summary.get("success_orders"),
+        error_orders=summary.get("error_orders"),
+    )
+    return HTMLResponse(
+        html,
+        headers={
+            "X-Daily-Delivery-Total-Orders": str(summary.get("total_orders", 0)),
+            "X-Daily-Delivery-Success-Orders": str(summary.get("success_orders", 0)),
+            "X-Daily-Delivery-Error-Orders": str(summary.get("error_orders", 0)),
+        },
+    )
 
 
 @router.get("/order-form-saved-sheet", dependencies=[Depends(require_role("operator"))])

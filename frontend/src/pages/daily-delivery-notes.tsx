@@ -935,42 +935,24 @@ export default function DailyDeliveryNotesPage() {
   };
 
   const openDailyDeliveryHtml = async () => {
-    if (!orders.length) {
-      setMessage("表示中の注文がありません。");
+    if (!date) {
+      setMessage("日付を指定してください。");
       return;
     }
     setMessage("当日納品書HTMLを作成中です...");
     try {
-      const escapeHtml = (value: string) =>
-        value
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      const responses = await Promise.all(
-        orders.map((order) => apiClient.get(`/outputs/delivery-notes/html?order_id=${order.id}`, { responseType: "text", timeout: 0 })),
-      );
-      const parser = new DOMParser();
-      let styleText = "";
-      const sheets = responses.map((res, index) => {
-        const doc = parser.parseFromString(String(res.data || ""), "text/html");
-        if (!styleText) {
-          styleText = doc.querySelector("style")?.textContent || "";
-        }
-        const sheet = doc.querySelector(".sheet");
-        const title = doc.querySelector("title")?.textContent || orders[index]?.id || `納品書${index + 1}`;
-        return `<section class="bundle-page"><div class="bundle-title" contenteditable="true">${escapeHtml(title)}</div>${sheet?.outerHTML || ""}</section>`;
+      const res = await apiClient.get("/outputs/daily-delivery-notes/html", {
+        params: { date, status: status || undefined },
+        responseType: "text",
+        timeout: 0,
       });
-      const safeDate = escapeHtml(date);
-      const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8" /><title>${safeDate} 当日納品書HTML</title><style>${styleText}.bundle-page{break-after:page;page-break-after:always}.bundle-title{display:none}@media print{.bundle-page{break-after:page;page-break-after:always}}</style></head><body><div class="toolbar"><div class="toolbar-title">${safeDate} 当日納品書HTML</div><button type="button" class="primary" onclick="window.print()">印刷/PDF保存</button></div>${sheets.join("")}</body></html>`;
       const win = window.open("", "_blank");
       if (!win) {
         setMessage("ブラウザで新しいタブを許可してください。");
         return;
       }
       win.document.open();
-      win.document.write(html);
+      win.document.write(String(res.data || ""));
       win.document.close();
       setMessage("当日納品書HTMLを別タブで開きました。");
     } catch (err: any) {
