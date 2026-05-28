@@ -490,6 +490,7 @@ export default function MonthlyMenuEditorPage() {
   const [masterCheckNotice, setMasterCheckNotice] = useState<string>("");
   const [entryExceptionDraft, setEntryExceptionDraft] = useState<MenuEntryExceptionDraft | null>(null);
   const [entryExceptionSaving, setEntryExceptionSaving] = useState<boolean>(false);
+  const [selectedMonth, setSelectedMonth] = useState<string>("");
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
     const value = (scopeOverride || "").trim();
@@ -576,7 +577,17 @@ export default function MonthlyMenuEditorPage() {
 
   useEffect(() => {
     setMasterCheckNotice("");
+    if (monthId && !Array.isArray(monthId)) {
+      setSelectedMonth(monthId);
+    }
   }, [monthId]);
+
+  const handleMonthChange = (nextMonth: string) => {
+    setSelectedMonth(nextMonth);
+    if (/^\d{4}-\d{2}$/.test(nextMonth)) {
+      router.push(`/menus/${nextMonth}`);
+    }
+  };
 
   useEffect(() => {
     if (!entries.length) {
@@ -1029,7 +1040,18 @@ export default function MonthlyMenuEditorPage() {
         <div>
           <p className="eyebrow">Monthly Menu</p>
           <h1>月次メニュー編集</h1>
-          <p className="subtle">月ID: {Array.isArray(monthId) ? monthId.join(",") : monthId}</p>
+          <div className="month-selector">
+            <label className="field compact-field">
+              <span className="field-label">対象月</span>
+              <input
+                className="input"
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => handleMonthChange(e.target.value)}
+              />
+            </label>
+            <p className="subtle">月ID: {Array.isArray(monthId) ? monthId.join(",") : monthId}</p>
+          </div>
         </div>
         <TopNav />
       </header>
@@ -2397,6 +2419,26 @@ export default function MonthlyMenuEditorPage() {
         h1 {
           font-size: clamp(26px, 4vw, 36px);
           margin: 0 0 12px;
+        }
+
+        .month-selector {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px 14px;
+          align-items: end;
+        }
+
+        .compact-field {
+          display: grid;
+          gap: 6px;
+        }
+
+        .compact-field .field-label {
+          margin-bottom: 0;
+        }
+
+        .compact-field .input {
+          min-width: 160px;
         }
 
         .subtle {

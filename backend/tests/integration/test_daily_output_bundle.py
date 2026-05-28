@@ -1125,6 +1125,76 @@ def test_daily_label_jp_keeps_units_servings_and_facility_floor_suffix():
     assert rows[0][""] == "3人前"
 
 
+def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
+    rows, fields, label_format = output_builder._build_label_rows(  # noqa: SLF001
+        [
+            {
+                "facility": "FAC00008",
+                "date": TARGET_DATE,
+                "daypart": "夕",
+                "menu_name": "れんこんの甘辛煮",
+                "menu_category": "副菜",
+                "diet_type": "soft",
+                "area_id": "2F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 40,
+                "menu_temp_type": "温菜",
+                "quantity": 9,
+            },
+            {
+                "facility": "FAC00008",
+                "date": TARGET_DATE,
+                "daypart": "夕",
+                "menu_name": "鶏すき焼き風",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "2F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 100,
+                "menu_temp_type": "温菜",
+                "quantity": 9,
+            },
+            {
+                "facility": "FAC00008",
+                "date": TARGET_DATE,
+                "daypart": "夕",
+                "menu_name": "鶏すき焼き風",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "3F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 100,
+                "menu_temp_type": "温菜",
+                "quantity": 6,
+            },
+            {
+                "facility": "FAC00008",
+                "date": TARGET_DATE,
+                "daypart": "夕",
+                "menu_name": "れんこんの甘辛煮",
+                "menu_category": "副菜",
+                "diet_type": "soft",
+                "area_id": "3F",
+                "menu_unit_type": "g",
+                "menu_qty_per_serving": 40,
+                "menu_temp_type": "温菜",
+                "quantity": 6,
+            },
+        ],
+        {},
+        "佐古グループホーム",
+    )
+
+    assert label_format == "jp"
+    assert fields[-1] == ""
+    assert [(row["商品名１"], row["時間"]) for row in rows] == [
+        ("鶏すき焼き風", "夕　2階"),
+        ("鶏すき焼き風", "夕　3階"),
+        ("れんこんの甘辛煮", "夕　2階"),
+        ("れんこんの甘辛煮", "夕　3階"),
+    ]
+
+
 def test_daily_label_jp_excludes_forbidden_diets():
     rows, _fields, _label_format = output_builder._build_label_rows(  # noqa: SLF001
         [

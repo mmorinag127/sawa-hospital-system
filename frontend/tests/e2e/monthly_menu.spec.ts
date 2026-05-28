@@ -69,6 +69,7 @@ test("monthly menu index redirects to the latest registered month", async ({ pag
 
   await expect(page).toHaveURL(/\/menus\/2026-03$/);
   await expect(page.getByRole("heading", { name: "月次メニュー編集" })).toBeVisible();
+  await expect(page.getByLabel("対象月")).toHaveValue("2026-03");
 });
 
 test("monthly menu page renders entries in a sheet-style grid", async ({ page }) => {
@@ -175,6 +176,7 @@ test("monthly menu page renders entries in a sheet-style grid", async ({ page })
   await page.goto(`${baseUrl}/menus/2026-03`);
 
   await expect(page.getByRole("heading", { name: "月次メニュー編集" })).toBeVisible();
+  await expect(page.getByLabel("対象月")).toHaveValue("2026-03");
   await expect(page.getByRole("heading", { name: "月次シート" })).toBeVisible();
   await expect(page.getByText("メニュー一覧（補助）")).toBeVisible();
 

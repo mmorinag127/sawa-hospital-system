@@ -2796,7 +2796,8 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
         scope_ids = _resolve_override_scope_ids(session, facility_id)
         rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
         base_rank = len(scope_ids)
-        selected: dict[tuple[object, object, int], tuple[int, MonthlyMenuEntry]] = {}
+        base_entries_by_slot: dict[tuple[object, object, int], list[MonthlyMenuEntry]] = {}
+        scoped_entries_by_slot: dict[tuple[object, object, int], list[tuple[int, MonthlyMenuEntry]]] = {}
         for entry in entries:
             scope = (entry.facility_override or "").strip()
             if scope:
@@ -2810,12 +2811,48 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
                 entry.daypart,
                 int(entry.slot_index) if entry.slot_index is not None else -1,
             )
-            current = selected.get(key)
-            if current is None or row_rank < current[0] or (
-                row_rank == current[0] and (entry.id or "") > (current[1].id or "")
-            ):
-                selected[key] = (row_rank, entry)
-        resolved = [serialize_entry(payload[1]) for payload in selected.values()]
+            if scope:
+                scoped_entries_by_slot.setdefault(key, []).append((row_rank, entry))
+            else:
+                base_entries_by_slot.setdefault(key, []).append(entry)
+
+        resolved_entries: list[MonthlyMenuEntry] = []
+        all_keys = set(base_entries_by_slot) | set(scoped_entries_by_slot)
+        for key in all_keys:
+            base_entries = list(base_entries_by_slot.get(key) or [])
+            scoped_candidates = scoped_entries_by_slot.get(key) or []
+            if not scoped_candidates:
+                resolved_entries.extend(base_entries)
+                continue
+
+            best_rank = min(row_rank for row_rank, _entry in scoped_candidates)
+            scoped_entries = [
+                entry
+                for row_rank, entry in scoped_candidates
+                if row_rank == best_rank
+            ]
+            if len(base_entries) <= 1:
+                resolved_entries.extend(scoped_entries)
+                continue
+
+            remaining_base = list(base_entries)
+            for scoped_entry in scoped_entries:
+                match_index = next(
+                    (
+                        idx
+                        for idx, base_entry in enumerate(remaining_base)
+                        if str(base_entry.category or "").strip() == str(scoped_entry.category or "").strip()
+                        and str(base_entry.diet_type or "").strip() == str(scoped_entry.diet_type or "").strip()
+                        and str(base_entry.name or "").strip() == str(scoped_entry.name or "").strip()
+                    ),
+                    -1,
+                )
+                if match_index >= 0:
+                    remaining_base.pop(match_index)
+            resolved_entries.extend(remaining_base)
+            resolved_entries.extend(scoped_entries)
+
+        resolved = [serialize_entry(entry) for entry in resolved_entries]
         resolved.sort(key=_menu_entry_sort_key)
         return resolved
 

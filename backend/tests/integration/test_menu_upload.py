@@ -288,6 +288,63 @@ def test_get_menu_for_facility_resolves_tag_and_entry_scope():
     assert names == ["タグ主菜", "共通副菜"]
 
 
+def test_get_menu_for_facility_preserves_multiple_base_entries_in_same_slot():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(FacilityConfig).delete()
+        session.query(Facility).delete()
+        session.query(MonthlyMenuEntry).filter(MonthlyMenuEntry.monthly_menu_id == "2099-05").delete()
+        session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == "2099-05").delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).filter(MonthlyMenu.id == "2099-05").delete()
+        session.add(MonthlyMenu(id="2099-05", filename="base.xlsx"))
+        session.add_all(
+            [
+                MonthlyMenuEntry(
+                    id="MME_DUP_SLOT_A",
+                    monthly_menu_id="2099-05",
+                    menu_date=date(2099, 5, 24),
+                    daypart="夕",
+                    name="豆腐ﾊﾝﾊﾞｰｸﾞ和風あん",
+                    category="主菜",
+                    diet_type="regular",
+                    slot_index=1,
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DUP_SLOT_B",
+                    monthly_menu_id="2099-05",
+                    menu_date=date(2099, 5, 24),
+                    daypart="夕",
+                    name="鶏すき焼き風",
+                    category="主菜",
+                    diet_type="regular",
+                    slot_index=1,
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DUP_SLOT_C",
+                    monthly_menu_id="2099-05",
+                    menu_date=date(2099, 5, 24),
+                    daypart="夕",
+                    name="南瓜サラダ",
+                    category="副菜",
+                    diet_type="regular",
+                    slot_index=2,
+                ),
+            ]
+        )
+
+    payload = menu_service.get_menu_for_facility("2099-05", "FAC00008")
+
+    assert payload is not None
+    names = [
+        entry["name"]
+        for entry in payload["entries"]
+        if entry["menu_date"] == "2099-05-24" and entry["daypart"] == "夕食"
+    ]
+    assert names == ["豆腐ﾊﾝﾊﾞｰｸﾞ和風あん", "鶏すき焼き風", "南瓜サラダ"]
+
+
 def test_get_menu_for_facility_returns_entries_in_canonical_daypart_order():
     with session_scope() as session:
         session.query(AuditLog).delete()

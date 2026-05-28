@@ -1877,17 +1877,62 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     daypart_order = {"朝": 0, "昼": 1, "夕": 2}
     category_order = {
         "主菜": 0,
-        "主菜（ミキサー）": 1,
-        "副菜①": 2,
-        "副菜①（ミキサー）": 3,
-        "副菜②": 4,
-        "副菜②（ミキサー）": 5,
-        "ソース": 6,
+        "主菜（軟菜）": 1,
+        "主菜（ミキサー）": 2,
+        "副菜①": 3,
+        "副菜①（軟菜）": 4,
+        "副菜①（ミキサー）": 5,
+        "副菜②": 6,
+        "副菜②（軟菜）": 7,
+        "副菜②（ミキサー）": 8,
+        "副菜": 9,
+        "副菜（軟菜）": 10,
+        "副菜（ミキサー）": 11,
+        "ソース": 12,
     }
+
+    def split_time_text(value: Any) -> tuple[str, str]:
+        text = str(value or "").strip()
+        if not text:
+            return "", ""
+        daypart = text[:1]
+        area = text[1:].strip(" 　")
+        return daypart, area
+
+    def normalize_category_for_sort(value: Any) -> str:
+        text = str(value or "").strip()
+        if text in category_order:
+            return text
+        if text.startswith("主菜"):
+            if "ミキサー" in text:
+                return "主菜（ミキサー）"
+            if "軟菜" in text:
+                return "主菜（軟菜）"
+            return "主菜"
+        if text.startswith("副菜①"):
+            if "ミキサー" in text:
+                return "副菜①（ミキサー）"
+            if "軟菜" in text:
+                return "副菜①（軟菜）"
+            return "副菜①"
+        if text.startswith("副菜②"):
+            if "ミキサー" in text:
+                return "副菜②（ミキサー）"
+            if "軟菜" in text:
+                return "副菜②（軟菜）"
+            return "副菜②"
+        if text.startswith("副菜"):
+            if "ミキサー" in text:
+                return "副菜（ミキサー）"
+            if "軟菜" in text:
+                return "副菜（軟菜）"
+            return "副菜"
+        return text
 
     def sort_key(row: dict) -> tuple:
         time_text = str(row.get("時間") or "")
-        daypart = time_text[:1]
+        daypart, area = split_time_text(time_text)
+        category = normalize_category_for_sort(row.get("メニュー"))
         try:
             serving_sort = -float(row.get("") or 0)
         except Exception:
@@ -1895,9 +1940,10 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         return (
             row.get("賞味期限", ""),
             daypart_order.get(daypart, 99),
-            time_text,
-            category_order.get(str(row.get("メニュー") or ""), 99),
+            category_order.get(category, 99),
             row.get("商品名１", ""),
+            area,
+            time_text,
             serving_sort,
         )
 
