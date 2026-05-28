@@ -7,6 +7,7 @@ import time
 import zipfile
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any
@@ -40,6 +41,7 @@ from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+_OUTPUT_LOOKUP_CACHE_SECONDS = 300
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
@@ -747,6 +749,96 @@ def _build_menu_name_aliases(value: object) -> list[str]:
     return aliases
 
 
+def _output_lookup_cache_bucket() -> int:
+    return int(time.time() // _OUTPUT_LOOKUP_CACHE_SECONDS)
+
+
+@lru_cache(maxsize=512)
+def _cached_menu_items_for_week(
+    week_value: str,
+    facility_id: str,
+    cache_bucket: int,
+) -> tuple[tuple[tuple[str, Any], ...], ...]:
+    del cache_bucket
+    items = order_service._collect_menu_items_for_week(week_value, facility_id or None)  # noqa: SLF001
+    return tuple(tuple(sorted(dict(item).items())) for item in items if isinstance(item, dict))
+
+
+@lru_cache(maxsize=512)
+def _cached_menu_entries_for_week(
+    week_value: str,
+    facility_id: str,
+    cache_bucket: int,
+) -> tuple[tuple[tuple[str, Any], ...], ...]:
+    del cache_bucket
+    entries = order_service._collect_menu_entries_for_week(week_value, facility_id or None)  # noqa: SLF001
+    return tuple(tuple(sorted(dict(entry).items())) for entry in entries if isinstance(entry, dict))
+
+
+@lru_cache(maxsize=512)
+def _cached_menu_defaults(
+    names: tuple[str, ...],
+    facility_id: str,
+    cache_bucket: int,
+) -> tuple[tuple[str, tuple[tuple[str, Any], ...]], ...]:
+    del cache_bucket
+    defaults = menu_service.resolve_menu_defaults(list(names), facility_id or None)
+    return tuple(
+        (name, tuple(sorted(dict(defaults.get(name, {})).items())))
+        for name in names
+    )
+
+
+@lru_cache(maxsize=32)
+def _cached_active_menu_rules(cache_bucket: int) -> tuple[tuple[tuple[str, Any], ...], ...]:
+    del cache_bucket
+    rules = menu_rule_service.list_active_rules()
+    return tuple(tuple(sorted(dict(rule).items())) for rule in rules if isinstance(rule, dict))
+
+
+def _cached_tuple_rows_to_dicts(rows: tuple[tuple[tuple[str, Any], ...], ...]) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
+def _collect_cached_menu_items_for_week(week_value: str | None, facility_id: str | None) -> list[dict]:
+    if not week_value:
+        return []
+    rows = _cached_menu_items_for_week(
+        str(week_value),
+        str(facility_id or ""),
+        _output_lookup_cache_bucket(),
+    )
+    return _cached_tuple_rows_to_dicts(rows)
+
+
+def _collect_cached_menu_entries_for_week(week_value: str | None, facility_id: str | None) -> list[dict]:
+    if not week_value:
+        return []
+    rows = _cached_menu_entries_for_week(
+        str(week_value),
+        str(facility_id or ""),
+        _output_lookup_cache_bucket(),
+    )
+    return _cached_tuple_rows_to_dicts(rows)
+
+
+def _resolve_cached_menu_defaults(names: list[str], facility_id: str | None) -> dict[str, dict]:
+    unique_names = tuple(dict.fromkeys(str(name or "").strip() for name in names if str(name or "").strip()))
+    if not unique_names:
+        return {}
+    rows = _cached_menu_defaults(
+        unique_names,
+        str(facility_id or ""),
+        _output_lookup_cache_bucket(),
+    )
+    return {name: dict(payload) for name, payload in rows}
+
+
+def _list_cached_active_menu_rules() -> list[dict]:
+    rows = _cached_active_menu_rules(_output_lookup_cache_bucket())
+    return _cached_tuple_rows_to_dicts(rows)
+
+
 def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dict]:
     if not menu_items:
         return lines
@@ -1002,7 +1094,7 @@ def _apply_garnish_defaults(lines: list[dict]) -> list[dict]:
 
 def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> list[dict]:
     menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
-    defaults = menu_service.resolve_menu_defaults(menu_names, facility_id)
+    defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
     if not defaults:
         return lines
     enriched: list[dict] = []
@@ -1060,7 +1152,7 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
 def _build_condiment_map(menu_names: list[str], facility_id: str | None) -> dict[str, list[str]]:
     if not menu_names:
         return {}
-    defaults = menu_service.resolve_menu_defaults(menu_names, facility_id)
+    defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
     condiment_map: dict[str, list[str]] = {}
     for name in menu_names:
         payload = defaults.get(name, {})
@@ -1239,7 +1331,9 @@ def build_order_lines_for_outputs(
     *,
     include_expanded_copy: bool = True,
     allow_stale_draft_lines: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> list[dict]:
+    total_started = time.perf_counter()
     facility_id = order.get("facility")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
@@ -1248,7 +1342,13 @@ def build_order_lines_for_outputs(
         or str(order.get("week") or "").strip()
         or str(order.get("week_code") or "").strip()
     )
+    facility_config_started = time.perf_counter()
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    if timings is not None:
+        timings["build_order_lines_facility_config_ms"] = round(
+            (time.perf_counter() - facility_config_started) * 1000,
+            1,
+        )
     raw_lines = order.get("lines", [])
     order_id = order.get("id")
     workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
@@ -1282,7 +1382,13 @@ def build_order_lines_for_outputs(
             workflow_state=workflow_state.get("state"),
         )
     else:
+        workflow_started = time.perf_counter()
         workflow_v2_lines = _workflow_v2_lines_for_outputs(order, raw_lines)
+        if timings is not None:
+            timings["build_order_lines_workflow_v2_ms"] = round(
+                (time.perf_counter() - workflow_started) * 1000,
+                1,
+            )
         if workflow_v2_lines is not None:
             raw_lines = workflow_v2_lines
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
@@ -1299,7 +1405,13 @@ def build_order_lines_for_outputs(
             _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
     if expanded_copy_enabled:
         if order_id:
+            expanded_started = time.perf_counter()
             materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
+            if timings is not None:
+                timings["build_order_lines_expanded_copy_ms"] = round(
+                    (time.perf_counter() - expanded_started) * 1000,
+                    1,
+                )
             candidate_lines = (
                 materialization_candidate.get("lines")
                 if isinstance(materialization_candidate, dict)
@@ -1308,18 +1420,41 @@ def build_order_lines_for_outputs(
             )
             if isinstance(candidate_lines, list) and candidate_lines:
                 raw_lines = candidate_lines
+    enrich_started = time.perf_counter()
     raw_lines = order_service._apply_change_override_priority_to_lines(raw_lines)  # noqa: SLF001
     raw_lines = _apply_garnish_lines(raw_lines)
-    menu_entries = order_service._collect_menu_entries_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
-    raw_lines = _apply_menu_entry_overrides(raw_lines, menu_entries)
-    menu_items = order_service._collect_menu_items_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
-    menu_entries = order_service._collect_menu_entries_for_week(week_value, facility_id) if week_value else []  # noqa: SLF001
+    if timings is not None:
+        timings["build_order_lines_pre_menu_ms"] = round(
+            (time.perf_counter() - enrich_started) * 1000,
+            1,
+        )
+    menu_items_started = time.perf_counter()
+    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
+    if timings is not None:
+        timings["build_order_lines_menu_items_ms"] = round(
+            (time.perf_counter() - menu_items_started) * 1000,
+            1,
+        )
+    menu_entries_started = time.perf_counter()
+    menu_entries = _collect_cached_menu_entries_for_week(week_value, facility_id)
+    if timings is not None:
+        timings["build_order_lines_menu_entries_ms"] = round(
+            (time.perf_counter() - menu_entries_started) * 1000,
+            1,
+        )
+    snapshot_started = time.perf_counter()
     snapshot = get_order_menu_snapshot(order.get("id"))
+    if timings is not None:
+        timings["build_order_lines_snapshot_ms"] = round(
+            (time.perf_counter() - snapshot_started) * 1000,
+            1,
+        )
     snapshot_items = snapshot.get("menu_items") if isinstance(snapshot, dict) else None
     if snapshot_items:
         order_lines = _apply_menu_snapshot(raw_lines, snapshot_items)
     else:
         order_lines = raw_lines
+    overrides_started = time.perf_counter()
     order_lines = _apply_output_diet_type_overrides(order_lines, facility_config)
     # Current monthly/menu-master settings must win over stale confirmed snapshots.
     order_lines = _apply_menu_overrides(order_lines, menu_items)
@@ -1334,6 +1469,15 @@ def build_order_lines_for_outputs(
     order_lines = _apply_condiment_lines(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
+    if timings is not None:
+        timings["build_order_lines_apply_overrides_ms"] = round(
+            (time.perf_counter() - overrides_started) * 1000,
+            1,
+        )
+        timings["build_order_lines_total_ms"] = round(
+            (time.perf_counter() - total_started) * 1000,
+            1,
+        )
     return order_lines
 
 
@@ -1535,7 +1679,7 @@ def _rule_applies(rule: dict, line: dict, facility_id: str | None) -> bool:
 
 
 def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
-    rules = menu_rule_service.list_active_rules()
+    rules = _list_cached_active_menu_rules()
     if not rules:
         return lines
     type_weight = {"global": 100, "menu": 200, "facility": 300}
@@ -3185,7 +3329,9 @@ def _build_delivery_rows(
     facility_config: dict | None = None,
     menu_meta: dict[str, object] | None = None,
     allow_ocr_menu_meta: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> list[dict]:
+    setup_started = time.perf_counter()
     columns = template.get("columns", [])
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     facility_id = order.get("facility")
@@ -3210,12 +3356,18 @@ def _build_delivery_rows(
                 "area_key": _resolve_area_key(area_id, area_aliases),
             }
         )
+    if timings is not None:
+        timings["build_rows_setup_ms"] = round((time.perf_counter() - setup_started) * 1000, 1)
     prefer_ocr_rows = bool(template.get("prefer_ocr_raw_rows", False))
     if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
+        ocr_started = time.perf_counter()
         menu_meta = _build_ocr_menu_meta(order, facility_config)
+        if timings is not None:
+            timings["build_rows_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
     rows: dict[tuple, dict] = {}
     menu_names = []
+    aggregate_started = time.perf_counter()
     for line in order.get("lines", []):
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
@@ -3242,12 +3394,16 @@ def _build_delivery_rows(
                 "menu_category": menu_category,
                 "menu_display": "",
                 "_order_index": order_index,
+                "_delivery_condiments": [],
             },
         )
         if menu_category and not row.get("menu_category"):
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
             row["_order_index"] = order_index
+        for condiment in _normalize_condiments(line.get("condiments")):
+            if condiment not in row["_delivery_condiments"]:
+                row["_delivery_condiments"].append(condiment)
         line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
         for col in quantity_columns:
@@ -3262,7 +3418,9 @@ def _build_delivery_rows(
             if not name:
                 continue
             row[name] = (row.get(name) or 0) + float(qty)
-    condiment_map = _build_condiment_map(menu_names, facility_id)
+    if timings is not None:
+        timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
+    finalize_started = time.perf_counter()
     result = list(rows.values())
     result.sort(
         key=lambda row: (
@@ -3275,7 +3433,7 @@ def _build_delivery_rows(
     )
     for row in result:
         row["menu_category"] = _normalize_delivery_category_label(row.get("menu_category"))
-        condiments = condiment_map.get(row.get("menu_name") or "", [])
+        condiments = _normalize_condiments(row.get("_delivery_condiments"))
         _apply_condiment_note(row, condiments)
         delivery_menu_name = _append_condiments_to_delivery_menu_name(
             row.get("menu_name"),
@@ -3285,6 +3443,8 @@ def _build_delivery_rows(
             row["menu_display"] = f"{row.get('menu_category')} {delivery_menu_name}".strip()
         else:
             row["menu_display"] = delivery_menu_name
+    if timings is not None:
+        timings["build_rows_finalize_ms"] = round((time.perf_counter() - finalize_started) * 1000, 1)
     return result
 
 
@@ -5066,13 +5226,20 @@ def _prepare_output_context(
     include_bags: bool = True,
     include_ocr_menu_meta: bool = True,
     include_expanded_copy: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> dict:
+    order_started = time.perf_counter()
     order = get_order_by_id(order_id)
+    if timings is not None:
+        timings["prepare_get_order_ms"] = round((time.perf_counter() - order_started) * 1000, 1)
     if not order:
         raise ValueError("order not found")
 
     facility_id = order.get("facility")
+    facility_started = time.perf_counter()
     facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    if timings is not None:
+        timings["prepare_facility_config_ms"] = round((time.perf_counter() - facility_started) * 1000, 1)
     if not facility_config:
         logger.warning("Facility config missing", facility_id=facility_id)
         facility_config = {}
@@ -5080,18 +5247,34 @@ def _prepare_output_context(
     packaging_policy = facility_config.get("packaging_policy", {})
     label_profile = facility_config.get("label_profile", {})
     invoice_template = facility_config.get("invoice_template", {})
+    policy_started = time.perf_counter()
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+    if timings is not None:
+        timings["prepare_ingest_policy_ms"] = round((time.perf_counter() - policy_started) * 1000, 1)
 
-    order_lines = build_order_lines_for_outputs(order, include_expanded_copy=include_expanded_copy)
+    order_lines_started = time.perf_counter()
+    order_lines = build_order_lines_for_outputs(
+        order,
+        include_expanded_copy=include_expanded_copy,
+        timings=timings,
+    )
+    if timings is not None:
+        timings["prepare_order_lines_ms"] = round((time.perf_counter() - order_lines_started) * 1000, 1)
     order_for_outputs = {**order, "lines": order_lines}
+    ocr_started = time.perf_counter()
     ocr_menu_meta = _build_ocr_menu_meta(order, facility_config) if include_ocr_menu_meta else {}
+    if timings is not None:
+        timings["prepare_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
 
     bags = []
     if include_bags:
+        bags_started = time.perf_counter()
         bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
         bag_types = _resolve_bag_types(facility_config)
         bags = _assign_bag_type_for_bags(bags, bag_types)
         bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
+        if timings is not None:
+            timings["prepare_bags_ms"] = round((time.perf_counter() - bags_started) * 1000, 1)
     return {
         "order": order,
         "facility_config": facility_config,
@@ -5118,6 +5301,7 @@ def _prepare_output_context_for_bundle(
             include_bags=include_bags,
             include_ocr_menu_meta=include_ocr_menu_meta,
             include_expanded_copy=include_expanded_copy,
+            timings=None,
         )
     except TypeError as exc:
         if (
@@ -5177,7 +5361,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
     total_started = time.perf_counter()
     timings: dict[str, float] = {}
     context_started = time.perf_counter()
-    ctx = _prepare_output_context(order_id, include_bags=False)
+    ctx = _prepare_output_context(order_id, include_bags=False, timings=timings)
     timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
@@ -5196,6 +5380,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
         quantity_rules,
         ctx["facility_config"],
         ctx.get("ocr_menu_meta"),
+        timings=timings,
     )
     timings["build_rows_ms"] = round((time.perf_counter() - rows_started) * 1000, 1)
     render_started = time.perf_counter()
