@@ -340,7 +340,7 @@ def _render_editable_delivery_note_html(
 def _delivery_facility_name(order_id: str) -> str:
     with session_scope() as session:
         order = session.get(Order, order_id)
-        facility_id = str(getattr(order, "facility", "") or "").strip() if order else ""
+        facility_id = str(getattr(order, "facility_code", "") or "").strip() if order else ""
     if not facility_id:
         return ""
     facility = facility_service.get_facility(facility_id)
