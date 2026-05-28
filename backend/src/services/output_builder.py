@@ -2931,7 +2931,7 @@ def _assign_delivery_rows_to_slots(
             target_row = slot_map.get((daypart, slot_label)) if daypart and slot_label else None
         if not target_row and slot_label:
             candidates = slot_label_map_by_daypart.get(daypart, {}).get(slot_label, []) if daypart else []
-            if not candidates:
+            if not candidates and not daypart:
                 candidates = slot_label_map.get(slot_label, [])
             for candidate in candidates:
                 if candidate not in used_rows:
@@ -2947,14 +2947,24 @@ def _assign_delivery_rows_to_slots(
             used_rows.add(target_row)
         else:
             pending.append(row)
-    pending_iter = iter(pending)
-    for slot_row in slot_rows:
-        if slot_row in assignments:
-            continue
-        row = next(pending_iter, None)
-        if row:
-            assignments[slot_row] = row
-            used_rows.add(slot_row)
+    if slot_rows_by_daypart:
+        for row in pending:
+            daypart = _normalize_delivery_daypart(row.get("daypart"))
+            candidates = slot_rows if not daypart else slot_rows_by_daypart.get(daypart, [])
+            for candidate in candidates:
+                if candidate not in used_rows:
+                    assignments[candidate] = row
+                    used_rows.add(candidate)
+                    break
+    else:
+        pending_iter = iter(pending)
+        for slot_row in slot_rows:
+            if slot_row in assignments:
+                continue
+            row = next(pending_iter, None)
+            if row:
+                assignments[slot_row] = row
+                used_rows.add(slot_row)
     return assignments
 
 
@@ -3916,25 +3926,18 @@ def _save_reference_daily_delivery_workbook_preserving_template_package(
     workbook: Workbook,
     output_path: Path,
 ) -> None:
-    _patch_template_package_with_workbook_values(
-        workbook,
-        template_bytes=DAILY_DELIVERY_REFERENCE_TEMPLATE.read_bytes(),
-        output_path=output_path,
-    )
+    workbook.save(output_path)
 
 
 def _reference_delivery_sheet_name(facility_code: str | None, facility_name: str | None) -> str | None:
     code = str(facility_code or "").strip()
     if code in DAILY_DELIVERY_SHEET_BY_FACILITY_ID:
         return DAILY_DELIVERY_SHEET_BY_FACILITY_ID[code]
-    if code:
-        return None
     name = str(facility_name or "").strip()
-    normalized = _normalize_cell_text(name)
-    for sheet_name in DAILY_DELIVERY_SHEET_BY_FACILITY_ID.values():
-        if _normalize_cell_text(sheet_name) and _normalize_cell_text(sheet_name) in normalized:
-            return sheet_name
-    return None
+    if name:
+        title = re.sub(r'[\\/*?:\[\]]+', "_", name)
+        return (re.sub(r"\s+", " ", title).strip() or name)[:31]
+    return code or None
 
 
 def _write_reference_daily_delivery_sheet(
@@ -4039,26 +4042,31 @@ def _create_reference_daily_delivery_workbook(
     if not DAILY_DELIVERY_REFERENCE_TEMPLATE.exists():
         raise ValueError(f"daily delivery reference template not found: {DAILY_DELIVERY_REFERENCE_TEMPLATE}")
     workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE)
-    display_workbook = load_workbook(DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=True)
+    if not workbook.worksheets:
+        raise ValueError(f"daily delivery reference template has no sheets: {DAILY_DELIVERY_REFERENCE_TEMPLATE}")
+    template_ws = workbook.worksheets[0]
+    template_ws.title = "テンプレート"
     _remove_delivery_static_artifacts(workbook)
-    for ws in workbook.worksheets:
-        ws.column_dimensions["D"].width = max(ws.column_dimensions["D"].width or 0, 36)
-        _clear_daily_delivery_sheet_data(ws)
-    rows_by_sheet: dict[str, list[dict]] = {}
-    all_rows: list[dict] = []
+    template_ws.column_dimensions["D"].width = max(template_ws.column_dimensions["D"].width or 0, 36)
+    _clear_daily_delivery_sheet_data(template_ws)
+    template_columns = _daily_delivery_column_meta(template_ws)
+    used_titles: set[str] = set()
     for group in grouped_outputs.values():
         sheet_name = _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
-        if not sheet_name or sheet_name not in workbook.sheetnames:
+        if not sheet_name:
             continue
-        ws = workbook[sheet_name]
+        ws = workbook.copy_worksheet(template_ws)
+        ws.title = _safe_sheet_title(sheet_name, "納品書", used_titles)
+        facility_name = group.get("facility_name") or (group.get("facility_config") or {}).get("facility_name")
+        _apply_delivery_facility_name(ws, facility_name)
         sheet_template = {
-            "columns": _daily_delivery_column_meta(ws),
+            "columns": template_columns,
             "prefer_ocr_raw_rows": bool((group.get("invoice_template") or {}).get("prefer_ocr_raw_rows", False)),
         }
         rows: list[dict] = []
         for ctx in group.get("contexts", []):
             rows.extend(
-                _build_delivery_rows(
+                _build_delivery_rows_for_bundle(
                     ctx["order_for_outputs"],
                     sheet_template,
                     {**ctx["quantity_rules"], "zero_as_empty": False},
@@ -4068,28 +4076,16 @@ def _create_reference_daily_delivery_workbook(
                 )
             )
         merged_rows = _merge_delivery_bundle_rows(rows, sheet_template)
-        rows_by_sheet[sheet_name] = merged_rows
-        all_rows.extend(merged_rows)
-    menu_only_rows = [
-        {
-            "date": row.get("date"),
-            "daypart": row.get("daypart"),
-            "menu_name": row.get("menu_name"),
-            "menu_category": row.get("menu_category"),
-            "menu_display": row.get("menu_display"),
-            "_order_index": row.get("_order_index"),
-        }
-        for row in _merge_delivery_bundle_rows(all_rows, {"columns": []})
-        if _ensure_date(row.get("date")) == target_date
-    ]
-    for ws in workbook.worksheets:
-        display_ws = display_workbook[ws.title] if ws.title in display_workbook.sheetnames else None
         _write_reference_daily_delivery_sheet(
             ws,
-            rows=rows_by_sheet.get(ws.title) or menu_only_rows,
+            rows=merged_rows,
             target_date=target_date,
-            display_ws=display_ws,
+            display_ws=None,
         )
+    workbook.remove(template_ws)
+    if not workbook.worksheets:
+        ws = workbook.create_sheet("納品書")
+        _write_reference_daily_delivery_sheet(ws, rows=[], target_date=target_date, display_ws=None)
     return workbook
 
 
@@ -4896,9 +4892,7 @@ def build_daily_output_bundle(
                     facility_name=group["facility_config"].get("facility_name"),
                 )
                 group.setdefault("_reference_bundle_label_sheets", []).append(sheet_name)
-            workbook.save(bundle_path)
-        else:
-            _save_reference_daily_delivery_workbook_preserving_template_package(workbook, bundle_path)
+        workbook.save(bundle_path)
         manifest_items.extend(
             {
                 "order_ids": list(group["order_ids"]),

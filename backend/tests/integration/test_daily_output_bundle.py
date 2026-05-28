@@ -1086,6 +1086,117 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
         )
 
 
+def test_reference_daily_delivery_template_is_single_blank_sheet():
+    workbook = load_workbook(output_builder.DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=False)
+
+    assert workbook.sheetnames == ["テンプレート"]
+    ws = workbook["テンプレート"]
+    formulas = []
+    populated_dynamic_cells = []
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                formulas.append(cell.coordinate)
+            if 12 <= cell.row <= 19 and (
+                cell.column == 1 or cell.column == 4 or cell.column >= 5
+            ) and cell.value not in (None, ""):
+                populated_dynamic_cells.append(cell.coordinate)
+
+    assert formulas == []
+    assert populated_dynamic_cells == []
+    assert ws["A4"].value in (None, "")
+
+
+def test_reference_daily_delivery_writing_values_does_not_change_template_borders(tmp_path):
+    template = load_workbook(output_builder.DAILY_DELIVERY_REFERENCE_TEMPLATE, data_only=False)
+    before_ws = template["テンプレート"]
+    before = {
+        cell.coordinate: _border_signature(cell.border)
+        for row in before_ws.iter_rows(min_row=12, max_row=19)
+        for cell in row
+        if not isinstance(cell, MergedCell)
+    }
+
+    workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
+        target_date=TARGET_DATE,
+        grouped_outputs={
+            "FAC00009": {
+                "facility_code": "FAC00009",
+                "facility_name": "グループホームそよかぜ",
+                "invoice_template": {},
+                "contexts": [
+                    {
+                        "order_for_outputs": {
+                            "id": "ORD-border",
+                            "facility": "FAC00009",
+                            "lines": [
+                                {
+                                    "date": TARGET_DATE,
+                                    "daypart": "朝",
+                                    "menu_category": "副①",
+                                    "menu_name": "献立A",
+                                    "diet_type": "regular",
+                                    "quantity_original": 3,
+                                }
+                            ],
+                        },
+                        "quantity_rules": {"zero_as_empty": True},
+                        "facility_config": {"facility_name": "グループホームそよかぜ"},
+                        "ocr_menu_meta": {},
+                    }
+                ],
+            }
+        },
+    )
+    output_path = tmp_path / "delivery.xlsx"
+    workbook.save(output_path)
+    saved = load_workbook(output_path, data_only=False)
+    ws = saved["そよかぜ"]
+    after = {
+        cell.coordinate: _border_signature(cell.border)
+        for row in ws.iter_rows(min_row=12, max_row=19)
+        for cell in row
+        if not isinstance(cell, MergedCell)
+    }
+
+    assert after == before
+    assert ws["E12"].value == 3
+
+
+def test_delivery_slot_assignment_does_not_cross_daypart_when_template_section_is_full():
+    assignments = output_builder._assign_delivery_rows_to_slots(  # noqa: SLF001
+        [
+            {"daypart": "朝", "menu_category": "副①", "menu_name": "朝副1", "_order_index": 1},
+            {"daypart": "朝", "menu_category": "副②", "menu_name": "朝副2", "_order_index": 2},
+            {"daypart": "朝", "menu_category": "主", "menu_name": "朝主", "_order_index": 3},
+        ],
+        [12, 13, 14, 15, 16, 17, 18, 19],
+        {
+            ("朝", "副1"): 12,
+            ("朝", "副2"): 13,
+            ("昼", "主a"): 14,
+            ("昼", "副1"): 15,
+            ("昼", "副2"): 16,
+            ("夕", "主"): 17,
+            ("夕", "副1"): 18,
+            ("夕", "副2"): 19,
+        },
+        {"副1": [12, 15, 18], "副2": [13, 16, 19], "主": [17], "主a": [14]},
+        {
+            "朝": {"副1": [12], "副2": [13]},
+            "昼": {"主a": [14], "副1": [15], "副2": [16]},
+            "夕": {"主": [17], "副1": [18], "副2": [19]},
+        },
+        {"朝": [12, 13], "昼": [14, 15, 16], "夕": [17, 18, 19]},
+    )
+
+    assert assignments[12]["menu_name"] == "朝副1"
+    assert assignments[13]["menu_name"] == "朝副2"
+    assert 17 not in assignments
+
+
 def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
     grouped_outputs = {
         "FAC00012": {
