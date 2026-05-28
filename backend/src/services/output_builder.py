@@ -4,7 +4,7 @@ import math
 import calendar
 import re
 import zipfile
-from copy import copy
+from copy import copy, deepcopy
 from datetime import date as dt_date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -3546,7 +3546,17 @@ def _restore_daily_delivery_table_borders(ws, template_ws) -> None:
 
 
 def _fix_daily_delivery_evening_daypart_border(ws) -> None:
-    cell = ws["B17"]
+    max_col = max(ws.max_column, 12)
+    for col_idx in range(2, max_col + 1):
+        cell = ws.cell(row=17, column=col_idx)
+        if isinstance(cell, MergedCell):
+            continue
+        if col_idx != 2 and cell.border.bottom.style != "dotted":
+            continue
+        _set_cell_bottom_border(cell, "thin")
+
+
+def _set_cell_bottom_border(cell, bottom_style: str) -> None:
     if isinstance(cell, MergedCell):
         return
     border = cell.border
@@ -3554,7 +3564,7 @@ def _fix_daily_delivery_evening_daypart_border(ws) -> None:
         left=copy(border.left),
         right=copy(border.right),
         top=copy(border.top),
-        bottom=Side(style="thin", color="000000"),
+        bottom=Side(style=bottom_style, color="000000"),
         diagonal=copy(border.diagonal),
         diagonal_direction=border.diagonal_direction,
         diagonalUp=border.diagonalUp,
@@ -3741,7 +3751,7 @@ def _ensure_xlsx_style_with_bottom_border(
     if base_border_id >= len(borders):
         return None
 
-    target_border = copy(borders[base_border_id])
+    target_border = deepcopy(borders[base_border_id])
     bottom = target_border.find(_xlsx_tag("bottom"))
     if bottom is None:
         bottom = ET.SubElement(target_border, _xlsx_tag("bottom"))
@@ -3781,24 +3791,32 @@ def _patch_daily_delivery_evening_daypart_border_xml_text(
     xlsx_parts: dict[str, bytes],
 ) -> str:
     # The reference workbook has a dotted bottom border directly under the
-    # evening daypart label. Keep the template package intact and patch only
-    # that shared output style at serialization time.
-    match = re.search(r'<c(?P<attrs>[^>]*\br="B17"[^>]*)(?:/>|>.*?</c>)', sheet_xml, re.DOTALL)
-    if match is None:
+    # first evening row. Keep the template package intact and patch that
+    # generated row style at serialization time.
+    root = ET.fromstring(sheet_xml.encode("utf-8"))
+    changed = False
+    for cell in root.findall(f".//{_xlsx_tag('c')}"):
+        coordinate = str(cell.attrib.get("r") or "")
+        if not coordinate.endswith("17"):
+            continue
+        col_idx = _cell_column_index(coordinate)
+        if col_idx is None or col_idx < 2:
+            continue
+        style_text = cell.attrib.get("s")
+        if not style_text or not style_text.isdigit():
+            continue
+        patched_style_id = _ensure_xlsx_style_with_bottom_border(
+            xlsx_parts,
+            base_style_id=int(style_text),
+            bottom_style="thin",
+        )
+        if patched_style_id is None:
+            continue
+        cell.attrib["s"] = str(patched_style_id)
+        changed = True
+    if not changed:
         return sheet_xml
-    attrs = match.group("attrs")
-    style_match = re.search(r'\bs="([^"]+)"', attrs)
-    if not style_match or not style_match.group(1).isdigit():
-        return sheet_xml
-    patched_style_id = _ensure_xlsx_style_with_bottom_border(
-        xlsx_parts,
-        base_style_id=int(style_match.group(1)),
-        bottom_style="thin",
-    )
-    if patched_style_id is None:
-        return sheet_xml
-    patched_attrs = _set_xml_attr_text(attrs, "s", str(patched_style_id))
-    return sheet_xml[: match.start("attrs")] + patched_attrs + sheet_xml[match.end("attrs") :]
+    return ET.tostring(root, encoding="unicode")
 
 
 def _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml: str, bottom_style_ids: set[int]) -> str:

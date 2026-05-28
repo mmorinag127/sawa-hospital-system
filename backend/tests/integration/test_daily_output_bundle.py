@@ -1066,10 +1066,15 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     for sheet_name in actual.sheetnames:
         assert sheet_name in actual.sheetnames
         actual_ws = actual[sheet_name]
-        evening_label_cell = actual_ws.cell(row=17, column=2)
-        assert not isinstance(evening_label_cell, MergedCell)
-        assert evening_label_cell.border.bottom.style == "thin", (
-            f"{sheet_name}!{evening_label_cell.coordinate} must not use dotted evening label underline"
+        dotted_cells = []
+        for col_idx in range(2, min(actual_ws.max_column, 12) + 1):
+            cell = actual_ws.cell(row=17, column=col_idx)
+            if isinstance(cell, MergedCell):
+                continue
+            if cell.border.bottom.style == "dotted":
+                dotted_cells.append(cell.coordinate)
+        assert not dotted_cells, (
+            f"{sheet_name} first evening row must not keep dotted underline: {dotted_cells}"
         )
 
 
