@@ -3,6 +3,7 @@ import json
 import math
 import calendar
 import re
+import time
 import zipfile
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
@@ -5173,7 +5174,11 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
 
 
 def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -> dict:
+    total_started = time.perf_counter()
+    timings: dict[str, float] = {}
+    context_started = time.perf_counter()
     ctx = _prepare_output_context(order_id, include_bags=False)
+    timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
@@ -5184,6 +5189,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
         if not name:
             continue
         display_headers.append(col.get("header") or name)
+    rows_started = time.perf_counter()
     rows = _build_delivery_rows(
         ctx["order_for_outputs"],
         invoice_template,
@@ -5191,6 +5197,8 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
         ctx["facility_config"],
         ctx.get("ocr_menu_meta"),
     )
+    timings["build_rows_ms"] = round((time.perf_counter() - rows_started) * 1000, 1)
+    render_started = time.perf_counter()
     raw_rows = [dict(row) for row in rows]
     preview_rows = []
     for row in rows:
@@ -5203,17 +5211,22 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
                 continue
             rendered.append(_format_delivery_preview_value(_resolve_delivery_cell(row, col)))
         preview_rows.append(rendered)
+    timings["render_rows_ms"] = round((time.perf_counter() - render_started) * 1000, 1)
     ocr_entries = ctx.get("ocr_menu_meta", {}).get("entries", []) if isinstance(ctx.get("ocr_menu_meta"), dict) else []
     table_raw_len = None
     if include_diagnostics:
+        diagnostics_started = time.perf_counter()
         parsed, _ = order_service.get_ocr_output(order_id)
         table_raw = parsed.get("table_raw") if isinstance(parsed, dict) else None
         table_raw_len = len(table_raw) if isinstance(table_raw, str) else None
+        timings["diagnostics_ms"] = round((time.perf_counter() - diagnostics_started) * 1000, 1)
+    timings["total_ms"] = round((time.perf_counter() - total_started) * 1000, 1)
     return {
         "headers": display_headers,
         "rows": preview_rows,
         "columns": columns,
         "raw_rows": raw_rows,
+        "timings": timings,
         "ocr_entry_count": len(ocr_entries),
         "ocr_table_raw_len": table_raw_len,
     }

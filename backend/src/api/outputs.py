@@ -652,7 +652,10 @@ def view_delivery_note_html(order_id: str):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"delivery note html build failed: {exc}") from exc
     logger.info("Output html view", order_id=order_id, output="delivery")
-    return HTMLResponse(html)
+    timings = preview.get("timings", {}) if isinstance(preview, dict) else {}
+    timing_header = ",".join(f"{key};dur={value}" for key, value in timings.items())
+    headers = {"Server-Timing": timing_header} if timing_header else None
+    return HTMLResponse(html, headers=headers)
 
 
 @router.get("/daily-delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
