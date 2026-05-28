@@ -1,4 +1,5 @@
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as dt_date
 from html import escape
 from pathlib import Path
@@ -368,10 +369,10 @@ def _render_editable_daily_delivery_note_html(
     style_text = ""
     errors: list[dict] = []
 
-    for order_summary in orders:
+    def build_section(order_summary: dict) -> tuple[str, str | None, dict | None]:
         order_id = str(order_summary.get("id") or "").strip()
         if not order_id:
-            continue
+            return "", None, None
         try:
             preview = build_delivery_preview(order_id)
             order_html = _render_editable_delivery_note_html(
@@ -381,16 +382,35 @@ def _render_editable_daily_delivery_note_html(
                 preview.get("rows", []),
                 _delivery_facility_name(order_id),
             )
-            if not style_text:
-                style_text = _extract_delivery_note_style(order_html)
             sheet_title, sheet_html = _extract_delivery_note_sheet(order_html)
-            sections.append(
+            section = (
                 '<section class="bundle-page" data-order-id="'
                 f'{escape(order_id)}"><div class="bundle-title" contenteditable="true">'
                 f'{escape(sheet_title)}</div>{sheet_html}</section>'
             )
+            return section, _extract_delivery_note_style(order_html), None
         except Exception as exc:  # noqa: BLE001
-            errors.append({"order_id": order_id, "error": str(exc)})
+            return "", None, {"order_id": order_id, "error": str(exc)}
+
+    max_workers = min(8, max(1, len(orders)))
+    indexed_results: dict[int, tuple[str, str | None, dict | None]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(build_section, order_summary): index
+            for index, order_summary in enumerate(orders)
+        }
+        for future in as_completed(future_map):
+            indexed_results[future_map[future]] = future.result()
+
+    for index in range(len(orders)):
+        section, section_style, error = indexed_results.get(index, ("", None, None))
+        if error:
+            errors.append(error)
+            continue
+        if section:
+            sections.append(section)
+            if not style_text and section_style:
+                style_text = section_style
 
     if not sections:
         raise ValueError("対象日の納品書出力対象がありません")
