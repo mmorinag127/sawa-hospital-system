@@ -2652,6 +2652,39 @@ def _resolve_delivery_cell(row: dict, column: dict) -> Any:
     return value
 
 
+def _delivery_daypart_sort_value(value: Any) -> int:
+    return {"朝": 0, "昼": 1, "夕": 2}.get(_normalize_delivery_daypart(value), 99)
+
+
+def _normalize_delivery_category_label(value: Any) -> str:
+    text = str(value or "").strip()
+    compact = text.replace(" ", "").replace("　", "")
+    if compact in {"副1", "副①", "副菜1", "副菜①", "副菜一"}:
+        return "副菜1"
+    if compact in {"副2", "副②", "副菜2", "副菜②", "副菜二"}:
+        return "副菜2"
+    if compact in {"主", "主菜", "主菜1", "主菜①"}:
+        return "主菜"
+    return text
+
+
+def _delivery_category_sort_value(daypart: Any, category: Any) -> int:
+    label = _normalize_delivery_category_label(category)
+    if label == "副菜1":
+        return 0
+    if label == "副菜2":
+        return 1
+    if label == "主菜":
+        return 2 if _normalize_delivery_daypart(daypart) == "夕" else 99
+    return 90
+
+
+def _format_delivery_preview_value(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _is_blank_cell_value(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
@@ -3233,11 +3266,14 @@ def _build_delivery_rows(
     result.sort(
         key=lambda row: (
             row.get("date") or "",
+            _delivery_daypart_sort_value(row.get("daypart")),
+            _delivery_category_sort_value(row.get("daypart"), row.get("menu_category")),
             row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
             row.get("menu_name") or "",
         )
     )
     for row in result:
+        row["menu_category"] = _normalize_delivery_category_label(row.get("menu_category"))
         condiments = condiment_map.get(row.get("menu_name") or "", [])
         _apply_condiment_note(row, condiments)
         delivery_menu_name = _append_condiments_to_delivery_menu_name(
@@ -5137,7 +5173,7 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
 
 
 def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -> dict:
-    ctx = _prepare_output_context(order_id)
+    ctx = _prepare_output_context(order_id, include_bags=False)
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
@@ -5155,6 +5191,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
         ctx["facility_config"],
         ctx.get("ocr_menu_meta"),
     )
+    raw_rows = [dict(row) for row in rows]
     preview_rows = []
     for row in rows:
         rendered = []
@@ -5164,7 +5201,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
             if not include_menu_name and col.get("source") == "menu_name":
                 rendered.append("")
                 continue
-            rendered.append(_resolve_delivery_cell(row, col))
+            rendered.append(_format_delivery_preview_value(_resolve_delivery_cell(row, col)))
         preview_rows.append(rendered)
     ocr_entries = ctx.get("ocr_menu_meta", {}).get("entries", []) if isinstance(ctx.get("ocr_menu_meta"), dict) else []
     table_raw_len = None
@@ -5175,6 +5212,8 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
     return {
         "headers": display_headers,
         "rows": preview_rows,
+        "columns": columns,
+        "raw_rows": raw_rows,
         "ocr_entry_count": len(ocr_entries),
         "ocr_table_raw_len": table_raw_len,
     }

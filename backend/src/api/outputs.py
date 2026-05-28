@@ -155,20 +155,46 @@ def _render_editable_delivery_note_html(
     headers: list,
     rows: list,
     facility_name: str | None = None,
+    columns: list | None = None,
+    raw_rows: list | None = None,
 ) -> str:
+    quantity_columns = [
+        col for col in (columns or [])
+        if isinstance(col, dict) and col.get("source") == "quantity" and col.get("name")
+    ]
+    if raw_rows and quantity_columns:
+        render_headers = ["日付", "食事", "区分", "献立名", *[str(col.get("header") or col.get("name")) for col in quantity_columns], "備考"]
+        render_rows: list[list] = []
+        for row in raw_rows:
+            cells: list = [
+                row.get("date"),
+                row.get("daypart"),
+                row.get("menu_category"),
+                row.get("menu_name"),
+            ]
+            cells.extend(row.get(str(col.get("name"))) for col in quantity_columns)
+            cells.append(row.get("note"))
+            render_rows.append(cells)
+    else:
+        render_headers = list(headers)
+        render_rows = list(rows)
     header_html = "".join(
-        f'<th contenteditable="true" data-edit="h-{idx}">{escape(str(header or ""))}</th>'
-        for idx, header in enumerate(headers)
+        f'<th class="col-{idx}" contenteditable="true" data-edit="h-{idx}">{escape(str(header or ""))}</th>'
+        for idx, header in enumerate(render_headers)
     )
     row_html: list[str] = []
-    for row_idx, row in enumerate(rows):
+    for row_idx, row in enumerate(render_rows):
         cells = row if isinstance(row, list) else []
         cell_html = []
-        for col_idx in range(len(headers)):
+        for col_idx in range(len(render_headers)):
             value = cells[col_idx] if col_idx < len(cells) else ""
-            class_name = "menu-cell" if col_idx == 2 else ""
+            if hasattr(value, "isoformat"):
+                value = value.isoformat()
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            class_name = "menu-cell" if col_idx == 3 else ""
             cell_html.append(
-                f'<td class="{class_name}" contenteditable="true" data-edit="r-{row_idx}-c-{col_idx}">'
+                f'<td class="col-{col_idx} {class_name}" contenteditable="true" data-edit="r-{row_idx}-c-{col_idx}">'
                 f"{escape(str(value or ''))}</td>"
             )
         row_html.append(f"<tr>{''.join(cell_html)}</tr>")
@@ -245,7 +271,7 @@ def _render_editable_delivery_note_html(
     table {{
       width: 100%;
       border-collapse: collapse;
-      table-layout: fixed;
+      table-layout: auto;
       background: #ffffff;
     }}
     th, td {{
@@ -260,6 +286,12 @@ def _render_editable_delivery_note_html(
     }}
     th {{ font-weight: 400; font-size: 14px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
+    .col-0 {{ width: 9%; }}
+    .col-1 {{ width: 6%; }}
+    .col-2 {{ width: 9%; }}
+    .col-3 {{ width: 24%; }}
+    th[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3),
+    td[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3) {{ width: 7%; }}
     [contenteditable="true"] {{ cursor: text; }}
     [contenteditable="true"]:focus {{
       outline: 2px solid #2563eb;
@@ -436,10 +468,16 @@ def _render_editable_daily_delivery_note_html(
     .facility-box {{ border: 2px solid #111827; min-height: 18mm; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; padding: 4mm; }}
     .company-name {{ font-size: 18px; font-weight: 800; margin-bottom: 5mm; }}
     .company-line {{ font-size: 10px; font-weight: 700; margin: 0 0 3mm; }}
-    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; background: #ffffff; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: auto; background: #ffffff; }}
     th, td {{ border: 1px solid #111827; min-height: 7mm; height: 7mm; padding: 2px 4px; text-align: center; vertical-align: middle; white-space: pre-wrap; word-break: break-word; }}
     th {{ font-weight: 400; font-size: 14px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
+    .col-0 {{ width: 9%; }}
+    .col-1 {{ width: 6%; }}
+    .col-2 {{ width: 9%; }}
+    .col-3 {{ width: 24%; }}
+    th[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3),
+    td[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3) {{ width: 7%; }}
     [contenteditable="true"] {{ cursor: text; }}
     [contenteditable="true"]:focus {{ outline: 2px solid #2563eb; outline-offset: -2px; background: #eff6ff; }}
     .bundle-page {{ break-after: page; page-break-after: always; }}
@@ -596,7 +634,7 @@ def download_delivery(order_id: str):
 @router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
 def view_delivery_note_html(order_id: str):
     try:
-        preview = build_delivery_preview(order_id)
+        preview = build_delivery_preview(order_id, include_diagnostics=False)
         headers = preview.get("headers", [])
         rows = preview.get("rows", [])
         facility_name = _delivery_facility_name(order_id)
@@ -606,6 +644,8 @@ def view_delivery_note_html(order_id: str):
             headers,
             rows,
             facility_name,
+            preview.get("columns", []),
+            preview.get("raw_rows", []),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
