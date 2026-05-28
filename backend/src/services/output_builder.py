@@ -706,6 +706,22 @@ def _safe_qty(line: dict, zero_as_empty: bool) -> float | None:
     return qty
 
 
+def _delivery_lines_have_structural_slots(lines: list[dict], quantity_rules: dict) -> bool:
+    zero_as_empty = quantity_rules.get("zero_as_empty", True)
+    seen_quantity_line = False
+    for line in lines:
+        if _safe_qty(line, zero_as_empty) is None:
+            continue
+        seen_quantity_line = True
+        if not _ensure_date(line.get("date")):
+            return False
+        if not _normalize_delivery_daypart(line.get("daypart")):
+            return False
+        if not _normalize_delivery_category_label(line.get("menu_category")):
+            return False
+    return seen_quantity_line
+
+
 def _format_menu_unit(qty: float | int | None, unit_type: str | None) -> str | None:
     if qty is None or unit_type is None:
         return None
@@ -5262,9 +5278,14 @@ def _prepare_output_context(
         timings["prepare_order_lines_ms"] = round((time.perf_counter() - order_lines_started) * 1000, 1)
     order_for_outputs = {**order, "lines": order_lines}
     ocr_started = time.perf_counter()
-    ocr_menu_meta = _build_ocr_menu_meta(order, facility_config) if include_ocr_menu_meta else {}
+    has_structural_slots = _delivery_lines_have_structural_slots(order_lines, quantity_rules)
+    if include_ocr_menu_meta and not has_structural_slots:
+        ocr_menu_meta = _build_ocr_menu_meta(order, facility_config)
+    else:
+        ocr_menu_meta = {}
     if timings is not None:
         timings["prepare_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
+        timings["prepare_ocr_menu_meta_skipped"] = 1.0 if has_structural_slots else 0.0
 
     bags = []
     if include_bags:
@@ -5380,6 +5401,7 @@ def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -
         quantity_rules,
         ctx["facility_config"],
         ctx.get("ocr_menu_meta"),
+        allow_ocr_menu_meta=False,
         timings=timings,
     )
     timings["build_rows_ms"] = round((time.perf_counter() - rows_started) * 1000, 1)
