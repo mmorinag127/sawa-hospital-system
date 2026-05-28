@@ -1093,20 +1093,35 @@ def test_reference_daily_delivery_template_is_single_blank_sheet():
     ws = workbook["テンプレート"]
     formulas = []
     populated_dynamic_cells = []
+    junk_cells = []
     for row in ws.iter_rows():
         for cell in row:
             if isinstance(cell, MergedCell):
                 continue
             if isinstance(cell.value, str) and cell.value.startswith("="):
                 formulas.append(cell.coordinate)
+            if cell.value in {"v", "V", "√", "✓", "./", " ", "　"}:
+                junk_cells.append(cell.coordinate)
             if 12 <= cell.row <= 19 and (
                 cell.column == 1 or cell.column == 4 or cell.column >= 5
             ) and cell.value not in (None, ""):
                 populated_dynamic_cells.append(cell.coordinate)
 
     assert formulas == []
+    assert junk_cells == []
     assert populated_dynamic_cells == []
     assert ws["A4"].value in (None, "")
+    assert {
+        ws.cell(row=19, column=col_idx).border.bottom.style
+        for col_idx in range(1, ws.max_column + 1)
+        if not isinstance(ws.cell(row=19, column=col_idx), MergedCell)
+    } == {"medium"}
+    assert ws["A17"].border.bottom.style == "medium"
+    assert ws["B17"].border.bottom.style == "medium"
+    assert {
+        ws.cell(row=20, column=col_idx).border.top.style
+        for col_idx in range(1, 12)
+    } == {"medium"}
 
 
 def test_reference_daily_delivery_writing_values_does_not_change_template_borders(tmp_path):
