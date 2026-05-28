@@ -1114,7 +1114,7 @@ export default function DailyDeliveryNotesPage() {
           </Link>
         </div>
         <p className="subtle helper-text">
-          一括Excelと袋分けは選択したステータス、総量は確定注文ベースです。週別の重量表Excelは別ページで出力します。
+          ラベルと袋分けは選択したステータス、総量は確定注文ベースです。納品書HTMLは表示中の注文を編集してPDF保存できます。
         </p>
       </section>
 
