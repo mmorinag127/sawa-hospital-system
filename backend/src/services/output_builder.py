@@ -5136,7 +5136,7 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
     raise ValueError(f"invalid output type: {output_type}")
 
 
-def build_delivery_preview(order_id: str) -> dict:
+def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -> dict:
     ctx = _prepare_output_context(order_id)
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
@@ -5167,9 +5167,11 @@ def build_delivery_preview(order_id: str) -> dict:
             rendered.append(_resolve_delivery_cell(row, col))
         preview_rows.append(rendered)
     ocr_entries = ctx.get("ocr_menu_meta", {}).get("entries", []) if isinstance(ctx.get("ocr_menu_meta"), dict) else []
-    parsed, _ = order_service.get_ocr_output(order_id)
-    table_raw = parsed.get("table_raw") if isinstance(parsed, dict) else None
-    table_raw_len = len(table_raw) if isinstance(table_raw, str) else None
+    table_raw_len = None
+    if include_diagnostics:
+        parsed, _ = order_service.get_ocr_output(order_id)
+        table_raw = parsed.get("table_raw") if isinstance(parsed, dict) else None
+        table_raw_len = len(table_raw) if isinstance(table_raw, str) else None
     return {
         "headers": display_headers,
         "rows": preview_rows,

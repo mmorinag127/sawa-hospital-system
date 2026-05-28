@@ -374,7 +374,7 @@ def _render_editable_daily_delivery_note_html(
         if not order_id:
             return "", None, None
         try:
-            preview = build_delivery_preview(order_id)
+            preview = build_delivery_preview(order_id, include_diagnostics=False)
             order_html = _render_editable_delivery_note_html(
                 order_id,
                 f"{order_id} 納品書",
