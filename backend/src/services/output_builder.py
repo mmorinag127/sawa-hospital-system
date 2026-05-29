@@ -1215,12 +1215,6 @@ def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
     if not condiments:
         return row
     row["_delivery_condiments"] = condiments
-    note = row.get("note") or ""
-    if any("ソース" in label for label in condiments):
-        if "ソース" not in note:
-            note = f"{note} / ソース".strip(" /") if note else "ソース"
-    if note:
-        row["note"] = note
     return row
 
 
