@@ -1,9 +1,11 @@
 import pathlib
 import sys
+from io import BytesIO
 from datetime import date
 from datetime import datetime
 
 import pytest
+from openpyxl import Workbook
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -116,6 +118,68 @@ def test_create_menu_blocks_file_month_mismatch(monkeypatch):
     with session_scope() as session:
         assert session.get(MonthlyMenu, "2026-03") is None
         assert session.query(MonthlyMenuEntry).count() == 0
+
+
+def test_parse_monthly_menu_handles_single_day_final_week():
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "掲示用（料理・食品）"
+    ws.append(["2026年5月"])
+    ws.append(["", "日", "月", "火", "水", "木", "金", "土"])
+    ws.append(["", 24, 25, 26, 27, 28, 29, 30])
+    ws.append(["朝食", "ごはん"])
+    ws.append(["", "いんげんと卵のソテー"])
+    ws.append(["", "オニオンサラダ"])
+    ws.append(["昼食", "ごはん"])
+    ws.append(["", "豚肉の生姜炒め"])
+    ws.append(["", "厚揚げの煮物"])
+    ws.append(["", "オクラのおろし和え"])
+    ws.append(["夕食", "ごはん"])
+    ws.append(["", "豆腐ﾊﾝﾊﾞｰｸﾞ和風あん"])
+    ws.append(["", "れんこんの甘辛煮"])
+    ws.append(["", "南瓜サラダ"])
+    ws.append(["", "ｴﾈﾙｷﾞｰ", "", 1292, "kcal"])
+    ws.append(["", 31, "", "", "", "", "", ""])
+    ws.append(["朝食", "ごはん"])
+    ws.append(["", "さつま芋のスープ煮"])
+    ws.append(["", "豆サラダ"])
+    ws.append(["昼食", "ごはん"])
+    ws.append(["", "照焼きハンバーグ　添)ﾌﾞﾛｯｺﾘｰ"])
+    ws.append(["", "ジャーマンポテト"])
+    ws.append(["", "ほうれん草の和え物"])
+    ws.append(["夕食", "ごはん"])
+    ws.append(["", "鶏すき焼き風"])
+    ws.append(["", "ピーマンのじゃこ炒め"])
+    ws.append(["", "大根なます"])
+
+    content = BytesIO()
+    workbook.save(content)
+
+    _month_start, _diet_type, _items, entries = menu_service._parse_monthly_menu(  # noqa: SLF001
+        content.getvalue(),
+        "献立表(月間)2026.5月.xlsm",
+        None,
+        "2026-05",
+    )
+
+    evening_names_by_date = {
+        target_date: [
+            entry["name"]
+            for entry in entries
+            if entry["menu_date"] == target_date and entry["daypart"] == "夕食"
+        ]
+        for target_date in (date(2026, 5, 24), date(2026, 5, 31))
+    }
+    assert evening_names_by_date[date(2026, 5, 24)] == [
+        "豆腐ﾊﾝﾊﾞｰｸﾞ和風あん",
+        "れんこんの甘辛煮",
+        "南瓜サラダ",
+    ]
+    assert evening_names_by_date[date(2026, 5, 31)] == [
+        "鶏すき焼き風",
+        "ピーマンのじゃこ炒め",
+        "大根なます",
+    ]
 
 
 def test_menu_upload_history_lists_and_downloads_saved_file(tmp_path):

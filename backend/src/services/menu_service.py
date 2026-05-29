@@ -566,6 +566,25 @@ def _row_has_tokens(row: list[str], tokens: tuple[str, ...]) -> bool:
     return False
 
 
+def _is_monthly_menu_date_row(row: list[str], weekday_cols: list[int], day_numbers: list[int | None]) -> bool:
+    date_count = sum(1 for number in day_numbers if number is not None)
+    if date_count >= 3:
+        return True
+    if date_count == 0:
+        return False
+    weekday_col_set = set(weekday_cols)
+    for col_idx, value in enumerate(row):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if col_idx not in weekday_col_set:
+            return False
+        weekday_pos = weekday_cols.index(col_idx)
+        if day_numbers[weekday_pos] is None:
+            return False
+    return True
+
+
 def _match_menu_pattern(menu_name: str, pattern: str, match_type: str | None) -> bool:
     if not pattern:
         return False
@@ -686,8 +705,7 @@ def _parse_monthly_menu(
     }
     for row_idx, row in enumerate(rows):
         day_numbers = [(_parse_day_number(row[col]) if col < len(row) else None) for col in weekday_cols]
-        date_count = sum(1 for number in day_numbers if number is not None)
-        if date_count >= 3:
+        if _is_monthly_menu_date_row(row, weekday_cols, day_numbers):
             current_dates = {}
             for col_idx, day_num in zip(weekday_cols, day_numbers):
                 if day_num is None or month_start is None:
