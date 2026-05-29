@@ -174,7 +174,7 @@ def create_facility(body: dict):
     return fac
 
 
-@router.put("/{facility_id}", dependencies=[Depends(require_role("admin"))])
+@router.put("/{facility_id}", dependencies=[Depends(require_role("operator"))])
 def update_facility(facility_id: str, body: dict):
     updated = facility_service.update_facility(facility_id, body.get("name"), body.get("areas"))
     if not updated:

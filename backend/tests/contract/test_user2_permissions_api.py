@@ -12,6 +12,7 @@ import src.api.auth as auth_module  # noqa: E402
 import src.api.auth_config as auth_config_module  # noqa: E402
 import src.api.base_menus as base_menus_api  # noqa: E402
 import src.api.facility_master as facility_master_api  # noqa: E402
+import src.api.facilities as facilities_api  # noqa: E402
 import src.api.menu_masters as menu_masters_api  # noqa: E402
 import src.api.menu_rules as menu_rules_api  # noqa: E402
 from src.main import app  # noqa: E402
@@ -78,3 +79,22 @@ def test_user2_facility_master_save_allows_operator(monkeypatch):
     res = client.put("/facility-master", json=sample_master, headers=headers)
     assert res.status_code == 200
     assert res.json()["updated"] is True
+
+
+def test_user2_facility_basic_update_allows_operator(monkeypatch):
+    headers = _set_operator_auth(monkeypatch)
+    monkeypatch.setattr(
+        facilities_api.facility_service,
+        "update_facility",
+        lambda facility_id, name, areas: {"id": facility_id, "name": name, "areas": areas},
+    )
+
+    client = TestClient(app)
+    res = client.put(
+        "/facilities/FAC00008",
+        json={"name": "佐古", "areas": [{"id": "2F", "name": "2F"}]},
+        headers=headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"id": "FAC00008", "name": "佐古", "areas": [{"id": "2F", "name": "2F"}]}
