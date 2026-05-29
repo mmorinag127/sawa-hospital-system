@@ -876,8 +876,12 @@ def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dic
         updated = dict(line)
         if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
-        if item.get("category") and not updated.get("menu_category"):
-            updated["menu_category"] = item.get("category")
+        item_category = _normalize_delivery_category_label(item.get("category"))
+        if item_category and (
+            _is_specific_delivery_category(item_category)
+            or not _is_specific_delivery_category(updated.get("menu_category"))
+        ):
+            updated["menu_category"] = item_category
         if item.get("unit_type"):
             updated["menu_unit_type"] = item.get("unit_type")
         if item.get("qty_per_serving") is not None:
@@ -915,8 +919,12 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
         updated = dict(line)
         if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
-        if item.get("category") and not updated.get("menu_category"):
-            updated["menu_category"] = item.get("category")
+        item_category = _normalize_delivery_category_label(item.get("category"))
+        if item_category and (
+            _is_specific_delivery_category(item_category)
+            or not _is_specific_delivery_category(updated.get("menu_category"))
+        ):
+            updated["menu_category"] = item_category
         if item.get("unit_type"):
             updated["menu_unit_type"] = item.get("unit_type")
         if item.get("qty_per_serving") is not None:
@@ -1147,8 +1155,12 @@ def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> l
             updated["menu_qty_per_serving"] = payload.get("qty_per_serving")
         if not updated.get("menu_temp_type") and payload.get("temp_type"):
             updated["menu_temp_type"] = payload.get("temp_type")
-        if not updated.get("menu_category") and payload.get("category"):
-            updated["menu_category"] = payload.get("category")
+        payload_category = _normalize_delivery_category_label(payload.get("category"))
+        if payload_category and (
+            _is_specific_delivery_category(payload_category)
+            or not _is_specific_delivery_category(updated.get("menu_category"))
+        ):
+            updated["menu_category"] = payload_category
         enriched.append(updated)
     return enriched
 
@@ -1749,11 +1761,19 @@ def _apply_builtin_menu_defaults(lines: list[dict]) -> list[dict]:
         return lines
     enriched: list[dict] = []
     for line in lines:
-        if line.get("menu_qty_per_serving") is not None:
-            enriched.append(line)
+        default_daypart, default_category, _default_temp, _default_qty, _default_unit = _label_menu_defaults(
+            line.get("menu_name")
+        )
+        updated = dict(line)
+        if default_daypart and not updated.get("daypart"):
+            updated["daypart"] = default_daypart
+        if default_category:
+            updated["menu_category"] = _normalize_delivery_category_label(default_category)
+        if updated.get("menu_qty_per_serving") is not None:
+            enriched.append(updated)
             continue
-        line_daypart = _normalize_output_daypart(line.get("daypart"))
-        line_category = _normalize_category_key(line.get("menu_category"))
+        line_daypart = _normalize_output_daypart(updated.get("daypart"))
+        line_category = _normalize_category_key(updated.get("menu_category"))
         matched = next(
             (
                 rule
@@ -1764,9 +1784,8 @@ def _apply_builtin_menu_defaults(lines: list[dict]) -> list[dict]:
             None,
         )
         if not matched:
-            enriched.append(line)
+            enriched.append(updated)
             continue
-        updated = dict(line)
         updated["menu_unit_type"] = matched.get("unit_type")
         updated["menu_qty_per_serving"] = matched.get("qty_per_serving")
         enriched.append(updated)
