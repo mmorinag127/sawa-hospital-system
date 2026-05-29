@@ -5458,7 +5458,12 @@ def build_delivery_preview(
     total_started = time.perf_counter()
     timings: dict[str, float] = {}
     context_started = time.perf_counter()
-    ctx = _prepare_output_context(order_id, include_bags=False, timings=timings)
+    ctx = _prepare_output_context(
+        order_id,
+        include_bags=False,
+        include_expanded_copy=False,
+        timings=timings,
+    )
     timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
     if target_date is not None:
         filtered_lines = [
