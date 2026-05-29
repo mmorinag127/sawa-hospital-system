@@ -5264,13 +5264,17 @@ def _delivery_invoice_header(column: dict, signature: tuple[str | None, str | No
 def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> dict:
     if not isinstance(facility_config, dict):
         return {}
-    fax_columns = ((facility_config.get("fax_template") or {}).get("columns") or [])
+    fax_template = facility_config.get("fax_template") or {}
+    fax_columns = (fax_template.get("columns") or [])
     if not isinstance(fax_columns, list):
         return {}
+    extra_columns = fax_template.get("delivery_extra_columns") or []
+    if not isinstance(extra_columns, list):
+        extra_columns = []
     area_aliases = _build_area_alias_map(facility_config)
     fax_quantity_columns = [
         column
-        for column in fax_columns
+        for column in list(fax_columns) + list(extra_columns)
         if _fax_quantity_signature(column, area_aliases)
     ]
     fax_signatures = {
@@ -5306,7 +5310,7 @@ def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> di
                 "area_id": area_key or "X",
             }
         )
-    for column in fax_columns:
+    for column in list(fax_columns) + list(extra_columns):
         if not isinstance(column, dict) or column.get("delivery_enabled") is False:
             continue
         delivery_source = str(column.get("delivery_source") or "").strip()

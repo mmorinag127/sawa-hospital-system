@@ -789,22 +789,20 @@
             "role": "note",
             "header": "備考欄",
             "source_index": 11
-          },
+          }
+        ],
+        "delivery_extra_columns": [
           {
-            "role": "delivery_static",
             "header": "保管温度",
             "name": "delivery.保管温度",
             "delivery_source": "static",
-            "delivery_header": "保管温度",
-            "index": 11
+            "delivery_header": "保管温度"
           },
           {
-            "role": "delivery_static",
             "header": "賞味期限",
             "name": "delivery.賞味期限",
             "delivery_source": "static",
-            "delivery_header": "賞味期限",
-            "index": 12
+            "delivery_header": "賞味期限"
           }
         ]
       }
@@ -1982,22 +1980,20 @@
             "role": "note",
             "header": "備考欄",
             "source_index": 10
-          },
+          }
+        ],
+        "delivery_extra_columns": [
           {
-            "role": "delivery_static",
             "header": "保管温度",
             "name": "delivery.保管温度",
             "delivery_source": "static",
-            "delivery_header": "保管温度",
-            "index": 10
+            "delivery_header": "保管温度"
           },
           {
-            "role": "delivery_static",
             "header": "賞味期限",
             "name": "delivery.賞味期限",
             "delivery_source": "static",
-            "delivery_header": "賞味期限",
-            "index": 11
+            "delivery_header": "賞味期限"
           }
         ]
       },
