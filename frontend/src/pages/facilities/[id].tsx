@@ -52,6 +52,16 @@ const parseJson = (text: string) => {
   }
 };
 
+const errorDetailText = (err: any, fallback: string) => {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail === "object") {
+    const message = detail.message || detail.error;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  return fallback;
+};
+
 const parseBoolean = (value: unknown, defaultValue = false): boolean => {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
@@ -219,12 +229,16 @@ export default function FacilityConfigPage() {
       setMessage("Areas JSON must be an array.");
       return;
     }
-    const res = await apiClient.put(`/facilities/${facility.id}`, {
-      name,
-      areas: parsed.value,
-    });
-    setFacility(res.data);
-    setMessage("Facility saved.");
+    try {
+      const res = await apiClient.put(`/facilities/${facility.id}`, {
+        name,
+        areas: parsed.value,
+      });
+      setFacility(res.data);
+      setMessage("Facility saved.");
+    } catch (err: any) {
+      setMessage(`Failed to save facility: ${errorDetailText(err, "Unknown error")}`);
+    }
   };
 
   const saveConfig = async () => {
