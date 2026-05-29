@@ -39,6 +39,11 @@ def get_latest_menu():
     return menu
 
 
+@router.get("", dependencies=[Depends(require_role("operator"))])
+def list_recent_menus(limit: int = Query(default=12, ge=1, le=36)):
+    return {"items": menu_service.list_recent_menus(limit=limit)}
+
+
 @router.get("/{month_id}", dependencies=[Depends(require_role("operator"))])
 def get_menu(month_id: str, facility_id: str | None = Query(default=None)):
     menu = menu_service.get_menu_for_facility(month_id, facility_id) if facility_id else menu_service.get_menu(month_id)

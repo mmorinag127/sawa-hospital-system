@@ -34,6 +34,7 @@ type MenuEntry = {
 type MonthlyMenu = {
   id: string;
   filename?: string | null;
+  month_start?: string | null;
   display_name?: string | null;
   uploaded_at?: string | null;
 };
@@ -203,6 +204,20 @@ const formatSheetDateLabel = (value?: string | null) => {
   const parsed = new Date(`${value}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return value;
   return `${String(parsed.getMonth() + 1).padStart(2, "0")}/${String(parsed.getDate()).padStart(2, "0")}`;
+};
+
+const formatMonthOptionLabel = (menu: MonthlyMenu) => {
+  const parsed = new Date(`${menu.id}-01T00:00:00`);
+  const monthLabel = Number.isNaN(parsed.getTime())
+    ? menu.id
+    : `${parsed.getFullYear()}年${String(parsed.getMonth() + 1).padStart(2, "0")}月`;
+  if (menu.uploaded_at) {
+    const uploaded = new Date(menu.uploaded_at);
+    if (!Number.isNaN(uploaded.getTime())) {
+      return `${monthLabel} / 最終登録 ${uploaded.toLocaleDateString("ja-JP")}`;
+    }
+  }
+  return monthLabel;
 };
 
 const buildMenuSheetGrid = (
@@ -491,6 +506,7 @@ export default function MonthlyMenuEditorPage() {
   const [entryExceptionDraft, setEntryExceptionDraft] = useState<MenuEntryExceptionDraft | null>(null);
   const [entryExceptionSaving, setEntryExceptionSaving] = useState<boolean>(false);
   const [selectedMonth, setSelectedMonth] = useState<string>("");
+  const [menuOptions, setMenuOptions] = useState<MonthlyMenu[]>([]);
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
     const value = (scopeOverride || "").trim();
@@ -534,6 +550,15 @@ export default function MonthlyMenuEditorPage() {
     }
   };
 
+  const loadRecentMenus = async () => {
+    try {
+      const res = await apiClient.get("/monthly-menus", { params: { limit: 12 } });
+      setMenuOptions(res.data?.items || []);
+    } catch {
+      setMenuOptions([]);
+    }
+  };
+
   const loadMenu = async () => {
     if (!monthId || Array.isArray(monthId)) return;
     try {
@@ -572,6 +597,7 @@ export default function MonthlyMenuEditorPage() {
   useEffect(() => {
     loadMenu();
     loadScopeOptions();
+    loadRecentMenus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monthId]);
 
@@ -1042,7 +1068,26 @@ export default function MonthlyMenuEditorPage() {
           <h1>月次メニュー編集</h1>
           <div className="month-selector">
             <label className="field compact-field">
-              <span className="field-label">対象月</span>
+              <span className="field-label">登録済み月次</span>
+              <select
+                className="input month-select"
+                value={Array.isArray(monthId) ? "" : monthId || ""}
+                onChange={(e) => handleMonthChange(e.target.value)}
+              >
+                {menuOptions.some((option) => option.id === monthId) ? null : (
+                  <option value={Array.isArray(monthId) ? "" : monthId || ""}>
+                    {Array.isArray(monthId) ? monthId.join(",") : monthId || "対象月"}
+                  </option>
+                )}
+                {menuOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {formatMonthOptionLabel(option)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field compact-field">
+              <span className="field-label">対象月を直接指定</span>
               <input
                 className="input"
                 type="month"
@@ -2439,6 +2484,10 @@ export default function MonthlyMenuEditorPage() {
 
         .compact-field .input {
           min-width: 160px;
+        }
+
+        .compact-field .month-select {
+          min-width: 260px;
         }
 
         .subtle {

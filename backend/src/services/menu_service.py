@@ -2465,6 +2465,7 @@ def serialize_menu(menu: MonthlyMenu, latest_upload_log: AuditLog | None = None)
     return {
         "id": menu.id,
         "filename": menu.filename,
+        "month_start": menu.month_start.isoformat() if menu.month_start else None,
         "display_name": display_name,
         "uploaded_at": uploaded_at,
     }
@@ -2476,6 +2477,7 @@ def _serialize_synthetic_menu(month_id: str, latest_upload_log: AuditLog | None 
     return {
         "id": month_id,
         "filename": None,
+        "month_start": None,
         "display_name": display_name,
         "uploaded_at": uploaded_at,
     }
@@ -2905,6 +2907,19 @@ def get_menu(month_id: str) -> dict | None:
         if _payload_contains_requested_month(shifted_payload, month_id):
             return _canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted)
     return None
+
+
+def list_recent_menus(limit: int = 12) -> list[dict]:
+    ensure_menu_schema()
+    normalized_limit = max(1, min(int(limit or 12), 36))
+    with session_scope() as session:
+        rows = (
+            session.query(MonthlyMenu)
+            .order_by(MonthlyMenu.month_start.desc().nullslast(), MonthlyMenu.id.desc())
+            .limit(normalized_limit)
+            .all()
+        )
+        return [serialize_menu(row, _get_latest_menu_upload_log(session, row.id)) for row in rows]
 
 
 def get_latest_menu() -> dict | None:

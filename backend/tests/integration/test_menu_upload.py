@@ -91,6 +91,27 @@ def test_menu_upload_records_menu():
     assert index[first_name]["qty_per_serving"] == 80
 
 
+def test_list_recent_menus_returns_latest_registered_months():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenu).delete()
+        session.add_all(
+            [
+                MonthlyMenu(id="2026-04", filename="april.xlsx", month_start=date(2026, 4, 1)),
+                MonthlyMenu(id="2026-05", filename="may.xlsx", month_start=date(2026, 5, 1)),
+                MonthlyMenu(id="2026-06", filename="june.xlsx", month_start=date(2026, 6, 1)),
+            ]
+        )
+
+    rows = menu_service.list_recent_menus(limit=2)
+
+    assert [row["id"] for row in rows] == ["2026-06", "2026-05"]
+    assert rows[0]["month_start"] == "2026-06-01"
+    assert rows[0]["filename"] == "june.xlsx"
+
+
 def test_create_menu_blocks_file_month_mismatch(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()
