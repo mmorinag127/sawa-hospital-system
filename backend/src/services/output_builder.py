@@ -1189,7 +1189,7 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
         for label in condiments:
             condiment_line = dict(updated)
             condiment_line["menu_name"] = label
-            condiment_line["menu_category"] = "付属"
+            condiment_line["menu_category"] = "添え"
             condiment_line["condiments"] = []
             condiment_line["bag_type"] = "condiment"
             condiment_line["menu_bag_max_qty"] = None
@@ -1226,12 +1226,7 @@ def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
 
 def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
     text = str(menu_name or "").strip()
-    condiment_labels = _normalize_condiments(condiments)
-    if not text or not condiment_labels:
-        return text
-    if "添" in text:
-        return text
-    return f"{text} 添）{'、'.join(condiment_labels)}"
+    return text
 
 
 def _resolve_bag_types(facility_config: dict | None) -> list[dict]:
@@ -3377,6 +3372,13 @@ def _write_delivery_note(
         output_path=path,
     )
 
+def _delivery_menu_entry_date(entry: dict) -> dt_date | None:
+    return _ensure_date(entry.get("date") or entry.get("menu_date"))
+
+
+def _delivery_menu_entry_name(entry: dict) -> object:
+    return entry.get("menu_name") or entry.get("name")
+
 
 def _build_delivery_rows(
     order: dict,
@@ -3421,6 +3423,14 @@ def _build_delivery_rows(
         if timings is not None:
             timings["build_rows_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
+    entry_defaults = _resolve_cached_menu_defaults(
+        [
+            str(_delivery_menu_entry_name(entry) or "").strip()
+            for entry in entries
+            if isinstance(entry, dict) and str(_delivery_menu_entry_name(entry) or "").strip()
+        ],
+        facility_id,
+    ) if isinstance(entries, list) else {}
     rows: dict[tuple, dict] = {}
     menu_names = []
     aggregate_started = time.perf_counter()
@@ -3483,17 +3493,17 @@ def _build_delivery_rows(
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            entry_date = _ensure_date(entry.get("date"))
+            entry_date = _delivery_menu_entry_date(entry)
             if allowed_dates and entry_date not in allowed_dates:
                 continue
-            menu_name = entry.get("menu_name")
+            menu_name = _delivery_menu_entry_name(entry)
             menu_key = _normalize_menu_key(menu_name)
             if not entry_date or not menu_key:
                 continue
             daypart_value = entry.get("daypart")
             menu_category = entry.get("category")
             key = (entry_date, daypart_value, menu_name)
-            rows.setdefault(
+            row = rows.setdefault(
                 key,
                 {
                     "date": entry_date,
@@ -3505,6 +3515,25 @@ def _build_delivery_rows(
                     "_delivery_condiments": [],
                 },
             )
+            entry_condiments = _normalize_condiments(entry.get("condiments"))
+            if not entry_condiments:
+                entry_condiments = _normalize_condiments(entry_defaults.get(str(menu_name or "").strip(), {}).get("condiments"))
+            for condiment in entry_condiments:
+                if condiment not in row["_delivery_condiments"]:
+                    row["_delivery_condiments"].append(condiment)
+                condiment_key = (entry_date, daypart_value, condiment)
+                rows.setdefault(
+                    condiment_key,
+                    {
+                        "date": entry_date,
+                        "daypart": daypart_value,
+                        "menu_name": condiment,
+                        "menu_category": "添え",
+                        "menu_display": "",
+                        "_order_index": entry.get("index"),
+                        "_delivery_condiments": [],
+                    },
+                )
     if timings is not None:
         timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
     finalize_started = time.perf_counter()
@@ -5473,6 +5502,25 @@ def build_delivery_preview(
         ]
         ctx["order_for_outputs"] = {**ctx["order_for_outputs"], "lines": filtered_lines}
         timings["target_date_filtered_lines"] = float(len(filtered_lines))
+        order = ctx["order"]
+        week_value = (
+            str(order.get("stored_week_value") or "").strip()
+            or str(order.get("week_value") or "").strip()
+            or str(order.get("persisted_week_value") or "").strip()
+            or str(order.get("week") or "").strip()
+            or str(order.get("week_code") or "").strip()
+        )
+        menu_entries = [
+            entry
+            for entry in _collect_cached_menu_entries_for_week(week_value, order.get("facility"))
+            if _delivery_menu_entry_date(entry) == target_date
+        ]
+        if menu_entries:
+            menu_meta = dict(ctx.get("ocr_menu_meta") or {})
+            existing_entries = menu_meta.get("entries") if isinstance(menu_meta.get("entries"), list) else []
+            menu_meta["entries"] = [*existing_entries, *menu_entries]
+            ctx["ocr_menu_meta"] = menu_meta
+        timings["target_date_menu_entries"] = float(len(menu_entries))
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
