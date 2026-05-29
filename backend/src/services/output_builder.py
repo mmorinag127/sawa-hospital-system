@@ -1220,7 +1220,11 @@ def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
 
 def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
     text = str(menu_name or "").strip()
-    return text
+    labels = _normalize_condiments(condiments)
+    if not labels:
+        return text
+    suffix = " ".join(f"添）{label}" for label in labels)
+    return f"{text} {suffix}".strip()
 
 
 def _resolve_bag_types(facility_config: dict | None) -> list[dict]:
@@ -2860,13 +2864,37 @@ def _normalize_delivery_category_label(value: Any) -> str:
 
 def _delivery_category_sort_value(daypart: Any, category: Any) -> int:
     label = _normalize_delivery_category_label(category)
-    if label == "副菜1":
-        return 0
-    if label == "副菜2":
-        return 1
+    normalized_daypart = _normalize_delivery_daypart(daypart)
     if label == "主菜":
-        return 2 if _normalize_delivery_daypart(daypart) == "夕" else 99
+        return 0 if normalized_daypart in {"昼", "夕"} else 2
+    if label == "副菜1":
+        return 1 if normalized_daypart in {"昼", "夕"} else 0
+    if label == "副菜2":
+        return 2 if normalized_daypart in {"昼", "夕"} else 1
     return 90
+
+
+def _delivery_category_from_menu_default(daypart: Any, menu_name: Any, current_category: Any) -> str:
+    normalized = _normalize_delivery_category_label(current_category)
+    if normalized in {"副菜1", "副菜2", "添え"}:
+        return normalized
+    default_daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(menu_name)
+    if default_category and _normalize_delivery_daypart(default_daypart) == _normalize_delivery_daypart(daypart):
+        default_label = _normalize_delivery_category_label(default_category)
+        if default_label in {"副菜1", "副菜2", "主菜"}:
+            return default_label
+    return normalized
+
+
+def _delivery_display_category_label(daypart: Any, category: Any) -> str:
+    label = _normalize_delivery_category_label(category)
+    if label == "副菜1":
+        return "副①"
+    if label == "副菜2":
+        return "副②"
+    if label == "主菜":
+        return "主Ａ" if _normalize_delivery_daypart(daypart) == "昼" else "主"
+    return label
 
 
 def _format_delivery_preview_value(value: Any) -> Any:
@@ -3579,7 +3607,21 @@ def _build_delivery_rows(
     if timings is not None:
         timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
     finalize_started = time.perf_counter()
+    default_payloads = _resolve_cached_menu_defaults(menu_names, facility_id)
+    for row in rows.values():
+        if row.get("_delivery_condiments"):
+            continue
+        payload = default_payloads.get(str(row.get("menu_name") or "").strip()) or {}
+        for condiment in _normalize_condiments(payload.get("condiments")):
+            if condiment not in row["_delivery_condiments"]:
+                row["_delivery_condiments"].append(condiment)
     result = list(rows.values())
+    for row in result:
+        row["menu_category"] = _delivery_category_from_menu_default(
+            row.get("daypart"),
+            row.get("menu_name"),
+            row.get("menu_category"),
+        )
     result.sort(
         key=lambda row: (
             row.get("date") or "",
@@ -3590,7 +3632,7 @@ def _build_delivery_rows(
         )
     )
     for row in result:
-        row["menu_category"] = _normalize_delivery_category_label(row.get("menu_category"))
+        row["menu_category"] = _delivery_display_category_label(row.get("daypart"), row.get("menu_category"))
         condiments = _normalize_condiments(row.get("_delivery_condiments"))
         _apply_condiment_note(row, condiments)
         delivery_menu_name = _append_condiments_to_delivery_menu_name(

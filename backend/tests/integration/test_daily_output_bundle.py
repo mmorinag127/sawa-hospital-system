@@ -1429,12 +1429,90 @@ def test_daily_label_jp_excludes_forbidden_diets():
     assert rows == []
 
 
+def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
+    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+        {
+            "id": "ORD-slots",
+            "facility": "FAC00009",
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "主菜",
+                    "menu_name": "ジャーマンポテト",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "主菜",
+                    "menu_name": "煮込みハンバーグ",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "副菜",
+                    "menu_name": "ほうれん草の和え物",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "豚肉と白菜のすき煮",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "さつま芋の天ぷら",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+            ],
+        },
+        {
+            "columns": [
+                {"name": "日付", "source": "date"},
+                {"name": "区分", "source": "daypart"},
+                {"name": "献立区分", "source": "menu_category"},
+                {"name": "メニュー名", "source": "menu_name"},
+                {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+            ]
+        },
+        {"zero_as_empty": True},
+        {"facility_name": "グループホームそよかぜ"},
+        {},
+        allow_ocr_menu_meta=False,
+    )
+
+    assert [(row["daypart"], row["menu_category"], row["menu_name"]) for row in rows] == [
+        ("昼", "主Ａ", "豚肉と白菜のすき煮"),
+        ("昼", "副①", "さつま芋の天ぷら"),
+        ("夕", "主", "煮込みハンバーグ"),
+        ("夕", "副①", "ジャーマンポテト"),
+        ("夕", "副②", "ほうれん草の和え物"),
+    ]
+
+
 def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
     monkeypatch.setattr(
         output_builder.menu_service,
         "resolve_menu_defaults",
         lambda menu_names, facility_id: {"主菜A": {"condiments": ["キャベツ"]}},
     )
+    output_builder._cached_menu_defaults.cache_clear()  # noqa: SLF001
 
     rows = output_builder._build_delivery_rows(  # noqa: SLF001
         {
