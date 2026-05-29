@@ -38,12 +38,12 @@ def _iter_confirmed_orders(date_from: date | None = None, date_to: date | None =
     with session_scope() as session:
         query = select(Order).where(Order.status == "確定")
         if date_from or date_to:
-            query = query.join(OrderLine, Order.id == OrderLine.order_id)
+            line_query = select(OrderLine.id).where(OrderLine.order_id == Order.id)
             if date_from:
-                query = query.where(OrderLine.date >= date_from)
+                line_query = line_query.where(OrderLine.date >= date_from)
             if date_to:
-                query = query.where(OrderLine.date <= date_to)
-            query = query.distinct()
+                line_query = line_query.where(OrderLine.date <= date_to)
+            query = query.where(line_query.exists())
         orders = session.execute(query).scalars().all()
         for order in orders:
             yield order
