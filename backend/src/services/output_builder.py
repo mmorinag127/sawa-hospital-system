@@ -5432,10 +5432,7 @@ def build_daily_output_bundle(
                 }
             )
 
-    use_reference_daily_delivery = normalized_type in {"delivery", "both"} and any(
-        _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
-        for group in grouped_outputs.values()
-    )
+    use_reference_daily_delivery = False
     if use_reference_daily_delivery:
         workbook = _create_reference_daily_delivery_workbook(
             target_date=target_date,
