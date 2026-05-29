@@ -3446,16 +3446,17 @@ def _build_delivery_rows(
         meta_map = menu_meta.get("by_menu") if isinstance(menu_meta, dict) else None
         meta = meta_map.get((line_date, menu_key)) if meta_map else None
         daypart_value = line.get("daypart") or line.get("menu_category")
+        daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
         if meta and not daypart_value:
             daypart_value = meta.get("daypart") or daypart_value
         menu_category = line.get("menu_category") or (meta.get("category") if meta else None)
         order_index = meta.get("index") if meta else None
-        key = (line_date, daypart_value, menu_name)
+        key = (line_date, daypart_key, menu_name)
         row = rows.setdefault(
             key,
             {
                 "date": line_date,
-                "daypart": daypart_value,
+                "daypart": daypart_key,
                 "menu_name": menu_name,
                 "menu_category": menu_category,
                 "menu_display": "",
@@ -3501,13 +3502,14 @@ def _build_delivery_rows(
             if not entry_date or not menu_key:
                 continue
             daypart_value = entry.get("daypart")
+            daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
             menu_category = entry.get("category")
-            key = (entry_date, daypart_value, menu_name)
+            key = (entry_date, daypart_key, menu_name)
             row = rows.setdefault(
                 key,
                 {
                     "date": entry_date,
-                    "daypart": daypart_value,
+                    "daypart": daypart_key,
                     "menu_name": menu_name,
                     "menu_category": menu_category,
                     "menu_display": "",
@@ -3521,12 +3523,12 @@ def _build_delivery_rows(
             for condiment in entry_condiments:
                 if condiment not in row["_delivery_condiments"]:
                     row["_delivery_condiments"].append(condiment)
-                condiment_key = (entry_date, daypart_value, condiment)
+                condiment_key = (entry_date, daypart_key, condiment)
                 rows.setdefault(
                     condiment_key,
                     {
                         "date": entry_date,
-                        "daypart": daypart_value,
+                        "daypart": daypart_key,
                         "menu_name": condiment,
                         "menu_category": "添え",
                         "menu_display": "",
