@@ -1529,7 +1529,6 @@ def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
                 "diet_type": "regular",
                 "area_id": "2F",
                 "quantity_original": 3,
-                "_order_index": index,
             }
         )
 

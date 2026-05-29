@@ -3509,7 +3509,7 @@ def _build_delivery_rows(
     rows: dict[tuple, dict] = {}
     menu_names = []
     aggregate_started = time.perf_counter()
-    for line in order.get("lines", []):
+    for line_index, line in enumerate(order.get("lines", [])):
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:
@@ -3526,7 +3526,7 @@ def _build_delivery_rows(
         if meta and not daypart_value:
             daypart_value = meta.get("daypart") or daypart_value
         menu_category = line.get("menu_category") or (meta.get("category") if meta else None)
-        order_index = meta.get("index") if meta else line.get("_order_index", line.get("order_index"))
+        order_index = meta.get("index") if meta else line.get("_order_index", line.get("order_index", line_index))
         key = (line_date, daypart_key, menu_name)
         row = rows.setdefault(
             key,
