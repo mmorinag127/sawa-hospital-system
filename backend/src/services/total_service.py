@@ -6,7 +6,7 @@ from typing import Any, Iterable
 from sqlalchemy import select
 
 from src.db import session_scope
-from src.models.order import Order
+from src.models.order import Order, OrderLine
 from src.services import config_service
 from src.services import output_builder
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
@@ -34,13 +34,17 @@ def _filter_date(value: date | None, date_from: date | None, date_to: date | Non
     return True
 
 
-def _iter_confirmed_orders() -> Iterable[Order]:
+def _iter_confirmed_orders(date_from: date | None = None, date_to: date | None = None) -> Iterable[Order]:
     with session_scope() as session:
-        orders = (
-            session.execute(select(Order).where(Order.status == "確定"))
-            .scalars()
-            .all()
-        )
+        query = select(Order).where(Order.status == "確定")
+        if date_from or date_to:
+            query = query.join(OrderLine, Order.id == OrderLine.order_id)
+            if date_from:
+                query = query.where(OrderLine.date >= date_from)
+            if date_to:
+                query = query.where(OrderLine.date <= date_to)
+            query = query.distinct()
+        orders = session.execute(query).scalars().all()
         for order in orders:
             yield order
 
@@ -80,7 +84,7 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     grouped: dict[tuple, dict] = {}
     facility_name_cache: dict[str, str] = {}
-    for order in _iter_confirmed_orders():
+    for order in _iter_confirmed_orders(date_from, date_to):
         order_payload = serialize_order(order)
         order_lines = output_builder.build_order_lines_for_outputs(
             order_payload,

@@ -502,22 +502,19 @@ export default function DailyDeliveryNotesPage() {
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
-      const [ordersRes, bagRes, auditRes, totalsRes] = await Promise.allSettled([
-        apiClient.get("/orders/by-line-date", { params }),
+      const ordersRes = await apiClient.get("/orders/by-line-date", { params });
+      const items = Array.isArray(ordersRes.data?.orders) ? ordersRes.data.orders : [];
+      setOrders(items);
+      if (!items.length) {
+        setMessage("該当する注文がありません。");
+      }
+      setLoading(false);
+
+      const [bagRes, auditRes, totalsRes] = await Promise.allSettled([
         apiClient.get("/orders/daily-bags", { params }),
         apiClient.get("/orders/daily-bags/audit", { params }),
         apiClient.get("/totals", { params: { date } }),
       ]);
-
-      if (ordersRes.status === "fulfilled") {
-        const items = Array.isArray(ordersRes.value.data?.orders) ? ordersRes.value.data.orders : [];
-        setOrders(items);
-        if (!items.length) {
-          setMessage("該当する注文がありません。");
-        }
-      } else {
-        throw ordersRes.reason;
-      }
 
       if (bagRes.status === "fulfilled") {
         const payload = bagRes.value.data || {};
