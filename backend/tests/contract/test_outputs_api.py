@@ -28,6 +28,7 @@ def test_delivery_html_render_columns_hide_revision_columns_and_split_duplicate_
 
     assert headers == ["日付", "区分", "献立区分", "メニュー名", "常食", "ミキサー\n2F", "ミキサー\n3F", "備考欄"]
     assert quantity_columns[0]["source_names"] == ["常食1回目", "常食2回目", "常食3回目", "変更1"]
+    assert "変更1" not in headers
 
 
 def test_delivery_html_render_sums_final_regular_column():
