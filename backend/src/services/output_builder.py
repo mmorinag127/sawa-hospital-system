@@ -1092,7 +1092,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         if entry.get("daypart") and not daypart:
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
         entry_category = _menu_entry_category_label(entry)
-        if entry_category and not _is_specific_delivery_category(updated.get("menu_category")):
+        if entry_category:
             updated["menu_category"] = entry_category
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
@@ -1156,7 +1156,7 @@ def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> l
         if not updated.get("menu_temp_type") and payload.get("temp_type"):
             updated["menu_temp_type"] = payload.get("temp_type")
         payload_category = _normalize_delivery_category_label(payload.get("category"))
-        if payload_category and (
+        if not updated.get("_monthly_entry_override_applied") and payload_category and (
             _is_specific_delivery_category(payload_category)
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
@@ -1756,7 +1756,7 @@ def _apply_builtin_menu_defaults(lines: list[dict]) -> list[dict]:
         updated = dict(line)
         if default_daypart and not updated.get("daypart"):
             updated["daypart"] = default_daypart
-        if default_category:
+        if default_category and not updated.get("_monthly_entry_override_applied"):
             updated["menu_category"] = _normalize_delivery_category_label(default_category)
         if updated.get("menu_qty_per_serving") is not None:
             enriched.append(updated)
