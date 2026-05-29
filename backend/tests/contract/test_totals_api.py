@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
+from sqlalchemy.dialects import postgresql
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -14,7 +15,7 @@ from src.main import app  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
 from src.models.menu import MonthlyMenuEntry  # noqa: E402
 from src.models.order import OrderMenuSnapshot  # noqa: E402
-from src.services import facility_service, menu_service, order_service  # noqa: E402
+from src.services import facility_service, menu_service, order_service, total_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -24,6 +25,14 @@ def _reset_facilities_from_master() -> None:
         session.execute(delete(FacilityArea))
         session.execute(delete(Facility))
     facility_service.list_facilities()
+
+
+def test_totals_dated_confirmed_order_query_uses_exists_not_distinct_for_postgres_json_columns():
+    query = total_service._confirmed_orders_query(date(2026, 5, 15), date(2026, 5, 15))
+    sql = str(query.compile(dialect=postgresql.dialect()))
+
+    assert "EXISTS" in sql
+    assert "DISTINCT" not in sql
 
 
 def test_totals_prefers_line_daypart_over_snapshot_daypart():

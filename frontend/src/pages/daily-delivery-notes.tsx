@@ -387,6 +387,20 @@ const buildDaypartGroups = (groups: DailyBagMenuGroup[]) => {
   return Array.from(map.values()).sort((left, right) => left.daypart.localeCompare(right.daypart, "ja"));
 };
 
+const sectionData = <T,>(section: any): T | null => {
+  if (!section || section.status !== "fulfilled") return null;
+  return section.data || {};
+};
+
+const sectionErrorMessage = (section: any, fallback: string) => {
+  if (!section || section.status !== "rejected") return fallback;
+  const message = String(section.error?.message || "").trim();
+  const type = String(section.error?.type || "").trim();
+  if (message && type) return `${fallback} (${type}: ${message})`;
+  if (message) return `${fallback} (${message})`;
+  return fallback;
+};
+
 export default function DailyDeliveryNotesPage() {
   const [date, setDate] = useState<string>("");
   const [status, setStatus] = useState<string>("");
@@ -502,22 +516,22 @@ export default function DailyDeliveryNotesPage() {
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
-      const ordersRes = await apiClient.get("/orders/by-line-date", { params });
-      const items = Array.isArray(ordersRes.data?.orders) ? ordersRes.data.orders : [];
+      const contextRes = await apiClient.get("/orders/daily-output-context", { params });
+      const sections = contextRes.data?.sections || {};
+      const ordersPayload = sectionData<{ orders?: OrderSummary[] }>(sections.orders);
+      const items = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
       setOrders(items);
       if (!items.length) {
-        setMessage("該当する注文がありません。");
+        if (sections.orders?.status === "rejected") {
+          setMessage(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
+        } else {
+          setMessage("該当する注文がありません。");
+        }
       }
-      setLoading(false);
 
-      const [bagRes, auditRes, totalsRes] = await Promise.allSettled([
-        apiClient.get("/orders/daily-bags", { params }),
-        apiClient.get("/orders/daily-bags/audit", { params }),
-        apiClient.get("/totals", { params: { date } }),
-      ]);
-
-      if (bagRes.status === "fulfilled") {
-        const payload = bagRes.value.data || {};
+      const bagPayload = sectionData<DailyBagSummaryResponse>(sections.daily_bags);
+      if (bagPayload) {
+        const payload = bagPayload || {};
         setDailyBagSummary(payload);
         const count = Array.isArray(payload.groups) ? payload.groups.length : 0;
         if (!count) {
@@ -525,29 +539,31 @@ export default function DailyDeliveryNotesPage() {
         }
       } else {
         setDailyBagSummary({});
-        setBagMessage("袋分け結果の取得に失敗しました。");
+        setBagMessage(sectionErrorMessage(sections.daily_bags, "袋分け結果の取得に失敗しました。"));
       }
 
-      if (auditRes.status === "fulfilled") {
-        const payload = auditRes.value.data || {};
+      const auditPayload = sectionData<DailyBagAuditResponse>(sections.daily_bags_audit);
+      if (auditPayload) {
+        const payload = auditPayload || {};
         setDailyBagAudit(payload);
         if (!Number(payload?.rule_based?.finding_count || 0)) {
           setAuditMessage("ルールベース監査で確認候補はありません。");
         }
       } else {
         setDailyBagAudit({});
-        setAuditMessage("数量監査の取得に失敗しました。");
+        setAuditMessage(sectionErrorMessage(sections.daily_bags_audit, "数量監査の取得に失敗しました。"));
       }
 
-      if (totalsRes.status === "fulfilled") {
-        const rows = Array.isArray(totalsRes.value.data?.rows) ? totalsRes.value.data.rows : [];
+      const totalsPayload = sectionData<{ rows?: TotalRow[] }>(sections.totals);
+      if (totalsPayload) {
+        const rows = Array.isArray(totalsPayload.rows) ? totalsPayload.rows : [];
         setTotalsRows(rows);
         if (!rows.length) {
           setTotalsMessage("総量は確定注文のみ集計されるため、対象データがありません。");
         }
       } else {
         setTotalsRows([]);
-        setTotalsMessage("総量の取得に失敗しました。");
+        setTotalsMessage(sectionErrorMessage(sections.totals, "総量の取得に失敗しました。"));
       }
     } catch (err: any) {
       const detail = err?.response?.data?.detail;

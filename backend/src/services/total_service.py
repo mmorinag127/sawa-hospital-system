@@ -34,16 +34,21 @@ def _filter_date(value: date | None, date_from: date | None, date_to: date | Non
     return True
 
 
+def _confirmed_orders_query(date_from: date | None = None, date_to: date | None = None):
+    query = select(Order).where(Order.status == "確定")
+    if date_from or date_to:
+        line_query = select(OrderLine.id).where(OrderLine.order_id == Order.id)
+        if date_from:
+            line_query = line_query.where(OrderLine.date >= date_from)
+        if date_to:
+            line_query = line_query.where(OrderLine.date <= date_to)
+        query = query.where(line_query.exists())
+    return query
+
+
 def _iter_confirmed_orders(date_from: date | None = None, date_to: date | None = None) -> Iterable[Order]:
     with session_scope() as session:
-        query = select(Order).where(Order.status == "確定")
-        if date_from or date_to:
-            line_query = select(OrderLine.id).where(OrderLine.order_id == Order.id)
-            if date_from:
-                line_query = line_query.where(OrderLine.date >= date_from)
-            if date_to:
-                line_query = line_query.where(OrderLine.date <= date_to)
-            query = query.where(line_query.exists())
+        query = _confirmed_orders_query(date_from, date_to)
         orders = session.execute(query).scalars().all()
         for order in orders:
             yield order

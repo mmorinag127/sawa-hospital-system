@@ -7,7 +7,14 @@ from fastapi.responses import Response, JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from src.services import order_service, config_service, candidate_resolution_service, workflow_state_service, uploaded_pdf_service
+from src.services import (
+    order_service,
+    config_service,
+    candidate_resolution_service,
+    workflow_state_service,
+    uploaded_pdf_service,
+    total_service,
+)
 from src.services import order_workflow_v2_service
 from src.services import shipping_status_store
 from src.services.ocr_job_service import (
@@ -1233,6 +1240,80 @@ def get_daily_bags_audit(
         status=status,
         use_ai=use_ai,
     )
+
+
+def _daily_output_section(value: object = None, error: Exception | None = None) -> dict:
+    if error is None:
+        return {"status": "fulfilled", "data": value}
+    return {
+        "status": "rejected",
+        "error": {
+            "type": error.__class__.__name__,
+            "message": str(error),
+        },
+    }
+
+
+@router.get("/daily-output-context", dependencies=[Depends(require_role("operator"))])
+def get_daily_output_context(date: str, facility: str | None = None, status: str | None = None):
+    target_date = _parse_iso_date(date)
+    result: dict[str, object] = {
+        "date": target_date.isoformat(),
+        "facility": facility,
+        "status": status,
+        "sections": {},
+    }
+    sections = result["sections"]
+    try:
+        orders = order_service.list_orders_by_line_date(target_date, facility_id=facility, status=status)
+        sections["orders"] = _daily_output_section(
+            {"date": target_date.isoformat(), "orders": orders}
+        )
+    except Exception as exc:  # noqa: BLE001
+        sections["orders"] = _daily_output_section(error=exc)
+        orders = []
+
+    try:
+        sections["daily_bags"] = _daily_output_section(
+            order_service.get_daily_bag_summary(
+                target_date,
+                facility_id=facility,
+                status=status,
+                allow_stale_draft_lines=True,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        sections["daily_bags"] = _daily_output_section(error=exc)
+
+    try:
+        sections["daily_bags_audit"] = _daily_output_section(
+            order_service.get_daily_bag_audit(
+                target_date,
+                facility_id=facility,
+                status=status,
+                use_ai=False,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        sections["daily_bags_audit"] = _daily_output_section(error=exc)
+
+    try:
+        sections["totals"] = _daily_output_section(
+            {
+                "rows": total_service.build_totals(target_date, target_date),
+                "date_from": target_date.isoformat(),
+                "date_to": target_date.isoformat(),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        sections["totals"] = _daily_output_section(error=exc)
+
+    result["ok"] = all(
+        isinstance(section, dict) and section.get("status") == "fulfilled"
+        for section in sections.values()
+    )
+    result["order_count"] = len(orders)
+    return result
 
 
 @router.get("/daily-output-overrides", dependencies=[Depends(require_role("operator"))])
