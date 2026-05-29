@@ -308,7 +308,7 @@ def _render_editable_delivery_note_html(
 ) -> str:
     render_columns = _build_delivery_render_columns(columns)
     render_rows = [row for row in (raw_rows or []) if isinstance(row, dict)]
-    if not render_rows:
+    if not render_rows and not columns:
         render_columns = [{"kind": "field", "source": f"col-{idx}", "header": str(header or "")} for idx, header in enumerate(headers)]
         render_rows = [
             {f"col-{idx}": row[idx] if isinstance(row, list) and idx < len(row) else "" for idx in range(len(render_columns))}
