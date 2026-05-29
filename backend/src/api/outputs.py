@@ -20,7 +20,7 @@ from src.services.output_builder import (
 )
 from src.db import session_scope
 from src.models.order import Order
-from src.services import order_form_service, facility_service, order_service
+from src.services import order_form_service, facility_service, order_service, config_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -712,6 +712,15 @@ def _delivery_facility_name(order_id: str) -> str:
         facility_id = str(getattr(order, "facility_code", "") or "").strip() if order else ""
     if not facility_id:
         return ""
+    master = config_service.load_facility_master()
+    for entry in master.get("facilities", []) if isinstance(master, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("facility_id") or "").strip() != facility_id:
+            continue
+        official_name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+        if official_name:
+            return official_name
     facility = facility_service.get_facility(facility_id)
     if isinstance(facility, dict):
         return str(facility.get("name") or facility.get("facility_name") or facility_id)

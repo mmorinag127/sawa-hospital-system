@@ -23,7 +23,7 @@ from src.api import (
     system,
     users,
 )
-from src.services import menu_service
+from src.services import facility_service, menu_service
 from src.services.read_only_request_guard_service import read_only_request_guard
 from src.workers.ingest_worker import start_uploaded_pdf_recovery_loop
 
@@ -74,4 +74,5 @@ app.include_router(users.router, prefix="")
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
     menu_service.ensure_menu_schema()
+    facility_service.sync_facility_names_from_master()
     start_uploaded_pdf_recovery_loop()

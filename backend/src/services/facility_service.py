@@ -247,6 +247,30 @@ def upsert_facility_rows_from_master(session, master: dict) -> None:
             session.add(FacilityArea(id=area["id"], facility_id=facility_id, name=area["name"]))
 
 
+def sync_facility_names_from_master() -> int:
+    master = config_service.load_facility_master()
+    facilities = master.get("facilities") if isinstance(master, dict) else None
+    if not isinstance(facilities, list):
+        return 0
+    updated = 0
+    with session_scope() as session:
+        for entry in facilities:
+            if not isinstance(entry, dict):
+                continue
+            facility_id = str(entry.get("facility_id") or "").strip()
+            name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+            if not facility_id or not name:
+                continue
+            fac = session.get(Facility, facility_id)
+            if fac is None:
+                session.add(Facility(id=facility_id, name=name))
+                updated += 1
+            elif fac.name != name:
+                fac.name = name
+                updated += 1
+    return updated
+
+
 def _facility_config_from_master_entry(entry: dict) -> dict:
     config = {
         key: value
