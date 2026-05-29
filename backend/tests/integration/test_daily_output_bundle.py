@@ -186,6 +186,77 @@ def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, mon
     assert pathlib.Path(outputs["aggregate"]).exists()
 
 
+def test_prepare_output_context_derives_invoice_columns_when_template_has_no_quantity_overlap(monkeypatch):
+    monkeypatch.setattr(
+        output_builder,
+        "get_order_by_id",
+        lambda _order_id: {
+            "id": "ORD-FUREAI",
+            "facility": "FAC00004",
+            "week": "2026-05",
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "献立A",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                    "quantity_original": 5,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        output_builder.config_service,
+        "get_facility_config",
+        lambda _facility_id: {
+            "facility_name": "介護老人保健施設ふれあいの丘",
+            "fax_template": {
+                "columns": [
+                    {"role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                    {"role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
+                    {"role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+                    {"role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                ]
+            },
+            "invoice_template": {
+                "columns": [
+                    {"name": "日付", "source": "date"},
+                    {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+                    {"name": "ミキサー2F", "source": "quantity", "diet_type": "mixer", "area_id": "2F"},
+                ],
+                "include_menu_name": False,
+            },
+        },
+    )
+    monkeypatch.setattr(output_builder.config_service, "load_ingest_policy", lambda: {"quantity_rules": {"zero_as_empty": True}})
+    monkeypatch.setattr(output_builder, "_build_ocr_menu_meta", lambda *_args, **_kwargs: {})
+
+    ctx = output_builder._prepare_output_context("ORD-FUREAI", include_bags=False, include_ocr_menu_meta=False)
+    columns = ctx["invoice_template"]["columns"]
+
+    assert [column.get("header") for column in columns] == [
+        "日付",
+        "区分",
+        "献立区分",
+        "メニュー名",
+        "常食",
+        "通所",
+        "職員",
+        "魚禁",
+        "備考欄",
+    ]
+    rows = output_builder._build_delivery_rows(
+        ctx["order_for_outputs"],
+        ctx["invoice_template"],
+        ctx["quantity_rules"],
+        ctx["facility_config"],
+        {},
+        allow_ocr_menu_meta=False,
+    )
+    assert rows[0]["qty.regular_x"] == 5
+
+
 def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(

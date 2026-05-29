@@ -5122,6 +5122,115 @@ def _merge_delivery_bundle_rows(rows: list[dict], invoice_template: dict | None)
     return result
 
 
+def _invoice_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple[str | None, str | None] | None:
+    if not isinstance(column, dict) or column.get("source") != "quantity":
+        return None
+    diet_type = column.get("diet_type")
+    area_id = column.get("area_id")
+    if not diet_type or not area_id:
+        inferred_diet, inferred_area = _infer_delivery_column_meta(column.get("name") or column.get("header"))
+        diet_type = diet_type or inferred_diet
+        area_id = area_id or inferred_area
+    diet_key = _normalize_delivery_diet_key(diet_type)
+    area_key = _resolve_area_key(area_id, area_aliases) if area_id else None
+    if not diet_key:
+        return None
+    return diet_key, area_key
+
+
+def _fax_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple[str | None, str | None] | None:
+    if not isinstance(column, dict) or str(column.get("role") or "").strip().lower() != "quantity":
+        return None
+    diet_key = _normalize_delivery_diet_key(column.get("diet_type"))
+    area_key = _resolve_area_key(column.get("area_id"), area_aliases) if column.get("area_id") else None
+    if not diet_key:
+        return None
+    return diet_key, area_key
+
+
+def _delivery_invoice_header(column: dict, signature: tuple[str | None, str | None]) -> str:
+    raw_header = str(column.get("header") or "").strip()
+    if raw_header and raw_header not in {"-", "－"}:
+        return raw_header
+    diet_key, area_key = signature
+    diet_labels = {
+        "regular": "常食",
+        "soft": "軟菜",
+        "mixer": "ミキサー",
+        "daycare": "通所",
+        "staff": "職員",
+        "no_meat": "肉禁",
+        "no_fish": "魚禁",
+        "no_fried": "揚げ物禁",
+    }
+    label = diet_labels.get(str(diet_key or ""), str(column.get("header") or column.get("name") or diet_key or "").strip())
+    if area_key and area_key != "X":
+        return f"{label}{area_key}"
+    return label
+
+
+def _derive_invoice_template_from_fax_columns(invoice_template: dict, facility_config: dict | None) -> dict:
+    if not isinstance(facility_config, dict):
+        return invoice_template
+    fax_columns = ((facility_config.get("fax_template") or {}).get("columns") or [])
+    if not isinstance(fax_columns, list):
+        return invoice_template
+    area_aliases = _build_area_alias_map(facility_config)
+    invoice_columns = invoice_template.get("columns") if isinstance(invoice_template, dict) else None
+    if not isinstance(invoice_columns, list):
+        invoice_columns = []
+
+    invoice_signatures = {
+        signature
+        for column in invoice_columns
+        if (signature := _invoice_quantity_signature(column, area_aliases))
+    }
+    fax_quantity_columns = [
+        column
+        for column in fax_columns
+        if _fax_quantity_signature(column, area_aliases)
+    ]
+    fax_signatures = {
+        signature
+        for column in fax_quantity_columns
+        if (signature := _fax_quantity_signature(column, area_aliases))
+    }
+    if not fax_signatures or invoice_signatures & fax_signatures:
+        return invoice_template
+
+    derived_columns: list[dict] = [
+        {"name": "日付", "header": "日付", "source": "date"},
+        {"name": "区分", "header": "区分", "source": "daypart"},
+        {"name": "献立区分", "header": "献立区分", "source": "menu_category"},
+        {"name": "メニュー名", "header": "メニュー名", "source": "menu_name"},
+    ]
+    seen: set[tuple[str | None, str | None]] = set()
+    for column in fax_quantity_columns:
+        signature = _fax_quantity_signature(column, area_aliases)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        diet_key, area_key = signature
+        if diet_key in {"placeholder", "change_1", "change_2", "unknown"}:
+            continue
+        name = f"qty.{diet_key}_{str(area_key or 'x').lower()}"
+        derived_columns.append(
+            {
+                "name": name,
+                "header": _delivery_invoice_header(column, signature),
+                "source": "quantity",
+                "diet_type": diet_key,
+                "area_id": area_key or "X",
+            }
+        )
+    derived_columns.append({"name": "備考欄", "header": "備考欄", "source": "note"})
+
+    updated = dict(invoice_template or {})
+    updated["columns"] = derived_columns
+    updated["include_menu_name"] = True
+    return updated
+
+
 def build_daily_output_bundle(
     target_date: dt_date,
     *,
@@ -5404,7 +5513,10 @@ def _prepare_output_context(
 
     packaging_policy = facility_config.get("packaging_policy", {})
     label_profile = facility_config.get("label_profile", {})
-    invoice_template = facility_config.get("invoice_template", {})
+    invoice_template = _derive_invoice_template_from_fax_columns(
+        facility_config.get("invoice_template", {}),
+        facility_config,
+    )
     policy_started = time.perf_counter()
     quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
     if timings is not None:
