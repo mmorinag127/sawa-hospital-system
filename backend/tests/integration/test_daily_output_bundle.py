@@ -1506,6 +1506,62 @@ def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
     ]
 
 
+def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
+    lines = []
+    for index, (daypart, category, menu_name) in enumerate(
+        [
+            ("朝", "主", "厚揚げと竹輪の煮物"),
+            ("朝", "副菜", "ほうれん草のお浸し"),
+            ("昼", "主Ａ", "ポークチャップ"),
+            ("昼", "副菜", "マカロニソテー"),
+            ("昼", "副菜", "胡瓜のサラダ"),
+            ("夕", "主", "オムレツのカニ玉風"),
+            ("夕", "主", "さつま芋の煮物"),
+            ("夕", "副菜", "三色ナムル"),
+        ]
+    ):
+        lines.append(
+            {
+                "date": TARGET_DATE,
+                "daypart": daypart,
+                "menu_category": category,
+                "menu_name": menu_name,
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity_original": 3,
+                "_order_index": index,
+            }
+        )
+
+    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+        {"id": "ORD-raw-slots", "facility": "FAC00008", "lines": lines},
+        {
+            "columns": [
+                {"name": "日付", "source": "date"},
+                {"name": "区分", "source": "daypart"},
+                {"name": "献立区分", "source": "menu_category"},
+                {"name": "メニュー名", "source": "menu_name"},
+                {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+            ]
+        },
+        {"zero_as_empty": True},
+        {"facility_name": "佐古"},
+        {},
+        allow_ocr_menu_meta=False,
+    )
+
+    assert [(row["daypart"], row["menu_category"], row["menu_name"]) for row in rows] == [
+        ("朝", "副①", "厚揚げと竹輪の煮物"),
+        ("朝", "副②", "ほうれん草のお浸し"),
+        ("昼", "主Ａ", "ポークチャップ"),
+        ("昼", "副①", "マカロニソテー"),
+        ("昼", "副②", "胡瓜のサラダ"),
+        ("夕", "主", "オムレツのカニ玉風"),
+        ("夕", "副①", "さつま芋の煮物"),
+        ("夕", "副②", "三色ナムル"),
+    ]
+
+
 def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
     monkeypatch.setattr(
         output_builder.menu_service,

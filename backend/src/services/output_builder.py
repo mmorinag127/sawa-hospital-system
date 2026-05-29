@@ -2897,6 +2897,41 @@ def _delivery_display_category_label(daypart: Any, category: Any) -> str:
     return label
 
 
+def _delivery_reference_slot_sequence(daypart: Any) -> list[str]:
+    normalized_daypart = _normalize_delivery_daypart(daypart)
+    if normalized_daypart == "朝":
+        return ["副菜1", "副菜2"]
+    if normalized_daypart == "昼":
+        return ["主菜", "副菜1", "副菜2"]
+    if normalized_daypart == "夕":
+        return ["主菜", "副菜1", "副菜2"]
+    return []
+
+
+def _apply_delivery_reference_slot_categories(rows: list[dict]) -> None:
+    grouped: dict[tuple[Any, str], list[dict]] = {}
+    for row in rows:
+        if _normalize_delivery_category_label(row.get("menu_category")) == "添え":
+            continue
+        daypart = _normalize_delivery_daypart(row.get("daypart"))
+        if not daypart:
+            continue
+        grouped.setdefault((row.get("date"), daypart), []).append(row)
+
+    for (_date_value, daypart), daypart_rows in grouped.items():
+        slot_sequence = _delivery_reference_slot_sequence(daypart)
+        if len(daypart_rows) != len(slot_sequence):
+            continue
+        daypart_rows.sort(
+            key=lambda row: (
+                row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
+                row.get("menu_name") or "",
+            )
+        )
+        for row, category in zip(daypart_rows, slot_sequence, strict=True):
+            row["menu_category"] = category
+
+
 def _format_delivery_preview_value(value: Any) -> Any:
     if isinstance(value, float) and value.is_integer():
         return int(value)
@@ -3491,7 +3526,7 @@ def _build_delivery_rows(
         if meta and not daypart_value:
             daypart_value = meta.get("daypart") or daypart_value
         menu_category = line.get("menu_category") or (meta.get("category") if meta else None)
-        order_index = meta.get("index") if meta else None
+        order_index = meta.get("index") if meta else line.get("_order_index", line.get("order_index"))
         key = (line_date, daypart_key, menu_name)
         row = rows.setdefault(
             key,
@@ -3622,6 +3657,7 @@ def _build_delivery_rows(
             row.get("menu_name"),
             row.get("menu_category"),
         )
+    _apply_delivery_reference_slot_categories(result)
     result.sort(
         key=lambda row: (
             row.get("date") or "",
