@@ -3264,10 +3264,25 @@ def _write_delivery_note(
     facility_name: str | None = None,
 ) -> None:
     if not template_uri:
+        export_columns = [
+            (
+                str(col.get("name") or "").strip(),
+                str(col.get("header") or col.get("name") or "").strip(),
+            )
+            for col in columns
+            if isinstance(col, dict) and str(col.get("name") or "").strip()
+        ]
+        export_headers = [header or name for name, header in export_columns]
         if not rows:
-            df = pd.DataFrame(columns=[col["name"] for col in columns])
+            df = pd.DataFrame(columns=export_headers)
         else:
-            df = pd.DataFrame(rows)
+            df = pd.DataFrame(
+                [
+                    {header or name: row.get(name) for name, header in export_columns}
+                    for row in rows
+                ],
+                columns=export_headers,
+            )
         df.to_excel(path, index=False)
         return
 
