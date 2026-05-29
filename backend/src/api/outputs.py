@@ -528,7 +528,7 @@ def _render_editable_daily_delivery_note_html(
       }};
       const loadOne = async (orderId, index) => {{
         try {{
-          const response = await fetch(`/api/outputs/delivery-notes/html?order_id=${{encodeURIComponent(orderId)}}`);
+          const response = await fetch(`/api/outputs/delivery-notes/html?order_id=${{encodeURIComponent(orderId)}}&date={safe_date}`);
           if (!response.ok) {{
             throw new Error(await response.text());
           }}
@@ -632,9 +632,10 @@ def download_delivery(order_id: str):
 
 
 @router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
-def view_delivery_note_html(order_id: str):
+def view_delivery_note_html(order_id: str, date: str | None = None):
     try:
-        preview = build_delivery_preview(order_id, include_diagnostics=False)
+        target_date = _parse_iso_date(date) if date else None
+        preview = build_delivery_preview(order_id, include_diagnostics=False, target_date=target_date)
         headers = preview.get("headers", [])
         rows = preview.get("rows", [])
         facility_name = _delivery_facility_name(order_id)

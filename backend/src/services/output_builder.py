@@ -1011,6 +1011,26 @@ def _normalize_output_daypart(value: object) -> str:
     return text
 
 
+def _menu_entry_category_label(entry: dict) -> str:
+    normalized = _normalize_delivery_category_label(entry.get("category"))
+    if normalized in {"副菜1", "副菜2", "主菜"}:
+        return normalized
+    daypart = _normalize_output_daypart(entry.get("daypart"))
+    try:
+        slot_index = int(entry.get("slot_index"))
+    except Exception:
+        return normalized
+    if daypart in {"朝", "昼"}:
+        return {0: "副菜1", 1: "副菜2"}.get(slot_index, normalized)
+    if daypart == "夕":
+        return {0: "副菜1", 1: "副菜2", 2: "主菜"}.get(slot_index, normalized)
+    return normalized
+
+
+def _is_specific_delivery_category(value: object) -> bool:
+    return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "主菜"}
+
+
 def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str, str, str], dict], dict[tuple[str, str], dict]]:
     by_exact: dict[tuple[str, str, str], dict] = {}
     by_date_name: dict[tuple[str, str], dict | None] = {}
@@ -1063,8 +1083,9 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         updated = dict(line)
         if entry.get("daypart") and not daypart:
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
-        if entry.get("category") and not updated.get("menu_category"):
-            updated["menu_category"] = entry.get("category")
+        entry_category = _menu_entry_category_label(entry)
+        if entry_category and not _is_specific_delivery_category(updated.get("menu_category")):
+            updated["menu_category"] = entry_category
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
     return enriched
@@ -5378,12 +5399,25 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
     raise ValueError(f"invalid output type: {output_type}")
 
 
-def build_delivery_preview(order_id: str, *, include_diagnostics: bool = True) -> dict:
+def build_delivery_preview(
+    order_id: str,
+    *,
+    include_diagnostics: bool = True,
+    target_date: dt_date | None = None,
+) -> dict:
     total_started = time.perf_counter()
     timings: dict[str, float] = {}
     context_started = time.perf_counter()
     ctx = _prepare_output_context(order_id, include_bags=False, timings=timings)
     timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
+    if target_date is not None:
+        filtered_lines = [
+            line
+            for line in ctx["order_for_outputs"].get("lines", [])
+            if _ensure_date(line.get("date")) == target_date
+        ]
+        ctx["order_for_outputs"] = {**ctx["order_for_outputs"], "lines": filtered_lines}
+        timings["target_date_filtered_lines"] = float(len(filtered_lines))
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
