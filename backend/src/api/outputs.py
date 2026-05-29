@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 from datetime import date as dt_date
 from html import escape
 from pathlib import Path
@@ -25,6 +26,21 @@ from src.api.auth import require_role
 router = APIRouter()
 
 _PREVIEW_LIMIT_DEFAULT = 10
+_FINAL_DIET_LABELS = {
+    "regular": "常食",
+    "regular_bag": "常食袋分け",
+    "soft": "軟菜",
+    "mixer": "ミキサー",
+    "daycare": "通所",
+    "staff": "職員",
+    "diabetes": "糖尿",
+    "no_meat": "禁食肉禁",
+    "no_fish": "禁食魚禁",
+    "no_fried": "揚げ物禁",
+    "forbidden_other": "禁食その他",
+    "forbidden": "禁食",
+    "禁食": "禁食",
+}
 
 
 def _output_file_for_type(order_id: str, output_type: str) -> tuple[Path, str]:
@@ -149,6 +165,138 @@ def _wrap_preview_html(title: str, body: str) -> str:
 </html>"""
 
 
+def _normalize_delivery_diet_for_display(value: object) -> str:
+    text = str(value or "").strip()
+    compact = re.sub(r"[\s　]+", "", text)
+    lowered = text.lower()
+    if lowered in {"change_1", "change_2", "change1", "change2"} or compact in {"変更1", "変更2", "変更１", "変更２"}:
+        return "regular"
+    if lowered in {"regular", "standard"} or "常食" in text:
+        return "regular"
+    if lowered in {"regular_bag"} or "袋" in text:
+        return "regular_bag"
+    if lowered == "soft" or "軟菜" in text:
+        return "soft"
+    if lowered == "mixer" or "ミキサ" in text or "ﾐｷｻ" in text:
+        return "mixer"
+    if lowered == "daycare" or "通所" in text:
+        return "daycare"
+    if lowered == "staff" or "職員" in text:
+        return "staff"
+    if lowered in {"diabetes", "diabetic"} or "糖尿" in text:
+        return "diabetes"
+    if lowered == "no_meat" or "肉禁" in text:
+        return "no_meat"
+    if lowered == "no_fish" or "魚禁" in text:
+        return "no_fish"
+    if lowered == "no_fried" or "揚げ物" in text or "揚物" in text:
+        return "no_fried"
+    if lowered == "forbidden_other" or "その他" in text:
+        return "forbidden_other"
+    if lowered in {"forbidden", "禁食"} or "禁食" in text:
+        return "forbidden"
+    return lowered or text
+
+
+def _normalize_delivery_area_for_display(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text.upper() == "X":
+        return ""
+    text = text.replace("階", "F").replace("ｆ", "F").replace("Ｆ", "F")
+    if not re.search(r"\dF|月|花", text, re.IGNORECASE):
+        return ""
+    if "花" in text:
+        return "2F"
+    if "月" in text:
+        return "3F"
+    return text.upper()
+
+
+def _delivery_final_header_base(column: dict) -> str:
+    diet = _normalize_delivery_diet_for_display(column.get("diet_type"))
+    if diet in _FINAL_DIET_LABELS:
+        return _FINAL_DIET_LABELS[diet]
+    raw = str(column.get("header") or column.get("name") or "").strip()
+    raw = re.sub(r"\d+\s*回目", "", raw).strip()
+    if raw in {"1回目", "2回目", "3回目", "変更1", "変更2", "変更１", "変更２"}:
+        return "常食"
+    return raw or str(column.get("name") or "").strip()
+
+
+def _build_delivery_render_columns(columns: list | None) -> list[dict]:
+    render_columns: list[dict] = [
+        {"kind": "field", "source": "date", "header": "日付"},
+        {"kind": "field", "source": "daypart", "header": "区分"},
+        {"kind": "field", "source": "menu_category", "header": "献立区分"},
+        {"kind": "field", "source": "menu_name", "header": "メニュー名"},
+    ]
+    quantity_groups: dict[tuple[str, str], dict] = {}
+    for column in columns or []:
+        if not isinstance(column, dict) or column.get("source") != "quantity" or not column.get("name"):
+            continue
+        diet = _normalize_delivery_diet_for_display(column.get("diet_type") or column.get("name"))
+        if diet in {"change_1", "change_2", "change1", "change2", "変更1", "変更2", "変更１", "変更２"}:
+            diet = "regular"
+        area = _normalize_delivery_area_for_display(column.get("area_id") or column.get("name"))
+        base = _delivery_final_header_base(column)
+        key = (diet or base, area)
+        group = quantity_groups.setdefault(
+            key,
+            {
+                "kind": "quantity",
+                "header_base": base,
+                "area": area,
+                "source_names": [],
+            },
+        )
+        group["source_names"].append(str(column.get("name")))
+    base_counts: dict[str, int] = {}
+    for group in quantity_groups.values():
+        base_counts[str(group.get("header_base") or "")] = base_counts.get(str(group.get("header_base") or ""), 0) + 1
+    for group in quantity_groups.values():
+        base = str(group.get("header_base") or "")
+        area = str(group.get("area") or "")
+        group["header"] = f"{base}\n{area}" if area and base_counts.get(base, 0) > 1 else base
+        render_columns.append(group)
+    render_columns.append({"kind": "field", "source": "note", "header": "備考欄"})
+    return render_columns
+
+
+def _format_delivery_html_cell(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _delivery_render_cell_value(row: dict, column: dict) -> object:
+    if column.get("kind") == "quantity":
+        total = 0.0
+        has_value = False
+        for name in column.get("source_names") or []:
+            value = row.get(str(name))
+            if value is None or value == "":
+                continue
+            try:
+                total += float(value)
+                has_value = True
+            except (TypeError, ValueError):
+                return value
+        if not has_value:
+            return ""
+        return int(total) if total.is_integer() else total
+    source = column.get("source")
+    if source == "menu_name":
+        return row.get("menu_name")
+    if source == "daypart":
+        value = str(row.get("daypart") or "").strip()
+        return value[:1] if value in {"朝食", "昼食", "夕食"} else value
+    return row.get(str(source))
+
+
 def _render_editable_delivery_note_html(
     order_id: str,
     title: str,
@@ -158,46 +306,31 @@ def _render_editable_delivery_note_html(
     columns: list | None = None,
     raw_rows: list | None = None,
 ) -> str:
-    quantity_columns = [
-        col for col in (columns or [])
-        if isinstance(col, dict) and col.get("source") == "quantity" and col.get("name")
-    ]
-    if raw_rows and quantity_columns:
-        render_headers = ["日付", "食事", "区分", "献立名", *[str(col.get("header") or col.get("name")) for col in quantity_columns], "備考"]
-        render_rows: list[list] = []
-        for row in raw_rows:
-            cells: list = [
-                row.get("date"),
-                row.get("daypart"),
-                row.get("menu_category"),
-                row.get("menu_name"),
-            ]
-            cells.extend(row.get(str(col.get("name"))) for col in quantity_columns)
-            cells.append(row.get("note"))
-            render_rows.append(cells)
-    else:
-        render_headers = list(headers)
-        render_rows = list(rows)
+    render_columns = _build_delivery_render_columns(columns)
+    render_rows = [row for row in (raw_rows or []) if isinstance(row, dict)]
+    if not render_rows:
+        render_columns = [{"kind": "field", "source": f"col-{idx}", "header": str(header or "")} for idx, header in enumerate(headers)]
+        render_rows = [
+            {f"col-{idx}": row[idx] if isinstance(row, list) and idx < len(row) else "" for idx in range(len(render_columns))}
+            for row in rows
+        ]
     header_html = "".join(
-        f'<th class="col-{idx}" contenteditable="true" data-edit="h-{idx}">{escape(str(header or ""))}</th>'
-        for idx, header in enumerate(render_headers)
+        f'<th class="col-{idx}" contenteditable="true" data-edit="h-{idx}">{escape(str(column.get("header") or ""))}</th>'
+        for idx, column in enumerate(render_columns)
     )
     row_html: list[str] = []
     for row_idx, row in enumerate(render_rows):
-        cells = row if isinstance(row, list) else []
+        daypart = str(row.get("daypart") or "")
+        row_class = "daypart-start" if row_idx == 0 or daypart != str(render_rows[row_idx - 1].get("daypart") or "") else ""
         cell_html = []
-        for col_idx in range(len(render_headers)):
-            value = cells[col_idx] if col_idx < len(cells) else ""
-            if hasattr(value, "isoformat"):
-                value = value.isoformat()
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            class_name = "menu-cell" if col_idx == 3 else ""
+        for col_idx, column in enumerate(render_columns):
+            value = _delivery_render_cell_value(row, column)
+            class_name = "menu-cell" if column.get("source") == "menu_name" else ""
             cell_html.append(
                 f'<td class="col-{col_idx} {class_name}" contenteditable="true" data-edit="r-{row_idx}-c-{col_idx}">'
-                f"{escape(str(value or ''))}</td>"
+                f"{escape(_format_delivery_html_cell(value))}</td>"
             )
-        row_html.append(f"<tr>{''.join(cell_html)}</tr>")
+        row_html.append(f'<tr class="{row_class}">{"".join(cell_html)}</tr>')
     body_html = "".join(row_html)
     safe_title = escape(title)
     safe_order_id = escape(order_id)
@@ -272,6 +405,7 @@ def _render_editable_delivery_note_html(
       width: 100%;
       border-collapse: collapse;
       table-layout: auto;
+      border: 2px solid #111827;
       background: #ffffff;
     }}
     th, td {{
@@ -284,7 +418,12 @@ def _render_editable_delivery_note_html(
       white-space: pre-wrap;
       word-break: break-word;
     }}
-    th {{ font-weight: 400; font-size: 14px; }}
+    th {{ font-weight: 400; font-size: 14px; height: 12mm; min-height: 12mm; }}
+    thead th {{ border-top-width: 2px; border-bottom-width: 2px; }}
+    tr.daypart-start td {{ border-top-width: 2px; }}
+    tbody tr:last-child td {{ border-bottom-width: 2px; }}
+    th:first-child, td:first-child {{ border-left-width: 2px; }}
+    th:last-child, td:last-child {{ border-right-width: 2px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
     .col-0 {{ width: 9%; }}
     .col-1 {{ width: 6%; }}
@@ -468,9 +607,14 @@ def _render_editable_daily_delivery_note_html(
     .facility-box {{ border: 2px solid #111827; min-height: 18mm; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; padding: 4mm; }}
     .company-name {{ font-size: 18px; font-weight: 800; margin-bottom: 5mm; }}
     .company-line {{ font-size: 10px; font-weight: 700; margin: 0 0 3mm; }}
-    table {{ width: 100%; border-collapse: collapse; table-layout: auto; background: #ffffff; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: auto; border: 2px solid #111827; background: #ffffff; }}
     th, td {{ border: 1px solid #111827; min-height: 7mm; height: 7mm; padding: 2px 4px; text-align: center; vertical-align: middle; white-space: pre-wrap; word-break: break-word; }}
-    th {{ font-weight: 400; font-size: 14px; }}
+    th {{ font-weight: 400; font-size: 14px; height: 12mm; min-height: 12mm; }}
+    thead th {{ border-top-width: 2px; border-bottom-width: 2px; }}
+    tr.daypart-start td {{ border-top-width: 2px; }}
+    tbody tr:last-child td {{ border-bottom-width: 2px; }}
+    th:first-child, td:first-child {{ border-left-width: 2px; }}
+    th:last-child, td:last-child {{ border-right-width: 2px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
     .col-0 {{ width: 9%; }}
     .col-1 {{ width: 6%; }}
@@ -511,6 +655,7 @@ def _render_editable_daily_delivery_note_html(
       let done = 0;
       let failed = 0;
       const parser = new DOMParser();
+      const authHeader = window.sessionStorage.getItem("auth_header") || "";
       const updateStatus = () => {{
         status.textContent = `納品書を読み込んでいます: ${{done}} / ${{orderIds.length}}件`;
         if (done >= orderIds.length) {{
@@ -528,7 +673,9 @@ def _render_editable_daily_delivery_note_html(
       }};
       const loadOne = async (orderId, index) => {{
         try {{
-          const response = await fetch(`/api/outputs/delivery-notes/html?order_id=${{encodeURIComponent(orderId)}}&date={safe_date}`);
+          const response = await fetch(`/api/outputs/delivery-notes/html?order_id=${{encodeURIComponent(orderId)}}&date={safe_date}`, {{
+            headers: authHeader ? {{ Authorization: authHeader }} : undefined,
+          }});
           if (!response.ok) {{
             throw new Error(await response.text());
           }}

@@ -9,7 +9,7 @@ from src.services import config_service, output_builder  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
 
 
-def test_build_delivery_rows_ignores_legacy_ocr_raw_rows():
+def test_build_delivery_rows_adds_menu_rows_without_copying_ocr_quantities():
     rows = output_builder._build_delivery_rows(
         {
             "id": "ORD-STRUCTURED-DELIVERY",
@@ -45,7 +45,9 @@ def test_build_delivery_rows_ignores_legacy_ocr_raw_rows():
         },
     )
 
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["menu_display"] == "Menu A"
+    assert "qty_regular_total" not in rows[0]
 
 
 def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():

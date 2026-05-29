@@ -3474,6 +3474,37 @@ def _build_delivery_rows(
             if not name:
                 continue
             row[name] = (row.get(name) or 0) + float(qty)
+    if isinstance(entries, list) and entries:
+        allowed_dates = {
+            _ensure_date(line.get("date"))
+            for line in order.get("lines", [])
+            if _ensure_date(line.get("date")) is not None
+        }
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_date = _ensure_date(entry.get("date"))
+            if allowed_dates and entry_date not in allowed_dates:
+                continue
+            menu_name = entry.get("menu_name")
+            menu_key = _normalize_menu_key(menu_name)
+            if not entry_date or not menu_key:
+                continue
+            daypart_value = entry.get("daypart")
+            menu_category = entry.get("category")
+            key = (entry_date, daypart_value, menu_name)
+            rows.setdefault(
+                key,
+                {
+                    "date": entry_date,
+                    "daypart": daypart_value,
+                    "menu_name": menu_name,
+                    "menu_category": menu_category,
+                    "menu_display": "",
+                    "_order_index": entry.get("index"),
+                    "_delivery_condiments": [],
+                },
+            )
     if timings is not None:
         timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
     finalize_started = time.perf_counter()

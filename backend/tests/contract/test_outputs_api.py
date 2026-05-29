@@ -12,6 +12,41 @@ from src.api import outputs as outputs_api  # noqa: E402
 from src.services import output_builder  # noqa: E402
 
 
+def test_delivery_html_render_columns_hide_revision_columns_and_split_duplicate_areas():
+    columns = [
+        {"name": "常食1回目", "source": "quantity", "diet_type": "regular", "area_id": "X", "header": "常食1回目"},
+        {"name": "常食2回目", "source": "quantity", "diet_type": "change_1", "area_id": "X", "header": "常食2回目"},
+        {"name": "常食3回目", "source": "quantity", "diet_type": "change_2", "area_id": "X", "header": "常食3回目"},
+        {"name": "変更1", "source": "quantity", "diet_type": "変更1", "area_id": "X", "header": "変更1"},
+        {"name": "ミキサー2F", "source": "quantity", "diet_type": "mixer", "area_id": "2F", "header": "ミキサー"},
+        {"name": "ミキサー3F", "source": "quantity", "diet_type": "mixer", "area_id": "3F", "header": "ミキサー"},
+    ]
+
+    render_columns = outputs_api._build_delivery_render_columns(columns)  # noqa: SLF001
+    headers = [column.get("header") for column in render_columns]
+    quantity_columns = [column for column in render_columns if column.get("kind") == "quantity"]
+
+    assert headers == ["日付", "区分", "献立区分", "メニュー名", "常食", "ミキサー\n2F", "ミキサー\n3F", "備考欄"]
+    assert quantity_columns[0]["source_names"] == ["常食1回目", "常食2回目", "常食3回目", "変更1"]
+
+
+def test_delivery_html_render_sums_final_regular_column():
+    columns = outputs_api._build_delivery_render_columns(  # noqa: SLF001
+        [
+            {"name": "常食1回目", "source": "quantity", "diet_type": "regular", "area_id": "X", "header": "常食1回目"},
+            {"name": "常食2回目", "source": "quantity", "diet_type": "change_1", "area_id": "X", "header": "常食2回目"},
+        ]
+    )
+    regular_column = [column for column in columns if column.get("kind") == "quantity"][0]
+
+    value = outputs_api._delivery_render_cell_value(  # noqa: SLF001
+        {"常食1回目": 1.0, "常食2回目": 2.0},
+        regular_column,
+    )
+
+    assert value == 3
+
+
 def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"
