@@ -3380,6 +3380,24 @@ def _delivery_menu_entry_name(entry: dict) -> object:
     return entry.get("menu_name") or entry.get("name")
 
 
+def _delivery_hidden_condiments_for_menu(menu_name: object) -> list[str]:
+    text = str(menu_name or "")
+    if any(token in text for token in ("カツ", "ｶﾂ", "フライ", "ﾌﾗｲ")):
+        return ["ソース"]
+    return []
+
+
+def _delivery_split_menu_name(menu_name: object) -> tuple[str, list[str]]:
+    base, garnish = _split_garnish_name(str(menu_name or "").strip())
+    condiments: list[str] = []
+    if garnish:
+        condiments.append(garnish)
+    for condiment in _delivery_hidden_condiments_for_menu(base or menu_name):
+        if condiment not in condiments:
+            condiments.append(condiment)
+    return base or str(menu_name or "").strip(), condiments
+
+
 def _build_delivery_rows(
     order: dict,
     template: dict,
@@ -3439,7 +3457,8 @@ def _build_delivery_rows(
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:
             continue
-        menu_name = line.get("menu_name")
+        raw_menu_name = line.get("menu_name")
+        menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
         if menu_name:
             menu_names.append(menu_name)
         menu_key = _normalize_menu_key(menu_name)
@@ -3468,9 +3487,30 @@ def _build_delivery_rows(
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
             row["_order_index"] = order_index
-        for condiment in _normalize_condiments(line.get("condiments")):
+        line_condiments = _normalize_condiments(line.get("condiments"))
+        for condiment in split_condiments:
+            if condiment not in line_condiments:
+                line_condiments.append(condiment)
+        for condiment in line_condiments:
             if condiment not in row["_delivery_condiments"]:
                 row["_delivery_condiments"].append(condiment)
+        condiment_rows: list[dict] = []
+        for condiment in line_condiments:
+            condiment_key = (line_date, daypart_key, condiment)
+            condiment_rows.append(
+                rows.setdefault(
+                    condiment_key,
+                    {
+                        "date": line_date,
+                        "daypart": daypart_key,
+                        "menu_name": condiment,
+                        "menu_category": "添え",
+                        "menu_display": "",
+                        "_order_index": order_index,
+                        "_delivery_condiments": [],
+                    },
+                )
+            )
         line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
         for col in quantity_columns:
@@ -3485,6 +3525,8 @@ def _build_delivery_rows(
             if not name:
                 continue
             row[name] = (row.get(name) or 0) + float(qty)
+            for condiment_row in condiment_rows:
+                condiment_row[name] = (condiment_row.get(name) or 0) + float(qty)
     if isinstance(entries, list) and entries:
         allowed_dates = {
             _ensure_date(line.get("date"))
@@ -3497,7 +3539,8 @@ def _build_delivery_rows(
             entry_date = _delivery_menu_entry_date(entry)
             if allowed_dates and entry_date not in allowed_dates:
                 continue
-            menu_name = _delivery_menu_entry_name(entry)
+            raw_menu_name = _delivery_menu_entry_name(entry)
+            menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
             menu_key = _normalize_menu_key(menu_name)
             if not entry_date or not menu_key:
                 continue
@@ -3520,6 +3563,9 @@ def _build_delivery_rows(
             entry_condiments = _normalize_condiments(entry.get("condiments"))
             if not entry_condiments:
                 entry_condiments = _normalize_condiments(entry_defaults.get(str(menu_name or "").strip(), {}).get("condiments"))
+            for condiment in split_condiments:
+                if condiment not in entry_condiments:
+                    entry_condiments.append(condiment)
             for condiment in entry_condiments:
                 if condiment not in row["_delivery_condiments"]:
                     row["_delivery_condiments"].append(condiment)
