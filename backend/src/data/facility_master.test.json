@@ -279,7 +279,8 @@
             "diet_type_locked": true,
             "area_id_locked": true,
             "name_locked": true,
-            "source_index": 6
+            "source_index": 6,
+            "delivery_header": "禁食　【　常食　・　小口　】 肉禁"
           },
           {
             "index": 6,
@@ -291,7 +292,8 @@
             "diet_type_locked": true,
             "area_id_locked": true,
             "name_locked": true,
-            "source_index": 7
+            "source_index": 7,
+            "delivery_header": "禁食　【　常食　・　小口　】 魚禁"
           },
           {
             "index": 7,
@@ -771,7 +773,8 @@
             "header": "揚げ物禁",
             "diet_type": "no_fried",
             "area_id": "X",
-            "source_index": 9
+            "source_index": 9,
+            "delivery_header": "禁食 その他"
           },
           {
             "index": 9,
@@ -786,6 +789,22 @@
             "role": "note",
             "header": "備考欄",
             "source_index": 11
+          },
+          {
+            "role": "delivery_static",
+            "header": "保管温度",
+            "name": "delivery.保管温度",
+            "delivery_source": "static",
+            "delivery_header": "保管温度",
+            "index": 11
+          },
+          {
+            "role": "delivery_static",
+            "header": "賞味期限",
+            "name": "delivery.賞味期限",
+            "delivery_source": "static",
+            "delivery_header": "賞味期限",
+            "index": 12
           }
         ]
       }
@@ -1025,7 +1044,8 @@
             "role": "quantity",
             "header": "常食1回目",
             "diet_type": "regular",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_header": "常食 通常"
           },
           {
             "index": 4,
@@ -1057,7 +1077,8 @@
             "role": "quantity",
             "header": "常食袋分け",
             "diet_type": "regular_bag",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_enabled": false
           },
           {
             "index": 7,
@@ -1081,7 +1102,8 @@
             "role": "quantity",
             "header": "禁食肉禁",
             "diet_type": "no_meat",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_header": "禁食　【　常食　・　小口　】 肉禁"
           },
           {
             "index": 10,
@@ -1089,7 +1111,8 @@
             "role": "quantity",
             "header": "禁食魚禁",
             "diet_type": "no_fish",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_header": "禁食　【　常食　・　小口　】 魚禁"
           },
           {
             "index": 11,
@@ -1230,7 +1253,8 @@
             "header": "肉禁",
             "header_group": "禁食",
             "diet_type": "no_meat",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_header": "禁食　【　常食　・　小口　】 肉禁"
           },
           {
             "index": 5,
@@ -1239,7 +1263,8 @@
             "header": "魚禁",
             "header_group": "禁食",
             "diet_type": "no_fish",
-            "area_id": "X"
+            "area_id": "X",
+            "delivery_header": "禁食　【　常食　・　小口　】 魚禁"
           },
           {
             "index": 6,
@@ -1698,7 +1723,8 @@
             "header": "-",
             "diet_type": "placeholder",
             "area_id": "X",
-            "source_index": 5
+            "source_index": 5,
+            "delivery_enabled": false
           },
           {
             "index": 5,
@@ -1706,7 +1732,8 @@
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X",
-            "source_index": 6
+            "source_index": 6,
+            "delivery_header": "禁食　【　常食　・　小口　】 肉禁"
           },
           {
             "index": 6,
@@ -1714,7 +1741,8 @@
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X",
-            "source_index": 7
+            "source_index": 7,
+            "delivery_header": "禁食　【　常食　・　小口　】 魚禁"
           },
           {
             "index": 7,
@@ -1938,7 +1966,8 @@
             "header": "ゴマアレルギー",
             "diet_type": "sesame_allergy",
             "area_id": "X",
-            "source_index": 8
+            "source_index": 8,
+            "delivery_header": "禁食 ｺﾞﾏ禁"
           },
           {
             "index": 8,
@@ -1953,6 +1982,22 @@
             "role": "note",
             "header": "備考欄",
             "source_index": 10
+          },
+          {
+            "role": "delivery_static",
+            "header": "保管温度",
+            "name": "delivery.保管温度",
+            "delivery_source": "static",
+            "delivery_header": "保管温度",
+            "index": 10
+          },
+          {
+            "role": "delivery_static",
+            "header": "賞味期限",
+            "name": "delivery.賞味期限",
+            "delivery_source": "static",
+            "delivery_header": "賞味期限",
+            "index": 11
           }
         ]
       },
@@ -2079,7 +2124,8 @@
             "header": "-",
             "diet_type": "placeholder",
             "area_id": "X",
-            "source_index": 5
+            "source_index": 5,
+            "delivery_header": "小口"
           },
           {
             "index": 5,
@@ -2087,7 +2133,8 @@
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X",
-            "source_index": 6
+            "source_index": 6,
+            "delivery_header": "禁食　【　常食　・　小口　】 肉禁"
           },
           {
             "index": 6,
@@ -2095,7 +2142,8 @@
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X",
-            "source_index": 7
+            "source_index": 7,
+            "delivery_header": "禁食　【　常食　・　小口　】 魚禁"
           },
           {
             "index": 7,
@@ -2268,7 +2316,8 @@
             "header": "肉禁",
             "diet_type": "no_meat",
             "area_id": "X",
-            "source_index": 6
+            "source_index": 6,
+            "delivery_enabled": false
           },
           {
             "index": 6,
@@ -2276,7 +2325,8 @@
             "header": "魚禁",
             "diet_type": "no_fish",
             "area_id": "X",
-            "source_index": 7
+            "source_index": 7,
+            "delivery_header": "魚禁 (常食)"
           },
           {
             "index": 7,
@@ -2490,7 +2540,8 @@
               "bag_type": null,
               "aggregation_role": "include"
             },
-            "read_target": true
+            "read_target": true,
+            "delivery_header": "禁食　【　常食　・　ミキサー　】 肉禁"
           },
           {
             "index": 6,
@@ -2509,7 +2560,8 @@
               "bag_type": null,
               "aggregation_role": "include"
             },
-            "read_target": true
+            "read_target": true,
+            "delivery_header": "禁食　【　常食　・　ミキサー　】 魚禁"
           },
           {
             "index": 7,

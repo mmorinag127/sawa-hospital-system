@@ -20,25 +20,21 @@ type AreaEntry = {
   name: string;
 };
 
-type InvoiceColumn = {
-  name: string;
-  source: string;
-  header: string;
-  columnIndex: string;
-  dietType: string;
-  areaId: string;
-};
-
 type FaxColumn = {
   index: string;
   sourceIndex: string;
   role: string;
   header: string;
+  headerGroup: string;
   name: string;
   format: string;
   dietType: string;
   areaId: string;
   bagType: string;
+  deliveryHeader: string;
+  deliveryName: string;
+  deliverySource: string;
+  deliveryEnabled: boolean | null;
 };
 
 const DAILY_LABEL_DIET_OPTIONS = [
@@ -180,20 +176,6 @@ const normalizeArea = (area: AreaEntry) => {
   return { area_id: id || name, name: name || id };
 };
 
-const normalizeInvoiceColumn = (column: InvoiceColumn) => {
-  const next: Record<string, unknown> = {};
-  if (column.name.trim()) next.name = column.name.trim();
-  if (column.source.trim()) next.source = column.source.trim();
-  if (column.header.trim()) next.header = column.header.trim();
-  if (column.columnIndex.trim()) {
-    const parsed = Number(column.columnIndex);
-    next.column_index = Number.isFinite(parsed) ? parsed : column.columnIndex.trim();
-  }
-  if (column.dietType.trim()) next.diet_type = column.dietType.trim();
-  if (column.areaId.trim()) next.area_id = column.areaId.trim();
-  return next;
-};
-
 const readFaxOverride = (facility?: FacilityEntry) => {
   if (!facility || typeof facility !== "object") return { columns: [] as FaxColumn[] };
   const override = (facility as Record<string, unknown>).fax_template_override;
@@ -210,11 +192,16 @@ const readFaxOverride = (facility?: FacilityEntry) => {
           sourceIndex: toStringValue(col.source_index),
           role: readString(col.role),
           header: readString(col.header),
+          headerGroup: readString(col.header_group),
           name: readString(col.name),
           format: readString(col.format),
           dietType: readString(col.diet_type),
           areaId: readString(col.area_id),
           bagType: readString(col.bag_type),
+          deliveryHeader: readString(col.delivery_header),
+          deliveryName: readString(col.delivery_name),
+          deliverySource: readString(col.delivery_source),
+          deliveryEnabled: typeof col.delivery_enabled === "boolean" ? col.delivery_enabled : null,
         };
       })
       .filter(
@@ -225,11 +212,16 @@ const readFaxOverride = (facility?: FacilityEntry) => {
                 col.sourceIndex ||
                 col.role ||
                 col.header ||
+                col.headerGroup ||
                 col.name ||
                 col.format ||
                 col.dietType ||
                 col.areaId ||
-                col.bagType)
+                col.bagType ||
+                col.deliveryHeader ||
+                col.deliveryName ||
+                col.deliverySource ||
+                col.deliveryEnabled !== null)
           )
       ),
   };
@@ -247,11 +239,16 @@ const normalizeFaxColumn = (column: FaxColumn) => {
   }
   if (column.role.trim()) next.role = column.role.trim();
   if (column.header.trim()) next.header = column.header.trim();
+  if (column.headerGroup.trim()) next.header_group = column.headerGroup.trim();
   if (column.name.trim()) next.name = column.name.trim();
   if (column.format.trim()) next.format = column.format.trim();
   if (column.dietType.trim()) next.diet_type = column.dietType.trim();
   if (column.areaId.trim()) next.area_id = column.areaId.trim();
   if (column.bagType.trim()) next.bag_type = column.bagType.trim();
+  if (column.deliveryHeader.trim()) next.delivery_header = column.deliveryHeader.trim();
+  if (column.deliveryName.trim()) next.delivery_name = column.deliveryName.trim();
+  if (column.deliverySource.trim()) next.delivery_source = column.deliverySource.trim();
+  if (column.deliveryEnabled !== null) next.delivery_enabled = column.deliveryEnabled;
   return next;
 };
 
@@ -295,14 +292,6 @@ const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
         if (Array.isArray(record.areas)) {
           record.areas = readEditableAreas(record.areas).map(normalizeArea).filter(Boolean);
         }
-        if (record.invoice_template && typeof record.invoice_template === "object") {
-          const invoice = record.invoice_template as Record<string, unknown>;
-          const columns = readInvoiceTemplate(record)?.columns || [];
-          record.invoice_template = {
-            ...invoice,
-            columns: columns.map(normalizeInvoiceColumn).filter((column) => Object.keys(column).length > 0),
-          };
-        }
         if (record.fax_template_override && typeof record.fax_template_override === "object") {
           const override = record.fax_template_override as Record<string, unknown>;
           const columns = readFaxOverride(record).columns;
@@ -321,36 +310,6 @@ const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
   return { ...master, facilities };
 };
 
-
-const readInvoiceTemplate = (facility?: FacilityEntry) => {
-  if (!facility || typeof facility !== "object") return null;
-  const invoice = (facility as Record<string, unknown>).invoice_template;
-  if (!invoice || typeof invoice !== "object") return null;
-  const invoiceRecord = invoice as Record<string, unknown>;
-  const columns = Array.isArray(invoiceRecord.columns) ? invoiceRecord.columns : [];
-  return {
-    templateUri: readString(invoiceRecord.template_uri),
-    sheetName: readString(invoiceRecord.sheet_name),
-    includeMenuName: Boolean(invoiceRecord.include_menu_name),
-    columns: columns
-      .map((column) => {
-        if (!column || typeof column !== "object") return null;
-        const col = column as Record<string, unknown>;
-        return {
-          name: readString(col.name),
-          source: readString(col.source),
-          header: readString(col.header),
-          columnIndex: toStringValue(col.column_index),
-          dietType: readString(col.diet_type),
-          areaId: readString(col.area_id),
-        };
-      })
-      .filter(
-        (col): col is InvoiceColumn =>
-          Boolean(col && (col.name || col.source || col.header || col.columnIndex || col.dietType || col.areaId))
-      ),
-  };
-};
 
 export default function FacilityMasterPage() {
   const [master, setMaster] = useState<FacilityMaster | null>(null);
@@ -542,11 +501,16 @@ export default function FacilityMasterPage() {
         sourceIndex: "",
         role: "quantity",
         header: "",
+        headerGroup: "",
         name: "",
         format: "",
         dietType: "",
         areaId: "X",
         bagType: "",
+        deliveryHeader: "",
+        deliveryName: "",
+        deliverySource: "",
+        deliveryEnabled: null,
       },
     ];
     updateFaxOverride({
@@ -564,45 +528,6 @@ export default function FacilityMasterPage() {
     });
   };
 
-  const updateInvoiceTemplate = (patch: Record<string, unknown>) => {
-    if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const current = ((selectedFacility as Record<string, unknown>).invoice_template || {}) as Record<string, unknown>;
-    updateSelectedField("invoice_template", { ...current, ...patch });
-  };
-
-  const updateInvoiceColumn = (index: number, patch: Partial<InvoiceColumn>) => {
-    if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const invoice = readInvoiceTemplate(selectedFacility);
-    const columns = invoice?.columns || [];
-    const nextColumns = columns.map((column, itemIndex) =>
-      itemIndex === index ? { ...column, ...patch } : column
-    );
-    updateInvoiceTemplate({ columns: nextColumns.map(normalizeInvoiceColumn) });
-  };
-
-  const addInvoiceColumn = () => {
-    if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const invoice = readInvoiceTemplate(selectedFacility);
-    const columns = invoice?.columns || [];
-    updateInvoiceTemplate({
-      columns: [
-        ...columns.map(normalizeInvoiceColumn),
-        { name: "", source: "quantity", header: "", column_index: "", diet_type: "", area_id: "" },
-      ],
-    });
-  };
-
-  const removeInvoiceColumn = (index: number) => {
-    if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const invoice = readInvoiceTemplate(selectedFacility);
-    const columns = invoice?.columns || [];
-    updateInvoiceTemplate({
-      columns: columns
-        .filter((_, itemIndex) => itemIndex !== index)
-        .map(normalizeInvoiceColumn),
-    });
-  };
-
   const addFacility = () => {
     if (!master) return;
     const existing = new Set(facilities.map((facility) => String(facility.facility_id || "")));
@@ -614,12 +539,6 @@ export default function FacilityMasterPage() {
       areas: [],
       fax_template_ids: [],
       daily_label_comparable_diet_types: [],
-      invoice_template: {
-        template_uri: "",
-        sheet_name: "",
-        include_menu_name: false,
-        columns: [],
-      },
     };
     const nextFacilities = [...facilities, nextFacility];
     const nextMaster = { ...master, facilities: nextFacilities };
@@ -705,7 +624,6 @@ export default function FacilityMasterPage() {
       faxOverride: readFaxOverride(selectedFacility),
       aliases: readEditableStringList(record.aliases),
       areas: readEditableAreas(record.areas),
-      invoice: readInvoiceTemplate(selectedFacility),
       dailyLabelDietTypes: readDailyLabelDietTypes(selectedFacility),
     };
   }, [selectedFacility]);
@@ -716,7 +634,7 @@ export default function FacilityMasterPage() {
         <div>
           <p className="eyebrow">Facilities</p>
           <h1>施設一覧</h1>
-          <p className="subtle">施設情報と納品書テンプレート設定を更新します。</p>
+          <p className="subtle">施設情報とFAXテンプレート設定を更新します。</p>
         </div>
         <TopNav />
       </header>
@@ -1113,125 +1031,6 @@ export default function FacilityMasterPage() {
                 </p>
               </div>
 
-              <div className="form-section">
-                <div className="section-title-row">
-                  <h3>納品書テンプレート</h3>
-                  <button className="btn compact" onClick={addInvoiceColumn} disabled={!isEditing}>
-                    列を追加
-                  </button>
-                </div>
-                <div className="form-grid">
-                  <label className="field">
-                    <span className="field-label">テンプレートURI</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.invoice?.templateUri || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateInvoiceTemplate({ template_uri: e.target.value })}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field-label">シート名</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.invoice?.sheetName || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateInvoiceTemplate({ sheet_name: e.target.value })}
-                    />
-                  </label>
-                  <label className="check-field">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(facilityInfo?.invoice?.includeMenuName)}
-                      disabled={!isEditing}
-                      onChange={(e) => updateInvoiceTemplate({ include_menu_name: e.target.checked })}
-                    />
-                    <span>献立名を含める</span>
-                  </label>
-                </div>
-                {facilityInfo?.invoice?.columns.length ? (
-                  <div className="table-wrap">
-                    <table className="invoice-table">
-                      <thead>
-                        <tr>
-                          <th>列名</th>
-                          <th>ソース</th>
-                          <th>ヘッダー</th>
-                          <th>列番号</th>
-                          <th>食種</th>
-                          <th>施設区分</th>
-                          <th>操作</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {facilityInfo.invoice.columns.map((col, idx) => (
-                          <tr key={`${col.name}-${col.source}-${idx}`}>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={col.name}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { name: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={col.source}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { source: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={col.header}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { header: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input numeric"
-                                value={col.columnIndex}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { columnIndex: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={col.dietType}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { dietType: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="table-input"
-                                value={col.areaId}
-                                disabled={!isEditing}
-                                onChange={(e) => updateInvoiceColumn(idx, { areaId: e.target.value })}
-                              />
-                            </td>
-                            <td>
-                              <button
-                                className="btn danger compact"
-                                onClick={() => removeInvoiceColumn(idx)}
-                                disabled={!isEditing}
-                              >
-                                削除
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="subtle">納品書カラムが未設定です。列を追加してください。</p>
-                )}
-              </div>
               {isEditing && (
                 <div className="actions save-actions">
                   <button className="btn ghost" onClick={cancelEdit} disabled={saving}>
