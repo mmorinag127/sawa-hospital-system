@@ -1066,37 +1066,6 @@ export default function MonthlyMenuEditorPage() {
         <div>
           <p className="eyebrow">Monthly Menu</p>
           <h1>月次メニュー編集</h1>
-          <div className="month-selector">
-            <label className="field compact-field">
-              <span className="field-label">登録済み月次</span>
-              <div className="month-option-list" aria-label="登録済み月次">
-                {menuOptions.length ? (
-                  menuOptions.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`month-option${option.id === monthId ? " active" : ""}`}
-                      onClick={() => handleMonthChange(option.id)}
-                    >
-                      {formatMonthOptionLabel(option)}
-                    </button>
-                  ))
-                ) : (
-                  <span className="subtle">登録済み月次がありません</span>
-                )}
-              </div>
-            </label>
-            <label className="field compact-field">
-              <span className="field-label">対象月を直接指定</span>
-              <input
-                className="input"
-                type="month"
-                value={selectedMonth}
-                onChange={(e) => handleMonthChange(e.target.value)}
-              />
-            </label>
-            <p className="subtle">月ID: {Array.isArray(monthId) ? monthId.join(",") : monthId}</p>
-          </div>
         </div>
         <TopNav />
       </header>
@@ -1167,6 +1136,37 @@ export default function MonthlyMenuEditorPage() {
           <button className="btn primary" onClick={handleUpload} disabled={uploading}>
             {uploading ? "アップロード中..." : "アップロード"}
           </button>
+        </div>
+        <div className="month-selector">
+          <label className="field compact-field">
+            <span className="field-label">登録済み月次</span>
+            <div className="month-option-list" aria-label="登録済み月次">
+              {menuOptions.length ? (
+                menuOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`month-option${option.id === monthId ? " active" : ""}`}
+                    onClick={() => handleMonthChange(option.id)}
+                  >
+                    {formatMonthOptionLabel(option)}
+                  </button>
+                ))
+              ) : (
+                <span className="subtle">登録済み月次がありません</span>
+              )}
+            </div>
+          </label>
+          <label className="field compact-field">
+            <span className="field-label">対象月を直接指定</span>
+            <input
+              className="input"
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => handleMonthChange(e.target.value)}
+            />
+          </label>
+          <p className="subtle">月ID: {Array.isArray(monthId) ? monthId.join(",") : monthId}</p>
         </div>
         <p className="subtle scope-note">
           通常は <strong>共通(base)</strong> を使います。施設だけ違う献立は <strong>施設差分</strong>、複数施設で共通の差分は
