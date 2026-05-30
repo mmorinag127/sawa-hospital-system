@@ -1069,22 +1069,22 @@ export default function MonthlyMenuEditorPage() {
           <div className="month-selector">
             <label className="field compact-field">
               <span className="field-label">登録済み月次</span>
-              <select
-                className="input month-select"
-                value={Array.isArray(monthId) ? "" : monthId || ""}
-                onChange={(e) => handleMonthChange(e.target.value)}
-              >
-                {menuOptions.some((option) => option.id === monthId) ? null : (
-                  <option value={Array.isArray(monthId) ? "" : monthId || ""}>
-                    {Array.isArray(monthId) ? monthId.join(",") : monthId || "対象月"}
-                  </option>
+              <div className="month-option-list" aria-label="登録済み月次">
+                {menuOptions.length ? (
+                  menuOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`month-option${option.id === monthId ? " active" : ""}`}
+                      onClick={() => handleMonthChange(option.id)}
+                    >
+                      {formatMonthOptionLabel(option)}
+                    </button>
+                  ))
+                ) : (
+                  <span className="subtle">登録済み月次がありません</span>
                 )}
-                {menuOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {formatMonthOptionLabel(option)}
-                  </option>
-                ))}
-              </select>
+              </div>
             </label>
             <label className="field compact-field">
               <span className="field-label">対象月を直接指定</span>
@@ -2486,8 +2486,28 @@ export default function MonthlyMenuEditorPage() {
           min-width: 160px;
         }
 
-        .compact-field .month-select {
-          min-width: 260px;
+        .month-option-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          max-width: min(720px, 80vw);
+        }
+
+        .month-option {
+          border: 1px solid #1f2a2a24;
+          background: #ffffff;
+          color: #1f2a2a;
+          border-radius: 999px;
+          padding: 8px 12px;
+          font-weight: 700;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .month-option.active {
+          background: #1f2a2a;
+          border-color: #1f2a2a;
+          color: #f7f2e7;
         }
 
         .subtle {
