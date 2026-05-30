@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
@@ -224,6 +224,7 @@ export default function OrdersPage() {
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isHydratingRuntime, setIsHydratingRuntime] = useState<boolean>(false);
+  const [runtimeHydrated, setRuntimeHydrated] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
   const [archiveNotice, setArchiveNotice] = useState<string>("");
   const [archiveError, setArchiveError] = useState<string>("");
@@ -276,47 +277,14 @@ export default function OrdersPage() {
     setIsLoading(true);
     setLoadError("");
     setIsHydratingRuntime(false);
+    setRuntimeHydrated(false);
     apiClient
       .get("/orders", { params })
-      .then(async (res) => {
+      .then((res) => {
         if (cancelled) return;
         const baseOrders = res.data.orders || [];
         setOrders(baseOrders);
         setIsLoading(false);
-        setIsHydratingRuntime(true);
-        try {
-          const runtimeParams = statusFilter
-            ? {
-                status: statusFilter,
-                include_ocr: false,
-                include_archived: showArchived,
-                limit: ORDER_LIST_FETCH_LIMIT,
-              }
-            : {
-                include_ocr: false,
-                include_archived: showArchived,
-                limit: ORDER_LIST_FETCH_LIMIT,
-              };
-          const runtimeRes = await apiClient.get("/orders", { params: runtimeParams });
-          if (cancelled) return;
-          const runtimeOrders = Array.isArray(runtimeRes.data?.orders) ? runtimeRes.data.orders : [];
-          const runtimeById = new Map<string, Order>();
-          runtimeOrders.forEach((runtimeOrder: Order) => {
-            const orderId = String(runtimeOrder.id || "").trim();
-            if (orderId) runtimeById.set(orderId, runtimeOrder);
-          });
-          setOrders((prev) =>
-            prev.map((order) => {
-              const orderId = String(order.id || "").trim();
-              const runtimeOrder = runtimeById.get(orderId);
-              return runtimeOrder ? { ...order, ...runtimeOrder } : order;
-            }),
-          );
-        } catch {
-          if (cancelled) return;
-        } finally {
-          if (!cancelled) setIsHydratingRuntime(false);
-        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -335,6 +303,44 @@ export default function OrdersPage() {
       cancelled = true;
     };
   }, [statusFilter, reloadToken, showArchived]);
+
+  const hydrateRuntimeOrders = useCallback(async () => {
+    if (runtimeHydrated || isHydratingRuntime) return;
+    const runtimeParams = statusFilter
+      ? {
+          status: statusFilter,
+          include_ocr: false,
+          include_archived: showArchived,
+          limit: ORDER_LIST_FETCH_LIMIT,
+        }
+      : {
+          include_ocr: false,
+          include_archived: showArchived,
+          limit: ORDER_LIST_FETCH_LIMIT,
+        };
+    setIsHydratingRuntime(true);
+    try {
+      const runtimeRes = await apiClient.get("/orders", { params: runtimeParams });
+      const runtimeOrders = Array.isArray(runtimeRes.data?.orders) ? runtimeRes.data.orders : [];
+      const runtimeById = new Map<string, Order>();
+      runtimeOrders.forEach((runtimeOrder: Order) => {
+        const orderId = String(runtimeOrder.id || "").trim();
+        if (orderId) runtimeById.set(orderId, runtimeOrder);
+      });
+      setOrders((prev) =>
+        prev.map((order) => {
+          const orderId = String(order.id || "").trim();
+          const runtimeOrder = runtimeById.get(orderId);
+          return runtimeOrder ? { ...order, ...runtimeOrder } : order;
+        }),
+      );
+      setRuntimeHydrated(true);
+    } catch {
+      // The base list remains usable; runtime context is retried on the next expansion.
+    } finally {
+      setIsHydratingRuntime(false);
+    }
+  }, [isHydratingRuntime, runtimeHydrated, showArchived, statusFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -829,10 +835,14 @@ export default function OrdersPage() {
   const isWeekGroupExpanded = (groupKey: string) => expandedWeekGroups[groupKey] === true;
 
   const toggleWeekGroup = (groupKey: string) => {
-    setExpandedWeekGroups((current) => ({
-      ...current,
-      [groupKey]: current[groupKey] !== true,
-    }));
+    setExpandedWeekGroups((current) => {
+      const nextExpanded = current[groupKey] !== true;
+      if (nextExpanded) void hydrateRuntimeOrders();
+      return {
+        ...current,
+        [groupKey]: nextExpanded,
+      };
+    });
   };
 
   const renderOrderCard = (order: Order) => {
