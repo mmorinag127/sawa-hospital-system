@@ -1482,21 +1482,22 @@ export default function MonthlyMenuEditorPage() {
         </div>
       )}
 
-      <section className="panel">
-        <header className="panel-header">
-          <div>
-            <h2>メニューマスター差分チェック</h2>
-            <p className="subtle">
-              月次メニューとメニューマスターを突き合わせ、新規登録が必要なものと、マスター更新が必要な差分を確認します。
-            </p>
-          </div>
-        </header>
-        {masterCheckNotice && <p className="message">{masterCheckNotice}</p>}
-        <p className="subtle">検出件数: {masterCheckState.issues.length}</p>
-        {masterCheckState.issues.length === 0 ? (
-          <p className="subtle">差分はありません。</p>
-        ) : (
-          <div className="review-list">
+      <div className="panel-row master-tools-row">
+        <section className="panel master-check-panel">
+          <header className="panel-header">
+            <div>
+              <h2>メニューマスター差分チェック</h2>
+              <p className="subtle">
+                月次メニューとメニューマスターを突き合わせ、新規登録が必要なものと、マスター更新が必要な差分を確認します。
+              </p>
+            </div>
+          </header>
+          {masterCheckNotice && <p className="message">{masterCheckNotice}</p>}
+          <p className="subtle">検出件数: {masterCheckState.issues.length}</p>
+          {masterCheckState.issues.length === 0 ? (
+            <p className="subtle">差分はありません。</p>
+          ) : (
+            <div className="review-list">
             {masterCheckState.issues.map((issue, index) => {
               const issueKey = getReviewIssueKey(issue, index);
               const resolution = masterCheckState.resolutions[issueKey];
@@ -1913,23 +1914,26 @@ export default function MonthlyMenuEditorPage() {
                 </article>
               );
             })}
-          </div>
-        )}
-      </section>
+            </div>
+          )}
+        </section>
 
-      <section className="panel">
-        <header className="panel-header">
-          <h2>付属品フラグ</h2>
-          <p className="subtle">献立メニューからソース等の付属品フラグを反映します。</p>
-        </header>
-        <div className="upload-actions">
-          <input type="file" onChange={(e) => setCondimentFile(e.target.files?.[0] || null)} />
-          <button className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
-            {condimentUploading ? "反映中..." : "反映する"}
-          </button>
-        </div>
-        {condimentMessage && <p className="message">{condimentMessage}</p>}
-      </section>
+        <section className="panel condiment-panel">
+          <header className="panel-header">
+            <div>
+              <h2>付属品フラグ</h2>
+              <p className="subtle">献立メニューからソース等の付属品フラグを反映します。</p>
+            </div>
+          </header>
+          <div className="upload-actions condiment-actions">
+            <input type="file" onChange={(e) => setCondimentFile(e.target.files?.[0] || null)} />
+            <button className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
+              {condimentUploading ? "反映中..." : "反映する"}
+            </button>
+          </div>
+          {condimentMessage && <p className="message">{condimentMessage}</p>}
+        </section>
+      </div>
 
       <section className="panel">
         <header className="panel-header">
@@ -2427,7 +2431,7 @@ export default function MonthlyMenuEditorPage() {
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
-          font-family: "Manrope", "Noto Sans JP", sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
         }
 
         :global(*) {
@@ -2540,6 +2544,34 @@ export default function MonthlyMenuEditorPage() {
           border: 1px solid rgba(25, 32, 30, 0.08);
           box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
           margin-bottom: 20px;
+        }
+
+        .panel-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+          gap: 20px;
+          align-items: start;
+          margin-bottom: 20px;
+        }
+
+        .panel-row .panel {
+          margin-bottom: 0;
+        }
+
+        .master-check-panel {
+          min-width: 0;
+        }
+
+        .condiment-panel {
+          min-width: 0;
+        }
+
+        .condiment-actions {
+          align-items: stretch;
+        }
+
+        .condiment-actions input[type="file"] {
+          width: 100%;
         }
 
         .panel-header {
@@ -3069,6 +3101,10 @@ export default function MonthlyMenuEditorPage() {
           .master-check-compare {
             grid-template-columns: 1fr;
           }
+
+          .panel-row {
+            grid-template-columns: 1fr;
+          }
         }
 
         @media (max-width: 720px) {
@@ -3091,9 +3127,6 @@ export default function MonthlyMenuEditorPage() {
             justify-content: stretch;
           }
         }
-      `}</style>
-      <style jsx global>{`
-        @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
     </main>
   );
