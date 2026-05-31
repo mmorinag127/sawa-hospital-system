@@ -217,6 +217,8 @@ export default function TopNav() {
       <style jsx>{`
         .top-nav-wrap {
           display: block;
+          flex: 0 0 100%;
+          min-width: 0;
           width: 100%;
         }
 
