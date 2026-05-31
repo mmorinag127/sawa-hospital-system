@@ -695,6 +695,13 @@ export default function PdfUploadPage() {
           color: #1f2a2a;
           font-family: "Manrope", "Noto Sans JP", sans-serif;
         }
+        :global(*) {
+          box-sizing: border-box;
+        }
+        :global(a) {
+          color: inherit;
+          text-decoration: none;
+        }
         .page {
           min-height: 100vh;
           padding: 48px 6vw 80px;
@@ -704,7 +711,7 @@ export default function PdfUploadPage() {
           flex-wrap: wrap;
           justify-content: space-between;
           gap: 24px;
-          align-items: flex-start;
+          align-items: center;
           margin-bottom: 32px;
         }
         .eyebrow {
