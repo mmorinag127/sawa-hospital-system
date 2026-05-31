@@ -222,6 +222,10 @@ export default function TopNav() {
           width: 100%;
         }
 
+        :global(.hero > div:first-child) {
+          min-height: 126px;
+        }
+
         .top-nav-groups {
           display: grid;
           gap: 10px;
