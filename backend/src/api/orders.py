@@ -1094,16 +1094,21 @@ def list_orders(
     include_runtime: bool | None = None,
     include_candidate_summary: bool = False,
     limit: int | None = Query(default=None, ge=1, le=1000),
+    before_received_at: str | None = None,
+    before_id: str | None = None,
 ):
     include_archived_flag = True if include_archived is None else include_archived
-    orders = order_service.list_orders(
+    page = order_service.list_orders_page(
         status=status,
         include_archived=include_archived_flag,
         limit=limit,
+        before_received_at=before_received_at,
+        before_id=before_id,
     )
+    orders = page["orders"]
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
-        return {"orders": orders}
+        return page
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     lightweight_mode = include_ocr is False
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
@@ -1191,7 +1196,8 @@ def list_orders(
                 ocr_job=review_job,
             )
             _attach_order_workflow_context(order, refresh=False)
-    return {"orders": orders}
+    page["orders"] = orders
+    return page
 
 
 @router.post("/cache-refresh", dependencies=[Depends(require_role("admin"))])

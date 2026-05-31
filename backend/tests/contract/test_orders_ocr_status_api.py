@@ -915,6 +915,39 @@ def test_list_orders_applies_limit_after_database_ordering():
     assert [row.get("id") for row in rows] == ["ORDlimit2", "ORDlimit1"]
 
 
+def test_list_orders_page_uses_cursor_for_next_page():
+    order_service.clear_all()
+    with session_scope() as session:
+        for index in range(5):
+            session.add(
+                Order(
+                    id=f"ORDpage{index}",
+                    facility_code="FAC00001",
+                    week_code="2026-02",
+                    status="要確認",
+                    document_uri=f"file://dummy-page-{index}.pdf",
+                    message_id=f"msg-status-api-page-{index}",
+                    received_at=datetime(2026, 2, 15, 9, index, 0),
+                )
+            )
+
+    first_page = order_service.list_orders_page(include_archived=False, limit=2)
+    assert [row.get("id") for row in first_page["orders"]] == ["ORDpage4", "ORDpage3"]
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] == {
+        "received_at": datetime(2026, 2, 15, 9, 3, 0).isoformat(),
+        "id": "ORDpage3",
+    }
+
+    second_page = order_service.list_orders_page(
+        include_archived=False,
+        limit=2,
+        before_received_at=first_page["next_cursor"]["received_at"],
+        before_id=first_page["next_cursor"]["id"],
+    )
+    assert [row.get("id") for row in second_page["orders"]] == ["ORDpage2", "ORDpage1"]
+
+
 def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
     order_service.clear_all()
     order = _create_seed_order("msg-status-api-confirm-block")

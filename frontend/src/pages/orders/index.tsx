@@ -74,6 +74,11 @@ type Order = {
   ocr_pages_count?: number | null;
 };
 
+type OrderListCursor = {
+  received_at?: string | null;
+  id?: string | null;
+};
+
 type WeekGroup = {
   key: string;
   label: string;
@@ -129,7 +134,22 @@ const effectiveOrderStatus = (order: Order) => {
   return String(order.status || "").trim();
 };
 
-const ORDER_LIST_FETCH_LIMIT = 500;
+const ORDER_LIST_PAGE_SIZE = 100;
+
+const mergeOrdersById = (current: Order[], incoming: Order[]) => {
+  const byId = new Map<string, Order>();
+  current.forEach((order) => {
+    const key = String(order.id || order.document || "").trim();
+    if (key) byId.set(key, order);
+  });
+  incoming.forEach((order) => {
+    const key = String(order.id || order.document || "").trim();
+    if (!key) return;
+    const existing = byId.get(key);
+    byId.set(key, existing ? { ...existing, ...order } : order);
+  });
+  return Array.from(byId.values()).sort(compareOrdersByReceivedAt);
+};
 
 const normalizeWeekGroup = (order: Order) => {
   const candidateWeek = order.candidate_resolution?.resolutions?.week;
@@ -223,8 +243,11 @@ export default function OrdersPage() {
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [isHydratingRuntime, setIsHydratingRuntime] = useState<boolean>(false);
   const [runtimeHydrated, setRuntimeHydrated] = useState<boolean>(false);
+  const [nextCursor, setNextCursor] = useState<OrderListCursor | null>(null);
+  const [hasMoreOrders, setHasMoreOrders] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
   const [archiveNotice, setArchiveNotice] = useState<string>("");
   const [archiveError, setArchiveError] = useState<string>("");
@@ -266,24 +289,29 @@ export default function OrdersPage() {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
-          limit: ORDER_LIST_FETCH_LIMIT,
+          limit: ORDER_LIST_PAGE_SIZE,
         }
       : {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
-          limit: ORDER_LIST_FETCH_LIMIT,
+          limit: ORDER_LIST_PAGE_SIZE,
         };
     setIsLoading(true);
     setLoadError("");
     setIsHydratingRuntime(false);
     setRuntimeHydrated(false);
+    setNextCursor(null);
+    setHasMoreOrders(false);
+    setExpandedWeekGroups({});
     apiClient
       .get("/orders", { params })
       .then((res) => {
         if (cancelled) return;
-        const baseOrders = res.data.orders || [];
+        const baseOrders = Array.isArray(res.data?.orders) ? res.data.orders : [];
         setOrders(baseOrders);
+        setNextCursor(res.data?.next_cursor || null);
+        setHasMoreOrders(Boolean(res.data?.has_more && res.data?.next_cursor));
         setIsLoading(false);
       })
       .catch((err) => {
@@ -304,19 +332,64 @@ export default function OrdersPage() {
     };
   }, [statusFilter, reloadToken, showArchived]);
 
+  const loadMoreOrders = useCallback(async () => {
+    if (isLoading || isLoadingMore || !hasMoreOrders || !nextCursor) return;
+    const cursorReceivedAt = String(nextCursor.received_at || "").trim();
+    const cursorId = String(nextCursor.id || "").trim();
+    if (!cursorReceivedAt || !cursorId) return;
+    const params = statusFilter
+      ? {
+          status: statusFilter,
+          include_ocr: false,
+          include_archived: showArchived,
+          include_runtime: false,
+          limit: ORDER_LIST_PAGE_SIZE,
+          before_received_at: cursorReceivedAt,
+          before_id: cursorId,
+        }
+      : {
+          include_ocr: false,
+          include_archived: showArchived,
+          include_runtime: false,
+          limit: ORDER_LIST_PAGE_SIZE,
+          before_received_at: cursorReceivedAt,
+          before_id: cursorId,
+        };
+    setIsLoadingMore(true);
+    setLoadError("");
+    try {
+      const res = await apiClient.get("/orders", { params });
+      const incomingOrders = Array.isArray(res.data?.orders) ? res.data.orders : [];
+      setOrders((current) => mergeOrdersById(current, incomingOrders));
+      setNextCursor(res.data?.next_cursor || null);
+      setHasMoreOrders(Boolean(res.data?.has_more && res.data?.next_cursor));
+      setRuntimeHydrated(false);
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "追加の注文データの取得に失敗しました。";
+      setLoadError(String(detail));
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [hasMoreOrders, isLoading, isLoadingMore, nextCursor, showArchived, statusFilter]);
+
   const hydrateRuntimeOrders = useCallback(async () => {
     if (runtimeHydrated || isHydratingRuntime) return;
+    const runtimeLimit = Math.min(Math.max(orders.length, ORDER_LIST_PAGE_SIZE), 1000);
     const runtimeParams = statusFilter
       ? {
           status: statusFilter,
           include_ocr: false,
           include_archived: showArchived,
-          limit: ORDER_LIST_FETCH_LIMIT,
+          limit: runtimeLimit,
         }
       : {
           include_ocr: false,
           include_archived: showArchived,
-          limit: ORDER_LIST_FETCH_LIMIT,
+          limit: runtimeLimit,
         };
     setIsHydratingRuntime(true);
     try {
@@ -340,7 +413,7 @@ export default function OrdersPage() {
     } finally {
       setIsHydratingRuntime(false);
     }
-  }, [isHydratingRuntime, runtimeHydrated, showArchived, statusFilter]);
+  }, [isHydratingRuntime, orders.length, runtimeHydrated, showArchived, statusFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -998,7 +1071,8 @@ export default function OrdersPage() {
         <header className="panel-header">
           <h2>フィルタ</h2>
           <span className="badge">
-            合計 {filteredOrders.length} 件
+            表示 {filteredOrders.length} 件
+            {hasMoreOrders ? " / 追加あり" : ""}
             {isHydratingRuntime ? " / 補足情報を取得中" : ""}
           </span>
         </header>
@@ -1099,6 +1173,13 @@ export default function OrdersPage() {
           ) : (
             weekGroups.map((group) => renderWeekGroup(group))
           )}
+          {!isLoading && !loadError && hasMoreOrders ? (
+            <div className="load-more-row">
+              <button className="retry-button" type="button" onClick={loadMoreOrders} disabled={isLoadingMore}>
+                {isLoadingMore ? "読み込み中..." : `さらに ${ORDER_LIST_PAGE_SIZE} 件読み込む`}
+              </button>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -1244,6 +1325,12 @@ export default function OrdersPage() {
         :global(.week-groups) {
           display: grid;
           gap: 18px;
+        }
+
+        .load-more-row {
+          display: flex;
+          justify-content: center;
+          padding: 8px 0 2px;
         }
 
         :global(.week-group) {

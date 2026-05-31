@@ -4701,13 +4701,34 @@ def _normalize_order_list_limit(limit: int | None) -> int | None:
     return min(normalized, 1000)
 
 
+def _parse_order_list_cursor_received_at(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _normalize_order_list_cursor_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
 def _fetch_orders(
     status: Optional[str],
     *,
     include_archived: bool = True,
     limit: int | None = None,
+    before_received_at: str | None = None,
+    before_id: str | None = None,
 ) -> list[dict]:
     normalized_limit = _normalize_order_list_limit(limit)
+    cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
+    cursor_id = _normalize_order_list_cursor_id(before_id)
     with session_scope() as session:
         query = select(
             Order.id,
@@ -4727,6 +4748,16 @@ def _fetch_orders(
             query = query.where(Order.status == status)
         if not include_archived:
             query = query.where(Order.archived_at.is_(None))
+        if cursor_received_at is not None:
+            if cursor_id:
+                query = query.where(
+                    or_(
+                        Order.received_at < cursor_received_at,
+                        (Order.received_at == cursor_received_at) & (Order.id < cursor_id),
+                    )
+                )
+            else:
+                query = query.where(Order.received_at < cursor_received_at)
         query = query.order_by(Order.received_at.desc(), Order.id.desc())
         if normalized_limit is not None:
             query = query.limit(normalized_limit)
@@ -4759,27 +4790,38 @@ def _fetch_orders(
                 }
             )
         if not status or status == "アップロード済み":
+            upload_query = select(
+                UploadedPdf.id,
+                UploadedPdf.message_id,
+                UploadedPdf.original_filename,
+                UploadedPdf.storage_uri,
+                UploadedPdf.received_at,
+                UploadedPdf.facility_hint,
+                UploadedPdf.week_hint,
+                UploadedPdf.facility_name,
+                UploadedPdf.status,
+                UploadedPdf.current_stage,
+                UploadedPdf.current_order_id,
+                UploadedPdf.current_document_id,
+                UploadedPdf.last_error_code,
+                UploadedPdf.last_error_message,
+            ).where(UploadedPdf.current_order_id.is_(None))
+            if cursor_received_at is not None:
+                if cursor_id:
+                    upload_cursor_id = cursor_id.removeprefix("UPLOAD-")
+                    upload_query = upload_query.where(
+                        or_(
+                            UploadedPdf.received_at < cursor_received_at,
+                            (UploadedPdf.received_at == cursor_received_at) & (UploadedPdf.id < upload_cursor_id),
+                        )
+                    )
+                else:
+                    upload_query = upload_query.where(UploadedPdf.received_at < cursor_received_at)
             uploaded_rows = (
                 session.execute(
-                    select(
-                        UploadedPdf.id,
-                        UploadedPdf.message_id,
-                        UploadedPdf.original_filename,
-                        UploadedPdf.storage_uri,
-                        UploadedPdf.received_at,
-                        UploadedPdf.facility_hint,
-                        UploadedPdf.week_hint,
-                        UploadedPdf.facility_name,
-                        UploadedPdf.status,
-                        UploadedPdf.current_stage,
-                        UploadedPdf.current_order_id,
-                        UploadedPdf.current_document_id,
-                        UploadedPdf.last_error_code,
-                        UploadedPdf.last_error_message,
+                    upload_query.order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc()).limit(
+                        min(200, normalized_limit) if normalized_limit is not None else 200
                     )
-                    .where(UploadedPdf.current_order_id.is_(None))
-                    .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
-                    .limit(min(200, normalized_limit) if normalized_limit is not None else 200)
                 )
                 .mappings()
                 .all()
@@ -4838,6 +4880,21 @@ def _fetch_orders(
         return payloads
 
 
+def build_order_list_cursor(orders: list[dict]) -> dict[str, str] | None:
+    if not orders:
+        return None
+    last = orders[-1]
+    received_at = last.get("received_at")
+    if isinstance(received_at, datetime):
+        received_at_value = received_at.isoformat()
+    else:
+        received_at_value = str(received_at or "").strip()
+    order_id = str(last.get("id") or "").strip()
+    if not received_at_value or not order_id:
+        return None
+    return {"received_at": received_at_value, "id": order_id}
+
+
 def _order_list_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
     received_at = item.get("received_at")
     if isinstance(received_at, str):
@@ -4879,6 +4936,38 @@ def list_orders(
     with _orders_cache_lock:
         _orders_cache[key] = (time.time(), orders)
     return orders
+
+
+def list_orders_page(
+    status: Optional[str] = None,
+    *,
+    include_archived: bool = True,
+    limit: int | None = None,
+    before_received_at: str | None = None,
+    before_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_limit = _normalize_order_list_limit(limit)
+    cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
+    cursor_id = _normalize_order_list_cursor_id(before_id)
+    if cursor_received_at is None and cursor_id:
+        cursor_id = ""
+    has_cursor = cursor_received_at is not None
+    if not has_cursor:
+        orders = list_orders(status=status, include_archived=include_archived, limit=normalized_limit)
+    else:
+        orders = _fetch_orders(
+            status,
+            include_archived=include_archived,
+            limit=normalized_limit,
+            before_received_at=cursor_received_at.isoformat(),
+            before_id=cursor_id,
+        )
+    has_more = normalized_limit is not None and len(orders) >= normalized_limit
+    return {
+        "orders": orders,
+        "next_cursor": build_order_list_cursor(orders) if has_more else None,
+        "has_more": has_more,
+    }
 
 
 def refresh_orders_cache(
