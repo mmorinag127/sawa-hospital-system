@@ -1084,19 +1084,54 @@ def _build_upload_menu_master_plan(
     if not normalized:
         raise ValueError("name is required")
     exact_master = _find_menu_master_by_normalized(session, normalized)
+    resolution = resolution if isinstance(resolution, dict) else None
     if exact_master and require_bagging_review:
         bagging_issue = _build_bagging_setting_issue(session, name, seed_patch, exact_master)
-        if bagging_issue:
+        if bagging_issue and not resolution:
             bagging_issue["reason"] = "bagging_settings_missing"
             return {"issue": bagging_issue}
     if exact_master:
+        if resolution:
+            action = str(resolution.get("action") or "").strip().lower()
+            if action in {"update", "create"}:
+                update_patch = dict(seed_patch or {})
+                update_patch.update(_extract_master_patch(resolution, _MASTER_FIELDS))
+                if require_bagging_review and _bagging_settings_missing(update_patch):
+                    raise ValueError(f"menu master update requires bag_max_qty and bag_max_unit for bagging units: {name}")
+                return {
+                    "action": "update",
+                    "menu_master_id": exact_master.id,
+                    "seed_fields": update_patch,
+                }
+            if action == "existing":
+                selected_id = str(resolution.get("menu_master_id") or "").strip()
+                if selected_id and selected_id != exact_master.id:
+                    selected = session.get(MenuMaster, selected_id)
+                    if not selected:
+                        raise ValueError(f"menu master candidate not found: {name}")
+                    return {
+                        "action": "existing",
+                        "menu_master_id": selected.id,
+                        "seed_fields": dict(seed_patch or {}),
+                    }
+                if require_bagging_review and _bagging_settings_missing(
+                    {
+                        **dict(seed_patch or {}),
+                        "unit_type": exact_master.unit_type,
+                        "qty_per_serving": exact_master.qty_per_serving,
+                        "bag_max_qty": exact_master.bag_max_qty,
+                        "bag_max_unit": exact_master.bag_max_unit,
+                    }
+                ):
+                    raise ValueError(f"menu master existing requires bag_max_qty and bag_max_unit for bagging units: {name}")
+            elif action not in {"", "create"}:
+                raise ValueError(f"unknown menu master resolution action: {name}")
         return {
             "action": "existing",
             "menu_master_id": exact_master.id,
             "seed_fields": dict(seed_patch or {}),
         }
 
-    resolution = resolution if isinstance(resolution, dict) else None
     if resolution:
         action = str(resolution.get("action") or "").strip().lower()
         if action == "existing":

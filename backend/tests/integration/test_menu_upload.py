@@ -1439,6 +1439,75 @@ def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch
     assert payload["master_checks"]["issues"] == []
 
 
+def test_monthly_menu_upload_applies_review_resolution_to_existing_master_bagging_gap(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(
+            MenuMaster(
+                id="MNU_EXISTING_CUT",
+                name="鮭切身",
+                normalized_name=menu_service._normalize_menu_name("鮭切身"),
+                unit_type="cut",
+                qty_per_serving=1,
+            )
+        )
+
+    def _parse_existing_cut_menu(*_args, **_kwargs):
+        return None, None, [{"name": "鮭切身", "unit_type": "cut", "qty_per_serving": 1}], [
+            {"menu_date": date(2026, 7, 1), "daypart": "昼", "name": "鮭切身", "slot_index": 0},
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_existing_cut_menu)
+
+    try:
+        menu_service.create_menu(
+            "2026-07",
+            b"dummy",
+            "menu.xlsx",
+            require_menu_master_review=True,
+        )
+        assert False, "expected menu master review"
+    except menu_service.MenuMasterResolutionRequired as exc:
+        assert exc.issues[0]["reason"] == "bagging_settings_missing"
+        assert exc.issues[0]["current_master"]["id"] == "MNU_EXISTING_CUT"
+
+    menu_service.create_menu(
+        "2026-07",
+        b"dummy",
+        "menu.xlsx",
+        require_menu_master_review=True,
+        menu_master_resolutions=[
+            {
+                "source_name": "鮭切身",
+                "action": "update",
+                "menu_master_id": "MNU_EXISTING_CUT",
+                "unit_type": "cut",
+                "qty_per_serving": 1,
+                "bag_max_qty": 20,
+                "bag_max_unit": "cut",
+            }
+        ],
+    )
+
+    payload = menu_service.get_menu("2026-07")
+    assert payload is not None
+    item = payload["items"][0]
+    assert item["menu_master_id"] == "MNU_EXISTING_CUT"
+    assert item["bag_max_qty"] == 20
+    assert item["bag_max_unit"] == "cut"
+    assert payload["master_checks"]["issues"] == []
+    with session_scope() as session:
+        master = session.get(MenuMaster, "MNU_EXISTING_CUT")
+        assert master is not None
+        assert master.bag_max_qty == 20
+        assert master.bag_max_unit == "cut"
+
+
 def test_monthly_menu_lists_existing_condiment_bagging_gaps():
     with session_scope() as session:
         session.query(AuditLog).delete()
