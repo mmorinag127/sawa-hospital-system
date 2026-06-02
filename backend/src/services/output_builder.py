@@ -2009,6 +2009,7 @@ def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | N
 
 def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     product_name = bag.get("menu_name") or ""
+    expiry_value = _resolve_label_expiry_date(bag.get("date"), label_profile)
     default_daypart, _default_category, default_temp, default_qty, default_unit = _label_menu_defaults(product_name)
     raw_per_qty = bag.get("menu_qty_per_serving")
     raw_unit = bag.get("menu_unit_type")
@@ -2036,10 +2037,20 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     time_value = str(bag.get("daypart") or default_daypart or "").strip()
     if area_suffix:
         time_value = f"{time_value}　{area_suffix}".strip()
+    source_refs = bag.get("_source_refs") or bag.get("source_refs") or []
+    source_row_indexes: list[int] = []
+    if isinstance(source_refs, list):
+        for ref in source_refs:
+            if not isinstance(ref, dict):
+                continue
+            try:
+                source_row_indexes.append(int(ref.get("source_row_index")))
+            except Exception:
+                continue
     return {
         "呼び出し番号": "",
         "発行枚数": 1,
-        "賞味期限": _resolve_label_expiry_date(bag.get("date"), label_profile),
+        "賞味期限": _format_jp_date(expiry_value),
         "時間": time_value,
         "メニュー": menu_value,
         "温・冷": _normalize_temp_label(bag.get("menu_temp_type") or default_temp),
@@ -2048,6 +2059,10 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
         "内容量": total_amount,
         "内容詳細": _daily_label_amount_cell(per_qty, unit),
         "": _format_servings(servings),
+        "_sort_date": expiry_value.isoformat() if hasattr(expiry_value, "isoformat") else str(expiry_value or ""),
+        "_sort_source_row": min(source_row_indexes) if source_row_indexes else None,
+        "_sort_diet": _daily_label_display_diet_key(bag),
+        "_sort_area": _normalize_area_id(bag.get("area_id")) or "",
     }
 
 
@@ -2084,6 +2099,16 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         "副菜（ミキサー）": 11,
         "ソース": 12,
     }
+    diet_order = {
+        "": 0,
+        "regular": 0,
+        "regular_bag": 0,
+        "standard": 0,
+        "soft": 1,
+        "soft_mixer": 1,
+        "mixer": 2,
+    }
+    area_order = {"": 0, "X": 0, "2F": 1, "3F": 2}
 
     def split_time_text(value: Any) -> tuple[str, str]:
         text = str(value or "").strip()
@@ -2123,20 +2148,47 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
             return "副菜"
         return text
 
+    def variant_for_sort(value: Any, explicit_diet: Any = None) -> str:
+        diet = str(explicit_diet or "").strip()
+        if diet:
+            return diet
+        text = str(value or "").strip()
+        if "ミキサー" in text:
+            return "mixer"
+        if "軟菜" in text:
+            return "soft"
+        return "regular"
+
+    def area_for_sort(row: dict, time_text: str) -> str:
+        explicit = str(row.get("_sort_area") or "").strip()
+        if explicit:
+            return explicit
+        _daypart, area = split_time_text(time_text)
+        normalized = _normalize_area_id(area)
+        return normalized or area
+
     def sort_key(row: dict) -> tuple:
         time_text = str(row.get("時間") or "")
         daypart, area = split_time_text(time_text)
         category = normalize_category_for_sort(row.get("メニュー"))
+        variant = variant_for_sort(row.get("メニュー"), row.get("_sort_diet"))
+        area_key = area_for_sort(row, time_text)
+        try:
+            source_row_sort = int(row.get("_sort_source_row"))
+        except Exception:
+            source_row_sort = 999999
         try:
             serving_sort = -float(row.get("") or 0)
         except Exception:
             serving_sort = 0
         return (
-            row.get("賞味期限", ""),
+            row.get("_sort_date") or row.get("賞味期限", ""),
             daypart_order.get(daypart, 99),
-            category_order.get(category, 99),
+            source_row_sort,
             row.get("商品名１", ""),
-            area,
+            category_order.get(category, 99),
+            diet_order.get(variant, 50),
+            area_order.get(area_key, 50),
             time_text,
             serving_sort,
         )
@@ -2144,6 +2196,10 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
     merged.sort(
         key=sort_key
     )
+    for row in merged:
+        for key in list(row.keys()):
+            if str(key).startswith("_sort_"):
+                row.pop(key, None)
     return merged
 
 

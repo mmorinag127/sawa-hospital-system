@@ -134,6 +134,144 @@ def test_daily_label_facility_config_overrides_default_comparable_diets():
     assert _label_menu_values_for_bags(bags) == ["主菜（職員）"]
 
 
+def test_daily_labels_format_expiry_date_in_japanese_style():
+    labels, fields, label_format = output_builder._build_label_rows(
+        [
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-25",
+                "daypart": "夕",
+                "menu_name": "豆腐ハンバーグ和風あん",
+                "menu_category": "主菜",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity": 3,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+            }
+        ],
+        {},
+        None,
+    )
+
+    assert label_format == "jp"
+    assert "賞味期限" in fields
+    assert labels[0]["賞味期限"] == "2026年5月25日"
+
+
+def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "mixer",
+                "area_id": "2F",
+                "quantity": 2,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "オクラのおろし和え",
+                "menu_category": "副菜①",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity": 3,
+                "menu_qty_per_serving": 40,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 13}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "regular",
+                "area_id": "3F",
+                "quantity": 5,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "2F",
+                "quantity": 3,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity": 3,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "mixer",
+                "area_id": "3F",
+                "quantity": 2,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+            {
+                "facility": "FAC00009",
+                "date": "2026-05-24",
+                "daypart": "昼",
+                "menu_name": "豚肉の生姜炒め",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "3F",
+                "quantity": 2,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+                "_source_refs": [{"source_row_index": 12}],
+            },
+        ],
+        {},
+        None,
+    )
+
+    assert [
+        (row["商品名１"], row["メニュー"], row["時間"])
+        for row in labels
+    ] == [
+        ("豚肉の生姜炒め", "主菜", "昼　2階"),
+        ("豚肉の生姜炒め", "主菜", "昼　3階"),
+        ("豚肉の生姜炒め", "主菜（軟菜）", "昼　2階"),
+        ("豚肉の生姜炒め", "主菜（軟菜）", "昼　3階"),
+        ("豚肉の生姜炒め", "主菜（ミキサー）", "昼　2階"),
+        ("豚肉の生姜炒め", "主菜（ミキサー）", "昼　3階"),
+        ("オクラのおろし和え", "副菜①", "昼　2階"),
+    ]
+
+
 def test_output_diet_type_override_maps_diabetes_to_regular(monkeypatch):
     facility_config = {
         "fax_template_override": {
