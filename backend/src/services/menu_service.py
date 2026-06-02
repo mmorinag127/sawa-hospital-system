@@ -1827,6 +1827,7 @@ def create_menu(
     parsed_items: list[dict] = []
     entries: list[dict] = []
     month_start = None
+    parse_error: ValueError | None = None
     try:
         month_start, _, parsed_items, entries = _parse_monthly_menu(
             file_bytes,
@@ -1834,7 +1835,8 @@ def create_menu(
             sheet_name,
             month_id,
         )
-    except ValueError:
+    except ValueError as exc:
+        parse_error = exc
         parsed_items = []
         entries = []
     parsed_month_id = _month_id_from_date(month_start)
@@ -1845,6 +1847,9 @@ def create_menu(
         names = [item["name"] for item in parsed_items]
     else:
         names = _extract_menu_names(file_bytes, filename, sheet_name)
+    if require_menu_master_review and not entries:
+        detail = str(parse_error) if parse_error else "日付別献立の行が見つかりません"
+        raise ValueError(f"monthly_menu_entries_missing:{detail}")
     deduped_names: list[str] = []
     seen_normalized_names: set[str] = set()
     for raw_name in names:
@@ -2024,14 +2029,23 @@ def _format_menu_upload_display(created_at: datetime | None) -> str | None:
     return f"{created_at.astimezone(_JST).strftime('%Y/%m/%d %H:%M')} アップロード"
 
 
-def _get_latest_menu_upload_log(session, month_id: str) -> AuditLog | None:
-    return (
+def _is_scoped_menu_upload_log(log: AuditLog) -> bool:
+    metadata = dict(log.metadata_json or {})
+    return bool(str(metadata.get("scope_override") or "").strip())
+
+
+def _get_latest_menu_upload_log(session, month_id: str, *, include_scoped: bool = False) -> AuditLog | None:
+    logs = (
         session.query(AuditLog)
         .filter(AuditLog.action == "menu_upload")
         .filter(AuditLog.target == month_id)
         .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        .first()
+        .all()
     )
+    for log in logs:
+        if include_scoped or not _is_scoped_menu_upload_log(log):
+            return log
+    return None
 
 
 def get_menu_upload_download(month_id: str, upload_id: str) -> dict | None:
@@ -2744,13 +2758,21 @@ def _get_menu_direct(month_id: str) -> dict | None:
             if menu
             else _serialize_synthetic_menu(month_id, latest_upload_log)
         )
-        items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
+        items = (
+            session.query(MonthlyMenuItem)
+            .filter(MonthlyMenuItem.monthly_menu_id == month_id)
+            .filter(or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == ""))
+            .all()
+        )
         entries = (
             session.query(MonthlyMenuEntry)
             .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .filter(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
             .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
             .all()
         )
+        if menu and not items and not entries and not latest_upload_log and not menu.month_start:
+            return None
         if not menu and not items and not entries:
             return None
         payload = [serialize_item(i) for i in items]
@@ -2951,10 +2973,32 @@ def list_recent_menus(limit: int = 12) -> list[dict]:
         rows = (
             session.query(MonthlyMenu)
             .order_by(MonthlyMenu.month_start.desc().nullslast(), MonthlyMenu.id.desc())
-            .limit(normalized_limit)
+            .limit(normalized_limit * 3)
             .all()
         )
-        return [serialize_menu(row, _get_latest_menu_upload_log(session, row.id)) for row in rows]
+        results: list[dict] = []
+        for row in rows:
+            latest_upload_log = _get_latest_menu_upload_log(session, row.id)
+            has_base_item = (
+                session.query(MonthlyMenuItem.id)
+                .filter(MonthlyMenuItem.monthly_menu_id == row.id)
+                .filter(or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == ""))
+                .first()
+                is not None
+            )
+            has_base_entry = (
+                session.query(MonthlyMenuEntry.id)
+                .filter(MonthlyMenuEntry.monthly_menu_id == row.id)
+                .filter(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
+                .first()
+                is not None
+            )
+            if not latest_upload_log and not has_base_item and not has_base_entry and not row.month_start:
+                continue
+            results.append(serialize_menu(row, latest_upload_log))
+            if len(results) >= normalized_limit:
+                break
+        return results
 
 
 def get_latest_menu() -> dict | None:

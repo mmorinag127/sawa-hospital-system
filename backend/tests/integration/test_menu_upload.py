@@ -299,9 +299,55 @@ def test_create_menu_scope_upload_replaces_only_target_scope(monkeypatch):
 
     payload = menu_service.get_menu("2026-03")
     assert payload is not None
-    all_entries = payload["entries"]
-    assert any(entry["name"] == "BaseA" and not entry.get("facility_override") for entry in all_entries)
-    assert any(entry["name"] == "ScopedA" and entry.get("facility_override") == "FAC00008" for entry in all_entries)
+    base_entries = payload["entries"]
+    assert any(entry["name"] == "BaseA" and not entry.get("facility_override") for entry in base_entries)
+    assert not any(entry["name"] == "ScopedA" for entry in base_entries)
+
+    scoped_payload = menu_service.get_menu_for_facility("2026-03", "FAC00008")
+    assert scoped_payload is not None
+    scoped_entries = scoped_payload["entries"]
+    assert any(entry["name"] == "ScopedA" and entry.get("facility_override") == "FAC00008" for entry in scoped_entries)
+
+
+def test_monthly_menu_review_upload_rejects_files_without_daily_entries(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+    with pytest.raises(ValueError, match="monthly_menu_entries_missing"):
+        menu_service.create_menu(
+            "2026-06",
+            b"menu\nMenuA\n",
+            "menu.csv",
+            require_menu_master_review=True,
+        )
+
+    assert menu_service.get_menu("2026-06") is None
+
+
+def test_scoped_upload_does_not_pollute_base_menu_display_or_recent_list(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+    menu_service.create_menu(
+        "2099-06",
+        b"menu\nScopedOnly\n",
+        "scoped-only.csv",
+        scope_override="TAG:codex-review",
+        menu_master_resolutions=[_create_resolution("ScopedOnly")],
+    )
+
+    assert menu_service.get_menu("2099-06") is None
+    assert [row["id"] for row in menu_service.list_recent_menus(limit=12)] == []
 
 
 def test_get_menu_for_facility_resolves_tag_and_entry_scope():
