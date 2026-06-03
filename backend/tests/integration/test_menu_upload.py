@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import menu_service
+from src.services import output_builder
 from src.db import session_scope
 from src.models.menu import MonthlyMenu, MonthlyMenuItem, MonthlyMenuEntry, MenuMaster, MenuFacilityOverride
 from src.models.facility import Facility, FacilityConfig
@@ -139,6 +140,134 @@ def test_create_menu_blocks_file_month_mismatch(monkeypatch):
     with session_scope() as session:
         assert session.get(MonthlyMenu, "2026-03") is None
         assert session.query(MonthlyMenuEntry).count() == 0
+
+
+def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(
+            MenuMaster(
+                id="MNU_GERMAN_POTATO",
+                name="ジャーマンポテト",
+                normalized_name=menu_service._normalize_menu_name("ジャーマンポテト"),
+                unit_type="g",
+                qty_per_serving=40,
+                daypart="昼食",
+                category="副菜",
+            )
+        )
+
+    def _parse_same_name_menu(*_args, **_kwargs):
+        return date(2026, 6, 1), None, [
+            {
+                "name": "ジャーマンポテト",
+                "daypart": "朝食",
+                "category": "主菜",
+                "unit_type": "g",
+                "qty_per_serving": 70,
+            },
+            {
+                "name": "ジャーマンポテト",
+                "daypart": "昼食",
+                "category": "副菜",
+                "unit_type": "g",
+                "qty_per_serving": 40,
+            },
+        ], [
+            {
+                "menu_date": date(2026, 6, 1),
+                "daypart": "朝食",
+                "name": "ジャーマンポテト",
+                "category": "主菜",
+                "slot_index": 0,
+            },
+            {
+                "menu_date": date(2026, 6, 1),
+                "daypart": "昼食",
+                "name": "ジャーマンポテト",
+                "category": "副菜",
+                "slot_index": 1,
+            },
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_same_name_menu)
+
+    menu_service.create_menu("2026-06", b"dummy", "menu.xlsx")
+
+    items = sorted(
+        menu_service.get_menu_items("2026-06"),
+        key=lambda item: ({"朝食": 0, "昼食": 1, "夕食": 2}.get(item["daypart"], 99), item["category"] or ""),
+    )
+    assert len(items) == 2
+    assert [(item["daypart"], item["category"], item["qty_per_serving"]) for item in items] == [
+        ("朝食", "主菜", 70.0),
+        ("昼食", "副菜", 40.0),
+    ]
+
+    morning = next(item for item in items if item["daypart"] == "朝食")
+    lunch = next(item for item in items if item["daypart"] == "昼食")
+    assert menu_service.update_item_status(
+        "2026-06",
+        morning["id"],
+        {
+            "name": "ジャーマンポテト",
+            "unit_type": "g",
+            "qty_per_serving": 75,
+            "daypart": "朝食",
+            "category": "主菜",
+        },
+    ) == "updated"
+
+    refreshed = {item["id"]: item for item in menu_service.get_menu_items("2026-06")}
+    assert refreshed[morning["id"]]["qty_per_serving"] == 75
+    assert refreshed[lunch["id"]]["qty_per_serving"] == 40
+
+
+def test_output_menu_overrides_select_same_name_by_daypart_and_category():
+    lines = [
+        {
+            "date": date(2026, 6, 1),
+            "daypart": "朝",
+            "menu_name": "ジャーマンポテト",
+            "menu_category": "主菜",
+        },
+        {
+            "date": date(2026, 6, 1),
+            "daypart": "昼",
+            "menu_name": "ジャーマンポテト",
+            "menu_category": "副菜",
+        },
+    ]
+    menu_items = [
+        {
+            "id": "MMI_MORNING",
+            "name": "ジャーマンポテト",
+            "daypart": "朝食",
+            "category": "主菜",
+            "unit_type": "g",
+            "qty_per_serving": 70,
+        },
+        {
+            "id": "MMI_LUNCH",
+            "name": "ジャーマンポテト",
+            "daypart": "昼食",
+            "category": "副菜",
+            "unit_type": "g",
+            "qty_per_serving": 40,
+        },
+    ]
+
+    updated = output_builder._apply_menu_overrides(lines, menu_items)
+
+    assert updated[0]["menu_qty_per_serving"] == 70
+    assert updated[0]["_menu_qty_source_daypart"] == "朝食"
+    assert updated[1]["menu_qty_per_serving"] == 40
+    assert updated[1]["_menu_qty_source_daypart"] == "昼食"
 
 
 def test_parse_monthly_menu_handles_single_day_final_week():

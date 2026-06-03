@@ -89,7 +89,15 @@ class MonthlyMenu(Base):
 class MonthlyMenuItem(Base):
     __tablename__ = "monthly_menu_items"
     __table_args__ = (
-        UniqueConstraint("monthly_menu_id", "name", "facility_override", name="uq_monthly_menu_item_scope"),
+        UniqueConstraint(
+            "monthly_menu_id",
+            "name",
+            "daypart",
+            "category",
+            "diet_type",
+            "facility_override",
+            name="uq_monthly_menu_item_scope",
+        ),
     )
 
     id = Column(String, primary_key=True)

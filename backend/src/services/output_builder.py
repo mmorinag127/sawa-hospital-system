@@ -855,21 +855,66 @@ def _list_cached_active_menu_rules() -> list[dict]:
     return _cached_tuple_rows_to_dicts(rows)
 
 
+def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] | None:
+    item_daypart = _normalize_delivery_daypart(item.get("daypart"))
+    line_daypart = _normalize_delivery_daypart(line.get("daypart"))
+    item_category = _normalize_delivery_category_label(item.get("category"))
+    line_category = _normalize_delivery_category_label(line.get("menu_category"))
+    item_diet = str(item.get("diet_type") or "").strip()
+    line_diet = str(line.get("diet_type") or line.get("menu_diet_type") or "").strip()
+    score = 0
+    specificity = 0
+    if item_daypart:
+        specificity += 1
+        if line_daypart and item_daypart == line_daypart:
+            score += 8
+        elif line_daypart:
+            return None
+    if item_category:
+        specificity += 1
+        if line_category and item_category == line_category:
+            score += 4
+        elif line_category and _is_specific_delivery_category(item_category):
+            return None
+    if item_diet:
+        specificity += 1
+        if line_diet and item_diet == line_diet:
+            score += 2
+        elif line_diet:
+            return None
+    return score, specificity, str(item.get("id") or "")
+
+
+def _select_menu_item_for_line(line: dict, menu_items_by_key: dict[str, list[dict]]) -> dict | None:
+    name_key = _normalize_menu_key(line.get("menu_name"))
+    candidates = menu_items_by_key.get(name_key) or []
+    if not candidates:
+        return None
+    ranked: list[tuple[tuple[int, int, str], dict]] = []
+    for item in candidates:
+        score = _menu_item_matches_context(item, line)
+        if score is not None:
+            ranked.append((score, item))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return ranked[0][1]
+
+
 def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dict]:
     if not menu_items:
         return lines
-    index: dict[str, dict] = {}
+    index: dict[str, list[dict]] = {}
     for item in menu_items:
         for alias in _build_menu_name_aliases(item.get("name")):
             key = _normalize_menu_key(alias)
-            if key and key not in index:
-                index[key] = item
+            if key:
+                index.setdefault(key, []).append(item)
     if not index:
         return lines
     enriched: list[dict] = []
     for line in lines:
-        name_key = _normalize_menu_key(line.get("menu_name"))
-        item = index.get(name_key)
+        item = _select_menu_item_for_line(line, index)
         if not item:
             enriched.append(line)
             continue
@@ -1497,10 +1542,10 @@ def build_order_lines_for_outputs(
     else:
         order_lines = raw_lines
     overrides_started = time.perf_counter()
+    order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
     order_lines = _apply_output_diet_type_overrides(order_lines, facility_config)
     # Current monthly/menu-master settings must win over stale confirmed snapshots.
     order_lines = _apply_menu_overrides(order_lines, menu_items)
-    order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id)
     order_lines = _apply_garnish_defaults(order_lines)

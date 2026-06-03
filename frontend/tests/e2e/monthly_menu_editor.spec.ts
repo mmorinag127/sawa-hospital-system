@@ -108,6 +108,105 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
 });
 
+test("monthly menu detail selects same-name item by daypart and uses daypart dropdown", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method().toUpperCase();
+
+    if (path.endsWith("/auth/me") && method === "GET") {
+      await route.fulfill({ status: 200, json: { role: "admin" } });
+      return;
+    }
+    if (path.endsWith("/monthly-menus/scope-options") && method === "GET") {
+      await route.fulfill({ status: 200, json: { facilities: [], tags: [] } });
+      return;
+    }
+    if (path.endsWith("/monthly-menus/2026-06/uploads") && method === "GET") {
+      await route.fulfill({ status: 200, json: { items: [] } });
+      return;
+    }
+    if (path.endsWith("/monthly-menus/2026-06") && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        json: {
+          menu: { id: "2026-06", display_name: "2026年6月献立" },
+          items: [
+            {
+              id: "MMI_MORNING",
+              month_id: "2026-06",
+              name: "ジャーマンポテト",
+              unit_type: "g",
+              qty_per_serving: 70,
+              daypart: "朝食",
+              category: "主菜",
+              diet_type: "",
+            },
+            {
+              id: "MMI_LUNCH",
+              month_id: "2026-06",
+              name: "ジャーマンポテト",
+              unit_type: "g",
+              qty_per_serving: 40,
+              daypart: "昼食",
+              category: "副菜",
+              diet_type: "",
+            },
+          ],
+          entries: [
+            {
+              id: "MME_MORNING",
+              month_id: "2026-06",
+              menu_date: "2026-06-01",
+              daypart: "朝食",
+              name: "ジャーマンポテト",
+              category: "主菜",
+              diet_type: "",
+              slot_index: 0,
+              facility_override: null,
+            },
+            {
+              id: "MME_LUNCH",
+              month_id: "2026-06",
+              menu_date: "2026-06-01",
+              daypart: "昼食",
+              name: "ジャーマンポテト",
+              category: "副菜",
+              diet_type: "",
+              slot_index: 1,
+              facility_override: null,
+            },
+          ],
+          master_checks: { count: 0, issues: [] },
+        },
+      });
+      return;
+    }
+
+    await route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/menus/2026-06`);
+  const sheet = page.locator("[data-testid='monthly-menu-sheet']");
+  await expect(page.getByTestId("selected-entry-name")).toHaveText("ジャーマンポテト");
+  await expect(page.getByLabel("量").first()).toHaveValue("70");
+  await expect(page.getByLabel("時間帯").first()).toHaveValue("朝食");
+  await expect(page.getByLabel("時間帯").first().locator("option")).toHaveText(["未選択", "朝食", "昼食", "夕食"]);
+
+  await sheet.getByRole("button", { name: "ジャーマンポテト" }).nth(1).click();
+
+  await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
+  await expect(page.getByLabel("量").first()).toHaveValue("40");
+  await expect(page.getByLabel("時間帯").first()).toHaveValue("昼食");
+});
+
 test("monthly menu page can create a facility exception from the selected entry", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
   let savedRequest: Record<string, unknown> | null = null;

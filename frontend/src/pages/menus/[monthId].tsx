@@ -175,6 +175,13 @@ const tempTypeChoices = [
   { value: "cold", label: "冷" },
 ];
 
+const daypartChoices = [
+  { value: "", label: "未選択" },
+  { value: "朝食", label: "朝食" },
+  { value: "昼食", label: "昼食" },
+  { value: "夕食", label: "夕食" },
+];
+
 const daypartSortOrder: Record<string, number> = {
   朝食: 0,
   朝: 0,
@@ -460,21 +467,37 @@ const findMatchingItemIndex = (items: MenuItem[], entry: MenuEntry | null) => {
   const entryName = normalizeValue(entry.name);
   const entryScope = normalizeValue(entry.facility_override);
   const entryDietType = normalizeValue(entry.diet_type);
+  const entryDaypart = normalizeValue(entry.daypart);
+  const entryCategory = normalizeValue(entry.category);
 
   const exactMatch = items.findIndex(
     (item) =>
       normalizeValue(item.name) === entryName &&
       normalizeValue(item.facility_override) === entryScope &&
+      normalizeValue(item.daypart) === entryDaypart &&
+      normalizeValue(item.category) === entryCategory &&
       normalizeValue(item.diet_type) === entryDietType,
   );
   if (exactMatch >= 0) return exactMatch;
 
+  const daypartMatch = items.findIndex(
+    (item) =>
+      normalizeValue(item.name) === entryName &&
+      normalizeValue(item.facility_override) === entryScope &&
+      normalizeValue(item.daypart) === entryDaypart &&
+      normalizeValue(item.diet_type) === entryDietType,
+  );
+  if (daypartMatch >= 0) return daypartMatch;
+
   const scopeMatch = items.findIndex(
-    (item) => normalizeValue(item.name) === entryName && normalizeValue(item.facility_override) === entryScope,
+    (item) =>
+      normalizeValue(item.name) === entryName &&
+      normalizeValue(item.facility_override) === entryScope &&
+      !normalizeValue(item.daypart),
   );
   if (scopeMatch >= 0) return scopeMatch;
 
-  return items.findIndex((item) => normalizeValue(item.name) === entryName);
+  return items.findIndex((item) => normalizeValue(item.name) === entryName && !normalizeValue(item.daypart));
 };
 
 export default function MonthlyMenuEditorPage() {
@@ -2129,12 +2152,17 @@ export default function MonthlyMenuEditorPage() {
                     </label>
                     <label>
                       <span>時間帯</span>
-                      <input
+                      <select
                         className="input"
                         value={selectedItem.daypart || ""}
-                        list="daypart-options"
                         onChange={(e) => updateItemField(selectedItemIndex, "daypart", e.target.value)}
-                      />
+                      >
+                        {daypartChoices.map((choice) => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label>
                       <span>区分</span>
@@ -2401,12 +2429,17 @@ export default function MonthlyMenuEditorPage() {
                         </select>
                       </td>
                       <td>
-                        <input
+                        <select
                           className="input"
                           value={item.daypart || ""}
-                          list="daypart-options"
                           onChange={(e) => updateItemField(idx, "daypart", e.target.value)}
-                        />
+                        >
+                          {daypartChoices.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
                       </td>
                       <td>
                         <input

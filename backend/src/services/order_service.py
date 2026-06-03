@@ -1014,7 +1014,7 @@ def _collect_menu_items_for_week(
     facility_id: str | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for _month_id, payload in _load_menu_payloads_for_week(week_id, facility_id):
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
@@ -1023,9 +1023,16 @@ def _collect_menu_items_for_week(
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
-            if not name or name in seen:
+            key = (
+                name,
+                str(item.get("daypart") or "").strip(),
+                str(item.get("category") or "").strip(),
+                str(item.get("diet_type") or "").strip(),
+                str(item.get("facility_override") or "").strip(),
+            )
+            if not name or key in seen:
                 continue
-            seen.add(name)
+            seen.add(key)
             items.append(dict(item))
     return items
 
@@ -5394,7 +5401,11 @@ def _build_menu_snapshot_from_lines(
     items: list[dict] = []
     if week_code:
         items = _collect_menu_items_for_week(week_code, facility_code)
-    item_map = {item.get("name"): item for item in items if item.get("name")}
+    item_map: dict[str, list[dict]] = {}
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        if name:
+            item_map.setdefault(name, []).append(item)
     defaults = menu_service.resolve_menu_defaults(names, facility_code)
     line_seed_fields = {
         "daypart": "daypart",
@@ -5425,7 +5436,20 @@ def _build_menu_snapshot_from_lines(
                 bucket.add(value)
     snapshot_items: dict[str, dict] = {}
     for name in names:
-        item = item_map.get(name, {})
+        line_contexts = [line for line in (lines or []) if isinstance(line, dict) and str(line.get("menu_name") or "").strip() == name]
+        item_candidates = item_map.get(name, [])
+        item = {}
+        if len(item_candidates) == 1:
+            item = item_candidates[0]
+        elif item_candidates and line_contexts:
+            line_dayparts = {str(line.get("daypart") or "").strip() for line in line_contexts if str(line.get("daypart") or "").strip()}
+            exact_items = [
+                candidate
+                for candidate in item_candidates
+                if str(candidate.get("daypart") or "").strip() in line_dayparts
+            ]
+            if len(exact_items) == 1:
+                item = exact_items[0]
         fallback = defaults.get(name, {})
         payload: dict[str, object] = {}
         for field in (

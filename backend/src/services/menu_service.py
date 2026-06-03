@@ -1,6 +1,5 @@
 from io import BytesIO
 from datetime import date, datetime, timezone
-from collections import Counter
 from pathlib import Path
 from difflib import SequenceMatcher
 import re
@@ -142,6 +141,43 @@ def _normalize_menu_match_key(value: str) -> str:
     normalized = re.sub(r"添[)）]?[^\n]*$", "", normalized)
     normalized = normalized.replace("の", "")
     return normalized
+
+
+def _monthly_item_identity_key(
+    *,
+    name: object,
+    daypart: object = None,
+    category: object = None,
+    diet_type: object = None,
+    facility_override: object = None,
+) -> tuple[str, str, str, str, str]:
+    return (
+        str(name or "").strip(),
+        str(_coerce_master_field_value("daypart", daypart) or "").strip(),
+        str(category or "").strip(),
+        str(normalize_diet_type(diet_type) or "").strip(),
+        str(facility_override or "").strip(),
+    )
+
+
+def _monthly_item_identity_key_from_item(item: MonthlyMenuItem) -> tuple[str, str, str, str, str]:
+    return _monthly_item_identity_key(
+        name=item.name,
+        daypart=item.daypart,
+        category=item.category,
+        diet_type=item.diet_type,
+        facility_override=item.facility_override,
+    )
+
+
+def _monthly_item_identity_key_from_payload(payload: dict, facility_override: str | None = None) -> tuple[str, str, str, str, str]:
+    return _monthly_item_identity_key(
+        name=payload.get("name"),
+        daypart=payload.get("daypart"),
+        category=payload.get("category"),
+        diet_type=payload.get("diet_type"),
+        facility_override=facility_override,
+    )
 
 
 def _menu_schema_missing_items() -> list[str]:
@@ -692,7 +728,7 @@ def _parse_monthly_menu(
         raise ValueError("weekday columns not found")
 
     entries: list[dict] = []
-    name_meta: dict[str, dict[str, Counter]] = {}
+    item_meta: dict[tuple[str, str, str, str], dict] = {}
     current_dates: dict[int, date] = {}
     current_daypart: str | None = None
     slot_index = -1
@@ -753,28 +789,36 @@ def _parse_monthly_menu(
                     "slot_index": slot_index,
                 }
             )
-            meta = name_meta.setdefault(
+            item_key = (
                 name,
-                {"daypart": Counter(), "category": Counter(), "diet_type": Counter()},
+                str(current_daypart or ""),
+                str(category or ""),
+                str(diet_type or ""),
             )
-            if current_daypart:
-                meta["daypart"][current_daypart] += 1
-            if category:
-                meta["category"][category] += 1
-            if diet_type:
-                meta["diet_type"][diet_type] += 1
+            meta = item_meta.setdefault(
+                item_key,
+                {
+                    "name": name,
+                    "daypart": current_daypart,
+                    "category": category,
+                    "diet_type": diet_type,
+                    "count": 0,
+                },
+            )
+            meta["count"] += 1
 
     items: list[dict] = []
-    for name, meta in name_meta.items():
+    for (_name, _daypart, _category, _diet_type), meta in item_meta.items():
+        name = str(meta.get("name") or "").strip()
         if _is_skip_menu_name(name):
             continue
         item_payload = {"name": name}
-        if meta["daypart"]:
-            item_payload["daypart"] = meta["daypart"].most_common(1)[0][0]
-        if meta["category"]:
-            item_payload["category"] = meta["category"].most_common(1)[0][0]
-        if meta["diet_type"]:
-            item_payload["diet_type"] = meta["diet_type"].most_common(1)[0][0]
+        if meta.get("daypart"):
+            item_payload["daypart"] = meta.get("daypart")
+        if meta.get("category"):
+            item_payload["category"] = meta.get("category")
+        if meta.get("diet_type"):
+            item_payload["diet_type"] = meta.get("diet_type")
         items.append(item_payload)
 
     return month_start, diet_type, items, entries
@@ -1861,13 +1905,24 @@ def create_menu(
     names = deduped_names
     resolved_scope_override = _normalize_scope_override(scope_override)
     parsed_items = _apply_rules_to_items(parsed_items)
-    parsed_meta = {str(item.get("name") or ""): item for item in parsed_items}
+    if parsed_items:
+        deduped_items: list[dict] = []
+        seen_item_keys: set[tuple[str, str, str, str, str]] = set()
+        for item in parsed_items:
+            item_key = _monthly_item_identity_key_from_payload(item, resolved_scope_override)
+            if not item_key[0] or item_key in seen_item_keys:
+                continue
+            seen_item_keys.add(item_key)
+            deduped_items.append(item)
+        parsed_items = deduped_items
+    else:
+        parsed_items = [{"name": name} for name in names]
     resolution_map = _index_menu_master_resolutions(menu_master_resolutions)
     with session_scope() as session:
         master_plans: dict[str, dict] = {}
         issues: list[dict] = []
         for name in names:
-            meta = parsed_meta.get(name, {})
+            meta = next((item for item in parsed_items if str(item.get("name") or "") == name), {})
             seed_patch = _extract_master_patch(meta, _MASTER_FIELDS)
             plan = _build_upload_menu_master_plan(
                 session,
@@ -1918,10 +1973,12 @@ def create_menu(
             session.flush()
             session.refresh(menu)
 
-        for name in names:
+        for meta in parsed_items:
+            name = str(meta.get("name") or "").strip()
+            if not name:
+                continue
             item_id = f"MMI{uuid4().hex[:6]}"
             master = _materialize_upload_menu_master_plan(session, name, master_plans[name])
-            meta = parsed_meta.get(name, {})
             item_patch = _extract_master_patch(meta, _MASTER_FIELDS)
             session.add(
                 MonthlyMenuItem(
@@ -1955,7 +2012,7 @@ def create_menu(
                     facility_override=resolved_scope_override,
                 )
             )
-        item_count = len(names)
+        item_count = len(parsed_items)
         logger.info(
             "Menu uploaded",
             month_id=month_id,
@@ -2116,6 +2173,9 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
             month_id,
             name,
             item.facility_override,
+            daypart=item.daypart,
+            category=item.category,
+            diet_type=item.diet_type,
             exclude_id=item.id,
         )
         if conflict:
@@ -2170,6 +2230,10 @@ def _find_existing_monthly_item(
     month_id: str,
     name: str,
     facility_override: str | None,
+    *,
+    daypart: str | None = None,
+    category: str | None = None,
+    diet_type: str | None = None,
     exclude_id: str | None = None,
 ) -> MonthlyMenuItem | None:
     query = select(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id).where(MonthlyMenuItem.name == name)
@@ -2183,6 +2247,15 @@ def _find_existing_monthly_item(
         )
     else:
         query = query.where(MonthlyMenuItem.facility_override == scope)
+    normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
+    if normalized_daypart:
+        query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
+    normalized_category = str(category or "").strip()
+    if normalized_category:
+        query = query.where(MonthlyMenuItem.category == normalized_category)
+    normalized_diet = normalize_diet_type(diet_type)
+    if normalized_diet:
+        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
     if exclude_id:
         query = query.where(MonthlyMenuItem.id != exclude_id)
     query = query.order_by(MonthlyMenuItem.id.asc())
@@ -2289,9 +2362,19 @@ def _find_best_monthly_item_for_entry(
     name: str,
     facility_override: str | None,
     diet_type: str | None,
+    daypart: str | None = None,
+    category: str | None = None,
 ) -> MonthlyMenuItem | None:
     scope = (facility_override or "").strip() or None
-    item = _find_existing_monthly_item(session, month_id, name, scope)
+    item = _find_existing_monthly_item(
+        session,
+        month_id,
+        name,
+        scope,
+        daypart=daypart,
+        category=category,
+        diet_type=diet_type,
+    )
     if item is not None:
         return item
     normalized_diet = normalize_diet_type(diet_type)
@@ -2305,6 +2388,12 @@ def _find_best_monthly_item_for_entry(
         )
         if normalized_diet:
             query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+        normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
+        if normalized_daypart:
+            query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
+        normalized_category = str(category or "").strip()
+        if normalized_category:
+            query = query.where(MonthlyMenuItem.category == normalized_category)
         item = session.execute(query).scalars().first()
         if item is not None:
             return item
@@ -2316,6 +2405,12 @@ def _find_best_monthly_item_for_entry(
     )
     if normalized_diet:
         query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+    normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
+    if normalized_daypart:
+        query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
+    normalized_category = str(category or "").strip()
+    if normalized_category:
+        query = query.where(MonthlyMenuItem.category == normalized_category)
     return session.execute(query).scalars().first()
 
 
@@ -2367,6 +2462,8 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
             name=str(entry.name or "").strip(),
             facility_override=source_scope,
             diet_type=str(entry.diet_type or "").strip() or None,
+            daypart=str(entry.daypart or "").strip() or None,
+            category=str(entry.category or "").strip() or None,
         )
         name = str(body.get("name") or entry.name or "").strip()
         if not name:
@@ -2441,9 +2538,25 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
                 scoped_entry.category = category if isinstance(category, str) else None
                 scoped_entry.diet_type = diet_type
 
-            scoped_item = _find_existing_monthly_item(session, month_id, name, facility_id)
+            scoped_item = _find_existing_monthly_item(
+                session,
+                month_id,
+                name,
+                facility_id,
+                daypart=resolved_daypart if isinstance(resolved_daypart, str) else None,
+                category=category if isinstance(category, str) else None,
+                diet_type=diet_type,
+            )
             if scoped_item is None and previous_name and previous_name != name:
-                reusable_item = _find_existing_monthly_item(session, month_id, previous_name, facility_id)
+                reusable_item = _find_existing_monthly_item(
+                    session,
+                    month_id,
+                    previous_name,
+                    facility_id,
+                    daypart=resolved_daypart if isinstance(resolved_daypart, str) else None,
+                    category=category if isinstance(category, str) else None,
+                    diet_type=diet_type,
+                )
                 if reusable_item is not None and _count_monthly_entry_refs(
                     session,
                     month_id=month_id,
@@ -2480,7 +2593,15 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
             scoped_item.bag_max_unit = bag_max_unit
 
             if previous_name and previous_name != name:
-                previous_item = _find_existing_monthly_item(session, month_id, previous_name, facility_id)
+                previous_item = _find_existing_monthly_item(
+                    session,
+                    month_id,
+                    previous_name,
+                    facility_id,
+                    daypart=resolved_daypart if isinstance(resolved_daypart, str) else None,
+                    category=category if isinstance(category, str) else None,
+                    diet_type=diet_type,
+                )
                 if previous_item is not None and _count_monthly_entry_refs(
                     session,
                     month_id=month_id,
@@ -2790,8 +2911,8 @@ def _is_blank(value: str | None) -> bool:
     return value is None or value.strip() == ""
 
 
-def _pick_latest_item_by_name(items: list[MonthlyMenuItem]) -> dict[str, MonthlyMenuItem]:
-    selected: dict[str, MonthlyMenuItem] = {}
+def _pick_latest_item_by_identity(items: list[MonthlyMenuItem]) -> dict[tuple[str, str, str, str, str], MonthlyMenuItem]:
+    selected: dict[tuple[str, str, str, str, str], MonthlyMenuItem] = {}
     ranked = sorted(
         items,
         key=lambda item: (
@@ -2800,10 +2921,10 @@ def _pick_latest_item_by_name(items: list[MonthlyMenuItem]) -> dict[str, Monthly
         ),
     )
     for item in ranked:
-        name = (item.name or "").strip()
-        if not name:
+        key = _monthly_item_identity_key_from_item(item)
+        if not key[0]:
             continue
-        selected[name] = item
+        selected[key] = item
     return selected
 
 
@@ -2825,10 +2946,10 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[
 
         if not facility_id:
             base_rows = [i for i in items if _is_blank(i.facility_override)]
-            base_items = [serialize_item(i) for i in _pick_latest_item_by_name(base_rows).values()]
+            base_items = [serialize_item(i) for i in _pick_latest_item_by_identity(base_rows).values()]
             return _merge_master_defaults(base_items, None)
 
-        selected: dict[str, tuple[int, MonthlyMenuItem]] = {}
+        selected: dict[tuple[str, str, str, str], tuple[int, MonthlyMenuItem]] = {}
         for item in items:
             scope = (item.facility_override or "").strip()
             if scope:
@@ -2837,9 +2958,10 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[
                 row_rank = rank[scope]
             else:
                 row_rank = base_rank
-            key = (item.name or "").strip()
-            if not key:
+            identity = _monthly_item_identity_key_from_item(item)
+            if not identity[0]:
                 continue
+            key = identity[:4]
             current = selected.get(key)
             if current is None or row_rank < current[0] or (
                 row_rank == current[0] and (item.id or "") > (current[1].id or "")
