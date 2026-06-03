@@ -201,6 +201,8 @@ def _menu_schema_missing_items() -> list[str]:
 
 
 def _ensure_monthly_menu_item_identity_index() -> None:
+    if engine.dialect.name != "postgresql":
+        return
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     if "monthly_menu_items" not in tables:
@@ -209,8 +211,7 @@ def _ensure_monthly_menu_item_identity_index() -> None:
     if "uq_monthly_menu_items_scope_identity" in index_names:
         return
     with engine.begin() as conn:
-        if engine.dialect.name == "postgresql":
-            conn.execute(text("ALTER TABLE monthly_menu_items DROP CONSTRAINT IF EXISTS uq_monthly_menu_item_scope"))
+        conn.execute(text("ALTER TABLE monthly_menu_items DROP CONSTRAINT IF EXISTS uq_monthly_menu_item_scope"))
         conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
         conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
         conn.execute(
