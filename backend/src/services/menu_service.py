@@ -10,7 +10,7 @@ from loguru import logger
 from uuid import uuid4
 import pandas as pd
 
-from sqlalchemy import delete, select, inspect, or_
+from sqlalchemy import delete, select, inspect, or_, text
 
 from src.db import session_scope, engine
 from src.models.menu import (
@@ -200,6 +200,34 @@ def _menu_schema_missing_items() -> list[str]:
     return missing
 
 
+def _ensure_monthly_menu_item_identity_index() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "monthly_menu_items" not in tables:
+        return
+    index_names = {str(index.get("name") or "") for index in inspector.get_indexes("monthly_menu_items")}
+    if "uq_monthly_menu_items_scope_identity" in index_names:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
+        conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
+        conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_menu_items_scope_identity
+                ON monthly_menu_items(
+                  monthly_menu_id,
+                  name,
+                  COALESCE(daypart, ''),
+                  COALESCE(category, ''),
+                  COALESCE(diet_type, ''),
+                  COALESCE(facility_override, '')
+                )
+                """
+            )
+        )
+
+
 def ensure_menu_schema() -> None:
     global _MENU_SCHEMA_INITIALIZED
     if _MENU_SCHEMA_INITIALIZED:
@@ -213,6 +241,7 @@ def ensure_menu_schema() -> None:
                 "menu schema is not migrated; run database migrations before boot: "
                 + ", ".join(missing)
             )
+        _ensure_monthly_menu_item_identity_index()
         _MENU_SCHEMA_INITIALIZED = True
 
 _TEMP_COLD_HINTS = (

@@ -15,6 +15,7 @@ depends_on = None
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
+        bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
         bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
         bind.execute(
             sa.text(
@@ -32,6 +33,7 @@ def upgrade() -> None:
             )
         )
     else:
+        bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
         bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
         bind.execute(
             sa.text(
@@ -53,6 +55,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_identity"))
+    bind.execute(sa.text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
     bind.execute(
         sa.text(
             """
