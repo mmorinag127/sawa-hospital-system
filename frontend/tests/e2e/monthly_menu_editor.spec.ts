@@ -632,12 +632,16 @@ test("monthly menu page can update masters, apply month-only overrides, and refl
 
   await diffCard.locator("select[aria-label^='差分単位-']").selectOption("count");
   await diffCard.locator("input[aria-label^='差分量-']").fill("1");
+  await diffCard.locator("input[aria-label^='差分袋上限数-']").fill("25");
+  await diffCard.locator("select[aria-label^='差分袋上限単位-']").selectOption("count");
   await diffCard.getByRole("button", { name: "マスターを更新" }).click();
   await expect(masterCheckSection.getByText("検出件数: 3")).toBeVisible();
 
   await monthOnlyCard.getByRole("radio", { name: "当月にのみ適用" }).check();
   await monthOnlyCard.locator("select[aria-label^='当月のみ単位-']").selectOption("cut");
   await monthOnlyCard.locator("input[aria-label^='当月のみ量-']").fill("");
+  await monthOnlyCard.locator("input[aria-label^='当月のみ袋上限数-']").fill("20");
+  await monthOnlyCard.locator("select[aria-label^='当月のみ袋上限単位-']").selectOption("cut");
   await monthOnlyCard.getByRole("button", { name: "この月だけ反映" }).click();
   await expect(masterCheckSection.getByText("当月だけ反映しました: アジのムニエル（3件 → 2件）")).toBeVisible();
   await expect(masterCheckSection.getByText("検出件数: 2")).toBeVisible();
@@ -649,6 +653,8 @@ test("monthly menu page can update masters, apply month-only overrides, and refl
 
   await createCard.locator("select[aria-label^='差分新規単位-']").selectOption("cut");
   await createCard.locator("input[aria-label^='差分新規量-']").fill("2");
+  await createCard.locator("input[aria-label^='差分新規袋上限数-']").fill("20");
+  await createCard.locator("select[aria-label^='差分新規袋上限単位-']").selectOption("cut");
   await createCard.getByRole("button", { name: "この内容で登録" }).click();
 
   expect(resolvePayloads[0]).toContain('"action":"update"');

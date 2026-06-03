@@ -392,7 +392,9 @@ const buildInitialReviewResolution = (issue: MenuMasterReviewIssue, index: numbe
 const isReviewResolutionComplete = (
   issue: MenuMasterReviewIssue,
   resolution?: MenuMasterReviewResolution | null,
+  options?: { requireBaggingSettings?: boolean },
 ) => {
+  const requireBaggingSettings = options?.requireBaggingSettings ?? true;
   if (!resolution) return false;
   if (resolution.action === "existing") {
     return Boolean(resolution.menu_master_id);
@@ -400,7 +402,7 @@ const isReviewResolutionComplete = (
   if (resolution.action === "update") {
     const qty = Number(resolution.qty_per_serving);
     const bagQtyRaw = String(resolution.bag_max_qty ?? "").trim();
-    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
+    const needsBagMax = requireBaggingSettings && ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
     return (
       Boolean(resolution.name.trim()) &&
       Boolean(normalizeUnitChoice(resolution.unit_type)) &&
@@ -415,14 +417,14 @@ const isReviewResolutionComplete = (
     }
     const rawQty = String(resolution.qty_per_serving ?? "").trim();
     if (!rawQty) {
-      return !["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type)) || (
+      return !requireBaggingSettings || !["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type)) || (
         Number.isFinite(Number(resolution.bag_max_qty)) &&
         Number(resolution.bag_max_qty) > 0 &&
         Boolean(normalizeUnitChoice(resolution.bag_max_unit))
       );
     }
     const qty = Number(rawQty);
-    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
+    const needsBagMax = requireBaggingSettings && ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
     return Number.isFinite(qty) && qty > 0 && (!needsBagMax || (
       Number.isFinite(Number(resolution.bag_max_qty)) &&
       Number(resolution.bag_max_qty) > 0 &&
@@ -434,7 +436,7 @@ const isReviewResolutionComplete = (
   }
   if (resolution.action === "create") {
     const qty = Number(resolution.qty_per_serving);
-    const needsBagMax = ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
+    const needsBagMax = requireBaggingSettings && ["cut", "count"].includes(normalizeUnitChoice(resolution.unit_type));
     return (
       Boolean(resolution.name.trim()) &&
       Boolean(normalizeUnitChoice(resolution.unit_type)) &&
@@ -744,7 +746,9 @@ export default function MonthlyMenuEditorPage() {
     if (!monthId || Array.isArray(monthId) || !pendingReview) return;
     const unresolved = pendingReview.issues.find((issue, index) => {
       const issueKey = getReviewIssueKey(issue, index);
-      return !isReviewResolutionComplete(issue, pendingReview.resolutions[issueKey]);
+      return !isReviewResolutionComplete(issue, pendingReview.resolutions[issueKey], {
+        requireBaggingSettings: false,
+      });
     });
     if (unresolved) {
       setMessage(`未登録メニューの確認が完了していません: ${getReviewSourceName(unresolved)}`);
@@ -1058,7 +1062,9 @@ export default function MonthlyMenuEditorPage() {
   const { columns: sheetColumns, rows: sheetDateRows } = buildMenuSheetGrid(entries, formatScopeLabel);
   const canSubmitPendingReview =
     pendingReview?.issues.every((issue, index) =>
-      isReviewResolutionComplete(issue, pendingReview.resolutions[getReviewIssueKey(issue, index)]),
+      isReviewResolutionComplete(issue, pendingReview.resolutions[getReviewIssueKey(issue, index)], {
+        requireBaggingSettings: false,
+      }),
     ) ?? false;
   return (
     <main className="page">
@@ -1887,6 +1893,34 @@ export default function MonthlyMenuEditorPage() {
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
                             />
+                          </label>
+                          <label>
+                            <span>袋上限数</span>
+                            <input
+                              className="input"
+                              aria-label={`差分新規袋上限数-${index + 1}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={resolution.bag_max_qty}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
+                            />
+                          </label>
+                          <label>
+                            <span>袋上限単位</span>
+                            <select
+                              className="input"
+                              aria-label={`差分新規袋上限単位-${index + 1}`}
+                              value={normalizeUnitChoice(resolution.bag_max_unit)}
+                              onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_unit: e.target.value })}
+                            >
+                              <option value="">単位を選択</option>
+                              {unitChoices.map((choice) => (
+                                <option key={choice.value} value={choice.value}>
+                                  {choice.label}
+                                </option>
+                              ))}
+                            </select>
                           </label>
                         </div>
                       )}

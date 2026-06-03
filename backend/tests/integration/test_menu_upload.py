@@ -1431,7 +1431,7 @@ def test_upsert_entry_exceptions_creates_facility_scoped_override_entries():
     assert base_entries[("2026-06-03", "昼食", 1)]["name"] == "鶏の照焼き"
 
 
-def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch):
+def test_monthly_menu_upload_allows_cut_units_and_reports_bagging_gap_after_upload(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -1456,8 +1456,7 @@ def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch
         )
         assert False, "expected menu master review"
     except menu_service.MenuMasterResolutionRequired as exc:
-        assert exc.issues[0]["reason"] == "bagging_settings_missing"
-        assert {field["field"] for field in exc.issues[0]["field_diffs"]} == {"bag_max_qty", "bag_max_unit"}
+        assert exc.issues[0]["reason"] == "missing"
 
     menu_service.create_menu(
         "2026-07",
@@ -1470,8 +1469,6 @@ def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch
                 "action": "create",
                 "unit_type": "cut",
                 "qty_per_serving": 1,
-                "bag_max_qty": 20,
-                "bag_max_unit": "cut",
             }
         ],
     )
@@ -1480,12 +1477,12 @@ def test_monthly_menu_upload_requires_bagging_settings_for_cut_units(monkeypatch
     assert payload is not None
     item = payload["items"][0]
     assert item["unit_type"] == "cut"
-    assert item["bag_max_qty"] == 20
-    assert item["bag_max_unit"] == "cut"
-    assert payload["master_checks"]["issues"] == []
+    assert item["bag_max_qty"] is None
+    assert item["bag_max_unit"] is None
+    assert payload["master_checks"]["issues"][0]["reason"] == "bagging_settings_missing"
 
 
-def test_monthly_menu_upload_applies_review_resolution_to_existing_master_bagging_gap(monkeypatch):
+def test_monthly_menu_upload_allows_existing_master_bagging_gap_and_reports_after_upload(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -1510,48 +1507,25 @@ def test_monthly_menu_upload_applies_review_resolution_to_existing_master_baggin
 
     monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_existing_cut_menu)
 
-    try:
-        menu_service.create_menu(
-            "2026-07",
-            b"dummy",
-            "menu.xlsx",
-            require_menu_master_review=True,
-        )
-        assert False, "expected menu master review"
-    except menu_service.MenuMasterResolutionRequired as exc:
-        assert exc.issues[0]["reason"] == "bagging_settings_missing"
-        assert exc.issues[0]["current_master"]["id"] == "MNU_EXISTING_CUT"
-
     menu_service.create_menu(
         "2026-07",
         b"dummy",
         "menu.xlsx",
         require_menu_master_review=True,
-        menu_master_resolutions=[
-            {
-                "source_name": "鮭切身",
-                "action": "update",
-                "menu_master_id": "MNU_EXISTING_CUT",
-                "unit_type": "cut",
-                "qty_per_serving": 1,
-                "bag_max_qty": 20,
-                "bag_max_unit": "cut",
-            }
-        ],
     )
 
     payload = menu_service.get_menu("2026-07")
     assert payload is not None
     item = payload["items"][0]
     assert item["menu_master_id"] == "MNU_EXISTING_CUT"
-    assert item["bag_max_qty"] == 20
-    assert item["bag_max_unit"] == "cut"
-    assert payload["master_checks"]["issues"] == []
+    assert item["bag_max_qty"] is None
+    assert item["bag_max_unit"] is None
+    assert payload["master_checks"]["issues"][0]["reason"] == "bagging_settings_missing"
     with session_scope() as session:
         master = session.get(MenuMaster, "MNU_EXISTING_CUT")
         assert master is not None
-        assert master.bag_max_qty == 20
-        assert master.bag_max_unit == "cut"
+        assert master.bag_max_qty is None
+        assert master.bag_max_unit is None
 
 
 def test_monthly_menu_lists_existing_condiment_bagging_gaps():
@@ -1623,7 +1597,7 @@ def test_monthly_menu_lists_existing_condiment_bagging_gaps():
     assert payload["master_checks"]["issues"] == []
 
 
-def test_monthly_menu_upload_requires_condiment_bagging_settings(monkeypatch):
+def test_monthly_menu_upload_reports_condiment_bagging_gap_after_upload(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -1651,14 +1625,14 @@ def test_monthly_menu_upload_requires_condiment_bagging_settings(monkeypatch):
 
     monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_menu_with_sauce)
 
-    try:
-        menu_service.create_menu(
-            "2026-09",
-            b"dummy",
-            "menu.xlsx",
-            require_menu_master_review=True,
-        )
-        assert False, "expected condiment bagging review"
-    except menu_service.MenuMasterResolutionRequired as exc:
-        assert exc.issues[0]["reason"] == "bagging_settings_missing"
-        assert exc.issues[0]["condiment_issues"][0]["condiment_name"] == "ソース"
+    menu_service.create_menu(
+        "2026-09",
+        b"dummy",
+        "menu.xlsx",
+        require_menu_master_review=True,
+    )
+
+    payload = menu_service.get_menu("2026-09")
+    assert payload is not None
+    assert payload["master_checks"]["issues"][0]["reason"] == "bagging_settings_missing"
+    assert payload["master_checks"]["issues"][0]["condiment_issues"][0]["condiment_name"] == "ソース"

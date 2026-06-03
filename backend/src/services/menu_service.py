@@ -1874,7 +1874,7 @@ def create_menu(
                 name,
                 seed_patch,
                 resolution_map.get(name),
-                require_bagging_review=require_menu_master_review,
+                require_bagging_review=False,
             )
             issue = plan.get("issue") if isinstance(plan, dict) else None
             if issue:
