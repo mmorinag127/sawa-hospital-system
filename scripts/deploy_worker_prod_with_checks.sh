@@ -135,7 +135,9 @@ echo "current revision=${CURRENT_REVISION:-unknown}"
 echo "current image=${CURRENT_IMAGE:-unknown}"
 
 echo "[2/9] deploy ${SERVICE}"
-gcloud run deploy "${SERVICE}" \
+set +e
+DEPLOY_OUTPUT="$(
+  gcloud run deploy "${SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${IMAGE}" \
@@ -144,11 +146,39 @@ gcloud run deploy "${SERVICE}" \
   --cpu="${WORKER_CPU}" \
   --timeout="${WORKER_TIMEOUT}" \
   --concurrency="${WORKER_CONCURRENCY}" \
-  --quiet
+  --quiet 2>&1
+)"
+DEPLOY_EXIT=$?
+set -e
+printf '%s\n' "${DEPLOY_OUTPUT}"
 DEPLOYED_REVISION="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestCreatedRevisionName)')"
 if [[ -z "${DEPLOYED_REVISION}" ]]; then
   echo "deploy failed: latestCreatedRevisionName is empty"
   exit 1
+fi
+if [[ "${DEPLOY_EXIT}" != "0" ]]; then
+  DEPLOYED_READY="$(
+    gcloud run revisions describe "${DEPLOYED_REVISION}" \
+      --project="${PROJECT_ID}" \
+      --region="${REGION}" \
+      --format=json \
+      | python3 -c 'import json, sys; data=json.load(sys.stdin); conditions=data.get("status",{}).get("conditions") or []; print(next((item.get("status","") for item in conditions if item.get("type")=="Ready"), ""))' || true
+  )"
+  DEPLOYED_IMAGE="$(
+    gcloud run revisions describe "${DEPLOYED_REVISION}" \
+      --project="${PROJECT_ID}" \
+      --region="${REGION}" \
+      --format='value(spec.containers[0].image)' || true
+  )"
+  EXPECTED_REPO_FOR_DEPLOY="${IMAGE%:*}"
+  if [[ "${DEPLOYED_READY}" != "True" || ( "${DEPLOYED_IMAGE}" != "${IMAGE}" && "${DEPLOYED_IMAGE}" != "${EXPECTED_REPO_FOR_DEPLOY}@sha256:"* ) ]]; then
+    echo "deploy failed and latest created revision is not a ready revision for the expected image"
+    echo "latestCreatedRevision=${DEPLOYED_REVISION}"
+    echo "latestCreatedReady=${DEPLOYED_READY:-unknown}"
+    echo "latestCreatedImage=${DEPLOYED_IMAGE:-unknown}"
+    exit "${DEPLOY_EXIT}"
+  fi
+  echo "deploy command returned ${DEPLOY_EXIT}, but latest created revision ${DEPLOYED_REVISION} is ready with expected image; continuing"
 fi
 gcloud run services update-traffic "${SERVICE}" \
   --project="${PROJECT_ID}" \
