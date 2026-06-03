@@ -209,6 +209,8 @@ def _ensure_monthly_menu_item_identity_index() -> None:
     if "uq_monthly_menu_items_scope_identity" in index_names:
         return
     with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(text("ALTER TABLE monthly_menu_items DROP CONSTRAINT IF EXISTS uq_monthly_menu_item_scope"))
         conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
         conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
         conn.execute(
