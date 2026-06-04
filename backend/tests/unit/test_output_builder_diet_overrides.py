@@ -247,6 +247,86 @@ def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_
     assert tamago_label["内容詳細"] == "2個"
 
 
+def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alias():
+    lines = [
+        {
+            "date": "2026-06-10",
+            "daypart": "夕",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "mixer",
+            "quantity_original": 4,
+        },
+        {
+            "date": "2026-06-12",
+            "daypart": "昼",
+            "menu_name": "豆腐ﾊﾝﾊﾞｰｸﾞ",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "quantity_original": 5,
+        },
+    ]
+    entries = [
+        {
+            "menu_date": "2026-06-10",
+            "daypart": "夕食",
+            "name": "玉子焼き",
+            "category": "副菜",
+            "slot_index": 2,
+        },
+        {
+            "menu_date": "2026-06-12",
+            "daypart": "昼食",
+            "name": "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ",
+            "category": "主菜",
+            "slot_index": 1,
+        },
+    ]
+    items = [
+        {
+            "id": "MMI-tamago",
+            "name": "玉子焼き",
+            "daypart": "夕食",
+            "category": "副菜",
+            "diet_type": "regular",
+            "unit_type": "count",
+            "qty_per_serving": 2,
+            "temp_type": "hot",
+        },
+        {
+            "id": "MMI-tofu",
+            "name": "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ",
+            "daypart": "昼食",
+            "category": "主菜",
+            "diet_type": "regular",
+            "unit_type": "count",
+            "qty_per_serving": 2,
+            "temp_type": "hot",
+        },
+    ]
+
+    enriched = output_builder._apply_menu_entry_overrides(lines, entries)
+    enriched = output_builder._apply_menu_overrides(enriched, items)
+    enriched = output_builder._clear_stale_menu_qty_from_monthly_entry(enriched)
+    enriched = output_builder._apply_builtin_menu_defaults(enriched)
+
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
+            {**enriched[1], "facility": "FAC00009", "quantity": 5, "area_id": "2F"},
+        ],
+        {},
+        None,
+    )
+
+    tamago_label = next(row for row in labels if row["商品名１"] == "玉子焼き")
+    assert tamago_label["内容量"] == "8個"
+    assert tamago_label["内容詳細"] == "2個"
+    tofu_label = next(row for row in labels if row["商品名１"] == "豆腐ﾊﾝﾊﾞｰｸﾞ")
+    assert tofu_label["内容量"] == "10個"
+    assert tofu_label["内容詳細"] == "2個"
+
+
 def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
