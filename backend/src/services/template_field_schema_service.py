@@ -161,6 +161,8 @@ def canonical_field_name_from_template_column(
     if role not in {"quantity", "quantity_change"}:
         return None
     parsed_name = _parse_quantity_field_name(column.get("name"))
+    if parsed_name and bool(column.get("name_locked")):
+        return str(column.get("name") or "").strip().lower()
     diet = _normalize_token(column.get("diet_type")) or (parsed_name[0] if parsed_name else "")
     area = _normalize_area_token(column.get("area_id")) or (parsed_name[1] if parsed_name else "x")
     if not diet:

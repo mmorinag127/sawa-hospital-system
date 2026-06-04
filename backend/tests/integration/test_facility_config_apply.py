@@ -621,6 +621,38 @@ def test_fac00004_template_schema_contract_preserves_aux_columns():
     assert contract["aux_fields"] == ["aux.col_2", "aux.col_4"]
 
 
+def test_template_schema_uses_locked_quantity_name_as_canonical_field():
+    columns = [
+        {"index": 0, "role": "date"},
+        {"index": 1, "role": "daypart"},
+        {"index": 2, "role": "menu_name"},
+        {
+            "index": 3,
+            "role": "quantity",
+            "name": "qty.no_fish_soft_2f",
+            "name_locked": True,
+            "diet_type": "no_fish",
+            "area_id": "2F",
+        },
+        {
+            "index": 4,
+            "role": "quantity",
+            "name": "qty.no_fish_mixer_2f",
+            "name_locked": True,
+            "diet_type": "no_fish",
+            "area_id": "2F",
+        },
+    ]
+
+    assert template_field_schema_service.derive_row_fields_from_columns(columns) == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.no_fish_soft_2f",
+        "qty.no_fish_mixer_2f",
+    ]
+
+
 def test_fac00005_update_config_preserves_authoritative_master_schema():
     _clear_facilities()
     facility_service.list_facilities()
@@ -1490,6 +1522,44 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
     assert fac00016.get("fax_template_ids") == ["いこいの森プラス"]
 
 
+def test_fac00003_fish_forbidden_columns_keep_meal_shape_fields():
+    config_service.reload_configs()
+
+    fac00003 = config_service.get_facility_config("FAC00003")
+    assert fac00003 is not None
+    template = fac00003.get("fax_template") or {}
+    fields = template.get("main_ocr_row_fields") or []
+
+    assert fields == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "qty.no_fish_regular_2f",
+        "qty.no_fish_regular_3f",
+        "qty.no_fish_soft_2f",
+        "qty.no_fish_soft_3f",
+        "qty.no_fish_mixer_2f",
+        "qty.no_fish_mixer_3f",
+        "remarks",
+    ]
+
+    columns = template.get("columns") or []
+    by_field = {col.get("name"): col for col in columns if isinstance(col, dict)}
+    assert by_field["qty.no_fish_regular_2f"]["source_index"] == 10
+    assert by_field["qty.no_fish_regular_3f"]["source_index"] == 11
+    assert by_field["qty.no_fish_soft_2f"]["source_index"] == 12
+    assert by_field["qty.no_fish_soft_3f"]["source_index"] == 13
+    assert by_field["qty.no_fish_mixer_2f"]["source_index"] == 14
+    assert by_field["qty.no_fish_mixer_3f"]["source_index"] == 15
+    assert [col for col in columns if col.get("role") == "note"][0]["source_index"] == 16
+
+
 def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
     original = facility_service.get_facility_config("FAC00003") or {}
     next_config = dict(original)
@@ -1534,6 +1604,12 @@ def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
             "qty.soft_3f",
             "qty.mixer_2f",
             "qty.mixer_3f",
+            "qty.no_fish_regular_2f",
+            "qty.no_fish_regular_3f",
+            "qty.no_fish_soft_2f",
+            "qty.no_fish_soft_3f",
+            "qty.no_fish_mixer_2f",
+            "qty.no_fish_mixer_3f",
             "remarks",
         ]
     finally:

@@ -643,20 +643,89 @@
           {
             "index": 9,
             "source_index": 10,
+            "role": "quantity",
+            "name": "qty.no_fish_regular_2f",
+            "name_locked": true,
+            "header": "花",
+            "header_group": "魚禁 常食",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "2F",
+            "delivery_header": "魚禁 常食 花"
+          },
+          {
+            "index": 10,
+            "source_index": 11,
+            "role": "quantity",
+            "name": "qty.no_fish_regular_3f",
+            "name_locked": true,
+            "header": "月",
+            "header_group": "魚禁 常食",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "3F",
+            "delivery_header": "魚禁 常食 月"
+          },
+          {
+            "index": 11,
+            "source_index": 12,
+            "role": "quantity",
+            "name": "qty.no_fish_soft_2f",
+            "name_locked": true,
+            "header": "花",
+            "header_group": "魚禁 軟菜",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "2F",
+            "delivery_header": "魚禁 軟菜 花"
+          },
+          {
+            "index": 12,
+            "source_index": 13,
+            "role": "quantity",
+            "name": "qty.no_fish_soft_3f",
+            "name_locked": true,
+            "header": "月",
+            "header_group": "魚禁 軟菜",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "3F",
+            "delivery_header": "魚禁 軟菜 月"
+          },
+          {
+            "index": 13,
+            "source_index": 14,
+            "role": "quantity",
+            "name": "qty.no_fish_mixer_2f",
+            "name_locked": true,
+            "header": "花",
+            "header_group": "魚禁 ミキサー",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "2F",
+            "delivery_header": "魚禁 ミキサー 花"
+          },
+          {
+            "index": 14,
+            "source_index": 15,
+            "role": "quantity",
+            "name": "qty.no_fish_mixer_3f",
+            "name_locked": true,
+            "header": "月",
+            "header_group": "魚禁 ミキサー",
+            "diet_type": "no_fish",
+            "diet_type_locked": true,
+            "area_id": "3F",
+            "delivery_header": "魚禁 ミキサー 月"
+          },
+          {
+            "index": 15,
+            "source_index": 16,
             "role": "note",
             "header": "備考"
           }
         ],
-        "delivery_extra_columns": [
-          {
-            "role": "quantity",
-            "header": "魚禁",
-            "diet_type": "no_fish",
-            "area_id": "X",
-            "name": "qty.no_fish_x",
-            "delivery_header": "魚禁 (常食)"
-          }
-        ]
+        "delivery_extra_columns": []
       },
       "invoice_template": {
         "template_uri": "gs://${TEMPLATE_BUCKET}/invoice_templates/nouhinsho_2025-02-08.xlsx",
