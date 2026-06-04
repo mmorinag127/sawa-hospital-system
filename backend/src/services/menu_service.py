@@ -203,6 +203,17 @@ def _dedupe_monthly_item_payloads_by_identity(items: list[dict]) -> list[dict]:
     return list(selected.values())
 
 
+def _normalize_menu_payload_items(payload: dict | None) -> dict | None:
+    if not payload:
+        return payload
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+    normalized = dict(payload)
+    normalized["items"] = _dedupe_monthly_item_payloads_by_identity([dict(item) for item in items if isinstance(item, dict)])
+    return normalized
+
+
 def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str, str, str, str, str]:
     return _monthly_item_identity_key(
         name=entry.name,
@@ -3342,7 +3353,7 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
 def get_menu_for_facility(month_id: str, facility_id: str | None) -> dict | None:
     payload = _get_menu_for_facility_direct(month_id, facility_id)
     if payload is not None:
-        return payload
+        return _normalize_menu_payload_items(payload)
     for delta in (-1, 1):
         shifted = _shift_month_id(month_id, delta)
         if not shifted:
@@ -3351,14 +3362,14 @@ def get_menu_for_facility(month_id: str, facility_id: str | None) -> dict | None
         if shifted_payload is None:
             continue
         if _payload_contains_requested_month(shifted_payload, month_id):
-            return _canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted)
+            return _normalize_menu_payload_items(_canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted))
     return None
 
 
 def get_menu(month_id: str) -> dict | None:
     payload = _get_menu_direct(month_id)
     if payload is not None:
-        return payload
+        return _normalize_menu_payload_items(payload)
     for delta in (-1, 1):
         shifted = _shift_month_id(month_id, delta)
         if not shifted:
@@ -3367,7 +3378,7 @@ def get_menu(month_id: str) -> dict | None:
         if shifted_payload is None:
             continue
         if _payload_contains_requested_month(shifted_payload, month_id):
-            return _canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted)
+            return _normalize_menu_payload_items(_canonicalize_resolved_menu_payload(shifted_payload, month_id, shifted))
     return None
 
 
@@ -3433,12 +3444,12 @@ def get_latest_menu() -> dict | None:
         payload = _dedupe_monthly_item_payloads_by_identity(payload)
         serialized_entries = [serialize_entry(entry) for entry in entries]
         serialized_entries.sort(key=_menu_entry_sort_key)
-        return {
+        return _normalize_menu_payload_items({
             "menu": serialize_menu(latest, latest_upload_log),
             "items": _merge_master_defaults(payload, None),
             "entries": serialized_entries,
             "master_checks": _build_menu_master_checks(session, items, entries),
-        }
+        })
 
 
 def get_menu_items(month_id: str) -> list[dict]:
