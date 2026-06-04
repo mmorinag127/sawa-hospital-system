@@ -1784,8 +1784,9 @@ def _enqueue_workflow_v2_evidence_rerun(
 
     ocr_job_id = f"OCR-{order_id}"
     existing_job = get_ocr_job(ocr_job_id)
+    is_stale_reparse = bool(_is_order_reparse_job(existing_job, order_id) and _is_job_stale(existing_job))
     existing_job_state = describe_ocr_job_state(existing_job if _is_order_reparse_job(existing_job, order_id) else None)
-    if existing_job_state.get("status") == "stalled":
+    if is_stale_reparse or existing_job_state.get("status") == "stalled":
         stale_at = get_ocr_job_stale_at(existing_job)
         if stale_action == "wait":
             raise HTTPException(

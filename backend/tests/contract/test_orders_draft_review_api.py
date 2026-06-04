@@ -2,6 +2,7 @@ import pathlib
 import sys
 from datetime import date, datetime, timedelta
 
+from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -983,6 +984,79 @@ def test_stale_reparse_job_syncs_workflow_v2_wait_state(monkeypatch):
             "error": updates[0]["error_message"],
         }
     ]
+
+
+def test_workflow_v2_ocr_rerun_retries_recovering_stale_job(monkeypatch):
+    order_id = "ORD-stale-workflow-v2-rerun"
+    job_id = f"OCR-{order_id}"
+    stale_job = {
+        "id": job_id,
+        "order_id": order_id,
+        "status": "running",
+        "updated_at": datetime.utcnow() - timedelta(minutes=45),
+        "input_reference": "file:///old.pdf",
+        "metrics": {
+            "request_mode": "ocr_rerun",
+            "workflow_version": "v2",
+            "processing_stage": "ocr_pipeline",
+            "result_state": "processing",
+        },
+    }
+    marked: list[str] = []
+    updated: list[dict] = []
+    queued: list[str] = []
+    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")
+    monkeypatch.setattr(
+        orders_api.order_workflow_v2_service,
+        "get_workflow",
+        lambda _order_id: (
+            {
+                "state": "ocr_running",
+                "facility_id": "FAC00001",
+                "week_start": "2026-06-07",
+                "week_end": "2026-06-13",
+                "template_id": "template-fac00001",
+                "template_version_id": "FTV-1",
+                "ocr_job": {"id": job_id},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        orders_api.order_workflow_v2_service,
+        "workflow_has_confirmed_ocr_context",
+        lambda _workflow: True,
+    )
+    monkeypatch.setattr(
+        orders_api.order_workflow_v2_service,
+        "mark_ocr_run_queued",
+        lambda _order_id, _job_id: queued.append(_job_id)
+        or ({"state": "ocr_running", "ocr_job": {"id": _job_id}}, None),
+    )
+    monkeypatch.setattr(orders_api, "_resolve_order_document_version", lambda _order_id, _selected_document_id: (
+        {"id": order_id, "facility": "FAC00001", "lines_updated_at": None},
+        {"storage_uri": "gs://bucket/current.pdf", "document_id": "DOC-1", "version_no": 1, "is_current": True},
+    ))
+    monkeypatch.setattr(orders_api.config_service, "get_facility_config", lambda _facility_id: {"enabled": True})
+    monkeypatch.setattr(orders_api, "get_ocr_job", lambda _job_id: stale_job if not marked else {**stale_job, "status": "failed"})
+    monkeypatch.setattr(
+        orders_api,
+        "_mark_stale_order_reparse_job",
+        lambda _order, job, **_kwargs: marked.append(job["id"]) or {**job, "status": "failed"},
+    )
+    monkeypatch.setattr(orders_api, "create_ocr_job", lambda *_args, **_kwargs: ({}, False))
+    monkeypatch.setattr(
+        orders_api,
+        "update_ocr_job",
+        lambda job_id_arg, **kwargs: updated.append({"job_id": job_id_arg, **kwargs}),
+    )
+
+    result = orders_api._enqueue_workflow_v2_evidence_rerun(order_id, BackgroundTasks(), stale_action="retry")
+
+    assert result["accepted"] is True
+    assert marked == [job_id]
+    assert updated[0]["status"] == "running"
+    assert queued == [job_id]
 
 
 def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
