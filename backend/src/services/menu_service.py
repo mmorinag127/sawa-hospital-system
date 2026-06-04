@@ -91,6 +91,7 @@ _INVALID_PATCH_VALUE = object()
 _MENU_SCHEMA_INITIALIZED = False
 _MENU_SCHEMA_LOCK = threading.RLock()
 _JST = ZoneInfo("Asia/Tokyo")
+_REPAIRED_MENU_ITEM_ID_PREFIX = "MMI_REPAIR_"
 
 _MENU_ENTRY_DAYPART_SORT_ORDER = {
     "朝": 0,
@@ -2179,6 +2180,85 @@ def _repair_monthly_menu_items_for_entries(session, month_id: str) -> int:
     return repaired_count
 
 
+def _missing_monthly_menu_item_payloads(
+    session,
+    month_id: str,
+    entries: list[MonthlyMenuEntry],
+    items: list[MonthlyMenuItem],
+) -> list[dict]:
+    existing_keys = {_monthly_item_identity_key_from_item(item) for item in items}
+    missing_entries: list[MonthlyMenuEntry] = []
+    seen_missing_keys: set[tuple[str, str, str, str, str]] = set()
+    for entry in entries:
+        key = _monthly_item_identity_key_from_entry(entry)
+        if not key[0] or key in existing_keys or key in seen_missing_keys:
+            continue
+        generic_key = (key[0], "", "", key[3], key[4])
+        if generic_key in existing_keys:
+            continue
+        seen_missing_keys.add(key)
+        missing_entries.append(entry)
+    if not missing_entries:
+        return []
+
+    active_rules = [
+        {
+            "rule_type": rule.rule_type,
+            "match_type": rule.match_type,
+            "menu_pattern": rule.menu_pattern,
+            "facility_id": rule.facility_id,
+            "daypart": rule.daypart,
+            "category": rule.category,
+            "diet_type": normalize_diet_type(rule.diet_type),
+            "unit_type": rule.unit_type,
+            "qty_per_serving": rule.qty_per_serving,
+            "priority": rule.priority,
+            "active": rule.active,
+        }
+        for rule in session.query(MenuRule).filter(MenuRule.active.is_(True)).all()
+    ]
+    if not active_rules:
+        active_rules = [dict(rule) for rule in menu_rule_service.DEFAULT_GLOBAL_RULES]
+    seed_items = _apply_rule_payloads_to_items(
+        [
+            {
+                "name": entry.name,
+                "daypart": _coerce_master_field_value("daypart", entry.daypart),
+                "category": entry.category,
+                "diet_type": normalize_diet_type(entry.diet_type),
+            }
+            for entry in missing_entries
+        ],
+        active_rules,
+    )
+
+    payloads: list[dict] = []
+    for entry, seed in zip(missing_entries, seed_items, strict=False):
+        name = str(entry.name or "").strip()
+        if not name:
+            continue
+        master = _find_menu_master_by_normalized(session, _normalize_menu_name(name))
+        payloads.append(
+            {
+                "id": f"{_REPAIRED_MENU_ITEM_ID_PREFIX}{entry.id}",
+                "month_id": month_id,
+                "menu_master_id": master.id if master else None,
+                "name": name,
+                "unit_type": _coerce_master_field_value("unit_type", seed.get("unit_type")),
+                "qty_per_serving": _coerce_float(seed.get("qty_per_serving")),
+                "temp_type": _normalize_temp_type(seed.get("temp_type")),
+                "daypart": _coerce_master_field_value("daypart", entry.daypart),
+                "category": entry.category,
+                "diet_type": normalize_diet_type(entry.diet_type),
+                "facility_override": _normalize_scope_override(entry.facility_override),
+                "master_resolution_mode": "month_only",
+                "bag_max_qty": None,
+                "bag_max_unit": _coerce_master_field_value("bag_max_unit", seed.get("bag_max_unit")),
+            }
+        )
+    return payloads
+
+
 def list_menu_uploads(month_id: str) -> list[dict]:
     ensure_menu_schema()
     with session_scope() as session:
@@ -2286,9 +2366,33 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
     with session_scope() as session:
         item = session.get(MonthlyMenuItem, item_id)
         if not item:
-            return "not_found"
+            if not item_id.startswith(_REPAIRED_MENU_ITEM_ID_PREFIX):
+                return "not_found"
+            entry_id = item_id[len(_REPAIRED_MENU_ITEM_ID_PREFIX) :]
+            entry = session.get(MonthlyMenuEntry, entry_id)
+            if not entry or entry.monthly_menu_id != month_id:
+                return "not_found"
+            name = str(body.get("name") or entry.name or "").strip()
+            if not name:
+                return "invalid_name"
+            item = MonthlyMenuItem(
+                id=item_id,
+                monthly_menu_id=month_id,
+                name=name,
+                facility_override=_normalize_scope_override(body.get("facility_override", entry.facility_override)),
+                daypart=_coerce_master_field_value("daypart", body.get("daypart", entry.daypart)),
+                category=body.get("category", entry.category),
+                diet_type=normalize_diet_type(body.get("diet_type", entry.diet_type)),
+                master_resolution_mode="month_only",
+            )
+            session.add(item)
         if item.monthly_menu_id != month_id:
             return "month_mismatch"
+        keep_monthly_identity_values = bool(
+            str(item.daypart or "").strip()
+            or str(item.category or "").strip()
+            or item_id.startswith(_REPAIRED_MENU_ITEM_ID_PREFIX)
+        )
         if "name" in body:
             next_name = str(body.get("name") or "").strip()
             if next_name:
@@ -2301,6 +2405,10 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
                 item.facility_override = str(facility_override).strip()
         if "diet_type" in body:
             item.diet_type = normalize_diet_type(body.get("diet_type"))
+        if "daypart" in body:
+            item.daypart = _coerce_master_field_value("daypart", body.get("daypart"))
+        if "category" in body:
+            item.category = str(body.get("category") or "").strip() or None
         name = (item.name or "").strip()
         if not name:
             return "invalid_name"
@@ -2322,9 +2430,14 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
         if master:
             item.menu_master_id = master.id
         _upsert_menu_master(session, item, master_patch, master)
-        item.master_resolution_mode = None
-        for field in _MASTER_FIELDS:
-            setattr(item, field, None)
+        if keep_monthly_identity_values:
+            item.master_resolution_mode = "month_only"
+            for field, value in master_patch.items():
+                setattr(item, field, value)
+        else:
+            item.master_resolution_mode = None
+            for field in _MASTER_FIELDS:
+                setattr(item, field, None)
         logger.info("Menu item updated", month_id=month_id, item_id=item_id)
         event_fields = list(body.keys())
     record_event(
@@ -3034,6 +3147,7 @@ def _get_menu_direct(month_id: str) -> dict | None:
         if not menu and not items and not entries:
             return None
         payload = [serialize_item(i) for i in items]
+        payload.extend(_missing_monthly_menu_item_payloads(session, month_id, entries, items))
         serialized_entries = [serialize_entry(entry) for entry in entries]
         serialized_entries.sort(key=_menu_entry_sort_key)
         return {
@@ -3085,6 +3199,14 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[
         if not facility_id:
             base_rows = [i for i in items if _is_blank(i.facility_override)]
             base_items = [serialize_item(i) for i in _pick_latest_item_by_identity(base_rows).values()]
+            base_entries = (
+                session.query(MonthlyMenuEntry)
+                .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+                .filter(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
+                .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
+                .all()
+            )
+            base_items.extend(_missing_monthly_menu_item_payloads(session, month_id, base_entries, base_rows))
             return _merge_master_defaults(base_items, None)
 
         selected: dict[tuple[str, str, str, str], tuple[int, MonthlyMenuItem]] = {}
@@ -3284,6 +3406,7 @@ def get_latest_menu() -> dict | None:
             .all()
         )
         payload = [serialize_item(i) for i in items]
+        payload.extend(_missing_monthly_menu_item_payloads(session, latest.id, entries, items))
         serialized_entries = [serialize_entry(entry) for entry in entries]
         serialized_entries.sort(key=_menu_entry_sort_key)
         return {
@@ -3299,7 +3422,15 @@ def get_menu_items(month_id: str) -> list[dict]:
     with session_scope() as session:
         _repair_monthly_menu_items_for_entries(session, month_id)
         items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
-        return _merge_master_defaults([serialize_item(i) for i in items], None)
+        entries = (
+            session.query(MonthlyMenuEntry)
+            .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+            .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index)
+            .all()
+        )
+        payload = [serialize_item(i) for i in items]
+        payload.extend(_missing_monthly_menu_item_payloads(session, month_id, entries, items))
+        return _merge_master_defaults(payload, None)
 
 
 def get_item(item_id: str) -> dict | None:

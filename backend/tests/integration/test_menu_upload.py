@@ -307,6 +307,70 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
         assert len(rows) == 2
 
 
+def test_get_menu_exposes_repair_stub_when_legacy_repair_does_not_persist(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(MonthlyMenu(id="2099-07", month_start=date(2099, 7, 1), filename="legacy.xlsx"))
+        session.add(
+            MonthlyMenuItem(
+                id="MMI_LEGACY_MORNING_STUB",
+                monthly_menu_id="2099-07",
+                name="ジャーマンポテト",
+                unit_type="g",
+                qty_per_serving=70,
+                daypart="朝食",
+                category="主菜",
+                diet_type="regular",
+            )
+        )
+        session.add(
+            MonthlyMenuEntry(
+                id="MME_LEGACY_DINNER_STUB",
+                monthly_menu_id="2099-07",
+                menu_date=date(2099, 7, 24),
+                daypart="夕食",
+                name="ジャーマンポテト",
+                category="副菜",
+                diet_type="regular",
+                slot_index=2,
+            )
+        )
+
+    monkeypatch.setattr(menu_service, "_repair_monthly_menu_items_for_entries", lambda *_args, **_kwargs: 0)
+
+    payload = menu_service.get_menu("2099-07")
+
+    assert payload is not None
+    repaired = next(item for item in payload["items"] if item["id"] == "MMI_REPAIR_MME_LEGACY_DINNER_STUB")
+    assert repaired["daypart"] == "夕食"
+    assert repaired["category"] == "副菜"
+    assert repaired["qty_per_serving"] == 40.0
+
+    assert menu_service.update_item_status(
+        "2099-07",
+        repaired["id"],
+        {
+            "name": "ジャーマンポテト",
+            "unit_type": "g",
+            "qty_per_serving": 40,
+            "daypart": "夕食",
+            "category": "副菜",
+            "diet_type": "regular",
+        },
+    ) == "updated"
+    with session_scope() as session:
+        row = session.get(MonthlyMenuItem, repaired["id"])
+        assert row is not None
+        assert row.daypart == "夕食"
+        assert row.category == "副菜"
+        assert row.qty_per_serving == 40
+
+
 def test_output_menu_overrides_select_same_name_by_daypart_and_category():
     lines = [
         {
