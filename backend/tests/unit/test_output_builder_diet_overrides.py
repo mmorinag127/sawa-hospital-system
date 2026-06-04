@@ -327,6 +327,76 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
     assert tofu_label["内容詳細"] == "2個"
 
 
+def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(monkeypatch):
+    monkeypatch.setattr(
+        output_builder,
+        "_collect_cached_menu_items_for_week",
+        lambda _week_value, _facility_id: [
+            {
+                "id": "MMI-tofu",
+                "name": "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ",
+                "daypart": "昼食",
+                "category": "主菜",
+                "diet_type": "regular",
+                "unit_type": "count",
+                "qty_per_serving": 2,
+                "temp_type": "hot",
+            },
+            {
+                "id": "MMI-tamago",
+                "name": "玉子焼き",
+                "daypart": "夕食",
+                "category": "副菜",
+                "diet_type": "regular",
+                "unit_type": "count",
+                "qty_per_serving": 2,
+                "temp_type": "hot",
+            },
+        ],
+    )
+
+    bags = output_builder.build_bag_rows_for_outputs(
+        {
+            "id": "ORD-stale-materialized",
+            "facility": "FAC00010",
+            "week_value": "2026-06",
+            "lines": [
+                {
+                    "date": "2026-06-12",
+                    "daypart": "昼",
+                    "menu_name": "豆腐ﾊﾝﾊﾞｰｸﾞ",
+                    "menu_category": "主菜（軟菜）",
+                    "diet_type": "soft",
+                    "area_id": "2F",
+                    "quantity_original": 5,
+                    "menu_qty_per_serving": 100,
+                    "menu_unit_type": "g",
+                },
+                {
+                    "date": "2026-06-10",
+                    "daypart": "夕",
+                    "menu_name": "玉子焼き",
+                    "menu_category": "主菜（ミキサー）",
+                    "diet_type": "mixer",
+                    "area_id": "3F",
+                    "quantity_original": 4,
+                    "menu_qty_per_serving": 100,
+                    "menu_unit_type": "g",
+                },
+            ],
+        },
+        facility_config={"packaging_policy": {}, "fax_template_override": {"columns": []}},
+    )
+    labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
+
+    tofu_label = next(row for row in labels if row["商品名１"] == "豆腐ﾊﾝﾊﾞｰｸﾞ")
+    assert tofu_label["内容量"] == "10個"
+    assert tofu_label["内容詳細"] == "2個"
+    tamago_label = next(row for row in labels if row["商品名１"] == "玉子焼き")
+    assert tamago_label["内容量"] == "8個"
+    assert tamago_label["内容詳細"] == "2個"
+
+
 def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
