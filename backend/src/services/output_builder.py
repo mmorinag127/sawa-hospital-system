@@ -2019,6 +2019,17 @@ def build_bag_rows_for_outputs(
     order_for_outputs = {**order, "lines": resolved_lines}
 
     bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+    week_value = (
+        str(order.get("stored_week_value") or "").strip()
+        or str(order.get("week_value") or "").strip()
+        or str(order.get("persisted_week_value") or "").strip()
+        or str(order.get("week") or "").strip()
+        or str(order.get("week_code") or "").strip()
+    )
+    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
+    bags = _apply_menu_overrides(bags, menu_items)
+    bags = _clear_stale_menu_qty_from_monthly_entry(bags)
+    bags = _apply_builtin_menu_defaults(bags)
     bag_types = _resolve_bag_types(resolved_facility_config)
     bags = _assign_bag_type_for_bags(bags, bag_types)
     return _apply_daily_label_facility_rules_to_bags(bags, resolved_facility_config, facility_id)
@@ -5768,6 +5779,9 @@ def _prepare_output_context(
     if include_bags:
         bags_started = time.perf_counter()
         bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+        bags = _apply_menu_overrides(bags, menu_items)
+        bags = _clear_stale_menu_qty_from_monthly_entry(bags)
+        bags = _apply_builtin_menu_defaults(bags)
         bag_types = _resolve_bag_types(facility_config)
         bags = _assign_bag_type_for_bags(bags, bag_types)
         bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
