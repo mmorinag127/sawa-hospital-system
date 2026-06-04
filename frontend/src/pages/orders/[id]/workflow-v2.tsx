@@ -2270,14 +2270,21 @@ export default function OrderWorkflowV2Page() {
         decision,
         quad_px: quadPx,
       });
-      await refreshAll();
-      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
         document_id: effectiveSelectedDocumentId || undefined,
       });
-      setMessage("4点補正を保存し、OCRを再実行しました。");
+      const nextWorkflow = response.data?.workflow || response.data || null;
+      if (nextWorkflow) {
+        setWorkflow(nextWorkflow);
+      }
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
+      invalidateSheetPreSaveChecks();
+      setMessage("4点補正を保存し、OCRを再実行中です。完了後に正解OCRを選択してください。");
       setVisibleStep(2);
     } catch (err: any) {
       setError(formatApiError(err, "4点補正の保存またはOCR再実行に失敗しました"));
