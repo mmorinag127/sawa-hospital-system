@@ -44,3 +44,27 @@ def test_snap_regions_x_to_fax_lines_blocks_when_matches_are_insufficient() -> N
     assert evidence["applied"] is False
     assert evidence["reason"] == "local_grid_snap_insufficient_matches"
     assert snapped == regions
+
+
+def test_snap_regions_x_to_fax_lines_uses_lowest_outer_bottom_ruling() -> None:
+    image = np.full((260, 260, 3), 255, dtype=np.uint8)
+    template_xs = [50, 100, 150]
+    actual_bottom = 170
+    for y in [40, 90, 140, actual_bottom]:
+        image[max(0, y - 1) : y + 2, 40:180] = 0
+        for x in template_xs:
+            image[max(0, y - 18) : min(image.shape[0], y + 18), x - 1 : x + 2] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [50.0, 40.0, 100.0, 90.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [50.0, 140.0, 100.0, 240.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [100.0, 140.0, 150.0, 240.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(image, regions)
+
+    assert evidence["applied"] is True
+    assert evidence["outer_y_snap"]["bottom_template_y"] == 240
+    assert abs(float(evidence["outer_y_snap"]["bottom_snapped_y"]) - actual_bottom) < 2.0
+    by_cell = {region["sheet_cell"]: region for region in snapped}
+    assert abs(float(by_cell["E12"]["bbox"][3]) - actual_bottom) < 2.0
+    assert abs(float(by_cell["F12"]["bbox"][3]) - actual_bottom) < 2.0

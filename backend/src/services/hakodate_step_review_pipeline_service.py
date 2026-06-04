@@ -193,21 +193,26 @@ def snap_regions_x_to_local_fax_rulings(
 
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
-    for row_boundary in row_boundaries:
-        band_top = max(0, int(round(float(row_boundary) - 24.0)))
-        band_bottom = min(height, int(round(float(row_boundary) + 24.0)))
+    def snapped_x_edges_for_y(y_value: float) -> list[float | None] | None:
+        band_top = max(0, int(round(float(y_value) - 24.0)))
+        band_bottom = min(height, int(round(float(y_value) + 24.0)))
         if band_bottom <= band_top:
-            continue
+            return None
         projection = dark_mask[band_top:band_bottom, :].sum(axis=0).astype(np.float32)
         if float(projection.max(initial=0.0)) <= 0.0:
-            continue
+            return None
         smooth = np.convolve(projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
         threshold = max(7.0, float(smooth.max(initial=0.0)) * 0.36)
         centers = projection_centers(smooth, threshold=threshold, min_len=2)
-        snapped = [
+        return [
             nearest(float(boundary), centers, max_distance=18.0)
             for boundary in original_boundaries
         ]
+
+    for row_boundary in row_boundaries:
+        snapped = snapped_x_edges_for_y(float(row_boundary))
+        if snapped is None:
+            continue
         deltas = [
             None if snapped_x is None else float(snapped_x) - float(boundary)
             for boundary, snapped_x in zip(original_boundaries, snapped)
@@ -233,6 +238,37 @@ def snap_regions_x_to_local_fax_rulings(
         int(boundary): nearest(float(boundary), detected_y_edges, max_distance=18.0)
         for boundary in row_boundaries
     }
+    top_boundary = int(min(row_boundaries))
+    bottom_boundary = int(max(row_boundaries))
+    if y_edge_snaps.get(top_boundary) is None:
+        top_candidates = [
+            float(value)
+            for value in detected_y_edges
+            if float(top_boundary) - 80.0 <= float(value) <= float(top_boundary) + 80.0
+        ]
+        if top_candidates:
+            y_edge_snaps[top_boundary] = min(
+                top_candidates,
+                key=lambda value: abs(float(value) - float(top_boundary)),
+            )
+    if y_edge_snaps.get(bottom_boundary) is None:
+        bottom_candidates = [
+            float(value)
+            for value in detected_y_edges
+            if float(bottom_boundary) - 160.0 <= float(value) <= float(bottom_boundary) + 20.0
+        ]
+        if bottom_candidates:
+            # The bottom table ruling can be far above the template edge after
+            # local warp correction.  Use the lowest detected long ruling in
+            # the lower band instead of leaving the outer crop open.
+            y_edge_snaps[bottom_boundary] = max(bottom_candidates)
+    for boundary in (top_boundary, bottom_boundary):
+        snapped_y = y_edge_snaps.get(boundary)
+        if snapped_y is None or abs(float(snapped_y) - float(boundary)) <= 1.0:
+            continue
+        moved_snaps = snapped_x_edges_for_y(float(snapped_y))
+        if moved_snaps is not None:
+            row_edge_snaps[boundary] = moved_snaps
 
     boundary_index = {boundary: index for index, boundary in enumerate(original_boundaries)}
     snapped_regions: list[dict[str, Any]] = []
@@ -312,6 +348,12 @@ def snap_regions_x_to_local_fax_rulings(
         "method": "row_edge_local_fax_ruling_snap_v1",
         "original_boundaries": original_boundaries,
         "row_boundary_count": len(row_boundaries),
+        "outer_y_snap": {
+            "top_template_y": top_boundary,
+            "top_snapped_y": y_edge_snaps.get(top_boundary),
+            "bottom_template_y": bottom_boundary,
+            "bottom_snapped_y": y_edge_snaps.get(bottom_boundary),
+        },
         "snapped_region_count": snapped_count,
         "fallback_region_count": fallback_count,
         "row_debug": row_debug,
