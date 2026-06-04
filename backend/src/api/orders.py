@@ -270,6 +270,36 @@ def _mark_stale_order_reparse_job(order: dict, job: dict | None, *, force: bool 
         error_message=error_code,
         metrics=current_metrics,
     )
+    try:
+        workflow, workflow_error = order_workflow_v2_service.get_workflow(order_id)
+        workflow_job = workflow.get("ocr_job") if isinstance(workflow, dict) else None
+        workflow_job_id = str((workflow_job or {}).get("id") or "").strip() if isinstance(workflow_job, dict) else ""
+        if (
+            isinstance(workflow, dict)
+            and workflow.get("state") == "ocr_running"
+            and workflow_job_id == str(job.get("id") or "").strip()
+        ):
+            _updated_workflow, mark_error = order_workflow_v2_service.mark_ocr_run_completed(
+                order_id,
+                job_id=str(job.get("id") or ""),
+                error=error_code,
+            )
+            if mark_error:
+                logger.warning(
+                    "Failed to mark stale workflow-v2 OCR run completed: order_id={} job_id={} error={}",
+                    order_id,
+                    job.get("id"),
+                    mark_error,
+                )
+        elif workflow_error:
+            logger.debug("Skipping stale workflow-v2 sync for {}: {}", order_id, workflow_error)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to sync stale OCR job to workflow-v2: order_id={} job_id={} error={}",
+            order_id,
+            job.get("id"),
+            exc,
+        )
     refreshed = get_ocr_job(str(job.get("id") or ""))
     return refreshed or job
 

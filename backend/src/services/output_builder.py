@@ -867,21 +867,23 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] |
     if item_daypart:
         specificity += 1
         if line_daypart and item_daypart == line_daypart:
-            score += 8
+            score += 80
         elif line_daypart:
             return None
     if item_category:
         specificity += 1
         if line_category and item_category == line_category:
-            score += 4
+            score += 40
         elif line_category and _is_specific_delivery_category(item_category):
-            return None
+            score -= 4
     if item_diet:
         specificity += 1
         if line_diet and item_diet == line_diet:
-            score += 2
-        elif line_diet:
+            score += 20
+        elif line_diet and item_diet not in {"regular", "常食", "普通食"}:
             return None
+        elif line_diet:
+            score -= 2
     return score, specificity, str(item.get("id") or "")
 
 

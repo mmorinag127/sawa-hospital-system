@@ -922,6 +922,69 @@ def test_reparse_endpoint_blocks_when_reparse_job_is_already_running():
     assert detail.get("ocr_job_id") == f"OCR-{order['id']}"
 
 
+def test_stale_reparse_job_syncs_workflow_v2_wait_state(monkeypatch):
+    order_id = "ORD-stale-workflow-sync"
+    job_id = f"OCR-{order_id}"
+    job = {
+        "id": job_id,
+        "order_id": order_id,
+        "status": "running",
+        "updated_at": datetime.utcnow() - timedelta(minutes=45),
+        "metrics": {
+            "request_mode": "ocr_reparse",
+            "processing_stage": "hakodate_live_pipeline",
+            "result_state": "processing",
+        },
+    }
+    updates: list[dict] = []
+    marked: list[dict] = []
+    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")
+    monkeypatch.setattr(orders_api.order_service, "get_cached_ocr_payload", lambda _order_id: None)
+    monkeypatch.setattr(
+        orders_api.order_service,
+        "get_order_review_summary",
+        lambda *_args, **_kwargs: {"ocr_has_saved_draft": False},
+    )
+    monkeypatch.setattr(
+        orders_api,
+        "update_ocr_job",
+        lambda job_id_arg, **kwargs: updates.append({"job_id": job_id_arg, **kwargs}),
+    )
+    monkeypatch.setattr(orders_api, "get_ocr_job", lambda _job_id: {**job, "status": "failed"})
+    monkeypatch.setattr(
+        orders_api.order_workflow_v2_service,
+        "get_workflow",
+        lambda _order_id: (
+            {
+                "state": "ocr_running",
+                "ocr_job": {"id": job_id},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        orders_api.order_workflow_v2_service,
+        "mark_ocr_run_completed",
+        lambda order_id_arg, *, job_id, error: marked.append(
+            {"order_id": order_id_arg, "job_id": job_id, "error": error}
+        )
+        or ({"state": "ocr_failed"}, None),
+    )
+
+    refreshed = orders_api._mark_stale_order_reparse_job({"id": order_id}, job)
+
+    assert refreshed["status"] == "failed"
+    assert updates[0]["status"] == "failed"
+    assert updates[0]["error_message"].startswith("reparse_stale_timeout>")
+    assert marked == [
+        {
+            "order_id": order_id,
+            "job_id": job_id,
+            "error": updates[0]["error_message"],
+        }
+    ]
+
+
 def test_stale_reparse_job_is_marked_failed_and_allows_retry(monkeypatch):
     order_service.clear_all()
     monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")

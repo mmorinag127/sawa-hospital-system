@@ -159,6 +159,94 @@ def test_daily_labels_format_expiry_date_in_japanese_style():
     assert labels[0]["賞味期限"] == "2026年5月25日"
 
 
+def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_categories():
+    lines = [
+        {
+            "date": "2026-06-07",
+            "daypart": "夕",
+            "menu_name": "カレイの照焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-07",
+            "daypart": "夕",
+            "menu_name": "カレイの照焼き",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "quantity_original": 5,
+        },
+        {
+            "date": "2026-06-07",
+            "daypart": "夕",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "mixer",
+            "quantity_original": 4,
+        },
+    ]
+
+    enriched = output_builder._apply_menu_overrides(
+        lines,
+        [
+            {
+                "id": "MMI-karei",
+                "name": "カレイの照焼き 添）小松菜",
+                "daypart": "夕食",
+                "category": "主菜",
+                "diet_type": "regular",
+                "unit_type": "g",
+                "qty_per_serving": 100,
+                "temp_type": "hot",
+            },
+            {
+                "id": "MMI-tamago",
+                "name": "玉子焼き",
+                "daypart": "夕食",
+                "category": "副菜",
+                "diet_type": "regular",
+                "unit_type": "count",
+                "qty_per_serving": 2,
+                "temp_type": "hot",
+            },
+        ],
+    )
+
+    soft_karei = next(line for line in enriched if line["menu_name"] == "カレイの照焼き" and line["diet_type"] == "soft")
+    assert soft_karei["menu_temp_type"] == "hot"
+    assert soft_karei["menu_unit_type"] == "g"
+
+    mixer_tamago = next(line for line in enriched if line["menu_name"] == "玉子焼き")
+    assert mixer_tamago["menu_temp_type"] == "hot"
+    assert mixer_tamago["menu_unit_type"] == "count"
+    assert mixer_tamago["menu_qty_per_serving"] == 2
+
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {
+                **soft_karei,
+                "facility": "FAC00009",
+                "quantity": 5,
+                "area_id": "2F",
+            },
+            {
+                **mixer_tamago,
+                "facility": "FAC00009",
+                "quantity": 4,
+                "area_id": "2F",
+            },
+        ],
+        {},
+        None,
+    )
+    karei_label = next(row for row in labels if row["商品名１"] == "カレイの照焼き")
+    assert karei_label["温・冷"] == "温菜"
+    tamago_label = next(row for row in labels if row["商品名１"] == "玉子焼き")
+    assert tamago_label["内容量"] == "8個"
+    assert tamago_label["内容詳細"] == "2個"
+
+
 def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
