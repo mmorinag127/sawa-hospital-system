@@ -157,7 +157,7 @@ def _monthly_item_identity_key(
         str(name or "").strip(),
         str(_coerce_master_field_value("daypart", daypart) or "").strip(),
         str(category or "").strip(),
-        str(normalize_diet_type(diet_type) or "").strip(),
+        str(normalize_diet_type(diet_type) or "regular").strip(),
         str(facility_override or "").strip(),
     )
 
@@ -180,6 +180,27 @@ def _monthly_item_identity_key_from_payload(payload: dict, facility_override: st
         diet_type=payload.get("diet_type"),
         facility_override=facility_override,
     )
+
+
+def _monthly_item_payload_preference(payload: dict) -> tuple[int, int, int, str]:
+    return (
+        1 if payload.get("menu_master_id") else 0,
+        1 if not payload.get("master_resolution_mode") else 0,
+        0 if str(payload.get("id") or "").startswith(_REPAIRED_MENU_ITEM_ID_PREFIX) else 1,
+        str(payload.get("id") or ""),
+    )
+
+
+def _dedupe_monthly_item_payloads_by_identity(items: list[dict]) -> list[dict]:
+    selected: dict[tuple[str, str, str, str, str], dict] = {}
+    for item in items:
+        key = _monthly_item_identity_key_from_payload(item, item.get("facility_override"))
+        if not key[0]:
+            continue
+        current = selected.get(key)
+        if current is None or _monthly_item_payload_preference(item) > _monthly_item_payload_preference(current):
+            selected[key] = item
+    return list(selected.values())
 
 
 def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str, str, str, str, str]:
@@ -3148,6 +3169,7 @@ def _get_menu_direct(month_id: str) -> dict | None:
             return None
         payload = [serialize_item(i) for i in items]
         payload.extend(_missing_monthly_menu_item_payloads(session, month_id, entries, items))
+        payload = _dedupe_monthly_item_payloads_by_identity(payload)
         serialized_entries = [serialize_entry(entry) for entry in entries]
         serialized_entries.sort(key=_menu_entry_sort_key)
         return {
@@ -3207,6 +3229,7 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[
                 .all()
             )
             base_items.extend(_missing_monthly_menu_item_payloads(session, month_id, base_entries, base_rows))
+            base_items = _dedupe_monthly_item_payloads_by_identity(base_items)
             return _merge_master_defaults(base_items, None)
 
         selected: dict[tuple[str, str, str, str], tuple[int, MonthlyMenuItem]] = {}
@@ -3407,6 +3430,7 @@ def get_latest_menu() -> dict | None:
         )
         payload = [serialize_item(i) for i in items]
         payload.extend(_missing_monthly_menu_item_payloads(session, latest.id, entries, items))
+        payload = _dedupe_monthly_item_payloads_by_identity(payload)
         serialized_entries = [serialize_entry(entry) for entry in entries]
         serialized_entries.sort(key=_menu_entry_sort_key)
         return {
@@ -3430,6 +3454,7 @@ def get_menu_items(month_id: str) -> list[dict]:
         )
         payload = [serialize_item(i) for i in items]
         payload.extend(_missing_monthly_menu_item_payloads(session, month_id, entries, items))
+        payload = _dedupe_monthly_item_payloads_by_identity(payload)
         return _merge_master_defaults(payload, None)
 
 

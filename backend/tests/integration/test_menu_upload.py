@@ -260,7 +260,6 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
                 temp_type="hot",
                 daypart="朝食",
                 category="主菜",
-                diet_type="regular",
             )
         )
         session.add_all(
@@ -305,6 +304,12 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
     with session_scope() as session:
         rows = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == "2099-06").all()
         assert len(rows) == 2
+        morning_rows = [
+            row
+            for row in rows
+            if row.name == "ジャーマンポテト" and row.daypart == "朝食" and row.category == "主菜"
+        ]
+        assert len(morning_rows) == 1
 
 
 def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists():
