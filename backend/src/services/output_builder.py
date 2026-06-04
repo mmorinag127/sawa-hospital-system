@@ -5765,6 +5765,14 @@ def _prepare_output_context(
     if timings is not None:
         timings["prepare_order_lines_ms"] = round((time.perf_counter() - order_lines_started) * 1000, 1)
     order_for_outputs = {**order, "lines": order_lines}
+    week_value = (
+        str(order.get("stored_week_value") or "").strip()
+        or str(order.get("week_value") or "").strip()
+        or str(order.get("persisted_week_value") or "").strip()
+        or str(order.get("week") or "").strip()
+        or str(order.get("week_code") or "").strip()
+    )
+    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
     ocr_started = time.perf_counter()
     has_structural_slots = _delivery_lines_have_structural_slots(order_lines, quantity_rules)
     if include_ocr_menu_meta and not has_structural_slots:
