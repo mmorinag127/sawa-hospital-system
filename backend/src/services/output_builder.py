@@ -5765,6 +5765,13 @@ def _prepare_output_context(
     if timings is not None:
         timings["prepare_order_lines_ms"] = round((time.perf_counter() - order_lines_started) * 1000, 1)
     order_for_outputs = {**order, "lines": order_lines}
+    week_value = (
+        str(order.get("stored_week_value") or "").strip()
+        or str(order.get("week_value") or "").strip()
+        or str(order.get("persisted_week_value") or "").strip()
+        or str(order.get("week") or "").strip()
+        or str(order.get("week_code") or "").strip()
+    )
     ocr_started = time.perf_counter()
     has_structural_slots = _delivery_lines_have_structural_slots(order_lines, quantity_rules)
     if include_ocr_menu_meta and not has_structural_slots:
@@ -5779,6 +5786,7 @@ def _prepare_output_context(
     if include_bags:
         bags_started = time.perf_counter()
         bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
+        menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
         bags = _apply_menu_overrides(bags, menu_items)
         bags = _clear_stale_menu_qty_from_monthly_entry(bags)
         bags = _apply_builtin_menu_defaults(bags)
