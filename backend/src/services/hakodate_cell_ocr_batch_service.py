@@ -31,7 +31,6 @@ from src.services.hakodate_step_review_pipeline_service import (
     WEEK_SHEET_NAME,
     _align_axes,
     _bbox_quad_points,
-    _bgr_to_rgb_image,
     _draw_merge_aware_grid,
     _draw_quad_points,
     _draw_target_regions,
@@ -40,6 +39,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _source_template_name,
     _split_line_masks,
     _write_pdf_from_pages,
+    snap_regions_x_to_local_fax_rulings,
 )
 
 
@@ -1030,6 +1030,7 @@ def _build_preprocess_for_ocr(
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
+    target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(raw_rectified, target_regions)
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
     target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     rectified_quad_points = _bbox_quad_points(table_bbox)
@@ -1048,6 +1049,7 @@ def _build_preprocess_for_ocr(
             **axis_evidence,
             "merge": merge_evidence,
             "target": target_evidence,
+            "target_local_grid_snap": target_snap_evidence,
             "quad_estimate": quad_estimate,
         },
     }
