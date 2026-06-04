@@ -133,6 +133,191 @@ def _split_line_masks(image_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return h_lines, v_lines
 
 
+def snap_regions_x_to_local_fax_rulings(
+    rectified: np.ndarray,
+    regions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    target_regions = [
+        region
+        for region in regions
+        if isinstance(region.get("bbox"), list) and len(region["bbox"]) == 4
+    ]
+    if not target_regions:
+        return regions, {"applied": False, "reason": "no_target_regions"}
+    original_boundaries = sorted(
+        {int(round(float(region["bbox"][0]))) for region in target_regions}
+        | {int(round(float(region["bbox"][2]))) for region in target_regions}
+    )
+    if len(original_boundaries) < 2:
+        return regions, {"applied": False, "reason": "insufficient_boundaries"}
+    row_boundaries = sorted(
+        {int(round(float(region["bbox"][1]))) for region in target_regions}
+        | {int(round(float(region["bbox"][3]))) for region in target_regions}
+    )
+    if len(row_boundaries) < 2:
+        return regions, {"applied": False, "reason": "insufficient_row_boundaries"}
+
+    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified
+    if rectified.ndim == 3:
+        blue, green, red = cv2.split(rectified)
+        dark_mask = ((gray < 95) & (green < 130) & (red < 130) & (blue < 130)).astype(np.uint8)
+    else:
+        dark_mask = (gray < 95).astype(np.uint8)
+    height, width = dark_mask.shape[:2]
+
+    def projection_centers(projection: np.ndarray, *, threshold: float, min_len: int) -> list[float]:
+        if projection.size == 0:
+            return []
+        centers: list[float] = []
+        in_segment = False
+        start = 0
+        for index, value in enumerate(projection):
+            if value >= threshold and not in_segment:
+                start = index
+                in_segment = True
+            elif (value < threshold or index == len(projection) - 1) and in_segment:
+                end = index if value < threshold else index + 1
+                if end - start >= min_len:
+                    values = projection[start:end]
+                    if values.size and float(values.sum()) > 0.0:
+                        positions = np.arange(start, end, dtype=np.float32)
+                        centers.append(float(np.average(positions, weights=values)))
+                in_segment = False
+        return centers
+
+    def nearest(value: float, candidates: list[float], *, max_distance: float) -> float | None:
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda candidate: abs(float(candidate) - value))
+        return float(best) if abs(float(best) - value) <= max_distance else None
+
+    row_edge_snaps: dict[int, list[float | None]] = {}
+    row_debug: list[dict[str, Any]] = []
+    for row_boundary in row_boundaries:
+        band_top = max(0, int(round(float(row_boundary) - 24.0)))
+        band_bottom = min(height, int(round(float(row_boundary) + 24.0)))
+        if band_bottom <= band_top:
+            continue
+        projection = dark_mask[band_top:band_bottom, :].sum(axis=0).astype(np.float32)
+        if float(projection.max(initial=0.0)) <= 0.0:
+            continue
+        smooth = np.convolve(projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+        threshold = max(7.0, float(smooth.max(initial=0.0)) * 0.36)
+        centers = projection_centers(smooth, threshold=threshold, min_len=2)
+        snapped = [
+            nearest(float(boundary), centers, max_distance=18.0)
+            for boundary in original_boundaries
+        ]
+        deltas = [
+            None if snapped_x is None else float(snapped_x) - float(boundary)
+            for boundary, snapped_x in zip(original_boundaries, snapped)
+        ]
+        matched = [delta for delta in deltas if delta is not None]
+        row_edge_snaps[int(row_boundary)] = snapped
+        row_debug.append(
+            {
+                "row_y": int(row_boundary),
+                "matched_count": len(matched),
+                "mean_delta": None if not matched else round(float(np.mean(matched)), 3),
+                "max_abs_delta": None if not matched else round(float(max(abs(delta) for delta in matched)), 3),
+            }
+        )
+
+    y_span_left = max(0, min(original_boundaries))
+    y_span_right = min(width, max(original_boundaries))
+    y_projection = dark_mask[:, y_span_left:y_span_right].sum(axis=1).astype(np.float32)
+    y_smooth = np.convolve(y_projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+    y_threshold = max(15.0, float(y_smooth.max(initial=0.0)) * 0.35)
+    detected_y_edges = projection_centers(y_smooth, threshold=y_threshold, min_len=2)
+    y_edge_snaps = {
+        int(boundary): nearest(float(boundary), detected_y_edges, max_distance=18.0)
+        for boundary in row_boundaries
+    }
+
+    boundary_index = {boundary: index for index, boundary in enumerate(original_boundaries)}
+    snapped_regions: list[dict[str, Any]] = []
+    snapped_count = 0
+    fallback_count = 0
+    for region in regions:
+        box = region.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            snapped_regions.append(region)
+            continue
+        x0, y0, x1, y1 = [float(value) for value in box]
+        left_key = int(round(x0))
+        right_key = int(round(x1))
+        top_key = int(round(y0))
+        bottom_key = int(round(y1))
+        left_index = boundary_index.get(left_key)
+        right_index = boundary_index.get(right_key)
+        top_snaps = row_edge_snaps.get(top_key)
+        bottom_snaps = row_edge_snaps.get(bottom_key)
+        snapped_left_values: list[float] = []
+        snapped_right_values: list[float] = []
+        if top_snaps and left_index is not None and left_index < len(top_snaps) and top_snaps[left_index] is not None:
+            snapped_left_values.append(float(top_snaps[left_index]))
+        if bottom_snaps and left_index is not None and left_index < len(bottom_snaps) and bottom_snaps[left_index] is not None:
+            snapped_left_values.append(float(bottom_snaps[left_index]))
+        if top_snaps and right_index is not None and right_index < len(top_snaps) and top_snaps[right_index] is not None:
+            snapped_right_values.append(float(top_snaps[right_index]))
+        if bottom_snaps and right_index is not None and right_index < len(bottom_snaps) and bottom_snaps[right_index] is not None:
+            snapped_right_values.append(float(bottom_snaps[right_index]))
+        snapped_top = y_edge_snaps.get(top_key)
+        snapped_bottom = y_edge_snaps.get(bottom_key)
+        if (
+            len(snapped_left_values) < 2
+            or len(snapped_right_values) < 2
+            or snapped_top is None
+            or snapped_bottom is None
+        ):
+            fallback_count += 1
+            snapped_regions.append(region)
+            continue
+        snapped_x0 = float(np.mean(snapped_left_values))
+        snapped_x1 = float(np.mean(snapped_right_values))
+        snapped_y0 = float(snapped_top)
+        snapped_y1 = float(snapped_bottom)
+        if snapped_x1 <= snapped_x0 + 8.0 or snapped_y1 <= snapped_y0 + 8.0:
+            fallback_count += 1
+            snapped_regions.append(region)
+            continue
+        snapped_count += 1
+        snapped_regions.append(
+            {
+                **region,
+                "bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
+                "local_grid_snap": {
+                    "source_bbox": [x0, y0, x1, y1],
+                    "snapped_bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
+                    "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
+                    "y_delta": [snapped_y0 - y0, snapped_y1 - y1],
+                    "method": "row_edge_local_fax_ruling_snap_v1",
+                },
+            }
+        )
+    required_min = max(1, int(round(float(len(target_regions)) * 0.55)))
+    if snapped_count < required_min:
+        return regions, {
+            "applied": False,
+            "reason": "local_grid_snap_insufficient_matches",
+            "original_boundaries": original_boundaries,
+            "row_boundary_count": len(row_boundaries),
+            "snapped_region_count": snapped_count,
+            "fallback_region_count": fallback_count,
+            "required_min_snapped_region_count": required_min,
+            "row_debug": row_debug,
+        }
+    return snapped_regions, {
+        "applied": True,
+        "method": "row_edge_local_fax_ruling_snap_v1",
+        "original_boundaries": original_boundaries,
+        "row_boundary_count": len(row_boundaries),
+        "snapped_region_count": snapped_count,
+        "fallback_region_count": fallback_count,
+        "row_debug": row_debug,
+    }
+
+
 def _clustered_projection_positions(
     projection: np.ndarray,
     *,

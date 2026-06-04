@@ -34,6 +34,7 @@ from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _draw_quad_points,
     _make_review_canvas,
     _write_pdf_from_pages,
+    snap_regions_x_to_local_fax_rulings,
 )
 from src.hakodate_best_method_runtime.run_text_recognizer_corner_noise_trial import (  # noqa: E402
     TRIAL_ENGINE as TEXT_RECOGNIZER_ENGINE,
@@ -208,24 +209,7 @@ def _snap_regions_x_to_fax_lines_all_targets(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    target_regions = [
-        region
-        for region in regions
-        if isinstance(region.get("bbox"), list) and len(region["bbox"]) == 4
-    ]
-    if not target_regions:
-        return regions, {"applied": False, "reason": "no_target_regions"}
-    original_boundaries = sorted(
-        {int(round(float(region["bbox"][0]))) for region in target_regions}
-        | {int(round(float(region["bbox"][2]))) for region in target_regions}
-    )
-    if len(original_boundaries) < 2:
-        return regions, {"applied": False, "reason": "insufficient_boundaries"}
-    return regions, {
-        "applied": False,
-        "reason": "disabled_after_header_intersection_axis_alignment",
-        "original_boundaries": original_boundaries,
-    }
+    return snap_regions_x_to_local_fax_rulings(rectified, regions)
 
 
 def _apply_soft_pair_when_present(
@@ -873,16 +857,6 @@ def build_best_method_for_manifest_item(
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    method = cmp.MethodSpec(
-        name="fax_line_snap_current_frame_noise",
-        description="FAX-line snapped cells, current frame erasure, OpenCV KNN leave-one-out.",
-        crop_mode="expanded",
-        pad_x=1,
-        pad_y=8,
-        frame_mode="current",
-        threshold_mode="gray",
-        component_filter="small_only",
-    )
     auth_header = cmp._operator_auth_header_from_gcloud()
     pages: list[Image.Image] = []
     thumbnails: list[Image.Image] = []
@@ -902,9 +876,7 @@ def main() -> None:
         )
         page_png = facility_dir / "best_method_overlay.png"
         page_pdf = facility_dir / "best_method_overlay.pdf"
-        records_path = facility_dir / "best_method_records.json"
         summary_path = facility_dir / "best_method_summary.json"
-        contact_sheet_path = facility_dir / "best_method_contact_sheet.png"
         review_page.save(page_png)
         _write_pdf_from_pages([review_page], page_pdf)
         metrics = dict(summary.get("metrics") or {})
