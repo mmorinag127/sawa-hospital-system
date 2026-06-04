@@ -251,17 +251,17 @@ def snap_regions_x_to_local_fax_rulings(
                 top_candidates,
                 key=lambda value: abs(float(value) - float(top_boundary)),
             )
-    if y_edge_snaps.get(bottom_boundary) is None:
-        bottom_candidates = [
-            float(value)
-            for value in detected_y_edges
-            if float(bottom_boundary) - 160.0 <= float(value) <= float(bottom_boundary) + 20.0
-        ]
-        if bottom_candidates:
-            # The bottom table ruling can be far above the template edge after
-            # local warp correction.  Use the lowest detected long ruling in
-            # the lower band instead of leaving the outer crop open.
-            y_edge_snaps[bottom_boundary] = max(bottom_candidates)
+    bottom_candidates = [
+        float(value)
+        for value in detected_y_edges
+        if float(bottom_boundary) - 160.0 <= float(value) <= float(bottom_boundary) + 20.0
+    ]
+    if bottom_candidates:
+        # The bottom table ruling can be far above the template edge after
+        # local warp correction.  Prefer the lowest detected long ruling in
+        # the lower band; near-template dark peaks can be edge noise rather
+        # than the actual bottom horizontal ruling.
+        y_edge_snaps[bottom_boundary] = max(bottom_candidates)
     for boundary in (top_boundary, bottom_boundary):
         snapped_y = y_edge_snaps.get(boundary)
         if snapped_y is None or abs(float(snapped_y) - float(boundary)) <= 1.0:
