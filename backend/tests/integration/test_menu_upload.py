@@ -307,6 +307,74 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
         assert len(rows) == 2
 
 
+def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(MonthlyMenu(id="2099-08", month_start=date(2099, 8, 1), filename="legacy.xlsx"))
+        session.add_all(
+            [
+                MonthlyMenuItem(
+                    id="MMI_LEGACY_GENERIC_POTATO",
+                    monthly_menu_id="2099-08",
+                    name="ジャーマンポテト",
+                    unit_type="g",
+                    qty_per_serving=70,
+                    diet_type="regular",
+                ),
+                MonthlyMenuItem(
+                    id="MMI_LEGACY_MORNING_POTATO",
+                    monthly_menu_id="2099-08",
+                    name="ジャーマンポテト",
+                    unit_type="g",
+                    qty_per_serving=70,
+                    daypart="朝食",
+                    category="主菜",
+                    diet_type="regular",
+                ),
+                MonthlyMenuEntry(
+                    id="MME_LEGACY_DINNER_GENERIC_SUPPRESSED",
+                    monthly_menu_id="2099-08",
+                    menu_date=date(2099, 8, 24),
+                    daypart="夕食",
+                    name="ジャーマンポテト",
+                    category="副菜",
+                    diet_type="regular",
+                    slot_index=2,
+                ),
+            ]
+        )
+
+    payload = menu_service.get_menu("2099-08")
+
+    assert payload is not None
+    german_items = [
+        item
+        for item in payload["items"]
+        if item["name"] == "ジャーマンポテト" and item.get("daypart") == "夕食" and item.get("category") == "副菜"
+    ]
+    assert len(german_items) == 1
+    assert german_items[0]["qty_per_serving"] == 40.0
+    assert german_items[0]["master_resolution_mode"] == "month_only"
+
+    with session_scope() as session:
+        rows = (
+            session.query(MonthlyMenuItem)
+            .filter(MonthlyMenuItem.monthly_menu_id == "2099-08")
+            .filter(MonthlyMenuItem.name == "ジャーマンポテト")
+            .all()
+        )
+        assert sorted((row.daypart or "", row.category or "") for row in rows) == [
+            ("", ""),
+            ("夕食", "副菜"),
+            ("朝食", "主菜"),
+        ]
+
+
 def test_get_menu_exposes_repair_stub_when_legacy_repair_does_not_persist(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()

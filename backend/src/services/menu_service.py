@@ -2112,7 +2112,7 @@ def _repair_monthly_menu_items_for_entries(session, month_id: str) -> int:
         if not key[0] or key in existing_keys or key in seen_missing_keys:
             continue
         generic_key = (key[0], "", "", key[3], key[4])
-        if generic_key in existing_keys:
+        if not key[2] and generic_key in existing_keys:
             continue
         seen_missing_keys.add(key)
         missing_entries.append(entry)
@@ -2194,7 +2194,7 @@ def _missing_monthly_menu_item_payloads(
         if not key[0] or key in existing_keys or key in seen_missing_keys:
             continue
         generic_key = (key[0], "", "", key[3], key[4])
-        if generic_key in existing_keys:
+        if not key[2] and generic_key in existing_keys:
             continue
         seen_missing_keys.add(key)
         missing_entries.append(entry)
