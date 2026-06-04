@@ -24,6 +24,7 @@ type WorkflowV2 = {
   week_start?: string | null;
   week_end?: string | null;
   template_id?: string | null;
+  template_version_id?: string | null;
   expanded_cell_copy_mode?: ExpandedCellCopyMode | null;
   context_suggestion?: ContextSuggestion | null;
   bagging_result_id?: string | null;
@@ -1301,16 +1302,17 @@ export default function OrderWorkflowV2Page() {
       || "",
   ).trim();
   const ocrJobRecoveryAction = String(workflow?.ocr_job?.recovery_action || "").trim();
+  const canReviewQuad = Boolean(orderId && workflowContextConfirmed && workflow?.template_version_id);
   const quadReviewRequired = ocrJobRecoveryAction === "review_or_edit_quad"
     || workflowBlockers.includes("quad_estimation_failed")
     || Boolean(workflow?.quad_override?.quad_px?.length);
   const stepLabels = useMemo(() => {
     const labels = [baseStepLabels[0]];
-    if (quadReviewRequired || visibleStep === 1.5) labels.push({ step: 1.5, label: "4点確認/補正" });
+    if (canReviewQuad || quadReviewRequired || visibleStep === 1.5) labels.push({ step: 1.5, label: "4点確認/補正" });
     if (visibleStep === 1.6) labels.push({ step: 1.6, label: "ヘッダー補正" });
     labels.push(...baseStepLabels.slice(1));
     return labels;
-  }, [quadReviewRequired, visibleStep]);
+  }, [canReviewQuad, quadReviewRequired, visibleStep]);
   const ocrPrerequisiteBlockers = workflowBlockers.filter((item) =>
     [
       "menu_entries_missing",
@@ -3216,6 +3218,11 @@ export default function OrderWorkflowV2Page() {
           <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
             再読込
           </button>
+          {canReviewQuad ? (
+            <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy)}>
+              4点確認/補正
+            </button>
+          ) : null}
           {orderId ? (
             <>
               <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
@@ -3755,7 +3762,7 @@ export default function OrderWorkflowV2Page() {
             <div>
               <h2>4点推定の確認 / 手動補正</h2>
               <p className="subtle">
-                自動推定が許容範囲を超えた場合だけ使う復帰ページです。推定4点が表外枠に合っていればOK、合っていなければ手動で左上→右上→右下→左下の順に指定します。
+                OCRが失敗した場合や、OCR結果の行・列位置がずれている場合に使います。推定4点が表外枠に合っていればOK、合っていなければ手動で左上→右上→右下→左下の順に指定します。
               </p>
             </div>
             <button className="btn ghost" type="button" onClick={() => void loadQuadReview()} disabled={quadReviewLoading || Boolean(busy)}>
@@ -3990,9 +3997,14 @@ export default function OrderWorkflowV2Page() {
               <h2>正解 OCR を一つ選ぶ</h2>
               <p className="subtle">選択変更または削除時は、派生 sheet / bagging / output / confirmed snapshot を無効化します。</p>
             </div>
-            <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
-              ヘッダーを修正
-            </button>
+            <div className="row-actions">
+              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
+                4点からOCR再実行
+              </button>
+              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
+                ヘッダーを修正
+              </button>
+            </div>
           </header>
           <div className="ocr-result-list">
             {ocrResults.length ? (
@@ -4102,6 +4114,9 @@ export default function OrderWorkflowV2Page() {
               </button>
               <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
                 異常チェック
+              </button>
+              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
+                4点からOCR再実行
               </button>
               <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
                 異常を補正
