@@ -3838,9 +3838,38 @@ export default function OrderWorkflowV2Page() {
             ) : null}
           </div>
           {manualQuadMode ? (
-            <p className="workflow-warning">
-              手動指定中: {manualQuadPoints.length}/4 点。順序は 左上 → 右上 → 右下 → 左下 です。
-            </p>
+            <div className="quad-order-guide">
+              <div>
+                <p className="workflow-warning">
+                  手動指定中: {manualQuadPoints.length}/4 点。Q1左上 → Q2右上 → Q3右下 → Q4左下の時計回りで指定します。
+                </p>
+                <p className="subtle">表全体の外枠の角を指定してください。データ行の先頭線ではなく、日付・区分・献立などの見出しを含む外枠です。</p>
+              </div>
+              <svg className="quad-order-diagram" viewBox="0 0 220 150" role="img" aria-label="4点指定順序 Q1左上 Q2右上 Q3右下 Q4左下">
+                <rect x="36" y="28" width="148" height="92" rx="4" className="quad-order-box" />
+                <path d="M58 24 H162 M188 50 V100 M162 124 H58 M32 100 V50" className="quad-order-arrow" />
+                <polygon points="162,18 182,24 162,30" className="quad-order-arrow-head" />
+                <polygon points="194,100 188,120 182,100" className="quad-order-arrow-head" />
+                <polygon points="58,130 38,124 58,118" className="quad-order-arrow-head" />
+                <polygon points="26,50 32,30 38,50" className="quad-order-arrow-head" />
+                <g className="quad-order-point">
+                  <circle cx="36" cy="28" r="14" />
+                  <text x="36" y="33">Q1</text>
+                </g>
+                <g className="quad-order-point">
+                  <circle cx="184" cy="28" r="14" />
+                  <text x="184" y="33">Q2</text>
+                </g>
+                <g className="quad-order-point">
+                  <circle cx="184" cy="120" r="14" />
+                  <text x="184" y="125">Q3</text>
+                </g>
+                <g className="quad-order-point">
+                  <circle cx="36" cy="120" r="14" />
+                  <text x="36" y="125">Q4</text>
+                </g>
+              </svg>
+            </div>
           ) : null}
           <div className="quad-review-canvas-wrap">
             {quadImageSrc ? (
@@ -6194,6 +6223,49 @@ export default function OrderWorkflowV2Page() {
           flex-wrap: wrap;
           gap: 10px;
           margin: 12px 0;
+        }
+        .quad-order-guide {
+          align-items: center;
+          background: #fbf7ed;
+          border: 1px solid #ddd5c2;
+          border-radius: 14px;
+          display: flex;
+          gap: 16px;
+          justify-content: space-between;
+          margin: 12px 0;
+          padding: 12px;
+        }
+        .quad-order-guide .workflow-warning {
+          margin: 0 0 6px;
+        }
+        .quad-order-diagram {
+          flex: 0 0 220px;
+          height: 150px;
+        }
+        .quad-order-box {
+          fill: #fffdf7;
+          stroke: #162019;
+          stroke-width: 3;
+        }
+        .quad-order-arrow {
+          fill: none;
+          stroke: #58766c;
+          stroke-linecap: round;
+          stroke-width: 4;
+        }
+        .quad-order-arrow-head {
+          fill: #58766c;
+        }
+        .quad-order-point circle {
+          fill: #2f7dff;
+          stroke: #fffdf7;
+          stroke-width: 4;
+        }
+        .quad-order-point text {
+          fill: #fffdf7;
+          font-size: 13px;
+          font-weight: 900;
+          text-anchor: middle;
         }
         .quad-review-canvas-wrap {
           background: #ffffff;
