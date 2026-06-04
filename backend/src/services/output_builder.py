@@ -935,6 +935,7 @@ def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dic
             updated["menu_qty_per_serving"] = item.get("qty_per_serving")
             updated["_menu_qty_source_daypart"] = item.get("daypart")
             updated["_menu_qty_source_category"] = item.get("category")
+            updated["_monthly_menu_item_override_applied"] = True
         if item.get("bag_max_qty") is not None:
             updated["menu_bag_max_qty"] = item.get("bag_max_qty")
         if item.get("bag_max_unit"):
@@ -978,6 +979,7 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
             updated["menu_qty_per_serving"] = item.get("qty_per_serving")
             updated["_menu_qty_source_daypart"] = item.get("daypart")
             updated["_menu_qty_source_category"] = item.get("category")
+            updated["_monthly_menu_item_override_applied"] = True
         if item.get("bag_max_qty") is not None:
             updated["menu_bag_max_qty"] = item.get("bag_max_qty")
         if item.get("bag_max_unit"):
@@ -1153,7 +1155,11 @@ def _normalize_category_key(value: object) -> str:
 def _clear_stale_menu_qty_from_monthly_entry(lines: list[dict]) -> list[dict]:
     enriched: list[dict] = []
     for line in lines:
-        if not line.get("_monthly_entry_override_applied") or line.get("menu_qty_per_serving") is None:
+        if (
+            not line.get("_monthly_entry_override_applied")
+            or line.get("_monthly_menu_item_override_applied")
+            or line.get("menu_qty_per_serving") is None
+        ):
             enriched.append(line)
             continue
         source_daypart = _normalize_output_daypart(line.get("_menu_qty_source_daypart"))
@@ -1719,6 +1725,7 @@ def _apply_garnish_lines(lines: list[dict]) -> list[dict]:
             "menu_bag_max_unit",
             "_menu_qty_source_daypart",
             "_menu_qty_source_category",
+            "_monthly_menu_item_override_applied",
             "_monthly_entry_override_applied",
         ):
             garnish_line.pop(field, None)
