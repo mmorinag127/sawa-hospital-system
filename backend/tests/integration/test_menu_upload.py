@@ -228,6 +228,85 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
     assert refreshed[lunch["id"]]["qty_per_serving"] == 40
 
 
+def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(
+            MenuMaster(
+                id="MNU_LEGACY_GERMAN_POTATO",
+                name="ジャーマンポテト",
+                normalized_name=menu_service._normalize_menu_name("ジャーマンポテト"),
+                unit_type="g",
+                qty_per_serving=70,
+                temp_type="hot",
+                daypart="朝食",
+                category="主菜",
+            )
+        )
+        session.add(MonthlyMenu(id="2099-06", month_start=date(2099, 6, 1), filename="legacy.xlsx"))
+        session.add(
+            MonthlyMenuItem(
+                id="MMI_LEGACY_MORNING",
+                monthly_menu_id="2099-06",
+                menu_master_id="MNU_LEGACY_GERMAN_POTATO",
+                name="ジャーマンポテト",
+                unit_type="g",
+                qty_per_serving=70,
+                temp_type="hot",
+                daypart="朝食",
+                category="主菜",
+                diet_type="regular",
+            )
+        )
+        session.add_all(
+            [
+                MonthlyMenuEntry(
+                    id="MME_LEGACY_MORNING",
+                    monthly_menu_id="2099-06",
+                    menu_date=date(2099, 6, 14),
+                    daypart="朝食",
+                    name="ジャーマンポテト",
+                    category="主菜",
+                    diet_type="regular",
+                    slot_index=1,
+                ),
+                MonthlyMenuEntry(
+                    id="MME_LEGACY_DINNER",
+                    monthly_menu_id="2099-06",
+                    menu_date=date(2099, 6, 24),
+                    daypart="夕食",
+                    name="ジャーマンポテト",
+                    category="副菜",
+                    diet_type="regular",
+                    slot_index=2,
+                ),
+            ]
+        )
+
+    payload = menu_service.get_menu("2099-06")
+
+    assert payload is not None
+    german_items = sorted(
+        [item for item in payload["items"] if item["name"] == "ジャーマンポテト"],
+        key=lambda item: (item["daypart"], item["category"]),
+    )
+    assert [(item["daypart"], item["category"], item["qty_per_serving"]) for item in german_items] == [
+        ("夕食", "副菜", 40.0),
+        ("朝食", "主菜", 70.0),
+    ]
+    repaired = next(item for item in german_items if item["daypart"] == "夕食")
+    assert repaired["master_resolution_mode"] == "month_only"
+
+    with session_scope() as session:
+        rows = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == "2099-06").all()
+        assert len(rows) == 2
+
+
 def test_output_menu_overrides_select_same_name_by_daypart_and_category():
     lines = [
         {

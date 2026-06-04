@@ -19,6 +19,7 @@ from src.models.menu import (
     MonthlyMenuEntry,
     MenuMaster,
     MenuFacilityOverride,
+    MenuRule,
 )
 from src.models.facility import Facility, FacilityConfig
 from src.models.user import AuditLog
@@ -177,6 +178,16 @@ def _monthly_item_identity_key_from_payload(payload: dict, facility_override: st
         category=payload.get("category"),
         diet_type=payload.get("diet_type"),
         facility_override=facility_override,
+    )
+
+
+def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str, str, str, str, str]:
+    return _monthly_item_identity_key(
+        name=entry.name,
+        daypart=entry.daypart,
+        category=entry.category,
+        diet_type=entry.diet_type,
+        facility_override=entry.facility_override,
     )
 
 
@@ -689,6 +700,10 @@ def _rule_applies_to_item(rule: dict, item: dict) -> bool:
 
 def _apply_rules_to_items(items: list[dict]) -> list[dict]:
     rules = menu_rule_service.list_active_rules()
+    return _apply_rule_payloads_to_items(items, rules)
+
+
+def _apply_rule_payloads_to_items(items: list[dict], rules: list[dict]) -> list[dict]:
     type_weight = {"global": 100, "menu": 200}
     enriched: list[dict] = []
     for item in items:
@@ -2075,6 +2090,95 @@ def create_menu(
     return payload, replaced, item_count
 
 
+def _repair_monthly_menu_items_for_entries(session, month_id: str) -> int:
+    entries = (
+        session.query(MonthlyMenuEntry)
+        .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+        .all()
+    )
+    if not entries:
+        return 0
+    items = (
+        session.query(MonthlyMenuItem)
+        .filter(MonthlyMenuItem.monthly_menu_id == month_id)
+        .all()
+    )
+    existing_keys = {_monthly_item_identity_key_from_item(item) for item in items}
+    missing_entries: list[MonthlyMenuEntry] = []
+    seen_missing_keys: set[tuple[str, str, str, str, str]] = set()
+    for entry in entries:
+        key = _monthly_item_identity_key_from_entry(entry)
+        if not key[0] or key in existing_keys or key in seen_missing_keys:
+            continue
+        generic_key = (key[0], "", "", key[3], key[4])
+        if generic_key in existing_keys:
+            continue
+        seen_missing_keys.add(key)
+        missing_entries.append(entry)
+    if not missing_entries:
+        return 0
+
+    active_rules = [
+        {
+            "rule_type": rule.rule_type,
+            "match_type": rule.match_type,
+            "menu_pattern": rule.menu_pattern,
+            "facility_id": rule.facility_id,
+            "daypart": rule.daypart,
+            "category": rule.category,
+            "diet_type": normalize_diet_type(rule.diet_type),
+            "unit_type": rule.unit_type,
+            "qty_per_serving": rule.qty_per_serving,
+            "priority": rule.priority,
+            "active": rule.active,
+        }
+        for rule in session.query(MenuRule).filter(MenuRule.active.is_(True)).all()
+    ]
+    if not active_rules:
+        active_rules = [dict(rule) for rule in menu_rule_service.DEFAULT_GLOBAL_RULES]
+    seed_items = _apply_rule_payloads_to_items(
+        [
+            {
+                "name": entry.name,
+                "daypart": _coerce_master_field_value("daypart", entry.daypart),
+                "category": entry.category,
+                "diet_type": normalize_diet_type(entry.diet_type),
+            }
+            for entry in missing_entries
+        ],
+        active_rules,
+    )
+    repaired_count = 0
+    for entry, seed in zip(missing_entries, seed_items, strict=False):
+        name = str(entry.name or "").strip()
+        if not name:
+            continue
+        master = _find_menu_master_by_normalized(session, _normalize_menu_name(name))
+        session.add(
+            MonthlyMenuItem(
+                id=f"MMI{uuid4().hex[:8]}",
+                monthly_menu_id=month_id,
+                menu_master_id=master.id if master else None,
+                name=name,
+                unit_type=_coerce_master_field_value("unit_type", seed.get("unit_type")),
+                qty_per_serving=_coerce_float(seed.get("qty_per_serving")),
+                temp_type=_normalize_temp_type(seed.get("temp_type")),
+                daypart=_coerce_master_field_value("daypart", entry.daypart),
+                category=entry.category,
+                diet_type=normalize_diet_type(entry.diet_type),
+                facility_override=_normalize_scope_override(entry.facility_override),
+                master_resolution_mode="month_only",
+                bag_max_qty=None,
+                bag_max_unit=_coerce_master_field_value("bag_max_unit", seed.get("bag_max_unit")),
+            )
+        )
+        repaired_count += 1
+    if repaired_count:
+        session.flush()
+        logger.info("Monthly menu item identities repaired from entries", month_id=month_id, count=repaired_count)
+    return repaired_count
+
+
 def list_menu_uploads(month_id: str) -> list[dict]:
     ensure_menu_schema()
     with session_scope() as session:
@@ -2904,6 +3008,7 @@ def _get_menu_for_facility_direct(month_id: str, facility_id: str | None) -> dic
 def _get_menu_direct(month_id: str) -> dict | None:
     ensure_menu_schema()
     with session_scope() as session:
+        _repair_monthly_menu_items_for_entries(session, month_id)
         menu = session.get(MonthlyMenu, month_id)
         latest_upload_log = _get_latest_menu_upload_log(session, month_id)
         menu_payload = (
@@ -2963,6 +3068,7 @@ def _pick_latest_item_by_identity(items: list[MonthlyMenuItem]) -> dict[tuple[st
 def get_menu_items_for_facility(month_id: str, facility_id: str | None) -> list[dict]:
     ensure_menu_schema()
     with session_scope() as session:
+        _repair_monthly_menu_items_for_entries(session, month_id)
         items = (
             session.query(MonthlyMenuItem)
             .filter(MonthlyMenuItem.monthly_menu_id == month_id)
@@ -3168,6 +3274,7 @@ def get_latest_menu() -> dict | None:
                 str(row.id or ""),
             ),
         )
+        _repair_monthly_menu_items_for_entries(session, latest.id)
         latest_upload_log = _get_latest_menu_upload_log(session, latest.id)
         items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == latest.id).all()
         entries = (
@@ -3190,6 +3297,7 @@ def get_latest_menu() -> dict | None:
 def get_menu_items(month_id: str) -> list[dict]:
     ensure_menu_schema()
     with session_scope() as session:
+        _repair_monthly_menu_items_for_entries(session, month_id)
         items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == month_id).all()
         return _merge_master_defaults([serialize_item(i) for i in items], None)
 

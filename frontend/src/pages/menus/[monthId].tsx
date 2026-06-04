@@ -2943,6 +2943,9 @@ export default function MonthlyMenuEditorPage() {
           border: 1px solid rgba(25, 32, 30, 0.08);
           border-radius: 16px;
           background: #fbfbf8;
+          max-height: 72vh;
+          overflow: auto;
+          overscroll-behavior: contain;
         }
 
         .sheet-stats {
@@ -2979,6 +2982,13 @@ export default function MonthlyMenuEditorPage() {
           background: #f4f1ea;
         }
 
+        .menu-sheet-table thead th {
+          position: sticky;
+          top: 0;
+          z-index: 2;
+          background: #f4f1ea;
+        }
+
         tbody tr:nth-child(even) {
           background: #faf9f5;
         }
@@ -2989,6 +2999,11 @@ export default function MonthlyMenuEditorPage() {
           background: #f8f5ed;
           z-index: 1;
           min-width: 96px;
+        }
+
+        .menu-sheet-table thead .sticky-date,
+        .menu-sheet-table thead th:first-child {
+          z-index: 3;
         }
 
         .sheet-cell-stack {
