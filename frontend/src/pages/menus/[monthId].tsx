@@ -288,6 +288,17 @@ const buildMenuSheetGrid = (
 
 const normalizeValue = (value?: string | null) => (value || "").trim();
 
+const splitGarnishMenuName = (value?: string | null) => {
+  const text = normalizeValue(value);
+  if (!text) return null;
+  const match = text.match(/^(.*?)\s*(?:添え|添[)）:：])\s*(.+)$/);
+  if (!match) return null;
+  const mainName = normalizeValue(match[1]);
+  const garnishName = normalizeValue(match[2]);
+  if (!mainName || !garnishName) return null;
+  return { mainName, garnishName };
+};
+
 const formatErrorDetail = (detail: unknown, fallback: string) => {
   const translate = (message: string) => {
     const text = message.trim();
@@ -553,6 +564,10 @@ export default function MonthlyMenuEditorPage() {
   const selectedEntry = entries.find((entry) => entry.id === selectedEntryId) || null;
   const selectedItemIndex = findMatchingItemIndex(items, selectedEntry);
   const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
+  const selectedGarnish = splitGarnishMenuName(selectedEntry?.name);
+  const selectedGarnishItem = selectedGarnish
+    ? items.find((item) => normalizeValue(item.name) === selectedGarnish.garnishName)
+    : null;
 
   const loadUploadHistory = async () => {
     if (!monthId || Array.isArray(monthId)) return;
@@ -1982,6 +1997,15 @@ export default function MonthlyMenuEditorPage() {
               <p className="subtle">献立メニューからソース等の付属品フラグを反映します。</p>
             </div>
           </header>
+          <div className="condiment-help" data-testid="condiment-flag-help">
+            <p>
+              別ファイルは必須ではありません。月次メニューに <strong>添)キャベツ</strong> のように入っている場合は、出力時に主菜と添えへ分離します。
+            </p>
+            <p>
+              添え側の温冷・単位・量は、メニューマスターに <strong>キャベツ</strong> などの添え名を別メニューとして登録して設定します。
+            </p>
+            <p>付属品フラグは、ソース等の付属品情報がまとまったファイルを一括反映するための補助機能です。</p>
+          </div>
           <div className="upload-actions condiment-actions">
             <input type="file" onChange={(e) => setCondimentFile(e.target.files?.[0] || null)} />
             <button className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
@@ -2086,6 +2110,25 @@ export default function MonthlyMenuEditorPage() {
                     <span>{formatScopeLabel(selectedEntry.facility_override)}</span>
                   </div>
                 </div>
+                {selectedGarnish && (
+                  <div className="garnish-guidance" data-testid="selected-garnish-guidance">
+                    <p className="field-label">添えの分離</p>
+                    <div className="garnish-split">
+                      <span>主菜: {selectedGarnish.mainName}</span>
+                      <span>添え: {selectedGarnish.garnishName}</span>
+                    </div>
+                    <p>
+                      ラベル・総量では上記のように分離して扱います。添え側の温冷・単位・量は、メニューマスターで
+                      <strong> {selectedGarnish.garnishName} </strong>
+                      を別メニューとして登録・設定してください。
+                    </p>
+                    <p>
+                      {selectedGarnishItem
+                        ? `現在、${selectedGarnish.garnishName} の月次メニュー設定があります。必要に応じてメニューマスター側も確認してください。`
+                        : `現在、この月次シート内には ${selectedGarnish.garnishName} 単体の設定が見つかりません。メニューマスターに登録すると添え側の設定として使われます。`}
+                    </p>
+                  </div>
+                )}
                 {selectedItem ? (
                   <div className="inspector-form">
                     <label>
@@ -2639,6 +2682,44 @@ export default function MonthlyMenuEditorPage() {
 
         .condiment-actions input[type="file"] {
           width: 100%;
+        }
+
+        .condiment-help,
+        .garnish-guidance {
+          display: grid;
+          gap: 8px;
+          padding: 12px 14px;
+          border: 1px solid rgba(20, 82, 67, 0.14);
+          border-radius: 14px;
+          background: #f2f7f4;
+          color: #29443d;
+          font-size: 13px;
+          line-height: 1.6;
+        }
+
+        .condiment-help {
+          margin-bottom: 12px;
+        }
+
+        .condiment-help p,
+        .garnish-guidance p {
+          margin: 0;
+        }
+
+        .garnish-split {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .garnish-split span {
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: #ffffff;
+          border: 1px solid rgba(25, 32, 30, 0.08);
+          font-size: 12px;
+          font-weight: 700;
+          color: #17302c;
         }
 
         .panel-header {

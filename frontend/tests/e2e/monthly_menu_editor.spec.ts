@@ -53,6 +53,16 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
               category: "主菜",
               diet_type: "",
             },
+            {
+              id: "MMI2",
+              month_id: "2026-03",
+              name: "白身魚フライ 添)キャベツ",
+              unit_type: "cut",
+              qty_per_serving: 1,
+              daypart: "夕",
+              category: "主菜",
+              diet_type: "",
+            },
           ],
           entries: [
             {
@@ -77,6 +87,17 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
               slot_index: 2,
               facility_override: null,
             },
+            {
+              id: "MME3",
+              month_id: "2026-03",
+              menu_date: "2026-03-24",
+              daypart: "夕",
+              name: "白身魚フライ 添)キャベツ",
+              category: "主菜",
+              diet_type: "",
+              slot_index: 1,
+              facility_override: null,
+            },
           ],
         },
       });
@@ -93,11 +114,12 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
   await expect(page.getByText("メニュー一覧（補助）")).toBeVisible();
   const sheet = page.locator("[data-testid='monthly-menu-sheet']");
   await expect(sheet.getByRole("rowheader", { name: "03/24" })).toBeVisible();
-  await expect(sheet.locator("thead").getByText("共通(base)")).toHaveCount(2);
+  await expect(sheet.locator("thead").getByText("共通(base)")).toHaveCount(3);
   await expect(sheet.locator("thead").getByText("昼")).toHaveCount(2);
-  await expect(sheet.locator("thead").getByText("主菜")).toHaveCount(1);
+  await expect(sheet.locator("thead").getByText("夕")).toHaveCount(1);
+  await expect(sheet.locator("thead").getByText("主菜")).toHaveCount(2);
   await expect(sheet.locator("thead").getByText("副菜")).toHaveCount(1);
-  await expect(sheet.locator("thead").getByText("枠1")).toBeVisible();
+  await expect(sheet.locator("thead").getByText("枠1")).toHaveCount(2);
   await expect(sheet.locator("thead").getByText("枠2")).toBeVisible();
   await expect(sheet.getByRole("button", { name: "ホイコーロー" })).toBeVisible();
   await expect(sheet.getByRole("button", { name: "豆腐の煮物" })).toBeVisible();
@@ -106,6 +128,11 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
   await sheet.getByRole("button", { name: "豆腐の煮物" }).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("豆腐の煮物");
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
+  await expect(page.getByTestId("condiment-flag-help")).toContainText("別ファイルは必須ではありません");
+  await sheet.getByRole("button", { name: "白身魚フライ 添)キャベツ" }).click();
+  await expect(page.getByTestId("selected-garnish-guidance")).toContainText("主菜: 白身魚フライ");
+  await expect(page.getByTestId("selected-garnish-guidance")).toContainText("添え: キャベツ");
+  await expect(page.getByTestId("selected-garnish-guidance")).toContainText("メニューマスター");
 });
 
 test("monthly menu detail selects same-name item by daypart and uses daypart dropdown", async ({ page }) => {
