@@ -860,6 +860,7 @@ def _serialize_workflow(
     effective_template_id = _effective_workflow_template_id(meta)
     template_version_id = _effective_workflow_template_version_id(row, meta)
     quad_override = meta.get("quad_override")
+    row_axis_override = meta.get("row_axis_override")
     output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
     confirmed_snapshot_id = row.confirmed_snapshot_id or (
         _normalize_id(output_bundle.get("confirmed_snapshot_id")) if output_bundle else None
@@ -882,6 +883,7 @@ def _serialize_workflow(
         "context_suggestion": _normalize_context_suggestion(meta.get("context_suggestion"))
         or None,
         "quad_override": quad_override if isinstance(quad_override, dict) else None,
+        "row_axis_override": row_axis_override if isinstance(row_axis_override, dict) else None,
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
@@ -1514,6 +1516,77 @@ def save_header_axis_review_decision(
         _write_workflow_meta(workflow, meta)
         workflow.state = "context_confirmed"
         workflow.headline = "ヘッダー交点補正を保存しました。OCRを再実行できます"
+        workflow.primary_action = "run_ocr"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.last_transition_at = _now()
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        return _serialize_workflow(workflow, ocr_job=ocr_job), None
+
+
+def get_row_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        if _get_workflow(session, order.id) is None:
+            return None, "workflow_not_initialized"
+    try:
+        return _get_order_service_module().build_hakodate_row_axis_review(order_id), None
+    except ValueError as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "order_id": order_id,
+            "status": "error",
+            "error": "row_axis_review_failed",
+            "error_detail": str(exc),
+        }, None
+
+
+def save_row_axis_review_decision(
+    order_id: str,
+    *,
+    corrected_ys: object,
+    coordinate_space: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(corrected_ys, list) or len(corrected_ys) < 2:
+        return None, "row_axis_ys_invalid"
+    if not isinstance(coordinate_space, dict):
+        return None, "row_axis_coordinate_space_invalid"
+    try:
+        width = int(coordinate_space.get("width"))
+        height = int(coordinate_space.get("height"))
+    except (TypeError, ValueError):
+        return None, "row_axis_coordinate_space_invalid"
+    normalized_ys: list[float] = []
+    for raw in corrected_ys:
+        try:
+            y = float(raw)
+        except (TypeError, ValueError):
+            return None, "row_axis_ys_invalid"
+        if y < 0 or y > float(height):
+            return None, "row_axis_ys_invalid"
+        normalized_ys.append(round(y, 3))
+    if any(b <= a for a, b in zip(normalized_ys, normalized_ys[1:])):
+        return None, "row_axis_ys_not_monotonic"
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        meta["row_axis_override"] = {
+            "corrected_ys": normalized_ys,
+            "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
+            "source": "operator_row_axis_override",
+            "created_at": _now().isoformat(),
+        }
+        meta["latest_ocr_error"] = None
+        _write_workflow_meta(workflow, meta)
+        workflow.state = "context_confirmed"
+        workflow.headline = "行推定補正を保存しました。OCRを再実行できます"
         workflow.primary_action = "run_ocr"
         workflow.blockers_json = []
         workflow.warnings_json = []

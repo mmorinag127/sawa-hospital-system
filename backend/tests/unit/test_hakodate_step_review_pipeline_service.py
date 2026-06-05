@@ -4,9 +4,11 @@ from openpyxl import Workbook
 from src.services.hakodate_step_review_pipeline_service import (
     _detect_vertical_candidates,
     _draw_merge_aware_grid,
+    _ordered_match_y_clusters_to_template,
     _physical_internal_horizontal_lines,
     _post_menu_boundary_preserving_xs,
     _post_menu_target_regions,
+    _row_height_outlier_evidence,
     _step_review_merge_regions_for_grid,
     _step_review_physical_row_map,
     _step_review_worksheet_row_to_grid_index,
@@ -89,6 +91,37 @@ def test_step_review_worksheet_row_to_grid_index_preserves_two_stage_header_boun
     assert _step_review_worksheet_row_to_grid_index(12) == 3
     assert _step_review_worksheet_row_to_grid_index(66) == 57
     assert _step_review_worksheet_row_to_grid_index(67) is None
+
+
+def test_full_table_row_axis_match_interpolates_missing_template_rows() -> None:
+    template_ys = [0, 10, 20, 30, 40, 50]
+    y_clusters = [
+        {"cluster_index": 0, "value": 0.0},
+        {"cluster_index": 1, "value": 10.0},
+        {"cluster_index": 2, "value": 20.0},
+        {"cluster_index": 3, "value": 40.0},
+        {"cluster_index": 4, "value": 50.0},
+    ]
+
+    corrected, evidence = _ordered_match_y_clusters_to_template(
+        template_ys=template_ys,
+        y_clusters=y_clusters,
+    )
+
+    assert evidence["used"] is True
+    assert evidence["skipped_template_indexes"] == [3]
+    assert evidence["skipped_cluster_indexes"] == []
+    assert corrected == [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+
+
+def test_row_height_outlier_evidence_requires_manual_review() -> None:
+    evidence = _row_height_outlier_evidence([0, 10, 20, 30, 55, 65])
+
+    assert evidence["manual_review_required"] is True
+    assert evidence["reason"] == "row_height_outlier_detected"
+    assert evidence["outliers"] == [
+        {"row_band_index": 3, "height": 25.0, "median_ratio": 2.5}
+    ]
 
 
 def test_step_review_header_merge_regions_use_grid_band_span() -> None:

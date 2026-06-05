@@ -196,6 +196,42 @@ def _normalize_operator_header_axis_override(value: object) -> dict[str, Any] | 
     }
 
 
+def _normalize_operator_row_axis_override(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate_space = value.get("coordinate_space")
+    if not isinstance(coordinate_space, dict):
+        return None
+    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
+        return None
+    try:
+        width = int(coordinate_space.get("width"))
+        height = int(coordinate_space.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    raw_ys = value.get("corrected_ys")
+    if not isinstance(raw_ys, list) or len(raw_ys) < 2:
+        return None
+    corrected_ys: list[float] = []
+    for raw in raw_ys:
+        try:
+            y = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if y < 0 or y > float(height):
+            return None
+        corrected_ys.append(round(y, 3))
+    if any(b <= a for a, b in zip(corrected_ys, corrected_ys[1:])):
+        return None
+    return {
+        "corrected_ys": corrected_ys,
+        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
+        "source": str(value.get("source") or "operator_row_axis_override"),
+    }
+
+
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
     return sheet_week_service.parse_sheet_week_value(value)
 
@@ -9004,6 +9040,7 @@ def _build_live_hakodate_manifest_item(
             render_width=render_width,
         )
         header_axis_override = _normalize_operator_header_axis_override(workflow_meta.get("header_axis_override"))
+        row_axis_override = _normalize_operator_row_axis_override(workflow_meta.get("row_axis_override"))
     if not document_uri:
         raise ValueError("document_missing")
     week_sheet_name = _week_sheet_name_from_week_value(week_code) or week_code
@@ -9090,6 +9127,7 @@ def _build_live_hakodate_manifest_item(
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
         "header_axis_override": header_axis_override,
+        "row_axis_override": row_axis_override,
         "week_sheet_name": week_sheet_name,
         "source": "live_order_master_facility_template",
     }
@@ -9132,6 +9170,9 @@ def build_hakodate_header_axis_review(order_id: str) -> dict[str, Any]:
             fax_template=fax_template,
             header_axis_override=runtime_item.get("header_axis_override")
             if isinstance(runtime_item.get("header_axis_override"), dict)
+            else None,
+            row_axis_override=runtime_item.get("row_axis_override")
+            if isinstance(runtime_item.get("row_axis_override"), dict)
             else None,
         )
         grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
@@ -9213,6 +9254,89 @@ def build_hakodate_header_axis_review(order_id: str) -> dict[str, Any]:
             "saved_override": runtime_item.get("header_axis_override"),
             "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height},
             "source": "hakodate_header_axis_review",
+        }
+
+
+def build_hakodate_row_axis_review(order_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if not order:
+            raise ValueError("order_not_found")
+        facility_id = str(order.facility_code or "").strip()
+    if not facility_id:
+        raise ValueError("facility_missing")
+    with tempfile.TemporaryDirectory(prefix=f"hakodate_row_review_{order_id}_") as tmp:
+        output_dir = Path(tmp)
+        runtime_item = _build_live_hakodate_manifest_item(
+            order_id=order_id,
+            facility_id=facility_id,
+            output_dir=output_dir,
+            render_width=1864,
+        )
+        rectified_fax = hakodate_cell_ocr_batch_service.cv2.imread(runtime_item["step2_png"])
+        if rectified_fax is None:
+            raise ValueError("row_axis_review_rectified_canvas_missing")
+        template_xs = [int(value) for value in runtime_item.get("template_axes_x") or []]
+        template_ys = [int(value) for value in runtime_item.get("template_axes_y") or []]
+        week_sheet_name = str(runtime_item.get("week_sheet_name") or "").strip() or hakodate_cell_ocr_batch_service.WEEK_SHEET_NAME
+        worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
+            item=runtime_item,
+            facility_id=facility_id,
+            week_sheet_name=week_sheet_name,
+        )
+        fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
+        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
+        aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
+            rectified_fax=rectified_fax,
+            template_xs=template_xs,
+            template_ys=template_ys,
+            worksheet=worksheet,
+            fax_template=fax_template,
+            header_axis_override=runtime_item.get("header_axis_override")
+            if isinstance(runtime_item.get("header_axis_override"), dict)
+            else None,
+            row_axis_override=runtime_item.get("row_axis_override")
+            if isinstance(runtime_item.get("row_axis_override"), dict)
+            else None,
+        )
+        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
+            worksheet=worksheet,
+            rectified_fax=rectified_fax,
+            xs=aligned_xs,
+            ys=aligned_ys,
+            horizontal_line_mask=horizontal_line_mask,
+        )
+        image = hakodate_cell_ocr_batch_service._draw_row_intersections_overlay(  # noqa: SLF001
+            image=grid_overlay,
+            axis_evidence=axis_evidence,
+        ).convert("RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
+        if not isinstance(match, dict):
+            match = {}
+        corrected_ys = match.get("corrected_ys")
+        if not isinstance(corrected_ys, list) or len(corrected_ys) < 2:
+            corrected_ys = list(aligned_ys)
+        ys: list[float] = []
+        for raw in corrected_ys:
+            try:
+                ys.append(round(float(raw), 3))
+            except (TypeError, ValueError):
+                continue
+        return {
+            "order_id": order_id,
+            "status": "ready",
+            "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+            "image_size": [image.width, image.height],
+            "canvas_size": [image.width, image.height],
+            "y_positions": ys,
+            "x_levels": [round(float(value), 3) for value in aligned_xs],
+            "axis_evidence": match,
+            "row_height_quality": match.get("row_height_quality") if isinstance(match.get("row_height_quality"), dict) else None,
+            "saved_override": runtime_item.get("row_axis_override"),
+            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height},
+            "source": "hakodate_row_axis_review",
         }
 
 

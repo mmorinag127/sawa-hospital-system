@@ -799,6 +799,298 @@ def normalize_header_axis_override(
     return xs
 
 
+def normalize_row_axis_override(
+    value: object,
+    *,
+    expected_count: int,
+    canvas_height: int,
+) -> list[float] | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate_space = value.get("coordinate_space")
+    if not isinstance(coordinate_space, dict):
+        return None
+    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
+        return None
+    try:
+        height_value = int(coordinate_space.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if height_value != int(canvas_height):
+        return None
+    raw_ys = value.get("corrected_ys")
+    if not isinstance(raw_ys, list) or len(raw_ys) != int(expected_count):
+        return None
+    ys: list[float] = []
+    for raw in raw_ys:
+        try:
+            y = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if y < 0 or y > float(canvas_height):
+            return None
+        ys.append(round(y, 3))
+    if not np.all(np.diff(np.array(ys, dtype=np.float32)) > 0):
+        return None
+    return ys
+
+
+def _enrich_y_clusters_with_column_votes(
+    *,
+    points: list[dict[str, Any]],
+    y_clusters: list[dict[str, Any]],
+    corrected_xs: list[float],
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for cluster in y_clusters:
+        column_votes: list[int] = []
+        for point_index in cluster.get("point_indexes") or []:
+            try:
+                point = points[int(point_index)]
+                x = float(point["x"])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            nearest_index = min(range(len(corrected_xs)), key=lambda index: abs(float(corrected_xs[index]) - x))
+            if abs(float(corrected_xs[nearest_index]) - x) <= 30.0:
+                column_votes.append(nearest_index)
+        unique_columns = sorted(set(column_votes))
+        item = dict(cluster)
+        item["column_votes"] = unique_columns
+        item["column_vote_count"] = len(unique_columns)
+        item["menu_support"] = any(index in unique_columns for index in (3, 4, 5))
+        item["quantity_support_count"] = len([index for index in unique_columns if index >= 5])
+        enriched.append(item)
+    return enriched
+
+
+def _filter_structural_y_clusters(y_clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    accepted: list[dict[str, Any]] = []
+    for cluster in y_clusters:
+        vote_count = int(cluster.get("column_vote_count") or 0)
+        quantity_count = int(cluster.get("quantity_support_count") or 0)
+        menu_support = bool(cluster.get("menu_support"))
+        if vote_count >= 4 or quantity_count >= 3 or (menu_support and vote_count >= 2):
+            item = dict(cluster)
+            item["cluster_index"] = len(accepted)
+            accepted.append(item)
+    return accepted
+
+
+def _detect_table_intersections_for_row_axis(
+    rectified_bgr: np.ndarray,
+    *,
+    corrected_xs: list[float],
+    template_ys: list[int],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    h_mask, v_mask = _split_line_masks(rectified_bgr)
+    x0 = max(0, int(round(float(corrected_xs[0]))) - 14)
+    x1 = min(rectified_bgr.shape[1], int(round(float(corrected_xs[-1]))) + 14)
+    y0 = max(0, int(round(float(template_ys[0]))) - 18)
+    y1 = min(rectified_bgr.shape[0], int(round(float(template_ys[-1]))) + 18)
+    h = h_mask[y0:y1, x0:x1]
+    v = v_mask[y0:y1, x0:x1]
+    if h.size == 0 or v.size == 0:
+        return [], {"reason": "empty_table_roi", "table_roi": [x0, y0, x1, y1]}
+    h_dilated = cv2.dilate(h, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5)), iterations=1)
+    v_dilated = cv2.dilate(v, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 9)), iterations=1)
+    intersections = cv2.bitwise_and(h_dilated, v_dilated)
+    points = _cluster_header_intersection_points(intersections)
+    for point in points:
+        point["x"] = round(float(point["x"]) + x0, 2)
+        point["y"] = round(float(point["y"]) + y0, 2)
+        bx, by, bw, bh = point["bbox"]
+        point["bbox"] = [int(bx + x0), int(by + y0), int(bw), int(bh)]
+    return points, {
+        "method": "full_table_intersection_structural_y_axis_correction",
+        "table_roi": [x0, y0, x1, y1],
+        "menu_roi": [
+            max(0, int(round(float(corrected_xs[3]))) - 14) if len(corrected_xs) > 5 else x0,
+            y0,
+            min(rectified_bgr.shape[1], int(round(float(corrected_xs[5]))) + 14) if len(corrected_xs) > 5 else x1,
+            y1,
+        ],
+        "horizontal_pixels": int(np.count_nonzero(h)),
+        "vertical_pixels": int(np.count_nonzero(v)),
+        "intersection_count": len(points),
+    }
+
+
+def _ordered_match_y_clusters_to_template(
+    *,
+    template_ys: list[int],
+    y_clusters: list[dict[str, Any]],
+) -> tuple[list[float] | None, dict[str, Any]]:
+    n = len(template_ys)
+    m = len(y_clusters)
+    if n < 2 or m < 2:
+        return None, {"used": False, "reason": "insufficient_row_y_clusters", "template_count": n, "cluster_count": m}
+    template = np.array([float(value) for value in template_ys], dtype=np.float64)
+    clusters = np.array([float(cluster["value"]) for cluster in y_clusters], dtype=np.float64)
+    template_span = max(1.0, float(template[-1] - template[0]))
+    cluster_span = max(1.0, float(clusters[-1] - clusters[0]))
+    projected = clusters[0] + ((template - template[0]) / template_span) * cluster_span
+    if n >= m:
+        dp = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
+        prev: list[list[tuple[int, int, str] | None]] = [[None for _ in range(m + 1)] for _ in range(n + 1)]
+        dp[0, 0] = 0.0
+        skip_penalty = 0.001
+        for i in range(n):
+            for j in range(m + 1):
+                base = dp[i, j]
+                if not np.isfinite(base):
+                    continue
+                if j < m:
+                    cost = abs(projected[i] - clusters[j]) / cluster_span
+                    if j > 0 and i > 0:
+                        template_gap = (template[i] - template[i - 1]) / template_span
+                        cluster_gap = (clusters[j] - clusters[j - 1]) / cluster_span
+                        cost += 0.45 * abs(template_gap - cluster_gap)
+                    if base + cost < dp[i + 1, j + 1]:
+                        dp[i + 1, j + 1] = base + cost
+                        prev[i + 1][j + 1] = (i, j, "match")
+                remaining_template = n - (i + 1)
+                remaining_cluster = m - j
+                if remaining_template >= remaining_cluster and base + skip_penalty < dp[i + 1, j]:
+                    dp[i + 1, j] = base + skip_penalty
+                    prev[i + 1][j] = (i, j, "skip_template")
+        if not np.isfinite(dp[n, m]):
+            return None, {"used": False, "reason": "no_ordered_row_y_match", "template_count": n, "cluster_count": m}
+        i, j = n, m
+        matched_pairs: list[tuple[int, int]] = []
+        while i > 0 or j > 0:
+            step = prev[i][j]
+            if step is None:
+                break
+            pi, pj, action = step
+            if action == "match":
+                matched_pairs.append((j - 1, i - 1))
+            i, j = pi, pj
+        matched_pairs.reverse()
+        score = round(float(dp[n, m] / max(1, len(matched_pairs))), 6)
+    else:
+        selected_cluster_indexes = np.linspace(0, m - 1, n).round().astype(int).tolist()
+        matched_pairs = [(cluster_index, template_index) for template_index, cluster_index in enumerate(selected_cluster_indexes)]
+        score = None
+    min_matches = min(min(n, m), max(10, min(n, m) - 1))
+    if len(matched_pairs) < min_matches:
+        return None, {
+            "used": False,
+            "reason": "too_few_row_y_structural_matches",
+            "template_count": n,
+            "cluster_count": m,
+            "match_count": len(matched_pairs),
+            "required_match_count": min_matches,
+        }
+    corrected: list[float | None] = [None for _ in range(n)]
+    for cluster_index, template_index in matched_pairs:
+        corrected[template_index] = float(clusters[cluster_index])
+    corrected[0] = float(template[0])
+    corrected[-1] = float(template[-1])
+    known_indexes = [index for index, value in enumerate(corrected) if value is not None]
+    interpolated = np.interp(
+        template,
+        np.array([template[index] for index in known_indexes], dtype=np.float64),
+        np.array([float(corrected[index]) for index in known_indexes], dtype=np.float64),
+    ).tolist()
+    interpolated[0] = float(template[0])
+    interpolated[-1] = float(template[-1])
+    if not np.all(np.diff(np.array(interpolated, dtype=np.float64)) > 0):
+        return None, {"used": False, "reason": "row_y_structural_match_not_monotonic"}
+    matched_template_indexes = {template_index for _cluster_index, template_index in matched_pairs}
+    matched_cluster_indexes = {cluster_index for cluster_index, _template_index in matched_pairs}
+    return [float(value) for value in interpolated], {
+        "used": True,
+        "reason": "applied_full_table_intersection_structural_y_match",
+        "method": "ordered_dp_full_table_y_intersection_match",
+        "score": score,
+        "match_count": len(matched_pairs),
+        "template_count": n,
+        "cluster_count": m,
+        "matched_pairs": [
+            {
+                "cluster_index": int(cluster_index),
+                "template_index": int(template_index),
+                "cluster_y": round(float(clusters[cluster_index]), 3),
+                "template_y": round(float(template[template_index]), 3),
+            }
+            for cluster_index, template_index in matched_pairs
+        ],
+        "skipped_template_indexes": [index for index in range(n) if index not in matched_template_indexes],
+        "skipped_cluster_indexes": [index for index in range(m) if index not in matched_cluster_indexes],
+    }
+
+
+def _row_height_outlier_evidence(row_edges: list[float]) -> dict[str, Any]:
+    heights = np.diff(np.array([float(value) for value in row_edges], dtype=np.float64))
+    if heights.size == 0:
+        return {"manual_review_required": True, "reason": "row_heights_empty"}
+    median = float(np.median(heights))
+    if median <= 0:
+        return {"manual_review_required": True, "reason": "row_height_median_invalid"}
+    outliers: list[dict[str, Any]] = []
+    for index, height in enumerate(heights.tolist()):
+        ratio = float(height) / median
+        if ratio < 0.55 or ratio > 1.75:
+            outliers.append({"row_band_index": index, "height": round(float(height), 3), "median_ratio": round(ratio, 3)})
+    return {
+        "manual_review_required": bool(outliers),
+        "reason": "row_height_outlier_detected" if outliers else "row_heights_within_tolerance",
+        "median_height": round(median, 3),
+        "min_height": round(float(np.min(heights)), 3),
+        "max_height": round(float(np.max(heights)), 3),
+        "outlier_count": len(outliers),
+        "outliers": outliers,
+    }
+
+
+def _row_intersection_correct_ys(
+    *,
+    rectified_fax: np.ndarray,
+    corrected_xs: list[float],
+    template_ys: list[int],
+) -> tuple[list[float] | None, dict[str, Any]]:
+    if len(corrected_xs) < 2 or len(template_ys) < 2:
+        return None, {"used": False, "reason": "insufficient_axes_for_row_intersection_match"}
+    points, detection = _detect_table_intersections_for_row_axis(
+        rectified_fax,
+        corrected_xs=[float(value) for value in corrected_xs],
+        template_ys=template_ys,
+    )
+    raw_y_clusters = _cluster_header_axis_values(points, "y", tolerance_px=18.0)
+    voted_y_clusters = _enrich_y_clusters_with_column_votes(
+        points=points,
+        y_clusters=raw_y_clusters,
+        corrected_xs=[float(value) for value in corrected_xs],
+    )
+    y_clusters = _filter_structural_y_clusters(voted_y_clusters)
+    corrected, structural_evidence = _ordered_match_y_clusters_to_template(template_ys=template_ys, y_clusters=y_clusters)
+    evidence = {
+        "used": False,
+        "method": "full_table_intersection_structural_y_axis_correction",
+        **detection,
+        "raw_fax_y_cluster_count": len(raw_y_clusters),
+        "fax_y_cluster_count": len(y_clusters),
+        "template_y_count": len(template_ys),
+        "intersection_points": points,
+        "raw_fax_y_clusters": voted_y_clusters,
+        "fax_y_clusters": y_clusters,
+        "structural_match": structural_evidence,
+    }
+    if corrected is None:
+        evidence["reason"] = structural_evidence.get("reason") if isinstance(structural_evidence, dict) else "row_y_match_failed"
+        return None, evidence
+    height_evidence = _row_height_outlier_evidence(corrected)
+    evidence["row_height_quality"] = height_evidence
+    evidence["corrected_ys"] = [round(float(value), 3) for value in corrected]
+    evidence["y_offsets_px"] = [round(float(value) - float(template_ys[index]), 3) for index, value in enumerate(corrected)]
+    evidence["used"] = True
+    if height_evidence.get("manual_review_required"):
+        evidence["reason"] = "applied_with_row_height_manual_review_required"
+        return corrected, evidence
+    evidence["reason"] = "applied"
+    return corrected, evidence
+
+
 def _draw_line_extraction(rectified: np.ndarray) -> tuple[Image.Image, dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified)
     image = _bgr_to_rgb_image(rectified).convert("RGBA")
@@ -1404,6 +1696,7 @@ def _align_axes(
     worksheet: Any | None = None,
     fax_template: dict[str, Any] | None = None,
     header_axis_override: dict[str, Any] | None = None,
+    row_axis_override: dict[str, Any] | None = None,
 ) -> tuple[list[float], list[float], dict[str, Any], Image.Image]:
     table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
     source_x, source_y, grid_evidence = _nearest_line_positions_in_rectified(rectified_fax, template_xs, template_ys)
@@ -1445,6 +1738,34 @@ def _align_axes(
         fax_template=fax_template,
     )
     adjusted_ys = np.maximum.accumulate(np.median(source_y, axis=1)).astype(np.float32).tolist()
+    row_corrected_ys, row_y_match = _row_intersection_correct_ys(
+        rectified_fax=rectified_fax,
+        corrected_xs=[float(value) for value in matched_xs],
+        template_ys=template_ys,
+    )
+    if row_corrected_ys is not None:
+        adjusted_ys = [float(value) for value in row_corrected_ys]
+    manual_row_ys = normalize_row_axis_override(
+        row_axis_override,
+        expected_count=len(template_ys),
+        canvas_height=rectified_fax.shape[0],
+    )
+    if manual_row_ys is not None:
+        adjusted_ys = [float(value) for value in manual_row_ys]
+        row_y_match = {
+            **(row_y_match if isinstance(row_y_match, dict) else {}),
+            "used": True,
+            "method": "operator_row_axis_override",
+            "reason": "applied_operator_row_axis_override",
+            "corrected_ys": [round(float(value), 3) for value in adjusted_ys],
+            "template_y_count": len(template_ys),
+            "row_height_quality": _row_height_outlier_evidence(adjusted_ys),
+            "coordinate_space": {
+                "mode": "template_canvas",
+                "width": int(rectified_fax.shape[1]),
+                "height": int(rectified_fax.shape[0]),
+            },
+        }
     axis_image = _draw_axis_match(
         rectified_fax,
         template_xs=template_xs,
@@ -1457,9 +1778,11 @@ def _align_axes(
     evidence = {
         "x_match": x_match,
         "header_intersection_x_match": header_x_match,
+        "row_intersection_y_match": row_y_match,
         "post_menu_x_match": post_menu_x_match,
         "grid": grid_evidence,
         "x_gaps": [round(float(b - a), 3) for a, b in zip(matched_xs, matched_xs[1:])],
+        "y_gaps": [round(float(b - a), 3) for a, b in zip(adjusted_ys, adjusted_ys[1:])],
         "counts": {
             "template_x": len(template_xs),
             "aligned_x": len(matched_xs),
@@ -1490,6 +1813,68 @@ def _draw_axis_match(
     for y in adjusted_ys:
         draw.line((x0, int(round(y)), x1, int(round(y))), fill=(0, 190, 0, 210), width=2)
     return Image.alpha_composite(image, layer).convert("RGB")
+
+
+def _draw_row_intersections_overlay(
+    *,
+    image: Image.Image,
+    axis_evidence: dict[str, Any],
+) -> Image.Image:
+    match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
+    if not isinstance(match, dict):
+        return image
+    points = match.get("intersection_points")
+    if not isinstance(points, list):
+        points = []
+    clusters = match.get("fax_y_clusters")
+    if not isinstance(clusters, list):
+        clusters = []
+    corrected_ys = match.get("corrected_ys")
+    if not isinstance(corrected_ys, list):
+        corrected_ys = []
+    table_roi = match.get("table_roi")
+    menu_roi = match.get("menu_roi")
+    overlay = image.convert("RGBA")
+    layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    if isinstance(table_roi, list) and len(table_roi) == 4:
+        x0, y0, x1, y1 = [int(round(float(value))) for value in table_roi]
+        draw.rectangle([x0, y0, x1, y1], outline=(255, 140, 0, 150), width=4)
+    if isinstance(menu_roi, list) and len(menu_roi) == 4:
+        x0, y0, x1, y1 = [int(round(float(value))) for value in menu_roi]
+        draw.rectangle([x0, y0, x1, y1], outline=(255, 140, 0, 240), width=6)
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        try:
+            x = float(point["x"])
+            y = float(point["y"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        draw.ellipse([x - 4, y - 4, x + 4, y + 4], outline=(255, 0, 0, 210), width=2)
+    x_start = 0
+    x_end = overlay.size[0]
+    if isinstance(table_roi, list) and len(table_roi) == 4:
+        x_start = int(round(float(table_roi[0])))
+        x_end = int(round(float(table_roi[2])))
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        try:
+            y = float(cluster.get("value"))
+        except (TypeError, ValueError):
+            continue
+        vote_count = int(cluster.get("column_vote_count") or 0)
+        width = 1 if vote_count < 4 else 3
+        color = (255, 0, 0, 110) if vote_count < 4 else (255, 0, 0, 190)
+        draw.line([x_start, y, x_end, y], fill=color, width=width)
+    for raw_y in corrected_ys:
+        try:
+            y = float(raw_y)
+        except (TypeError, ValueError):
+            continue
+        draw.line([0, y, overlay.size[0], y], fill=(0, 190, 70, 210), width=2)
+    return Image.alpha_composite(overlay, layer).convert("RGB")
 
 
 def _draw_merge_aware_grid(
@@ -1768,6 +2153,8 @@ def build_hakodate_step_review_for_manifest_item(
         template_ys=template_ys,
         worksheet=worksheet,
         fax_template=fax_template,
+        header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
+        row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
@@ -1787,6 +2174,7 @@ def build_hakodate_step_review_for_manifest_item(
         grid_overlay=grid_overlay,
         regions=target_regions,
     )
+    target_overlay = _draw_row_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     source_template = _source_template_name(facility_code)
     axis_evidence = {
         **axis_evidence,

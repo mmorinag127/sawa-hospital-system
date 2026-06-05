@@ -38,6 +38,12 @@ type WorkflowV2 = {
     decision?: string | null;
     created_at?: string | null;
   } | null;
+  row_axis_override?: {
+    corrected_ys?: number[];
+    coordinate_space?: { mode?: string; width?: number; height?: number };
+    source?: string | null;
+    created_at?: string | null;
+  } | null;
   ocr_job?: {
     ocr_job_id?: string | null;
     status?: string | null;
@@ -132,6 +138,31 @@ type HeaderAxisReviewPayload = {
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
   axis_evidence?: Record<string, unknown> | null;
+  coordinate_space?: { mode?: string; width?: number; height?: number } | null;
+};
+
+type RowAxisReviewPayload = {
+  order_id: string;
+  status?: string | null;
+  image_png_base64?: string | null;
+  image_size?: number[] | null;
+  canvas_size?: number[] | null;
+  y_positions?: number[] | null;
+  x_levels?: number[] | null;
+  saved_override?: {
+    corrected_ys?: number[];
+    coordinate_space?: { mode?: string; width?: number; height?: number };
+  } | null;
+  axis_evidence?: Record<string, unknown> | null;
+  row_height_quality?: {
+    manual_review_required?: boolean;
+    reason?: string;
+    median_height?: number;
+    min_height?: number;
+    max_height?: number;
+    outlier_count?: number;
+    outliers?: Array<Record<string, unknown>>;
+  } | null;
   coordinate_space?: { mode?: string; width?: number; height?: number } | null;
 };
 
@@ -1170,6 +1201,13 @@ export default function OrderWorkflowV2Page() {
   );
   const [selectedHeaderAxisIndex, setSelectedHeaderAxisIndex] = useState<number | null>(null);
   const [headerAxisAddMode, setHeaderAxisAddMode] = useState(false);
+  const [rowAxisReview, setRowAxisReview] = useState<RowAxisReviewPayload | null>(null);
+  const [rowAxisLoading, setRowAxisLoading] = useState(false);
+  const [rowAxisMessage, setRowAxisMessage] = useState("");
+  const [rowAxisYs, setRowAxisYs] = useState<number[]>([]);
+  const [draggingRowAxisIndex, setDraggingRowAxisIndex] = useState<number | null>(null);
+  const [selectedRowAxisIndex, setSelectedRowAxisIndex] = useState<number | null>(null);
+  const [rowAxisAddMode, setRowAxisAddMode] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
@@ -1310,6 +1348,7 @@ export default function OrderWorkflowV2Page() {
     const labels = [baseStepLabels[0]];
     if (canReviewQuad || quadReviewRequired || visibleStep === 1.5) labels.push({ step: 1.5, label: "4点確認/補正" });
     if (visibleStep === 1.6) labels.push({ step: 1.6, label: "ヘッダー補正" });
+    if (visibleStep === 1.7) labels.push({ step: 1.7, label: "行推定補正" });
     labels.push(...baseStepLabels.slice(1));
     return labels;
   }, [canReviewQuad, quadReviewRequired, visibleStep]);
@@ -1769,6 +1808,13 @@ export default function OrderWorkflowV2Page() {
     if (!router.isReady || !orderId || visibleStep !== 1.6) return;
     loadHeaderAxisReview().catch((err) => {
       setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
+    });
+  }, [router.isReady, orderId, visibleStep]);
+
+  useEffect(() => {
+    if (!router.isReady || !orderId || visibleStep !== 1.7) return;
+    loadRowAxisReview().catch((err) => {
+      setRowAxisMessage(formatApiError(err, "行推定確認データの取得に失敗しました"));
     });
   }, [router.isReady, orderId, visibleStep]);
 
@@ -2372,6 +2418,76 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
+  const loadRowAxisReview = async () => {
+    if (!orderId) return;
+    setRowAxisLoading(true);
+    setRowAxisMessage("");
+    try {
+      const timeoutMs = getHeaderAxisTimeoutMs();
+      const response = await apiClient.get<RowAxisReviewPayload>(
+        `/orders/${orderId}/workflow-v2/row-axis-review`,
+        { timeout: timeoutMs },
+      );
+      setRowAxisReview(response.data);
+      const savedYs = response.data?.saved_override?.corrected_ys;
+      const detectedYs = response.data?.y_positions;
+      const nextYs = Array.isArray(savedYs) && savedYs.length >= 2 ? savedYs : detectedYs;
+      setRowAxisYs((Array.isArray(nextYs) ? nextYs : []).map((value) => Number(value)).filter(Number.isFinite));
+      setSelectedRowAxisIndex(null);
+      setRowAxisAddMode(false);
+    } catch (err: any) {
+      setRowAxisMessage(formatApiError(err, "行推定確認データの取得に失敗しました"));
+    } finally {
+      setRowAxisLoading(false);
+    }
+  };
+
+  const saveRowAxisAndRerun = async () => {
+    if (!orderId || rowAxisYs.length < 2) {
+      setRowAxisMessage("行境界のY軸が不足しています。");
+      return;
+    }
+    const coordinateSpace = rowAxisReview?.coordinate_space;
+    if (!coordinateSpace?.width || !coordinateSpace?.height) {
+      setRowAxisMessage("行推定の座標系が取得できていません。");
+      return;
+    }
+    setBusy("row axis save");
+    setError("");
+    setRowAxisMessage("");
+    try {
+      const timeoutMs = getHeaderAxisTimeoutMs();
+      await apiClient.put(
+        `/orders/${orderId}/workflow-v2/row-axis-review`,
+        {
+          corrected_ys: rowAxisYs,
+          coordinate_space: coordinateSpace,
+        },
+        { timeout: timeoutMs },
+      );
+      await refreshAll();
+      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+        stale_action: "retry",
+        force: true,
+        mode: "hakodate",
+        document_id: effectiveSelectedDocumentId || undefined,
+      }, { timeout: timeoutMs });
+      setSheetPayload(null);
+      setSheetJson(formatJson(defaultSheet));
+      setSheetJsonStale(false);
+      setSheetAutoEditResult(null);
+      setLocalAnomalyReview(null);
+      setSelectedAnomalyIndex(null);
+      setSelectedAutoEditIndex(null);
+      setMessage("行推定補正を保存し、OCRを再実行しました。");
+      setVisibleStep(2);
+    } catch (err: any) {
+      setError(formatApiError(err, "行推定補正の保存またはOCR再実行に失敗しました"));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleQuadImageClick = (event: MouseEvent<HTMLImageElement>) => {
     if (!manualQuadMode || manualQuadPoints.length >= 4) return;
     const image = event.currentTarget;
@@ -2457,6 +2573,80 @@ export default function OrderWorkflowV2Page() {
     if (!headerAxisAddMode) return;
     addHeaderAxisAt(headerAxisPointerToCanvasX(event));
     setHeaderAxisAddMode(false);
+  };
+
+  const rowAxisPointerToCanvasY = (event: MouseEvent<SVGSVGElement>) => {
+    const svg = event.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const height = Number(rowAxisReview?.image_size?.[1] || rect.height || 1);
+    return Number((((event.clientY - rect.top) / Math.max(rect.height, 1)) * height).toFixed(3));
+  };
+
+  const normalizeRowAxisYs = (values: number[]) => {
+    const canvasHeight = Number(rowAxisReview?.canvas_size?.[1] || rowAxisReview?.coordinate_space?.height || 0);
+    const maxY = canvasHeight || Number.MAX_SAFE_INTEGER;
+    const sorted = values
+      .map((value) => Number(value))
+      .filter(Number.isFinite)
+      .map((value) => Math.min(Math.max(value, 0), maxY))
+      .sort((a, b) => a - b);
+    const normalized: number[] = [];
+    for (const value of sorted) {
+      if (normalized.length && Math.abs(value - normalized[normalized.length - 1]) < 1) continue;
+      normalized.push(Number(value.toFixed(3)));
+    }
+    return normalized;
+  };
+
+  const moveRowAxis = (index: number, nextY: number) => {
+    const canvasHeight = Number(rowAxisReview?.canvas_size?.[1] || rowAxisReview?.coordinate_space?.height || 0);
+    setRowAxisYs((current) => {
+      if (index < 0 || index >= current.length) return current;
+      const minY = index > 0 ? current[index - 1] + 1 : 0;
+      const maxY = index < current.length - 1 ? current[index + 1] - 1 : canvasHeight || Number.MAX_SAFE_INTEGER;
+      const clamped = Math.min(Math.max(nextY, minY), maxY);
+      return current.map((value, idx) => (idx === index ? Number(clamped.toFixed(3)) : value));
+    });
+  };
+
+  const addRowAxisAt = (nextY: number) => {
+    setRowAxisYs((current) => {
+      const next = normalizeRowAxisYs([...current, nextY]);
+      const insertedIndex = next.findIndex((value) => Math.abs(value - Number(nextY)) < 1);
+      setSelectedRowAxisIndex(insertedIndex >= 0 ? insertedIndex : null);
+      return next;
+    });
+  };
+
+  const deleteSelectedRowAxis = () => {
+    if (selectedRowAxisIndex === null) {
+      setRowAxisMessage("削除する行境界を選択してください。");
+      return;
+    }
+    setRowAxisYs((current) => current.filter((_, idx) => idx !== selectedRowAxisIndex));
+    setSelectedRowAxisIndex(null);
+    setRowAxisMessage("");
+  };
+
+  const resetRowAxisYs = () => {
+    const detectedYs = (Array.isArray(rowAxisReview?.y_positions) ? rowAxisReview?.y_positions : [])
+      .map((value) => Number(value))
+      .filter(Number.isFinite);
+    setRowAxisYs(normalizeRowAxisYs(detectedYs));
+    setSelectedRowAxisIndex(null);
+    setRowAxisAddMode(false);
+    setRowAxisMessage("");
+  };
+
+  const handleRowAxisPointerMove = (event: MouseEvent<SVGSVGElement>) => {
+    if (draggingRowAxisIndex === null) return;
+    moveRowAxis(draggingRowAxisIndex, rowAxisPointerToCanvasY(event));
+  };
+
+  const handleRowAxisCanvasClick = (event: MouseEvent<SVGSVGElement>) => {
+    if (!rowAxisAddMode) return;
+    addRowAxisAt(rowAxisPointerToCanvasY(event));
+    setRowAxisAddMode(false);
   };
 
   const runOcr = () =>
@@ -3154,6 +3344,13 @@ export default function OrderWorkflowV2Page() {
   const headerAxisExpectedCount = getHeaderAxisExpectedCount();
   const headerAxisCountWarning = headerAxisExpectedCount > 0 && headerAxisXs.length !== headerAxisExpectedCount
     ? `ヘッダー縦軸の本数がテンプレート期待値と一致していません。期待 ${headerAxisExpectedCount} 本 / 現在 ${headerAxisXs.length} 本。`
+    : "";
+  const rowAxisImageSrc = rowAxisReview?.image_png_base64 ? `data:image/png;base64,${rowAxisReview.image_png_base64}` : "";
+  const rowAxisImageWidth = Number(rowAxisReview?.image_size?.[0] || 1400);
+  const rowAxisImageHeight = Number(rowAxisReview?.image_size?.[1] || 2200);
+  const rowAxisQuality = rowAxisReview?.row_height_quality || null;
+  const rowAxisWarning = rowAxisQuality?.manual_review_required
+    ? `行の縦幅に外れ値があります。外れ値 ${rowAxisQuality.outlier_count ?? 0} 件 / 中央値 ${rowAxisQuality.median_height ?? "-"}px。行推定を手動確認してください。`
     : "";
   const currentFaxVersion = orderDetail?.current_version || null;
   const faxVersionCount = Number(orderDetail?.version_count || orderDetail?.versions?.length || 0);
@@ -4025,6 +4222,108 @@ export default function OrderWorkflowV2Page() {
         </section>
         ) : null}
 
+        {visibleStep === 1.7 ? (
+        <section className="panel row-axis-review-panel">
+          <p className="step-tag">Step1.7</p>
+          <header className="panel-header">
+            <div>
+              <h2>行推定の手動補正</h2>
+              <p className="subtle">
+                全テーブル交点から推定した行境界を確認します。行の縦幅に外れ値がある場合や、日付・献立行の境界がずれている場合は横線をドラッグして調整します。
+              </p>
+            </div>
+            <div className="row-actions">
+              <button className="btn ghost" type="button" onClick={() => void loadRowAxisReview()} disabled={rowAxisLoading || Boolean(busy)}>
+                {rowAxisLoading ? "取得中..." : "行推定を再取得"}
+              </button>
+              <button
+                className={`btn ghost ${rowAxisAddMode ? "active" : ""}`}
+                type="button"
+                onClick={() => {
+                  setRowAxisAddMode((current) => !current);
+                  setRowAxisMessage("");
+                }}
+                disabled={rowAxisLoading || Boolean(busy) || !rowAxisImageSrc}
+              >
+                {rowAxisAddMode ? "追加位置をクリック" : "行境界を追加"}
+              </button>
+              <button className="btn ghost" type="button" onClick={deleteSelectedRowAxis} disabled={rowAxisLoading || Boolean(busy) || selectedRowAxisIndex === null}>
+                選択行を削除
+              </button>
+              <button className="btn ghost" type="button" onClick={resetRowAxisYs} disabled={rowAxisLoading || Boolean(busy) || !rowAxisReview}>
+                自動検出に戻す
+              </button>
+              <button className="btn primary" type="button" onClick={() => void saveRowAxisAndRerun()} disabled={Boolean(busy || rowAxisYs.length < 2)}>
+                行推定補正を保存してOCR再実行
+              </button>
+            </div>
+          </header>
+          {rowAxisWarning ? <div className="notice warning">{rowAxisWarning}</div> : null}
+          <p className="subtle">
+            現在 {rowAxisYs.length} 本。横線をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に行境界を追加します。
+          </p>
+          {rowAxisMessage ? <div className="notice error">{rowAxisMessage}</div> : null}
+          <div className="row-axis-canvas-wrap">
+            {rowAxisImageSrc ? (
+              <div className="row-axis-canvas">
+                <img src={rowAxisImageSrc} alt="行推定補正" />
+                <svg
+                  viewBox={`0 0 ${rowAxisImageWidth} ${rowAxisImageHeight}`}
+                  onMouseMove={handleRowAxisPointerMove}
+                  onMouseUp={() => setDraggingRowAxisIndex(null)}
+                  onMouseLeave={() => setDraggingRowAxisIndex(null)}
+                  onClick={handleRowAxisCanvasClick}
+                  aria-label="行推定補正"
+                >
+                  {rowAxisYs.map((y, idx) => {
+                    const selected = selectedRowAxisIndex === idx;
+                    return (
+                      <g key={`row-axis-${idx}`}>
+                        <line x1={0} y1={y} x2={rowAxisImageWidth} y2={y} className={`row-axis-line ${selected ? "selected" : ""}`} />
+                        <circle
+                          cx={28}
+                          cy={y}
+                          r="10"
+                          className={`row-axis-point ${selected ? "selected" : ""}`}
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setSelectedRowAxisIndex(idx);
+                            setDraggingRowAxisIndex(idx);
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedRowAxisIndex(idx);
+                            setRowAxisAddMode(false);
+                          }}
+                        />
+                        <text
+                          x={42}
+                          y={y - 8}
+                          className={`row-axis-label ${selected ? "selected" : ""}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedRowAxisIndex(idx);
+                            setRowAxisAddMode(false);
+                          }}
+                        >
+                          {idx + 1}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            ) : (
+              <div className="pdf-placeholder">{rowAxisLoading ? "行推定確認画像を取得中..." : "行推定確認画像がありません。"}</div>
+            )}
+          </div>
+          <p className="subtle">
+            保存すると現在の注文だけに行Y軸補正を記録し、その補正を使って箱館OCRを再実行します。
+          </p>
+        </section>
+        ) : null}
+
         {visibleStep === 2 ? (
         <section className="panel">
           <p className="step-tag">Step2</p>
@@ -4035,10 +4334,13 @@ export default function OrderWorkflowV2Page() {
             </div>
             <div className="row-actions">
               <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
-                4点からOCR再実行
+                4点推定
               </button>
               <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
-                ヘッダーを修正
+                ヘッダー推定
+              </button>
+              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.7)} disabled={Boolean(busy)}>
+                行推定
               </button>
             </div>
           </header>
@@ -6393,6 +6695,59 @@ export default function OrderWorkflowV2Page() {
           stroke-width: 5;
         }
         .header-axis-label.selected {
+          fill: #0068ff;
+        }
+        .row-axis-canvas-wrap {
+          background: #ffffff;
+          border: 1px solid #ddd5c2;
+          border-radius: 16px;
+          max-height: 76vh;
+          overflow: auto;
+        }
+        .row-axis-canvas {
+          min-width: 1120px;
+          position: relative;
+          width: 100%;
+        }
+        .row-axis-canvas img {
+          display: block;
+          width: 100%;
+        }
+        .row-axis-canvas svg {
+          cursor: ns-resize;
+          inset: 0;
+          position: absolute;
+          width: 100%;
+          height: 100%;
+        }
+        .row-axis-line {
+          stroke: rgba(255, 145, 0, 0.65);
+          stroke-width: 4;
+        }
+        .row-axis-line.selected {
+          stroke: rgba(0, 104, 255, 0.92);
+          stroke-width: 7;
+        }
+        .row-axis-point {
+          cursor: ns-resize;
+          fill: #ff9100;
+          stroke: #fff;
+          stroke-width: 3;
+        }
+        .row-axis-point.selected {
+          fill: #0068ff;
+          stroke: #fff;
+          stroke-width: 5;
+        }
+        .row-axis-label {
+          fill: #1c2822;
+          font-size: 18px;
+          font-weight: 900;
+          paint-order: stroke;
+          stroke: #fffdf7;
+          stroke-width: 5;
+        }
+        .row-axis-label.selected {
           fill: #0068ff;
         }
         .ocr-result-list {

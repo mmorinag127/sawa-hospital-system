@@ -33,6 +33,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _bbox_quad_points,
     _draw_merge_aware_grid,
     _draw_quad_points,
+    _draw_row_intersections_overlay,
     _draw_target_regions,
     _make_review_canvas,
     _post_menu_target_regions,
@@ -1015,6 +1016,7 @@ def _build_preprocess_for_ocr(
         worksheet=worksheet,
         fax_template=fax_template,
         header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
+        row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
@@ -1033,6 +1035,7 @@ def _build_preprocess_for_ocr(
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(raw_rectified, target_regions)
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
     target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
+    target_overlay = _draw_row_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     rectified_quad_points = _bbox_quad_points(table_bbox)
     return {
         "page": page,

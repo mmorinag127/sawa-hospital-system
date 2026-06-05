@@ -241,6 +241,9 @@ def build_hakodate_preprocessing_for_manifest_item(
         template_xs=template_xs,
         template_ys=template_ys,
         worksheet=worksheet,
+        fax_template=fax_template,
+        header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
+        row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,

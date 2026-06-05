@@ -133,6 +133,11 @@ class WorkflowV2HeaderAxisReviewBody(BaseModel):
     coordinate_space: dict
 
 
+class WorkflowV2RowAxisReviewBody(BaseModel):
+    corrected_ys: list[float]
+    coordinate_space: dict
+
+
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
@@ -1953,6 +1958,22 @@ def save_order_workflow_v2_header_axis_review(order_id: str, body: WorkflowV2Hea
         order_workflow_v2_service.save_header_axis_review_decision(
             order_id,
             corrected_xs=body.corrected_xs,
+            coordinate_space=body.coordinate_space,
+        )
+    )
+
+
+@router.get("/{order_id}/workflow-v2/row-axis-review", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_row_axis_review(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_row_axis_review(order_id))
+
+
+@router.put("/{order_id}/workflow-v2/row-axis-review", dependencies=[Depends(require_role("operator"))])
+def save_order_workflow_v2_row_axis_review(order_id: str, body: WorkflowV2RowAxisReviewBody):
+    return _workflow_v2_or_404(
+        order_workflow_v2_service.save_row_axis_review_decision(
+            order_id,
+            corrected_ys=body.corrected_ys,
             coordinate_space=body.coordinate_space,
         )
     )
