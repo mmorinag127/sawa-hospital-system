@@ -534,7 +534,7 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
 
     assert fetched.status_code == 200
     columns = ((fetched.json().get("resolved_config") or {}).get("fax_template") or {}).get("columns") or []
-    assert [column.get("header") for column in columns[:10]] == [
+    assert [column.get("header") for column in columns] == [
         "日付",
         "区分",
         "メニュー",
@@ -544,6 +544,17 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
         "月",
         "花",
         "月",
+        "花",
+        "月",
+        "花",
+        "月",
+        "花",
+        "月",
         "備考",
     ]
-    assert [column.get("source_index") for column in columns[:10]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert [
+        column.get("header_super_group")
+        for column in columns
+        if column.get("role") == "quantity" and column.get("diet_type") == "no_fish"
+    ] == ["禁食、魚"] * 6
