@@ -204,6 +204,68 @@ def _write_header(ws: Worksheet, generated_columns: list[dict[str, Any]], end_co
     offset = 0
     while offset < len(generated_columns):
         column = generated_columns[offset]
+        super_group = str(column.get("header_super_group") or "").strip()
+        if super_group:
+            super_end = offset
+            while (
+                super_end + 1 < len(generated_columns)
+                and str(generated_columns[super_end + 1].get("header_super_group") or "").strip() == super_group
+            ):
+                super_end += 1
+            start_col = col_by_offset[offset]
+            stop_col = col_by_offset[super_end]
+            ws.merge_cells(
+                start_row=HEADER_TOP_ROW,
+                start_column=start_col,
+                end_row=HEADER_TOP_ROW,
+                end_column=stop_col,
+            )
+            ws.cell(HEADER_TOP_ROW, start_col).value = super_group
+
+            inner_offset = offset
+            while inner_offset <= super_end:
+                inner_column = generated_columns[inner_offset]
+                group = str(inner_column.get("header_group") or "").strip()
+                group_end = inner_offset
+                if group:
+                    while (
+                        group_end + 1 <= super_end
+                        and str(generated_columns[group_end + 1].get("header_group") or "").strip() == group
+                    ):
+                        group_end += 1
+                start_inner_col = col_by_offset[inner_offset]
+                stop_inner_col = col_by_offset[group_end]
+                if group and group_end > inner_offset:
+                    ws.merge_cells(
+                        start_row=HEADER_GROUP_BOTTOM_ROW,
+                        start_column=start_inner_col,
+                        end_row=HEADER_GROUP_BOTTOM_ROW,
+                        end_column=stop_inner_col,
+                    )
+                    ws.cell(HEADER_GROUP_BOTTOM_ROW, start_inner_col).value = group
+                    for leaf_offset in range(inner_offset, group_end + 1):
+                        leaf_col = col_by_offset[leaf_offset]
+                        ws.merge_cells(
+                            start_row=HEADER_LEAF_TOP_ROW,
+                            start_column=leaf_col,
+                            end_row=HEADER_BOTTOM_ROW,
+                            end_column=leaf_col,
+                        )
+                        ws.cell(HEADER_LEAF_TOP_ROW, leaf_col).value = _column_label(
+                            generated_columns[leaf_offset]
+                        )
+                else:
+                    ws.merge_cells(
+                        start_row=HEADER_GROUP_BOTTOM_ROW,
+                        start_column=start_inner_col,
+                        end_row=HEADER_BOTTOM_ROW,
+                        end_column=start_inner_col,
+                    )
+                    ws.cell(HEADER_GROUP_BOTTOM_ROW, start_inner_col).value = _column_label(inner_column)
+                inner_offset = group_end + 1
+            offset = super_end + 1
+            continue
+
         group = str(column.get("header_group") or "").strip()
         group_end = offset
         if group:

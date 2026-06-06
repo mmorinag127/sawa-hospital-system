@@ -212,6 +212,10 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert "E7:F8" in merged_ranges
     assert "G7:H8" in merged_ranges
     assert "I7:J8" in merged_ranges
+    assert "K7:P7" in merged_ranges
+    assert "K8:L8" in merged_ranges
+    assert "M8:N8" in merged_ranges
+    assert "O8:P8" in merged_ranges
     assert worksheet["E7"].value == "常食"
     assert worksheet["E9"].value == "花"
     assert worksheet["F9"].value == "月"
@@ -221,11 +225,12 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert worksheet["I7"].value == "ミキサー"
     assert worksheet["I9"].value == "花"
     assert worksheet["J9"].value == "月"
-    assert worksheet["K7"].value == "緊急、魚 常食"
+    assert worksheet["K7"].value == "緊急、魚"
+    assert worksheet["K8"].value == "常食"
     assert worksheet["K9"].value == "花"
     assert worksheet["L9"].value == "月"
-    assert worksheet["M7"].value == "緊急、魚 軟菜"
-    assert worksheet["O7"].value == "緊急、魚 ミキサー"
+    assert worksheet["M8"].value == "軟菜"
+    assert worksheet["O8"].value == "ミキサー"
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
