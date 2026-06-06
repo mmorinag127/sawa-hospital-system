@@ -37,15 +37,33 @@ def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns
                 "diet_type": "no_meat",
                 "area_id": "X",
             },
+            {
+                "index": 6,
+                "role": "quantity",
+                "header_super_group": "緊急、魚",
+                "header_group": "常食",
+                "header": "花",
+                "name": "qty.no_fish_regular_2f",
+                "diet_type": "no_fish_regular",
+                "area_id": "2F",
+            },
         ],
     }
 
     header = order_service._sheet_header_from_template(  # noqa: SLF001
-        ["date_mmdd", "daypart", "menu", "qty.regular_3f", "qty.soft_2f", "qty.no_meat_x"],
+        [
+            "date_mmdd",
+            "daypart",
+            "menu",
+            "qty.regular_3f",
+            "qty.soft_2f",
+            "qty.no_meat_x",
+            "qty.no_fish_regular_2f",
+        ],
         template,
     )
 
-    assert header == ["日付", "区分", "メニュー", "常食月", "軟菜花", "肉禁"]
+    assert header == ["日付", "区分", "メニュー", "常食月", "軟菜花", "肉禁", "緊急、魚 常食花"]
 
 
 def test_hakodate_canonical_payload_reads_digit_evidence_from_best_method_records(monkeypatch, tmp_path) -> None:

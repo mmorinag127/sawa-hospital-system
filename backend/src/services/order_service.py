@@ -15825,11 +15825,13 @@ def _sheet_header_from_template(
             continue
         header = str(col.get("header") or "").strip()
         header_group = str(col.get("header_group") or "").strip()
+        header_super_group = str(col.get("header_super_group") or "").strip()
         _diet, area = _quantity_meta_from_field(field)
         if header_group and header and area and area != "X":
-            header_by_field[field] = f"{header_group}{header}"
+            group_label = f"{header_super_group} {header_group}".strip() if header_super_group else header_group
+            header_by_field[field] = f"{group_label}{header}"
         else:
-            header_by_field[field] = header or header_group or _field_label(field)
+            header_by_field[field] = header or header_group or header_super_group or _field_label(field)
     return [header_by_field.get(field, _field_label(field)) for field in normalized_fields]
 
 

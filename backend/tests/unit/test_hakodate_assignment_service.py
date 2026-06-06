@@ -104,6 +104,21 @@ def _merged_structure_slot_worksheet():
     return worksheet
 
 
+def test_template_slot_label_includes_header_super_group_for_area_quantity_columns() -> None:
+    label = hakodate_assignment_service._template_slot_label(  # noqa: SLF001
+        {
+            "role": "quantity",
+            "header_super_group": "緊急、魚",
+            "header_group": "常食",
+            "header": "花",
+            "name": "qty.no_fish_regular_2f",
+        },
+        "qty.no_fish_regular_2f",
+    )
+
+    assert label == "緊急、魚 常食花"
+
+
 def _real_pdf_skeleton_rows(facility_id: str) -> list[dict]:
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
         facility_id=facility_id,
