@@ -225,7 +225,7 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert worksheet["I7"].value == "ミキサー"
     assert worksheet["I9"].value == "花"
     assert worksheet["J9"].value == "月"
-    assert worksheet["K7"].value == "緊急、魚"
+    assert worksheet["K7"].value == "禁食、魚"
     assert worksheet["K8"].value == "常食"
     assert worksheet["K9"].value == "花"
     assert worksheet["L9"].value == "月"

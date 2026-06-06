@@ -647,12 +647,12 @@
             "name": "qty.no_fish_regular_2f",
             "name_locked": true,
             "header": "花",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "常食",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "緊急、魚 常食 花"
+            "delivery_header": "禁食、魚 常食 花"
           },
           {
             "index": 10,
@@ -661,12 +661,12 @@
             "name": "qty.no_fish_regular_3f",
             "name_locked": true,
             "header": "月",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "常食",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "緊急、魚 常食 月"
+            "delivery_header": "禁食、魚 常食 月"
           },
           {
             "index": 11,
@@ -675,12 +675,12 @@
             "name": "qty.no_fish_soft_2f",
             "name_locked": true,
             "header": "花",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "軟菜",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "緊急、魚 軟菜 花"
+            "delivery_header": "禁食、魚 軟菜 花"
           },
           {
             "index": 12,
@@ -689,12 +689,12 @@
             "name": "qty.no_fish_soft_3f",
             "name_locked": true,
             "header": "月",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "軟菜",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "緊急、魚 軟菜 月"
+            "delivery_header": "禁食、魚 軟菜 月"
           },
           {
             "index": 13,
@@ -703,12 +703,12 @@
             "name": "qty.no_fish_mixer_2f",
             "name_locked": true,
             "header": "花",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "ミキサー",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "緊急、魚 ミキサー 花"
+            "delivery_header": "禁食、魚 ミキサー 花"
           },
           {
             "index": 14,
@@ -717,12 +717,12 @@
             "name": "qty.no_fish_mixer_3f",
             "name_locked": true,
             "header": "月",
-            "header_super_group": "緊急、魚",
+            "header_super_group": "禁食、魚",
             "header_group": "ミキサー",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "緊急、魚 ミキサー 月"
+            "delivery_header": "禁食、魚 ミキサー 月"
           },
           {
             "index": 15,

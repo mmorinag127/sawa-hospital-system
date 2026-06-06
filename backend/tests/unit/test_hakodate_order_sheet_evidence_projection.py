@@ -40,7 +40,7 @@ def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns
             {
                 "index": 6,
                 "role": "quantity",
-                "header_super_group": "緊急、魚",
+                "header_super_group": "禁食、魚",
                 "header_group": "常食",
                 "header": "花",
                 "name": "qty.no_fish_regular_2f",
@@ -63,7 +63,7 @@ def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns
         template,
     )
 
-    assert header == ["日付", "区分", "メニュー", "常食月", "軟菜花", "肉禁", "緊急、魚 常食花"]
+    assert header == ["日付", "区分", "メニュー", "常食月", "軟菜花", "肉禁", "禁食、魚 常食花"]
 
 
 def test_hakodate_canonical_payload_reads_digit_evidence_from_best_method_records(monkeypatch, tmp_path) -> None:

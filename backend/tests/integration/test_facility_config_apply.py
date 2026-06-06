@@ -1557,11 +1557,11 @@ def test_fac00003_fish_forbidden_columns_keep_meal_shape_fields():
     assert by_field["qty.no_fish_soft_3f"]["source_index"] == 13
     assert by_field["qty.no_fish_mixer_2f"]["source_index"] == 14
     assert by_field["qty.no_fish_mixer_3f"]["source_index"] == 15
-    assert by_field["qty.no_fish_regular_2f"]["header_super_group"] == "緊急、魚"
+    assert by_field["qty.no_fish_regular_2f"]["header_super_group"] == "禁食、魚"
     assert by_field["qty.no_fish_regular_2f"]["header_group"] == "常食"
-    assert by_field["qty.no_fish_soft_2f"]["header_super_group"] == "緊急、魚"
+    assert by_field["qty.no_fish_soft_2f"]["header_super_group"] == "禁食、魚"
     assert by_field["qty.no_fish_soft_2f"]["header_group"] == "軟菜"
-    assert by_field["qty.no_fish_mixer_2f"]["header_super_group"] == "緊急、魚"
+    assert by_field["qty.no_fish_mixer_2f"]["header_super_group"] == "禁食、魚"
     assert by_field["qty.no_fish_mixer_2f"]["header_group"] == "ミキサー"
     assert [col for col in columns if col.get("role") == "note"][0]["source_index"] == 16
 
