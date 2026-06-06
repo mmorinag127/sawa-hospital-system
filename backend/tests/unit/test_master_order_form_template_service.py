@@ -221,6 +221,11 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert worksheet["I7"].value == "ミキサー"
     assert worksheet["I9"].value == "花"
     assert worksheet["J9"].value == "月"
+    assert worksheet["K7"].value == "緊急、魚 常食"
+    assert worksheet["K9"].value == "花"
+    assert worksheet["L9"].value == "月"
+    assert worksheet["M7"].value == "緊急、魚 軟菜"
+    assert worksheet["O7"].value == "緊急、魚 ミキサー"
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 

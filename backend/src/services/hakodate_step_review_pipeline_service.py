@@ -819,7 +819,7 @@ def normalize_row_axis_override(
     if height_value != int(canvas_height):
         return None
     raw_ys = value.get("corrected_ys")
-    if not isinstance(raw_ys, list) or len(raw_ys) != int(expected_count):
+    if not isinstance(raw_ys, list) or len(raw_ys) < int(expected_count):
         return None
     ys: list[float] = []
     for raw in raw_ys:
@@ -832,7 +832,101 @@ def normalize_row_axis_override(
         ys.append(round(y, 3))
     if not np.all(np.diff(np.array(ys, dtype=np.float32)) > 0):
         return None
+    if len(ys) > int(expected_count):
+        fitted, _fit_evidence = _fit_extra_y_clusters_to_template_count(
+            template_ys=[float(value) for value in range(int(expected_count))],
+            clusters=[float(value) for value in ys],
+        )
+        if fitted is None or len(fitted) != int(expected_count):
+            return None
+        return [round(float(value), 3) for value in fitted]
     return ys
+
+
+def _row_height_quality_score(row_edges: list[float]) -> tuple[int, float, float]:
+    heights = np.diff(np.array([float(value) for value in row_edges], dtype=np.float64))
+    if heights.size == 0:
+        return (9999, 9999.0, 9999.0)
+    median = float(np.median(heights))
+    if median <= 0:
+        return (9999, 9999.0, 9999.0)
+    ratios = np.array([float(height) / median for height in heights], dtype=np.float64)
+    outlier_count = int(np.count_nonzero((ratios < 0.55) | (ratios > 1.75)))
+    max_deviation = float(np.max(np.abs(ratios - 1.0)))
+    spread = float(np.max(heights) - np.min(heights))
+    return (outlier_count, max_deviation, spread)
+
+
+def _fit_extra_y_clusters_to_template_count(
+    *,
+    template_ys: list[float],
+    clusters: list[float],
+) -> tuple[list[float] | None, dict[str, Any]]:
+    n = len(template_ys)
+    m = len(clusters)
+    if n < 2 or m < n:
+        return None, {"used": False, "reason": "insufficient_clusters_for_extra_row_fit", "template_count": n, "cluster_count": m}
+    if m == n:
+        return [float(value) for value in clusters], {
+            "used": False,
+            "reason": "cluster_count_matches_template",
+            "template_count": n,
+            "cluster_count": m,
+            "skipped_cluster_indexes": [],
+        }
+    if m - n > 3:
+        return None, {
+            "used": False,
+            "reason": "too_many_extra_row_clusters_for_safe_fit",
+            "template_count": n,
+            "cluster_count": m,
+            "extra_count": m - n,
+        }
+
+    template = np.array([float(value) for value in template_ys], dtype=np.float64)
+    cluster_values = np.array([float(value) for value in clusters], dtype=np.float64)
+    template_span = max(1.0, float(template[-1] - template[0]))
+    cluster_span = max(1.0, float(cluster_values[-1] - cluster_values[0]))
+    projected = cluster_values[0] + ((template - template[0]) / template_span) * cluster_span
+    skip_count = m - n
+    best: tuple[tuple[int, float, float, float], list[int], list[float]] | None = None
+    for skipped_tuple in itertools.combinations(range(m), skip_count):
+        skipped = set(skipped_tuple)
+        selected_indexes = [index for index in range(m) if index not in skipped]
+        selected = [float(cluster_values[index]) for index in selected_indexes]
+        if len(selected) != n or not np.all(np.diff(np.array(selected, dtype=np.float64)) > 0):
+            continue
+        height_score = _row_height_quality_score(selected)
+        alignment_cost = 0.0
+        for template_index, cluster_index in enumerate(selected_indexes):
+            alignment_cost += abs(float(projected[template_index]) - float(cluster_values[cluster_index])) / cluster_span
+            if template_index > 0:
+                template_gap = (template[template_index] - template[template_index - 1]) / template_span
+                cluster_gap = (cluster_values[cluster_index] - cluster_values[selected_indexes[template_index - 1]]) / cluster_span
+                alignment_cost += 0.45 * abs(float(template_gap) - float(cluster_gap))
+        score = (*height_score, float(alignment_cost))
+        if best is None or score < best[0]:
+            best = (score, selected_indexes, selected)
+    if best is None:
+        return None, {"used": False, "reason": "no_safe_extra_row_cluster_fit", "template_count": n, "cluster_count": m}
+    _score, selected_indexes, selected = best
+    skipped_indexes = [index for index in range(m) if index not in set(selected_indexes)]
+    return selected, {
+        "used": True,
+        "reason": "extra_row_clusters_fitted_by_row_height_quality",
+        "method": "exhaustive_extra_y_cluster_skip_selection",
+        "template_count": n,
+        "cluster_count": m,
+        "extra_count": skip_count,
+        "selected_cluster_indexes": [int(index) for index in selected_indexes],
+        "skipped_cluster_indexes": [int(index) for index in skipped_indexes],
+        "row_height_score": {
+            "outlier_count": int(_score[0]),
+            "max_ratio_deviation": round(float(_score[1]), 6),
+            "height_spread": round(float(_score[2]), 3),
+            "alignment_cost": round(float(_score[3]), 6),
+        },
+    }
 
 
 def _enrich_y_clusters_with_column_votes(
@@ -929,6 +1023,7 @@ def _ordered_match_y_clusters_to_template(
     template_span = max(1.0, float(template[-1] - template[0]))
     cluster_span = max(1.0, float(clusters[-1] - clusters[0]))
     projected = clusters[0] + ((template - template[0]) / template_span) * cluster_span
+    precomputed_corrected: list[float] | None = None
     if n >= m:
         dp = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
         prev: list[list[tuple[int, int, str] | None]] = [[None for _ in range(m + 1)] for _ in range(n + 1)]
@@ -968,9 +1063,32 @@ def _ordered_match_y_clusters_to_template(
         matched_pairs.reverse()
         score = round(float(dp[n, m] / max(1, len(matched_pairs))), 6)
     else:
-        selected_cluster_indexes = np.linspace(0, m - 1, n).round().astype(int).tolist()
-        matched_pairs = [(cluster_index, template_index) for template_index, cluster_index in enumerate(selected_cluster_indexes)]
-        score = None
+        fitted_clusters, fit_evidence = _fit_extra_y_clusters_to_template_count(
+            template_ys=[float(value) for value in template_ys],
+            clusters=[float(value) for value in clusters.tolist()],
+        )
+        if fitted_clusters is not None:
+            precomputed_corrected = [float(value) for value in fitted_clusters]
+            selected_cluster_indexes = [
+                int(index)
+                for index in (fit_evidence.get("selected_cluster_indexes") or [])
+                if isinstance(index, int) or str(index).isdigit()
+            ]
+            if len(selected_cluster_indexes) != n:
+                selected_cluster_indexes = []
+                last = -1
+                for fitted in fitted_clusters:
+                    for index in range(last + 1, m):
+                        if abs(float(clusters[index]) - float(fitted)) < 0.001:
+                            selected_cluster_indexes.append(index)
+                            last = index
+                            break
+            matched_pairs = [(cluster_index, template_index) for template_index, cluster_index in enumerate(selected_cluster_indexes)]
+            score = float((fit_evidence.get("row_height_score") or {}).get("alignment_cost") or 0.0)
+        else:
+            selected_cluster_indexes = np.linspace(0, m - 1, n).round().astype(int).tolist()
+            matched_pairs = [(cluster_index, template_index) for template_index, cluster_index in enumerate(selected_cluster_indexes)]
+            score = None
     min_matches = min(min(n, m), max(10, min(n, m) - 1))
     if len(matched_pairs) < min_matches:
         return None, {
@@ -984,21 +1102,24 @@ def _ordered_match_y_clusters_to_template(
     corrected: list[float | None] = [None for _ in range(n)]
     for cluster_index, template_index in matched_pairs:
         corrected[template_index] = float(clusters[cluster_index])
-    corrected[0] = float(template[0])
-    corrected[-1] = float(template[-1])
-    known_indexes = [index for index, value in enumerate(corrected) if value is not None]
-    interpolated = np.interp(
-        template,
-        np.array([template[index] for index in known_indexes], dtype=np.float64),
-        np.array([float(corrected[index]) for index in known_indexes], dtype=np.float64),
-    ).tolist()
-    interpolated[0] = float(template[0])
-    interpolated[-1] = float(template[-1])
+    if precomputed_corrected is not None:
+        interpolated = [float(value) for value in precomputed_corrected]
+    else:
+        corrected[0] = float(template[0])
+        corrected[-1] = float(template[-1])
+        known_indexes = [index for index, value in enumerate(corrected) if value is not None]
+        interpolated = np.interp(
+            template,
+            np.array([template[index] for index in known_indexes], dtype=np.float64),
+            np.array([float(corrected[index]) for index in known_indexes], dtype=np.float64),
+        ).tolist()
+        interpolated[0] = float(template[0])
+        interpolated[-1] = float(template[-1])
     if not np.all(np.diff(np.array(interpolated, dtype=np.float64)) > 0):
         return None, {"used": False, "reason": "row_y_structural_match_not_monotonic"}
     matched_template_indexes = {template_index for _cluster_index, template_index in matched_pairs}
     matched_cluster_indexes = {cluster_index for cluster_index, _template_index in matched_pairs}
-    return [float(value) for value in interpolated], {
+    evidence = {
         "used": True,
         "reason": "applied_full_table_intersection_structural_y_match",
         "method": "ordered_dp_full_table_y_intersection_match",
@@ -1018,6 +1139,11 @@ def _ordered_match_y_clusters_to_template(
         "skipped_template_indexes": [index for index in range(n) if index not in matched_template_indexes],
         "skipped_cluster_indexes": [index for index in range(m) if index not in matched_cluster_indexes],
     }
+    if m > n:
+        evidence["method"] = "ordered_full_table_y_intersection_match_with_extra_cluster_fit"
+        if "fit_evidence" in locals() and isinstance(fit_evidence, dict):
+            evidence["extra_cluster_fit"] = fit_evidence
+    return [float(value) for value in interpolated], evidence
 
 
 def _row_height_outlier_evidence(row_edges: list[float]) -> dict[str, Any]:

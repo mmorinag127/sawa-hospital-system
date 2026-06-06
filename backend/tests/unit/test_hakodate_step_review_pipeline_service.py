@@ -4,6 +4,7 @@ from openpyxl import Workbook
 from src.services.hakodate_step_review_pipeline_service import (
     _detect_vertical_candidates,
     _draw_merge_aware_grid,
+    _fit_extra_y_clusters_to_template_count,
     _ordered_match_y_clusters_to_template,
     _physical_internal_horizontal_lines,
     _post_menu_boundary_preserving_xs,
@@ -112,6 +113,40 @@ def test_full_table_row_axis_match_interpolates_missing_template_rows() -> None:
     assert evidence["skipped_template_indexes"] == [3]
     assert evidence["skipped_cluster_indexes"] == []
     assert corrected == [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+
+
+def test_full_table_row_axis_match_keeps_detected_boundary_when_extra_cluster_exists() -> None:
+    template_ys = [0, 10, 20, 30, 40, 50]
+    y_clusters = [
+        {"cluster_index": 0, "value": 0.0},
+        {"cluster_index": 1, "value": 10.0},
+        {"cluster_index": 2, "value": 20.0},
+        {"cluster_index": 3, "value": 30.0},
+        {"cluster_index": 4, "value": 40.0},
+        {"cluster_index": 5, "value": 50.0},
+        {"cluster_index": 6, "value": 110.0},
+    ]
+
+    corrected, evidence = _ordered_match_y_clusters_to_template(
+        template_ys=template_ys,
+        y_clusters=y_clusters,
+    )
+
+    assert evidence["used"] is True
+    assert evidence["method"] == "ordered_full_table_y_intersection_match_with_extra_cluster_fit"
+    assert evidence["skipped_cluster_indexes"] == [6]
+    assert corrected == [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+
+
+def test_extra_y_cluster_fit_prefers_balanced_row_heights_over_middle_skip() -> None:
+    fitted, evidence = _fit_extra_y_clusters_to_template_count(
+        template_ys=[0, 10, 20, 30, 40, 50],
+        clusters=[0, 10, 20, 30, 40, 50, 110],
+    )
+
+    assert evidence["used"] is True
+    assert evidence["skipped_cluster_indexes"] == [6]
+    assert fitted == [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
 
 
 def test_row_height_outlier_evidence_requires_manual_review() -> None:
