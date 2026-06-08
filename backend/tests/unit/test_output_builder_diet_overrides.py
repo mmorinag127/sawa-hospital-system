@@ -317,6 +317,64 @@ def test_existing_garnish_row_inherits_previous_menu_category():
     assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
 
 
+def test_lunch_side_dishes_become_side_one_and_two_by_menu_order():
+    lines = [
+        {
+            "date": "2026-06-14",
+            "daypart": "昼",
+            "menu_name": "鶏肉の塩麹焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "昼",
+            "menu_name": "茄子の味噌炒め",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 2,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "昼",
+            "menu_name": "茄子の味噌炒め",
+            "menu_category": "副菜",
+            "diet_type": "mixer",
+            "source_row_index": 2,
+            "quantity_original": 1,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "昼",
+            "menu_name": "白菜のお浸し",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 3,
+            "quantity_original": 3,
+        },
+    ]
+
+    enriched = output_builder._apply_side_dish_slot_categories(lines)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            for line in enriched
+        ],
+        {},
+        None,
+    )
+
+    eggplant_regular = next(row for row in labels if row["商品名１"] == "茄子の味噌炒め" and row["メニュー"] == "副菜①")
+    eggplant_mixer = next(row for row in labels if row["商品名１"] == "茄子の味噌炒め" and row["メニュー"] == "副菜①（ミキサー）")
+    hakusai = next(row for row in labels if row["商品名１"] == "白菜のお浸し")
+    assert eggplant_regular["メニュー"] == "副菜①"
+    assert eggplant_mixer["メニュー"] == "副菜①（ミキサー）"
+    assert hakusai["メニュー"] == "副菜②"
+
+
 def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit():
     lines = [
         {

@@ -1248,6 +1248,54 @@ def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
     return enriched
 
 
+def _apply_side_dish_slot_categories(lines: list[dict]) -> list[dict]:
+    grouped: dict[tuple[Any, str], list[dict]] = {}
+    for line in lines:
+        daypart = _normalize_output_daypart(line.get("daypart"))
+        if not daypart:
+            continue
+        grouped.setdefault((line.get("date"), daypart), []).append(line)
+
+    slot_by_id: dict[int, str] = {}
+    for daypart_lines in grouped.values():
+        side_dishes: list[str] = []
+        side_dish_slot_by_name: dict[str, str] = {}
+        for line in sorted(daypart_lines, key=_line_order_key):
+            category = _normalize_delivery_category_label(line.get("menu_category"))
+            if category in {"副菜1", "副菜2", "副菜①", "副菜②"}:
+                menu_name = str(line.get("menu_name") or "").strip()
+                if menu_name and menu_name not in side_dish_slot_by_name:
+                    side_dish_slot_by_name[menu_name] = "副菜1" if category in {"副菜1", "副菜①"} else "副菜2"
+                continue
+            if category != "副菜":
+                continue
+            menu_name = str(line.get("menu_name") or "").strip()
+            if not menu_name:
+                continue
+            if menu_name not in side_dish_slot_by_name:
+                side_dishes.append(menu_name)
+                if len(side_dishes) == 1:
+                    side_dish_slot_by_name[menu_name] = "副菜1"
+                elif len(side_dishes) == 2:
+                    side_dish_slot_by_name[menu_name] = "副菜2"
+                else:
+                    side_dish_slot_by_name[menu_name] = "副菜"
+            slot = side_dish_slot_by_name.get(menu_name)
+            if slot in {"副菜1", "副菜2"}:
+                slot_by_id[id(line)] = slot
+
+    enriched: list[dict] = []
+    for line in lines:
+        slot = slot_by_id.get(id(line))
+        if slot:
+            updated = dict(line)
+            updated["menu_category"] = slot
+            enriched.append(updated)
+        else:
+            enriched.append(line)
+    return enriched
+
+
 def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> list[dict]:
     menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
     defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
@@ -1636,6 +1684,7 @@ def build_order_lines_for_outputs(
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
+    order_lines = _apply_side_dish_slot_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
     order_lines = _apply_builtin_menu_defaults(order_lines)
