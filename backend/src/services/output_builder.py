@@ -1201,6 +1201,53 @@ def _apply_garnish_defaults(lines: list[dict]) -> list[dict]:
     return enriched
 
 
+def _line_order_key(line: dict) -> tuple[int, str]:
+    raw_index = line.get("_order_index")
+    if raw_index is None:
+        raw_index = line.get("source_row_index")
+    try:
+        order_index = int(raw_index)
+    except Exception:
+        order_index = 1_000_000
+    return order_index, str(line.get("menu_name") or "")
+
+
+def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
+    grouped: dict[tuple[Any, str], list[dict]] = {}
+    for line in lines:
+        daypart = _normalize_output_daypart(line.get("daypart"))
+        if not daypart:
+            continue
+        grouped.setdefault((line.get("date"), daypart), []).append(line)
+
+    parent_by_id: dict[int, str] = {}
+    for daypart_lines in grouped.values():
+        current_parent = ""
+        for line in sorted(daypart_lines, key=_line_order_key):
+            category = _normalize_delivery_category_label(line.get("menu_category"))
+            if category == "添え":
+                if current_parent:
+                    parent_by_id[id(line)] = current_parent
+                continue
+            normalized = _normalize_daily_label_category_text(category)
+            if normalized.startswith("主菜") or normalized.startswith("副菜"):
+                current_parent = normalized
+
+    enriched: list[dict] = []
+    for line in lines:
+        if (
+            _normalize_delivery_category_label(line.get("menu_category")) == "添え"
+            and not line.get("parent_menu_category")
+            and parent_by_id.get(id(line))
+        ):
+            updated = dict(line)
+            updated["parent_menu_category"] = parent_by_id[id(line)]
+            enriched.append(updated)
+        else:
+            enriched.append(line)
+    return enriched
+
+
 def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> list[dict]:
     menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
     defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
@@ -1588,6 +1635,7 @@ def build_order_lines_for_outputs(
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
+    order_lines = _apply_garnish_parent_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
     order_lines = _apply_builtin_menu_defaults(order_lines)

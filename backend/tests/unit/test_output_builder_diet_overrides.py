@@ -281,6 +281,42 @@ def test_garnish_label_uses_parent_category_and_diet_suffix():
     assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
 
 
+def test_existing_garnish_row_inherits_previous_menu_category():
+    lines = [
+        {
+            "date": "2026-04-26",
+            "daypart": "昼",
+            "menu_name": "サワラの揚げ浸し",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 4,
+        },
+        {
+            "date": "2026-04-26",
+            "daypart": "昼",
+            "menu_name": "ﾎｰﾚﾝ草",
+            "menu_category": "添え",
+            "diet_type": "soft",
+            "source_row_index": 2,
+            "quantity_original": 4,
+        },
+    ]
+
+    lines = output_builder._apply_garnish_parent_categories(lines)
+    garnish = output_builder._apply_garnish_defaults([lines[1]])[0]
+    bags = output_builder._build_bags(
+        {"id": "ORD-existing-garnish-label", "facility": "FAC00009", "lines": [garnish]},
+        {},
+        {"zero_as_empty": True},
+    )
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
+
+    assert labels[0]["商品名１"] == "ﾎｰﾚﾝ草"
+    assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
+
+
 def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit():
     lines = [
         {
