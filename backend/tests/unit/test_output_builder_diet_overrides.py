@@ -159,6 +159,188 @@ def test_daily_labels_format_expiry_date_in_japanese_style():
     assert labels[0]["賞味期限"] == "2026年5月25日"
 
 
+def test_daily_labels_show_master_condiment_as_main_side_label(monkeypatch):
+    defaults = {
+        "白身魚フライ": {
+            "unit_type": "count",
+            "qty_per_serving": 1,
+            "temp_type": "hot",
+            "category": "主菜",
+            "condiments": ["ソース"],
+        },
+        "ソース": {
+            "unit_type": "g",
+            "qty_per_serving": 5,
+            "temp_type": "cold",
+            "category": "添え",
+        },
+    }
+    monkeypatch.setattr(
+        output_builder,
+        "_resolve_cached_menu_defaults",
+        lambda names, facility_id: {name: defaults[name] for name in names if name in defaults},
+    )
+
+    lines = output_builder._apply_menu_master_defaults(
+        [
+            {
+                "date": "2026-06-07",
+                "daypart": "昼",
+                "menu_name": "白身魚フライ",
+                "menu_category": "主菜",
+                "diet_type": "regular",
+                "area_id": "2F",
+                "quantity_original": 3,
+            }
+        ],
+        "FAC00009",
+    )
+    lines = output_builder._apply_condiment_lines(lines)
+    lines = output_builder._apply_menu_master_defaults(lines, "FAC00009")
+    bags = output_builder._build_bags(
+        {"id": "ORD-condiment-label", "facility": "FAC00009", "lines": lines},
+        {},
+        {"zero_as_empty": True},
+    )
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
+
+    sauce_label = next(row for row in labels if row["商品名１"] == "ソース")
+    assert sauce_label["メニュー"] == "主菜 添え"
+    assert sauce_label["温・冷"] == "冷菜"
+    assert sauce_label["内容量"] == "15g"
+    assert sauce_label["内容詳細"] == "5g"
+
+
+def test_morning_monthly_entry_main_and_side_slots_become_side_one_and_two():
+    lines = [
+        {
+            "date": "2026-06-08",
+            "daypart": "朝",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "quantity_original": 2,
+        },
+        {
+            "date": "2026-06-08",
+            "daypart": "朝",
+            "menu_name": "ほうれん草和え",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "quantity_original": 2,
+        },
+    ]
+    entries = [
+        {
+            "menu_date": "2026-06-08",
+            "daypart": "朝食",
+            "name": "玉子焼き",
+            "category": "主菜",
+            "slot_index": 1,
+        },
+        {
+            "menu_date": "2026-06-08",
+            "daypart": "朝食",
+            "name": "ほうれん草和え",
+            "category": "副菜",
+            "slot_index": 2,
+        },
+    ]
+
+    enriched = output_builder._apply_menu_entry_overrides(lines, entries)
+
+    assert [line["menu_category"] for line in enriched] == ["副菜1", "副菜2"]
+
+
+def test_garnish_label_uses_parent_category_and_diet_suffix():
+    lines = output_builder._apply_garnish_lines(
+        [
+            {
+                "date": "2026-06-09",
+                "daypart": "夕",
+                "menu_name": "豆腐ﾊﾝﾊﾞｰｸﾞ 添)おろしｿｰｽ",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "2F",
+                "quantity_original": 4,
+            }
+        ]
+    )
+    garnish = next(line for line in lines if line["menu_name"] == "おろしｿｰｽ")
+    garnish = output_builder._apply_garnish_defaults([garnish])[0]
+    bags = output_builder._build_bags(
+        {"id": "ORD-garnish-label", "facility": "FAC00009", "lines": [garnish]},
+        {},
+        {"zero_as_empty": True},
+    )
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
+
+    assert labels[0]["商品名１"] == "おろしｿｰｽ"
+    assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
+
+
+def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit():
+    lines = [
+        {
+            "date": "2026-06-10",
+            "daypart": "夕",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "quantity_original": 4,
+        },
+        {
+            "date": "2026-06-10",
+            "daypart": "夕",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "mixer",
+            "quantity_original": 4,
+        },
+    ]
+    items = [
+        {
+            "id": "MMI-tamago-regular",
+            "name": "玉子焼き",
+            "daypart": "夕食",
+            "category": "主菜",
+            "diet_type": "regular",
+            "unit_type": "count",
+            "qty_per_serving": 1,
+            "temp_type": "hot",
+        },
+        {
+            "id": "MMI-tamago-mixer",
+            "name": "玉子焼き",
+            "daypart": "夕食",
+            "category": "主菜",
+            "diet_type": "mixer",
+            "unit_type": "g",
+            "qty_per_serving": 80,
+            "temp_type": "hot",
+        },
+    ]
+
+    enriched = output_builder._apply_menu_overrides(lines, items)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
+            {**enriched[1], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
+        ],
+        {},
+        None,
+    )
+
+    regular_label = next(row for row in labels if row["商品名１"] == "玉子焼き" and row["メニュー"] == "主菜")
+    mixer_label = next(row for row in labels if row["商品名１"] == "玉子焼き" and row["メニュー"] == "主菜（ミキサー）")
+    assert regular_label["内容量"] == "4個"
+    assert regular_label["内容詳細"] == "1個"
+    assert mixer_label["内容量"] == "320g"
+    assert mixer_label["内容詳細"] == "80g"
+
+
 def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_categories():
     lines = [
         {

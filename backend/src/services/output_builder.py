@@ -661,6 +661,15 @@ def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str
     if not category:
         category = default_category or ""
     suffix = _daily_label_category_suffix_for_bag(bag)
+    if category in {"添え", "付属品"}:
+        parent_category = _normalize_daily_label_category_text(
+            bag.get("parent_menu_category")
+            or bag.get("garnish_parent_category")
+            or bag.get("accessory_parent_category")
+            or ""
+        )
+        if parent_category.startswith("主菜") or parent_category.startswith("副菜"):
+            category = f"{parent_category} 添え"
     if suffix and (category.startswith("主菜") or category.startswith("副菜")):
         category = _append_daily_label_category_suffix(category, suffix)
     return category
@@ -1070,12 +1079,14 @@ def _normalize_output_daypart(value: object) -> str:
 
 def _menu_entry_category_label(entry: dict) -> str:
     normalized = _normalize_delivery_category_label(entry.get("category"))
-    if normalized in {"副菜1", "副菜2", "主菜"}:
-        return normalized
     daypart = _normalize_output_daypart(entry.get("daypart"))
     try:
         slot_index = int(entry.get("slot_index"))
     except Exception:
+        return normalized
+    if daypart == "朝" and slot_index > 0:
+        return {1: "副菜1", 2: "副菜2"}.get(slot_index, normalized)
+    if normalized in {"副菜1", "副菜2", "主菜"}:
         return normalized
     if daypart in {"朝", "昼"}:
         return {0: "副菜1", 1: "副菜2"}.get(slot_index, normalized)
@@ -1208,6 +1219,8 @@ def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> l
             updated["menu_qty_per_serving"] = payload.get("qty_per_serving")
         if not updated.get("menu_temp_type") and payload.get("temp_type"):
             updated["menu_temp_type"] = payload.get("temp_type")
+        if payload.get("condiments") is not None:
+            updated["condiments"] = payload.get("condiments")
         payload_category = _normalize_delivery_category_label(payload.get("category"))
         if not updated.get("_monthly_entry_override_applied") and payload_category and (
             _is_specific_delivery_category(payload_category)
@@ -1243,10 +1256,23 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
             condiment_line = dict(updated)
             condiment_line["menu_name"] = label
             condiment_line["menu_category"] = "添え"
+            condiment_line["parent_menu_name"] = updated.get("menu_name")
+            condiment_line["parent_menu_category"] = updated.get("menu_category")
             condiment_line["condiments"] = []
             condiment_line["bag_type"] = "condiment"
-            condiment_line["menu_bag_max_qty"] = None
-            condiment_line["menu_bag_max_unit"] = None
+            for field in (
+                "menu_qty_per_serving",
+                "menu_unit_type",
+                "menu_temp_type",
+                "actual_amount",
+                "actual_unit_type",
+                "menu_bag_max_qty",
+                "menu_bag_max_unit",
+                "_menu_qty_source_daypart",
+                "_menu_qty_source_category",
+                "_monthly_menu_item_override_applied",
+            ):
+                condiment_line.pop(field, None)
             enriched.append(condiment_line)
     return enriched
 
@@ -1562,6 +1588,9 @@ def build_order_lines_for_outputs(
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
+    order_lines = _apply_garnish_defaults(order_lines)
+    order_lines = _apply_menu_master_defaults(order_lines, facility_id)
+    order_lines = _apply_builtin_menu_defaults(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
     if timings is not None:
@@ -1716,6 +1745,8 @@ def _apply_garnish_lines(lines: list[dict]) -> list[dict]:
         garnish_line = dict(line)
         garnish_line["menu_name"] = garnish
         garnish_line["menu_category"] = "添え"
+        garnish_line["parent_menu_name"] = base
+        garnish_line["parent_menu_category"] = line.get("menu_category")
         for field in (
             "menu_qty_per_serving",
             "menu_unit_type",
@@ -1886,6 +1917,8 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
                 "diet_type": None if is_condiment else line.get("diet_type"),
                 "area_id": None if is_condiment else line.get("area_id"),
                 "bag_type": "condiment" if is_condiment else default_bag_type,
+                "parent_menu_name": line.get("parent_menu_name"),
+                "parent_menu_category": line.get("parent_menu_category"),
                 "menu_unit_type": line.get("menu_unit_type"),
                 "menu_qty_per_serving": line.get("menu_qty_per_serving"),
                 "menu_bag_max_qty": line.get("menu_bag_max_qty"),
@@ -1899,6 +1932,10 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
             name_value = (line.get("menu_name") or "").strip()
             if name_value:
                 grouped[key]["_condiment_names"].add(name_value)
+            if not grouped[key].get("parent_menu_name") and line.get("parent_menu_name"):
+                grouped[key]["parent_menu_name"] = line.get("parent_menu_name")
+            if not grouped[key].get("parent_menu_category") and line.get("parent_menu_category"):
+                grouped[key]["parent_menu_category"] = line.get("parent_menu_category")
         grouped[key]["quantity"] += float(qty)
         source_ref = {
             "order_id": order.get("id"),
@@ -1919,7 +1956,8 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
             names = sorted(bag.pop("_condiment_names", set()))
             if names:
                 bag["menu_name"] = " / ".join(names)
-            bag["menu_category"] = "付属品"
+            if not bag.get("menu_category"):
+                bag["menu_category"] = "付属品"
     return result
 
 
@@ -2029,6 +2067,7 @@ def build_bag_rows_for_outputs(
     menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
     bags = _apply_menu_overrides(bags, menu_items)
     bags = _clear_stale_menu_qty_from_monthly_entry(bags)
+    bags = _apply_menu_master_defaults(bags, facility_id)
     bags = _apply_builtin_menu_defaults(bags)
     bag_types = _resolve_bag_types(resolved_facility_config)
     bags = _assign_bag_type_for_bags(bags, bag_types)
@@ -2250,8 +2289,8 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
             row.get("_sort_date") or row.get("賞味期限", ""),
             daypart_order.get(daypart, 99),
             source_row_sort,
-            row.get("商品名１", ""),
             category_order.get(category, 99),
+            row.get("商品名１", ""),
             diet_order.get(variant, 50),
             area_order.get(area_key, 50),
             time_text,
@@ -5789,6 +5828,7 @@ def _prepare_output_context(
         menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
         bags = _apply_menu_overrides(bags, menu_items)
         bags = _clear_stale_menu_qty_from_monthly_entry(bags)
+        bags = _apply_menu_master_defaults(bags, facility_id)
         bags = _apply_builtin_menu_defaults(bags)
         bag_types = _resolve_bag_types(facility_config)
         bags = _assign_bag_type_for_bags(bags, bag_types)
