@@ -4862,7 +4862,7 @@ def _populate_label_sheet(ws, fieldnames: list[str], rows: list[dict]) -> None:
     ws.append(fieldnames)
     for row in rows:
         ws.append([row.get(field, "") for field in fieldnames])
-    _apply_daily_label_sheet_shape(ws, DAILY_LABEL_SHEET_MAX_ROWS.get(ws.title))
+    _apply_daily_label_sheet_shape(ws)
 
 
 def _daily_label_sheet_name(facility_code: str | None, facility_name: str | None) -> str:

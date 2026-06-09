@@ -312,6 +312,8 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
         yamato = load_workbook(BytesIO(archive.read("2026-03-22_大和なでしこ_labels.xlsx")))
     assert soyokaze.sheetnames == ["そよかぜ"]
     assert yamato.sheetnames == ["大和なでしこ"]
+    assert soyokaze["そよかぜ"].max_row == 3
+    assert yamato["大和なでしこ"].max_row == 2
     assert soyokaze["そよかぜ"]["A2"].value == "献立A"
     assert soyokaze["そよかぜ"]["A3"].value == "献立B"
     assert yamato["大和なでしこ"]["A2"].value == "献立C"
