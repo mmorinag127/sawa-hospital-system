@@ -1688,10 +1688,10 @@ def build_order_lines_for_outputs(
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
-    order_lines = _apply_label_meal_slot_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
     order_lines = _apply_builtin_menu_defaults(order_lines)
+    order_lines = _apply_label_meal_slot_categories(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
     if timings is not None:

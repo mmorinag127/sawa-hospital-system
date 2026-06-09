@@ -428,6 +428,56 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order():
     assert komatsuna["メニュー"] == "副菜②"
 
 
+def test_label_meal_slots_are_applied_after_menu_master_defaults(monkeypatch):
+    lines = [
+        {
+            "date": "2026-06-15",
+            "daypart": "朝",
+            "menu_name": "竹輪の卵炒め",
+            "menu_category": "副菜1",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-15",
+            "daypart": "朝",
+            "menu_name": "ブロッコリーのおかか和え",
+            "menu_category": "副菜2",
+            "diet_type": "regular",
+            "source_row_index": 2,
+            "quantity_original": 3,
+        },
+    ]
+
+    monkeypatch.setattr(
+        output_builder,
+        "_resolve_cached_menu_defaults",
+        lambda _names, _facility_id: {
+            "竹輪の卵炒め": {"category": "主菜"},
+            "ブロッコリーのおかか和え": {"category": "副菜2"},
+        },
+    )
+
+    after_defaults = output_builder._apply_menu_master_defaults(lines, "FAC00009")
+    assert after_defaults[0]["menu_category"] == "主菜"
+
+    enriched = output_builder._apply_label_meal_slot_categories(after_defaults)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            for line in enriched
+        ],
+        {},
+        None,
+    )
+
+    chikuwa = next(row for row in labels if row["商品名１"] == "竹輪の卵炒め")
+    broccoli = next(row for row in labels if row["商品名１"] == "ブロッコリーのおかか和え")
+    assert chikuwa["メニュー"] == "副菜①"
+    assert broccoli["メニュー"] == "副菜②"
+
+
 def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit():
     lines = [
         {
