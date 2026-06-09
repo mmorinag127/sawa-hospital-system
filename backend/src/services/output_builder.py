@@ -543,9 +543,9 @@ def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
     facility = str(facility_id or "").strip()
     if facility in {"FAC00008", "FAC00009", "FAC00010"}:
         if normalized == "2F":
-            return "2階"
+            return "２階"
         if normalized == "3F":
-            return "3階"
+            return "３階"
     if normalized == "2F":
         return "花"
     if normalized == "3F":
@@ -2246,7 +2246,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
     time_value = str(bag.get("daypart") or default_daypart or "").strip()
     if area_suffix:
-        time_value = f"{time_value}　{area_suffix}".strip()
+        time_value = f"{time_value}{area_suffix}".strip()
     source_refs = bag.get("_source_refs") or bag.get("source_refs") or []
     source_row_indexes: list[int] = []
     if isinstance(source_refs, list):
