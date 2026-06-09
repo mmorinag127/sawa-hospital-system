@@ -1248,7 +1248,15 @@ def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
     return enriched
 
 
-def _apply_side_dish_slot_categories(lines: list[dict]) -> list[dict]:
+def _label_meal_slot_sequence(daypart: str) -> list[str]:
+    if daypart == "朝":
+        return ["副菜1", "副菜2"]
+    if daypart in {"昼", "夕"}:
+        return ["主菜", "副菜1", "副菜2"]
+    return []
+
+
+def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
     grouped: dict[tuple[Any, str], list[dict]] = {}
     for line in lines:
         daypart = _normalize_output_daypart(line.get("daypart"))
@@ -1257,31 +1265,27 @@ def _apply_side_dish_slot_categories(lines: list[dict]) -> list[dict]:
         grouped.setdefault((line.get("date"), daypart), []).append(line)
 
     slot_by_id: dict[int, str] = {}
-    for daypart_lines in grouped.values():
-        side_dishes: list[str] = []
-        side_dish_slot_by_name: dict[str, str] = {}
+    for (_date_value, daypart), daypart_lines in grouped.items():
+        slot_sequence = _label_meal_slot_sequence(daypart)
+        if not slot_sequence:
+            continue
+        menu_slot_by_name: dict[str, str] = {}
+        menu_names: list[str] = []
         for line in sorted(daypart_lines, key=_line_order_key):
             category = _normalize_delivery_category_label(line.get("menu_category"))
-            if category in {"副菜1", "副菜2", "副菜①", "副菜②"}:
-                menu_name = str(line.get("menu_name") or "").strip()
-                if menu_name and menu_name not in side_dish_slot_by_name:
-                    side_dish_slot_by_name[menu_name] = "副菜1" if category in {"副菜1", "副菜①"} else "副菜2"
-                continue
-            if category != "副菜":
+            if category == "添え":
                 continue
             menu_name = str(line.get("menu_name") or "").strip()
             if not menu_name:
                 continue
-            if menu_name not in side_dish_slot_by_name:
-                side_dishes.append(menu_name)
-                if len(side_dishes) == 1:
-                    side_dish_slot_by_name[menu_name] = "副菜1"
-                elif len(side_dishes) == 2:
-                    side_dish_slot_by_name[menu_name] = "副菜2"
+            if menu_name not in menu_slot_by_name:
+                menu_names.append(menu_name)
+                if len(menu_names) <= len(slot_sequence):
+                    menu_slot_by_name[menu_name] = slot_sequence[len(menu_names) - 1]
                 else:
-                    side_dish_slot_by_name[menu_name] = "副菜"
-            slot = side_dish_slot_by_name.get(menu_name)
-            if slot in {"副菜1", "副菜2"}:
+                    menu_slot_by_name[menu_name] = category
+            slot = menu_slot_by_name.get(menu_name)
+            if slot:
                 slot_by_id[id(line)] = slot
 
     enriched: list[dict] = []
@@ -1684,7 +1688,7 @@ def build_order_lines_for_outputs(
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
-    order_lines = _apply_side_dish_slot_categories(order_lines)
+    order_lines = _apply_label_meal_slot_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
     order_lines = _apply_builtin_menu_defaults(order_lines)
@@ -4949,6 +4953,36 @@ def _create_daily_labels_sheet(
     return ws.title
 
 
+def _safe_output_filename(value: str, fallback: str) -> str:
+    text = str(value or "").strip() or fallback
+    text = re.sub(r'[\\/:*?"<>|]+', "_", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or fallback
+
+
+def _create_daily_label_workbook_bytes(
+    *,
+    target_date: dt_date,
+    group: dict,
+) -> tuple[bytes, str]:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    used_titles: set[str] = set()
+    sheet_name = _create_daily_labels_sheet(
+        workbook,
+        used_titles,
+        title_seed=_daily_label_sheet_name(group.get("facility_code"), group.get("facility_name")),
+        bags=group["bags"],
+        label_profile=group["label_profile"],
+        facility_name=group["facility_config"].get("facility_name"),
+    )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    facility_name = str(group.get("facility_name") or group.get("facility_code") or sheet_name or "facility").strip()
+    filename = _safe_output_filename(f"{target_date.isoformat()}_{facility_name}_labels.xlsx", "daily_labels.xlsx")
+    return buffer.getvalue(), filename
+
+
 def _create_daily_delivery_sheet(
     workbook,
     used_titles: set[str],
@@ -5760,6 +5794,50 @@ def build_daily_output_bundle(
     if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
         menu_ws = workbook.create_sheet(title="メニュー")
         _populate_daily_label_menu_sheet(menu_ws, target_date)
+
+    if normalized_type == "labels":
+        zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_labels_{stamp}.zip"
+        success_count = 0
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
+                item_payload: dict[str, object] = {
+                    "order_ids": list(group["order_ids"]),
+                    "facility_code": group["facility_code"],
+                    "facility_name": group["facility_name"],
+                    "status": "ok",
+                    "files": [],
+                }
+                try:
+                    if not group.get("bags"):
+                        item_payload["status"] = "empty"
+                        item_payload["error"] = "label rows not found for target date"
+                        manifest_items.append(item_payload)
+                        continue
+                    workbook_bytes, filename = _create_daily_label_workbook_bytes(
+                        target_date=target_date,
+                        group=group,
+                    )
+                    archive.writestr(filename, workbook_bytes)
+                    item_payload["files"].append(filename)
+                    success_count += 1
+                except Exception as exc:  # noqa: BLE001
+                    item_payload["status"] = "error"
+                    item_payload["error"] = str(exc)
+                manifest_items.append(item_payload)
+        if success_count == 0:
+            raise ValueError("対象日の出力対象がありません")
+        manifest = {
+            "date": target_date.isoformat(),
+            "bundle_type": normalized_type,
+            "status_filter": status,
+            "created_at": datetime.utcnow().isoformat(),
+            "total_orders": len(manifest_items),
+            "success_orders": success_count,
+            "error_orders": max(len(manifest_items) - success_count, 0),
+            "items": manifest_items,
+            "file_format": "zip",
+        }
+        return zip_path, manifest
 
     success_count = 0
     output_groups = (

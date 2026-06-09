@@ -48,12 +48,17 @@ def test_delivery_html_render_sums_final_regular_column():
     assert value == 3
 
 
-def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
+def test_daily_label_bundle_returns_zip(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"
+    workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.zip"
     workbook = Workbook()
     workbook.active.title = "そよかぜ"
-    workbook.save(workbook_path)
+    xlsx_path = tmp_path / "2026-03-22_そよかぜ_labels.xlsx"
+    workbook.save(xlsx_path)
+    import zipfile
+
+    with zipfile.ZipFile(workbook_path, "w") as archive:
+        archive.write(xlsx_path, xlsx_path.name)
 
     monkeypatch.setattr(
         outputs_api,
@@ -65,6 +70,7 @@ def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
                 "total_orders": 1,
                 "success_orders": 1,
                 "error_orders": 0,
+                "file_format": "zip",
             },
         ),
     )
@@ -76,10 +82,8 @@ def test_daily_bundle_returns_xlsx(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith(
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    assert "daily_outputs_2026-03-22_labels.xlsx" in response.headers["content-disposition"]
+    assert response.headers["content-type"].startswith("application/zip")
+    assert "daily_outputs_2026-03-22_labels.zip" in response.headers["content-disposition"]
 
 
 def test_weekly_weight_returns_xlsx(monkeypatch, tmp_path):

@@ -1,6 +1,8 @@
 import pathlib
 import sys
+import zipfile
 from datetime import date as dt_date
+from io import BytesIO
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -300,14 +302,19 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
         bundle_type="labels",
     )
 
-    assert bundle_path.suffix == ".xlsx"
-    assert summary["file_format"] == "xlsx"
+    assert bundle_path.suffix == ".zip"
+    assert summary["file_format"] == "zip"
     assert summary["success_orders"] == 2
-    workbook = load_workbook(bundle_path)
-    assert workbook.sheetnames == ["メニュー", "大和なでしこ", "そよかぜ"]
-    assert workbook["そよかぜ"]["A2"].value == "献立A"
-    assert workbook["そよかぜ"]["A3"].value == "献立B"
-    assert workbook["大和なでしこ"]["A2"].value == "献立C"
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = sorted(archive.namelist())
+        assert names == ["2026-03-22_そよかぜ_labels.xlsx", "2026-03-22_大和なでしこ_labels.xlsx"]
+        soyokaze = load_workbook(BytesIO(archive.read("2026-03-22_そよかぜ_labels.xlsx")))
+        yamato = load_workbook(BytesIO(archive.read("2026-03-22_大和なでしこ_labels.xlsx")))
+    assert soyokaze.sheetnames == ["そよかぜ"]
+    assert yamato.sheetnames == ["大和なでしこ"]
+    assert soyokaze["そよかぜ"]["A2"].value == "献立A"
+    assert soyokaze["そよかぜ"]["A3"].value == "献立B"
+    assert yamato["大和なでしこ"]["A2"].value == "献立C"
 
 
 def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):

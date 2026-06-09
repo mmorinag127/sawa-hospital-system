@@ -317,8 +317,26 @@ def test_existing_garnish_row_inherits_previous_menu_category():
     assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
 
 
-def test_lunch_side_dishes_become_side_one_and_two_by_menu_order():
+def test_label_meal_slots_are_assigned_by_daypart_menu_order():
     lines = [
+        {
+            "date": "2026-06-14",
+            "daypart": "朝",
+            "menu_name": "ジャーマンポテト",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "朝",
+            "menu_name": "カリフラワーとツナのサラダ",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 2,
+            "quantity_original": 3,
+        },
         {
             "date": "2026-06-14",
             "daypart": "昼",
@@ -355,9 +373,36 @@ def test_lunch_side_dishes_become_side_one_and_two_by_menu_order():
             "source_row_index": 3,
             "quantity_original": 3,
         },
+        {
+            "date": "2026-06-14",
+            "daypart": "夕",
+            "menu_name": "鮭の照焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "夕",
+            "menu_name": "玉子焼き",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 2,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-14",
+            "daypart": "夕",
+            "menu_name": "小松菜の和え物",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 3,
+            "quantity_original": 3,
+        },
     ]
 
-    enriched = output_builder._apply_side_dish_slot_categories(lines)
+    enriched = output_builder._apply_label_meal_slot_categories(lines)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
             {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
@@ -367,12 +412,20 @@ def test_lunch_side_dishes_become_side_one_and_two_by_menu_order():
         None,
     )
 
+    german = next(row for row in labels if row["商品名１"] == "ジャーマンポテト")
+    cauliflower = next(row for row in labels if row["商品名１"] == "カリフラワーとツナのサラダ")
     eggplant_regular = next(row for row in labels if row["商品名１"] == "茄子の味噌炒め" and row["メニュー"] == "副菜①")
     eggplant_mixer = next(row for row in labels if row["商品名１"] == "茄子の味噌炒め" and row["メニュー"] == "副菜①（ミキサー）")
     hakusai = next(row for row in labels if row["商品名１"] == "白菜のお浸し")
+    tamago = next(row for row in labels if row["商品名１"] == "玉子焼き")
+    komatsuna = next(row for row in labels if row["商品名１"] == "小松菜の和え物")
+    assert german["メニュー"] == "副菜①"
+    assert cauliflower["メニュー"] == "副菜②"
     assert eggplant_regular["メニュー"] == "副菜①"
     assert eggplant_mixer["メニュー"] == "副菜①（ミキサー）"
     assert hakusai["メニュー"] == "副菜②"
+    assert tamago["メニュー"] == "副菜①"
+    assert komatsuna["メニュー"] == "副菜②"
 
 
 def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit():
