@@ -912,7 +912,7 @@ def _select_menu_item_for_line(line: dict, menu_items_by_key: dict[str, list[dic
     return ranked[0][1]
 
 
-def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dict]:
+def _apply_menu_overrides(lines: list[dict], menu_items: list[dict], *, apply_category: bool = True) -> list[dict]:
     if not menu_items:
         return lines
     index: dict[str, list[dict]] = {}
@@ -933,7 +933,7 @@ def _apply_menu_overrides(lines: list[dict], menu_items: list[dict]) -> list[dic
         if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
         item_category = _normalize_delivery_category_label(item.get("category"))
-        if item_category and (
+        if apply_category and item_category and (
             _is_specific_delivery_category(item_category)
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
@@ -1300,7 +1300,12 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
     return enriched
 
 
-def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> list[dict]:
+def _apply_menu_master_defaults(
+    lines: list[dict],
+    facility_id: str | None,
+    *,
+    apply_category: bool = True,
+) -> list[dict]:
     menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
     defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
     if not defaults:
@@ -1321,7 +1326,7 @@ def _apply_menu_master_defaults(lines: list[dict], facility_id: str | None) -> l
         if payload.get("condiments") is not None:
             updated["condiments"] = payload.get("condiments")
         payload_category = _normalize_delivery_category_label(payload.get("category"))
-        if not updated.get("_monthly_entry_override_applied") and payload_category and (
+        if apply_category and not updated.get("_monthly_entry_override_applied") and payload_category and (
             _is_specific_delivery_category(payload_category)
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
@@ -2166,11 +2171,10 @@ def build_bag_rows_for_outputs(
         or str(order.get("week_code") or "").strip()
     )
     menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
-    bags = _apply_menu_overrides(bags, menu_items)
+    bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
     bags = _clear_stale_menu_qty_from_monthly_entry(bags)
-    bags = _apply_menu_master_defaults(bags, facility_id)
+    bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
     bags = _apply_builtin_menu_defaults(bags)
-    bags = _apply_label_meal_slot_categories(bags)
     bag_types = _resolve_bag_types(resolved_facility_config)
     bags = _assign_bag_type_for_bags(bags, bag_types)
     return _apply_daily_label_facility_rules_to_bags(bags, resolved_facility_config, facility_id)
@@ -6002,11 +6006,10 @@ def _prepare_output_context(
         bags_started = time.perf_counter()
         bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
         menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
-        bags = _apply_menu_overrides(bags, menu_items)
+        bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
         bags = _clear_stale_menu_qty_from_monthly_entry(bags)
-        bags = _apply_menu_master_defaults(bags, facility_id)
+        bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
         bags = _apply_builtin_menu_defaults(bags)
-        bags = _apply_label_meal_slot_categories(bags)
         bag_types = _resolve_bag_types(facility_config)
         bags = _assign_bag_type_for_bags(bags, bag_types)
         bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
