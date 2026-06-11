@@ -5331,7 +5331,7 @@ def list_orders_by_line_date(
             payload = serialize_order_summary(order)
             payload["line_count"] = int(line_count or 0)
             result.append(payload)
-        result.sort(key=lambda item: item.get("received_at") or "")
+        result.sort(key=lambda item: (item.get("received_at") or "", item.get("id") or ""), reverse=True)
         return result
 
 

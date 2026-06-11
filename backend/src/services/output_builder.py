@@ -1394,10 +1394,49 @@ def _build_condiment_map(menu_names: list[str], facility_id: str | None) -> dict
     return condiment_map
 
 
-def _apply_condiment_note(row: dict, condiments: list[str]) -> dict:
+def _append_delivery_note(row: dict, note: object) -> None:
+    text = str(note or "").strip()
+    if not text or text == "袋分け例外適用":
+        return
+    existing = str(row.get("note") or "").strip()
+    parts = [part.strip() for part in re.split(r"[、,\n]+", existing) if part.strip()]
+    if text not in parts:
+        parts.append(text)
+    row["note"] = "、".join(parts)
+
+
+def _format_delivery_note_quantity(value: float) -> str:
+    if math.isclose(value, round(value), abs_tol=1e-9):
+        return str(int(round(value)))
+    return f"{value:g}"
+
+
+def _delivery_condiment_note_label(condiment: str) -> str:
+    if "ケチャップ" in condiment:
+        return "ケチャップ"
+    if "ソース" in condiment:
+        return "ソース"
+    return "添え"
+
+
+def _apply_condiment_note(row: dict, condiments: list[str], quantity_columns: list[dict[str, str | None]]) -> dict:
     if not condiments:
         return row
     row["_delivery_condiments"] = condiments
+    total = 0.0
+    for col in quantity_columns:
+        name = col.get("name")
+        if not name:
+            continue
+        try:
+            total += float(row.get(name) or 0)
+        except Exception:
+            continue
+    if total <= 0:
+        return row
+    quantity = _format_delivery_note_quantity(total)
+    for condiment in condiments:
+        _append_delivery_note(row, f"{_delivery_condiment_note_label(condiment)}{quantity}")
     return row
 
 
@@ -3825,6 +3864,8 @@ def _build_delivery_rows(
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
             row["_order_index"] = order_index
+        for note_field in ("note", "remarks", "change_note"):
+            _append_delivery_note(row, line.get(note_field))
         line_condiments = _normalize_condiments(line.get("condiments"))
         for condiment in split_condiments:
             if condiment not in line_condiments:
@@ -3832,23 +3873,6 @@ def _build_delivery_rows(
         for condiment in line_condiments:
             if condiment not in row["_delivery_condiments"]:
                 row["_delivery_condiments"].append(condiment)
-        condiment_rows: list[dict] = []
-        for condiment in line_condiments:
-            condiment_key = (line_date, daypart_key, condiment)
-            condiment_rows.append(
-                rows.setdefault(
-                    condiment_key,
-                    {
-                        "date": line_date,
-                        "daypart": daypart_key,
-                        "menu_name": condiment,
-                        "menu_category": "添え",
-                        "menu_display": "",
-                        "_order_index": order_index,
-                        "_delivery_condiments": [],
-                    },
-                )
-            )
         line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
         for col in quantity_columns:
@@ -3863,8 +3887,6 @@ def _build_delivery_rows(
             if not name:
                 continue
             row[name] = (row.get(name) or 0) + float(qty)
-            for condiment_row in condiment_rows:
-                condiment_row[name] = (condiment_row.get(name) or 0) + float(qty)
     if isinstance(entries, list) and entries:
         allowed_dates = {
             _ensure_date(line.get("date"))
@@ -3907,19 +3929,6 @@ def _build_delivery_rows(
             for condiment in entry_condiments:
                 if condiment not in row["_delivery_condiments"]:
                     row["_delivery_condiments"].append(condiment)
-                condiment_key = (entry_date, daypart_key, condiment)
-                rows.setdefault(
-                    condiment_key,
-                    {
-                        "date": entry_date,
-                        "daypart": daypart_key,
-                        "menu_name": condiment,
-                        "menu_category": "添え",
-                        "menu_display": "",
-                        "_order_index": entry.get("index"),
-                        "_delivery_condiments": [],
-                    },
-                )
     if timings is not None:
         timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
     finalize_started = time.perf_counter()
@@ -3951,7 +3960,7 @@ def _build_delivery_rows(
     for row in result:
         row["menu_category"] = _delivery_display_category_label(row.get("daypart"), row.get("menu_category"))
         condiments = _normalize_condiments(row.get("_delivery_condiments"))
-        _apply_condiment_note(row, condiments)
+        _apply_condiment_note(row, condiments, quantity_columns)
         delivery_menu_name = _append_condiments_to_delivery_menu_name(
             row.get("menu_name"),
             row.get("_delivery_condiments"),

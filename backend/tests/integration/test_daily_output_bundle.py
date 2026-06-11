@@ -2,6 +2,7 @@ import pathlib
 import sys
 import zipfile
 from datetime import date as dt_date
+from datetime import datetime
 from io import BytesIO
 
 import pytest
@@ -12,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import order_service, output_builder  # noqa: E402
+from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
 TARGET_DATE = dt_date(2026, 3, 22)
@@ -1609,6 +1611,60 @@ def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
     )
 
     assert rows[0]["menu_display"] == "主Ａ 主菜A 添）キャベツ"
+    assert len(rows) == 1
+    assert rows[0]["note"] == "添え1"
+
+
+def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
+    monkeypatch.setattr(output_builder.menu_service, "resolve_menu_defaults", lambda menu_names, facility_id: {})
+    output_builder._cached_menu_defaults.cache_clear()  # noqa: SLF001
+
+    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+        {
+            "id": "ORD-sauce-note",
+            "facility": "FAC00009",
+            "lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "主",
+                    "menu_name": "白身魚フライ",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 7,
+                    "change_note": "青魚1",
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "主",
+                    "menu_name": "白身魚フライ",
+                    "diet_type": "regular",
+                    "area_id": "3F",
+                    "quantity_original": 3,
+                },
+            ],
+        },
+        {
+            "columns": [
+                {"name": "日付", "source": "date"},
+                {"name": "区分", "source": "daypart"},
+                {"name": "メニュー名", "source": "menu_display"},
+                {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+                {"name": "常食3F", "source": "quantity", "diet_type": "regular", "area_id": "3F"},
+                {"name": "備考欄", "source": "note"},
+            ]
+        },
+        {"zero_as_empty": True},
+        {"facility_name": "グループホームそよかぜ"},
+        {},
+        allow_ocr_menu_meta=False,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["menu_name"] == "白身魚フライ"
+    assert rows[0]["menu_display"] == "主 白身魚フライ 添）ソース"
+    assert rows[0]["note"] == "青魚1、ソース10"
 
 
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
@@ -1735,3 +1791,36 @@ def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
         assert str(exc) == "templated delivery notes cannot be embedded into a rebuilt daily bundle workbook"
     else:
         raise AssertionError("templated delivery embedding should be blocked")
+
+
+def test_list_orders_by_line_date_returns_latest_upload_first():
+    order_service.clear_all()
+    target = dt_date(2026, 6, 7)
+
+    def create_order(message_id: str, received_at: datetime, facility_id: str) -> dict:
+        return order_service.create_order_from_ingest(
+            IngestEmailPayload(
+                message_id=message_id,
+                pdf_uri=f"file://{message_id}.pdf",
+                received_at=received_at,
+                facility_hint=facility_id,
+                week_hint="2026-06",
+            ),
+            lines=[
+                {
+                    "date": target.isoformat(),
+                    "daypart": "朝",
+                    "menu_name": "Menu",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 1,
+                }
+            ],
+        )
+
+    older = create_order("daily-date-order-older", datetime(2026, 6, 1, 9, 0, 0), "FAC00008")
+    newer = create_order("daily-date-order-newer", datetime(2026, 6, 1, 10, 0, 0), "FAC00009")
+
+    rows = order_service.list_orders_by_line_date(target)
+
+    assert [row["id"] for row in rows[:2]] == [newer["id"], older["id"]]
