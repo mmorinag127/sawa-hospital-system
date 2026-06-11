@@ -932,11 +932,10 @@ def download_daily_bundle(
     }
     file_format = str(summary.get("file_format") or "xlsx")
     filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.{file_format}"
-    media_type = (
-        "application/zip"
-        if file_format == "zip"
-        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    media_type = {
+        "csv": "text/csv",
+        "zip": "application/zip",
+    }.get(file_format, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     return FileResponse(
         str(bundle_path),
         media_type=media_type,

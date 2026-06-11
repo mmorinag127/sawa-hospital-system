@@ -1,6 +1,5 @@
 import pathlib
 import sys
-import zipfile
 from datetime import date as dt_date
 from datetime import datetime
 from io import BytesIO
@@ -304,21 +303,71 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
         bundle_type="labels",
     )
 
-    assert bundle_path.suffix == ".zip"
-    assert summary["file_format"] == "zip"
+    assert bundle_path.suffix == ".xlsx"
+    assert summary["file_format"] == "xlsx"
     assert summary["success_orders"] == 2
-    with zipfile.ZipFile(bundle_path) as archive:
-        names = sorted(archive.namelist())
-        assert names == ["2026-03-22_そよかぜ_labels.xlsx", "2026-03-22_大和なでしこ_labels.xlsx"]
-        soyokaze = load_workbook(BytesIO(archive.read("2026-03-22_そよかぜ_labels.xlsx")))
-        yamato = load_workbook(BytesIO(archive.read("2026-03-22_大和なでしこ_labels.xlsx")))
-    assert soyokaze.sheetnames == ["そよかぜ"]
-    assert yamato.sheetnames == ["大和なでしこ"]
+    workbook = load_workbook(bundle_path)
+    assert workbook.sheetnames == ["メニュー", "大和なでしこ", "そよかぜ"]
+    soyokaze = workbook
+    yamato = workbook
     assert soyokaze["そよかぜ"].max_row == 3
     assert yamato["大和なでしこ"].max_row == 2
     assert soyokaze["そよかぜ"]["A2"].value == "献立A"
     assert soyokaze["そよかぜ"]["A3"].value == "献立B"
     assert yamato["大和なでしこ"]["A2"].value == "献立C"
+
+
+def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda target_date, status=None: [
+            {"id": "ORD-1", "facility": "FAC001"},
+            {"id": "ORD-2", "facility": "FAC001"},
+            {"id": "ORD-3", "facility": "FAC002"},
+        ],
+    )
+    monkeypatch.setattr(
+        output_builder.config_service,
+        "get_facility_config",
+        lambda facility_code: {
+            "FAC001": {"facility_name": "そよかぜ"},
+            "FAC002": {"facility_name": "大和なでしこ"},
+        }.get(facility_code, {}),
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id: {
+            "ORD-1": _make_context("ORD-1", "FAC001", "そよかぜ", "献立A"),
+            "ORD-2": _make_context("ORD-2", "FAC001", "そよかぜ", "献立B"),
+            "ORD-3": _make_context("ORD-3", "FAC002", "大和なでしこ", "献立C"),
+        }[order_id],
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_build_label_rows",
+        lambda bags, label_profile, facility_name: (
+            [{"メニュー": bag.get("menu_name") or ""} for bag in bags],
+            ["メニュー"],
+            "jp",
+        ),
+    )
+
+    bundle_path, summary = output_builder.build_daily_output_bundle(
+        TARGET_DATE,
+        bundle_type="labels_csv",
+    )
+
+    assert bundle_path.suffix == ".csv"
+    assert summary["file_format"] == "csv"
+    assert summary["success_orders"] == 2
+    content = bundle_path.read_text(encoding="cp932")
+    assert "施設名,施設コード,注文ID,メニュー" in content
+    assert "そよかぜ,FAC001,ORD-1 / ORD-2,献立A" in content
+    assert "そよかぜ,FAC001,ORD-1 / ORD-2,献立B" in content
+    assert "大和なでしこ,FAC002,ORD-3,献立C" in content
 
 
 def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):

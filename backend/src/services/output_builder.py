@@ -5689,8 +5689,8 @@ def build_daily_output_bundle(
     status: str | None = None,
 ) -> tuple[Path, dict]:
     normalized_type = str(bundle_type or "").strip().lower()
-    if normalized_type not in {"labels", "delivery", "both"}:
-        raise ValueError("bundle_type must be labels, delivery, or both")
+    if normalized_type not in {"labels", "labels_csv", "delivery", "both"}:
+        raise ValueError("bundle_type must be labels, labels_csv, delivery, or both")
 
     orders = order_service.list_orders_by_line_date(target_date, status=status)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -5718,7 +5718,7 @@ def build_daily_output_bundle(
         try:
             ctx = _prepare_output_context_for_bundle(
                 order_id,
-                include_bags=normalized_type in {"labels", "both"},
+                include_bags=normalized_type in {"labels", "labels_csv", "both"},
                 include_ocr_menu_meta=normalized_type != "delivery",
                 include_expanded_copy=normalized_type != "delivery",
             )
@@ -5747,12 +5747,12 @@ def build_daily_output_bundle(
 
             group["order_ids"].append(order_id)
             group["contexts"].append(ctx)
-            if normalized_type in {"labels", "both"}:
+            if normalized_type in {"labels", "labels_csv", "both"}:
                 filtered_bags = [
                     bag for bag in ctx["bags"] if _ensure_date(bag.get("date")) == target_date
                 ]
                 group["bags"].extend(filtered_bags)
-                if normalized_type == "labels":
+                if normalized_type in {"labels", "labels_csv"}:
                     _append_zero_quantity_label_bags(group, ctx, target_date)
             if normalized_type in {"delivery", "both"}:
                 delivery_rows = _build_delivery_rows_for_bundle(
@@ -5832,41 +5832,56 @@ def build_daily_output_bundle(
         }
         return bundle_path, summary
 
-    if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
-        menu_ws = workbook.create_sheet(title="メニュー")
-        _populate_daily_label_menu_sheet(menu_ws, target_date)
-
-    if normalized_type == "labels":
-        zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_labels_{stamp}.zip"
+    if normalized_type == "labels_csv":
+        csv_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_labels_csv_{stamp}.csv"
+        rows: list[dict[str, object]] = []
+        label_fields_seen: list[str] = []
         success_count = 0
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
-                item_payload: dict[str, object] = {
-                    "order_ids": list(group["order_ids"]),
-                    "facility_code": group["facility_code"],
-                    "facility_name": group["facility_name"],
-                    "status": "ok",
-                    "files": [],
-                }
-                try:
-                    if not group.get("bags"):
-                        item_payload["status"] = "empty"
-                        item_payload["error"] = "label rows not found for target date"
-                        manifest_items.append(item_payload)
-                        continue
-                    workbook_bytes, filename = _create_daily_label_workbook_bytes(
-                        target_date=target_date,
-                        group=group,
+        for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
+            item_payload: dict[str, object] = {
+                "order_ids": list(group["order_ids"]),
+                "facility_code": group["facility_code"],
+                "facility_name": group["facility_name"],
+                "status": "ok",
+                "files": [],
+            }
+            try:
+                if not group.get("bags"):
+                    item_payload["status"] = "empty"
+                    item_payload["error"] = "label rows not found for target date"
+                    manifest_items.append(item_payload)
+                    continue
+                labels, label_fields, _ = _build_label_rows(
+                    group["bags"],
+                    group["label_profile"],
+                    group["facility_config"].get("facility_name"),
+                )
+                for field in label_fields:
+                    if field not in label_fields_seen:
+                        label_fields_seen.append(field)
+                for label in labels:
+                    rows.append(
+                        {
+                            "施設名": group.get("facility_name") or "",
+                            "施設コード": group.get("facility_code") or "",
+                            "注文ID": " / ".join(str(order_id) for order_id in group.get("order_ids") or []),
+                            **label,
+                        }
                     )
-                    archive.writestr(filename, workbook_bytes)
-                    item_payload["files"].append(filename)
-                    success_count += 1
-                except Exception as exc:  # noqa: BLE001
-                    item_payload["status"] = "error"
-                    item_payload["error"] = str(exc)
-                manifest_items.append(item_payload)
-        if success_count == 0:
+                item_payload["files"].append(csv_path.name)
+                success_count += 1
+            except Exception as exc:  # noqa: BLE001
+                item_payload["status"] = "error"
+                item_payload["error"] = str(exc)
+            manifest_items.append(item_payload)
+        if success_count == 0 or not rows:
             raise ValueError("対象日の出力対象がありません")
+        fieldnames = ["施設名", "施設コード", "注文ID", *label_fields_seen]
+        with csv_path.open("w", encoding="cp932", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
         manifest = {
             "date": target_date.isoformat(),
             "bundle_type": normalized_type,
@@ -5876,9 +5891,13 @@ def build_daily_output_bundle(
             "success_orders": success_count,
             "error_orders": max(len(manifest_items) - success_count, 0),
             "items": manifest_items,
-            "file_format": "zip",
+            "file_format": "csv",
         }
-        return zip_path, manifest
+        return csv_path, manifest
+
+    if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
+        menu_ws = workbook.create_sheet(title="メニュー")
+        _populate_daily_label_menu_sheet(menu_ws, target_date)
 
     success_count = 0
     output_groups = (

@@ -974,12 +974,12 @@ export default function DailyDeliveryNotesPage() {
     }
   };
 
-  const downloadDailyBundle = async (bundleType: "labels") => {
+  const downloadDailyBundle = async (bundleType: "labels" | "labels_csv") => {
     if (!date) {
       setMessage("日付を指定してください。");
       return;
     }
-    const label = "当日ラベルExcel";
+    const label = bundleType === "labels_csv" ? "当日ラベルCSV" : "当日ラベルExcel";
     setMessage(`${label}を作成中です...`);
     try {
       const res = await apiClient.get("/outputs/daily-bundle", {
@@ -990,7 +990,8 @@ export default function DailyDeliveryNotesPage() {
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
-      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.xlsx`;
+      const defaultExt = bundleType === "labels_csv" ? "csv" : "xlsx";
+      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.${defaultExt}`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1097,6 +1098,9 @@ export default function DailyDeliveryNotesPage() {
           </label>
           <button className="btn primary" onClick={loadOrders} disabled={loading}>
             {loading ? "取得中..." : "取得"}
+          </button>
+          <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels_csv")} disabled={loading}>
+            当日ラベルCSV
           </button>
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels")} disabled={loading}>
             当日ラベルExcel
