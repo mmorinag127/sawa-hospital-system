@@ -1440,6 +1440,13 @@ def _apply_condiment_note(row: dict, condiments: list[str], quantity_columns: li
     return row
 
 
+def _is_delivery_accessory_child_line(line: dict) -> bool:
+    if str(line.get("bag_type") or "").strip() == "condiment":
+        return True
+    category = _normalize_delivery_category_label(line.get("menu_category"))
+    return category == "添え" and bool(str(line.get("parent_menu_name") or "").strip())
+
+
 def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
     text = str(menu_name or "").strip()
     labels = _normalize_condiments(condiments)
@@ -3830,7 +3837,7 @@ def _build_delivery_rows(
     menu_names = []
     aggregate_started = time.perf_counter()
     for line_index, line in enumerate(order.get("lines", [])):
-        if str(line.get("bag_type") or "").strip() == "condiment":
+        if _is_delivery_accessory_child_line(line):
             continue
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)

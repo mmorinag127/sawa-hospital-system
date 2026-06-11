@@ -1653,6 +1653,17 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
                     "quantity_original": 7,
                     "bag_type": "condiment",
                 },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "添え",
+                    "menu_name": "キャベツ",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 7,
+                    "parent_menu_name": "白身魚フライ",
+                    "parent_menu_category": "主",
+                },
             ],
         },
         {
