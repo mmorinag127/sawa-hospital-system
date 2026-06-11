@@ -1443,8 +1443,7 @@ def _apply_condiment_note(row: dict, condiments: list[str], quantity_columns: li
 def _is_delivery_accessory_child_line(line: dict) -> bool:
     if str(line.get("bag_type") or "").strip() == "condiment":
         return True
-    category = _normalize_delivery_category_label(line.get("menu_category"))
-    return category == "添え" and bool(str(line.get("parent_menu_name") or "").strip())
+    return bool(str(line.get("parent_menu_name") or "").strip())
 
 
 def _delivery_explicit_accessory_names_by_slot(lines: list[dict]) -> dict[tuple[object, object], set[str]]:

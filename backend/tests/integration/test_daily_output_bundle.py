@@ -1656,7 +1656,7 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
                 {
                     "date": TARGET_DATE,
                     "daypart": "夕",
-                    "menu_category": "添え",
+                    "menu_category": "副①",
                     "menu_name": "キャベツ",
                     "diet_type": "regular",
                     "area_id": "2F",
