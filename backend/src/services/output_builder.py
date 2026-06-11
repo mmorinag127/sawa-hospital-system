@@ -1447,6 +1447,21 @@ def _is_delivery_accessory_child_line(line: dict) -> bool:
     return category == "添え" and bool(str(line.get("parent_menu_name") or "").strip())
 
 
+def _delivery_explicit_accessory_names_by_slot(lines: list[dict]) -> dict[tuple[object, object], set[str]]:
+    names_by_slot: dict[tuple[object, object], set[str]] = {}
+    for line in lines:
+        date_value = _ensure_date(line.get("date"))
+        daypart_value = line.get("daypart") or line.get("menu_category")
+        daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
+        _, garnish = _split_garnish_name(str(line.get("menu_name") or "").strip())
+        if not garnish:
+            continue
+        garnish_key = _normalize_menu_key(garnish)
+        if garnish_key:
+            names_by_slot.setdefault((date_value, daypart_key), set()).add(garnish_key)
+    return names_by_slot
+
+
 def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
     text = str(menu_name or "").strip()
     labels = _normalize_condiments(condiments)
@@ -3836,22 +3851,26 @@ def _build_delivery_rows(
     rows: dict[tuple, dict] = {}
     menu_names = []
     aggregate_started = time.perf_counter()
-    for line_index, line in enumerate(order.get("lines", [])):
+    order_lines = order.get("lines", [])
+    accessory_names_by_slot = _delivery_explicit_accessory_names_by_slot(order_lines)
+    for line_index, line in enumerate(order_lines):
         if _is_delivery_accessory_child_line(line):
             continue
         line_date = _ensure_date(line.get("date"))
+        raw_menu_name = line.get("menu_name")
+        daypart_value = line.get("daypart") or line.get("menu_category")
+        daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
+        if _normalize_menu_key(raw_menu_name) in accessory_names_by_slot.get((line_date, daypart_key), set()):
+            continue
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:
             continue
-        raw_menu_name = line.get("menu_name")
         menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
         if menu_name:
             menu_names.append(menu_name)
         menu_key = _normalize_menu_key(menu_name)
         meta_map = menu_meta.get("by_menu") if isinstance(menu_meta, dict) else None
         meta = meta_map.get((line_date, menu_key)) if meta_map else None
-        daypart_value = line.get("daypart") or line.get("menu_category")
-        daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
         if meta and not daypart_value:
             daypart_value = meta.get("daypart") or daypart_value
         menu_category = line.get("menu_category") or (meta.get("category") if meta else None)

@@ -1628,7 +1628,7 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
                     "date": TARGET_DATE,
                     "daypart": "夕",
                     "menu_category": "主",
-                    "menu_name": "白身魚フライ",
+                    "menu_name": "白身魚フライ 添)キャベツ",
                     "diet_type": "regular",
                     "area_id": "2F",
                     "quantity_original": 7,
@@ -1664,6 +1664,15 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
                     "parent_menu_name": "白身魚フライ",
                     "parent_menu_category": "主",
                 },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "副①",
+                    "menu_name": "キャベツ",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 7,
+                },
             ],
         },
         {
@@ -1684,8 +1693,8 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
 
     assert len(rows) == 1
     assert rows[0]["menu_name"] == "白身魚フライ"
-    assert rows[0]["menu_display"] == "主 白身魚フライ 添）ソース"
-    assert rows[0]["note"] == "青魚1、ソース10"
+    assert rows[0]["menu_display"] == "主 白身魚フライ 添）キャベツ 添）ソース"
+    assert rows[0]["note"] == "青魚1、添え10、ソース10"
 
 
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
