@@ -3830,6 +3830,8 @@ def _build_delivery_rows(
     menu_names = []
     aggregate_started = time.perf_counter()
     for line_index, line in enumerate(order.get("lines", [])):
+        if str(line.get("bag_type") or "").strip() == "condiment":
+            continue
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:

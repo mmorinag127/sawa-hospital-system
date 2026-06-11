@@ -1643,6 +1643,16 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
                     "area_id": "3F",
                     "quantity_original": 3,
                 },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "夕",
+                    "menu_category": "添え",
+                    "menu_name": "ソース",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 7,
+                    "bag_type": "condiment",
+                },
             ],
         },
         {
