@@ -5746,7 +5746,7 @@ def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> di
         {"name": "日付", "header": "日付", "source": "date"},
         {"name": "区分", "header": "区分", "source": "daypart"},
         {"name": "献立区分", "header": "献立区分", "source": "menu_category"},
-        {"name": "メニュー名", "header": "メニュー名", "source": "menu_name"},
+        {"name": "メニュー名", "header": "メニュー名", "source": "menu_display"},
     ]
     seen: set[tuple[str | None, str | None]] = set()
     for column in fax_quantity_columns:

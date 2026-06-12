@@ -1889,6 +1889,29 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
     assert rows[0]["note"] == "青魚1、添え10、ソース10"
 
 
+def test_delivery_template_derived_from_fax_uses_display_menu_name():
+    template = output_builder._build_invoice_template_from_fax_columns(  # noqa: SLF001
+        {
+            "fax_template": {
+                "columns": [
+                        {
+                            "name": "regular_x",
+                            "header": "常食",
+                            "role": "quantity",
+                            "diet_type": "regular",
+                            "area_id": "X",
+                        }
+                ]
+            }
+        },
+    )
+
+    menu_column = next(col for col in template["columns"] if col["name"] == "メニュー名")
+
+    assert menu_column["source"] == "menu_display"
+    assert template["include_menu_name"] is True
+
+
 def test_daily_label_regular_bag_keeps_bag_split_suffix():
     rows, _fields, _label_format = output_builder._build_label_rows(  # noqa: SLF001
         [
