@@ -48,6 +48,25 @@ def test_delivery_html_render_sums_final_regular_column():
     assert value == 3
 
 
+def test_delivery_html_render_uses_display_menu_name_with_garnish():
+    columns = outputs_api._build_delivery_render_columns(  # noqa: SLF001
+        [{"name": "メニュー名", "source": "menu_display", "header": "メニュー名"}]
+    )
+    menu_column = [column for column in columns if column.get("header") == "メニュー名"][0]
+
+    assert menu_column["source"] == "menu_display"
+    assert (
+        outputs_api._delivery_render_cell_value(  # noqa: SLF001
+            {
+                "menu_name": "カレイの照焼き",
+                "menu_display": "主菜 カレイの照焼き 添)小松菜",
+            },
+            menu_column,
+        )
+        == "主菜 カレイの照焼き 添)小松菜"
+    )
+
+
 def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"

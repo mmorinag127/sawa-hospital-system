@@ -230,7 +230,7 @@ def _build_delivery_render_columns(columns: list | None) -> list[dict]:
         {"kind": "field", "source": "date", "header": "日付"},
         {"kind": "field", "source": "daypart", "header": "区分"},
         {"kind": "field", "source": "menu_category", "header": "献立区分"},
-        {"kind": "field", "source": "menu_name", "header": "メニュー名"},
+        {"kind": "field", "source": "menu_display", "header": "メニュー名"},
     ]
     quantity_groups: dict[tuple[str, str], dict] = {}
     for column in columns or []:
