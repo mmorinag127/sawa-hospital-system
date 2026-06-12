@@ -96,8 +96,12 @@ jobs:
           set -euo pipefail
           current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
           if [ "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT" ]; then
-            echo "image=$BACKEND_BASE_IMAGE" >> "$GITHUB_OUTPUT"
-            exit 0
+            gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+            if docker manifest inspect "$BACKEND_BASE_IMAGE" >/dev/null 2>&1; then
+              echo "image=$BACKEND_BASE_IMAGE" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Configured backend base image is missing; rebuilding base image." >&2
           fi
           short_fingerprint="${current_base_fingerprint:0:12}"
           tag="prod-backend-base-yomitoku-cpu-${short_fingerprint}-$(date -u +%Y%m%d-%H%M%S)"
