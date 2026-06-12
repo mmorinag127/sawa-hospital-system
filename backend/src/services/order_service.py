@@ -5625,7 +5625,15 @@ class ConfirmMaterializationError(Exception):
         self.message = str(message or "").strip() or self.code
 
 
-_EXCLUDED_AGGREGATION_DIETS = {"placeholder", "unknown"}
+_EXCLUDED_AGGREGATION_DIETS = {
+    "forbidden_other",
+    "no_fish",
+    "no_fried",
+    "no_meat",
+    "placeholder",
+    "sesame_allergy",
+    "unknown",
+}
 
 
 def _is_excluded_aggregation_diet(diet_type: object) -> bool:
@@ -15730,7 +15738,25 @@ def _quantity_meta_from_field(field: str) -> tuple[str | None, str | None]:
         return None, None
     area_token = area_match.group(1)
     diet_token = token[: area_match.start(1)].rstrip("_")
-    diet = _normalize_sheet_diet(diet_token or token)
+    diet_lookup_token = diet_token or token
+    if re.search(r"(?:^|_)no_?fish(?:_|$)", diet_lookup_token) or (
+        "魚" in diet_lookup_token and "禁" in diet_lookup_token
+    ):
+        diet = "no_fish"
+    elif re.search(r"(?:^|_)no_?meat(?:_|$)", diet_lookup_token) or (
+        "肉" in diet_lookup_token and "禁" in diet_lookup_token
+    ):
+        diet = "no_meat"
+    elif re.search(r"(?:^|_)no_?fried(?:_|$)", diet_lookup_token) or "揚" in diet_lookup_token:
+        diet = "no_fried"
+    elif re.search(r"(?:^|_)change_?1(?:_|$)", diet_lookup_token) or "変更1" in diet_lookup_token:
+        diet = "change_1"
+    elif re.search(r"(?:^|_)change_?2(?:_|$)", diet_lookup_token) or "変更2" in diet_lookup_token:
+        diet = "change_2"
+    elif re.search(r"(?:^|_)forbidden_?other(?:_|$)", diet_lookup_token):
+        diet = "forbidden_other"
+    else:
+        diet = _normalize_sheet_diet(diet_lookup_token)
     area = _normalize_sheet_area(area_token)
     if not diet or not area:
         return None, None

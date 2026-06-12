@@ -2068,6 +2068,58 @@ def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_pat
     assert label_ws["K2"].value == "3人前"
 
 
+def test_saved_sheet_quantity_index_does_not_let_no_fish_overwrite_regular_columns():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.mixer_3f",
+        "qty.no_fish_regular_3f",
+    ]
+
+    assert order_service._quantity_meta_from_field("qty.no_fish_regular_3f") == ("no_fish", "3F")  # noqa: SLF001
+    assert order_service._quantity_meta_from_field("qty.no_meat_regular_2f") == ("no_meat", "2F")  # noqa: SLF001
+
+    quantity_index = order_service._build_sheet_quantity_index(fields, include_excluded=False)  # noqa: SLF001
+
+    assert quantity_index[("regular", "2F")] == 3
+    assert quantity_index[("regular", "3F")] == 4
+    assert quantity_index[("soft", "2F")] == 5
+    assert quantity_index[("mixer", "3F")] == 6
+    assert ("no_fish", "3F") not in quantity_index
+
+
+def test_saved_sheet_materialization_ignores_excluded_diet_columns_without_overwriting_regular():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.mixer_3f",
+        "qty.no_fish_regular_3f",
+    ]
+    rows = [["06/21", "昼", "サワラの幽庵焼き 添)ｻﾂﾏ芋", "7", "6", "4", "3", "1"]]
+
+    lines = order_service._build_materialization_lines_from_sheet_rows(  # noqa: SLF001
+        fields=fields,
+        rows_payload=rows,
+        received_at=datetime(2026, 6, 12, 9, 0, 0),
+    )
+
+    by_source = {line["source_field"]: line for line in lines}
+    assert set(by_source) == {"qty.regular_2f", "qty.regular_3f", "qty.soft_2f", "qty.mixer_3f"}
+    assert by_source["qty.regular_2f"]["quantity_original"] == 7
+    assert by_source["qty.regular_3f"]["quantity_original"] == 6
+    assert by_source["qty.soft_2f"]["quantity_original"] == 4
+    assert by_source["qty.mixer_3f"]["quantity_original"] == 3
+    assert all(line["menu_name"] == "サワラの幽庵焼き 添)ｻﾂﾏ芋" for line in lines)
+
+
 def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
     template_path = tmp_path / "delivery_template.xlsx"
     workbook = Workbook()
