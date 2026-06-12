@@ -29,7 +29,7 @@ env:
   WORKER_SERVICE: worker-prod
   WEB_URL: https://web-prod-avlnzjjrca-dt.a.run.app
   WORKER_URL: https://worker-prod-avlnzjjrca-dt.a.run.app
-  BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260604-043740
+  BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260612-080320
   BACKEND_BASE_FINGERPRINT: 25dfbf2145a30df3fc4e702be5b08e1f7126a52737e717af3d4f939f3d3637b4
   OPERATOR_USER: admin
   STRICT_OCR_QUALITY: "1"
