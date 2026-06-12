@@ -555,6 +555,64 @@ def test_workflow_v2_materialization_rebuilds_incomplete_bagging_candidate(monke
     assert [line["menu_name"] for line in candidate["lines"]] == ["new-1", "new-2"]
 
 
+def test_workflow_v2_materialization_prefers_saved_sheet_over_stale_bagging_candidate(monkeypatch):
+    order = {"id": "ORD-WF2", "facility": "FAC00003", "stored_week_value": "2026-06 (06/21-06/27)"}
+    workflow = SimpleNamespace(
+        state="output_review",
+        secondary_actions_json={
+            "workflow_v2": {
+                "bagging_result": {
+                    "materialization_candidate": {
+                        "lines": [
+                            {"menu_name": "old-main", "quantity": 1},
+                            {"menu_name": "old-side", "quantity": 1},
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    draft = SimpleNamespace(
+        id="ODS-1",
+        order_id="ORD-WF2",
+        template_version_id="T1",
+        base_evidence_run_id=None,
+        base_template_resolution_id=None,
+        base_menu_snapshot_id=None,
+        draft_sheet_json={},
+        draft_state="saved",
+        blockers_json=[],
+        warnings_json=[],
+    )
+    monkeypatch.setattr(
+        output_builder.order_output_artifact_service,
+        "enrich_workflow_meta_with_artifacts",
+        lambda session, meta: meta,
+    )
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "_build_materialization_candidate_from_draft_record",
+        lambda *args, **kwargs: {
+            "lines": [
+                {"menu_name": "サワラの幽庵焼き 添)ｻﾂﾏ芋", "quantity": 13},
+                {"menu_name": "茄子と揚げの田舎煮", "quantity": 14},
+            ],
+        },
+    )
+
+    candidate = output_builder._workflow_v2_materialization_candidate(  # noqa: SLF001
+        SimpleNamespace(get=lambda *args, **kwargs: None),
+        order,
+        workflow,
+        draft,
+    )
+
+    assert [line["menu_name"] for line in candidate["lines"]] == [
+        "サワラの幽庵焼き 添)ｻﾂﾏ芋",
+        "茄子と揚げの田舎煮",
+    ]
+
+
 def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bootstrap(monkeypatch):
     blank_draft = {
         "id": "DRF-BLANK",

@@ -1863,25 +1863,23 @@ def _workflow_v2_materialization_candidate(
             raise ValueError("workflow-v2 bagging result template does not match saved sheet")
         candidate = bagging_result.get("materialization_candidate")
         if isinstance(candidate, dict):
-            candidate_lines = candidate.get("lines") if not candidate.get("error") else None
-            rebuilt_lines = None
-            if isinstance(candidate_lines, list):
-                try:
-                    rebuilt_candidate = rebuild_from_saved_sheet()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Workflow-v2 saved sheet rebuild skipped while validating bagging materialization candidate",
-                        order_id=order.get("id"),
-                        error=str(exc),
-                    )
-                    rebuilt_candidate = None
-                rebuilt_lines = rebuilt_candidate.get("lines") if isinstance(rebuilt_candidate, dict) and not rebuilt_candidate.get("error") else None
-            if isinstance(candidate_lines, list) and isinstance(rebuilt_lines, list) and len(candidate_lines) < len(rebuilt_lines):
+            try:
+                rebuilt_candidate = rebuild_from_saved_sheet()
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Workflow-v2 bagging materialization candidate is incomplete; rebuilding from saved sheet",
+                    "Workflow-v2 saved sheet rebuild skipped while validating bagging materialization candidate",
                     order_id=order.get("id"),
-                    candidate_lines=len(candidate_lines),
-                    rebuilt_lines=len(rebuilt_lines),
+                    error=str(exc),
+                )
+                rebuilt_candidate = None
+            if isinstance(rebuilt_candidate, dict) and not rebuilt_candidate.get("error"):
+                candidate_lines = candidate.get("lines") if not candidate.get("error") else None
+                rebuilt_lines = rebuilt_candidate.get("lines")
+                logger.info(
+                    "Workflow-v2 output materialization rebuilt from saved sheet",
+                    order_id=order.get("id"),
+                    candidate_lines=len(candidate_lines) if isinstance(candidate_lines, list) else None,
+                    rebuilt_lines=len(rebuilt_lines) if isinstance(rebuilt_lines, list) else None,
                     saved_sheet_id=draft.id,
                 )
                 return rebuilt_candidate
