@@ -293,6 +293,12 @@ def _delivery_render_cell_value(row: dict, column: dict) -> object:
     source = column.get("source")
     if source == "menu_name":
         return row.get("menu_name")
+    if source == "menu_display":
+        value = str(row.get("menu_display") or row.get("menu_name") or "").strip()
+        category = str(row.get("menu_category") or "").strip()
+        if category and value.startswith(f"{category} "):
+            return value[len(category) + 1 :].strip()
+        return value
     if source == "daypart":
         value = str(row.get("daypart") or "").strip()
         return value[:1] if value in {"朝食", "昼食", "夕食"} else value

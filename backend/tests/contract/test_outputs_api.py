@@ -59,11 +59,12 @@ def test_delivery_html_render_uses_display_menu_name_with_garnish():
         outputs_api._delivery_render_cell_value(  # noqa: SLF001
             {
                 "menu_name": "カレイの照焼き",
+                "menu_category": "主菜",
                 "menu_display": "主菜 カレイの照焼き 添)小松菜",
             },
             menu_column,
         )
-        == "主菜 カレイの照焼き 添)小松菜"
+        == "カレイの照焼き 添)小松菜"
     )
 
 
