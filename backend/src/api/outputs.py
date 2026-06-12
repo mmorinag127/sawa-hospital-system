@@ -16,6 +16,8 @@ from src.services.output_builder import (
     build_output_preview,
     build_delivery_preview,
     build_daily_output_bundle,
+    build_label_csv_for_order,
+    build_label_workbook_for_order,
     build_weekly_weight_summary_workbook,
 )
 from src.db import session_scope
@@ -314,10 +316,15 @@ def _render_editable_delivery_note_html(
             {f"col-{idx}": row[idx] if isinstance(row, list) and idx < len(row) else "" for idx in range(len(render_columns))}
             for row in rows
         ]
-    header_html = "".join(
-        f'<th class="col-{idx}" contenteditable="true" data-edit="h-{idx}">{escape(str(column.get("header") or ""))}</th>'
-        for idx, column in enumerate(render_columns)
-    )
+    header_cells: list[str] = []
+    for idx, column in enumerate(render_columns):
+        class_names = [f"col-{idx}"]
+        if column.get("source") == "note" or "備考" in str(column.get("header") or ""):
+            class_names.append("remarks-cell")
+        header_cells.append(
+            f'<th class="{" ".join(class_names)}" contenteditable="true" data-edit="h-{idx}">{escape(str(column.get("header") or ""))}</th>'
+        )
+    header_html = "".join(header_cells)
     row_html: list[str] = []
     for row_idx, row in enumerate(render_rows):
         daypart = str(row.get("daypart") or "")
@@ -325,7 +332,12 @@ def _render_editable_delivery_note_html(
         cell_html = []
         for col_idx, column in enumerate(render_columns):
             value = _delivery_render_cell_value(row, column)
-            class_name = "menu-cell" if column.get("source") == "menu_name" else ""
+            class_names = []
+            if column.get("source") == "menu_name":
+                class_names.append("menu-cell")
+            if column.get("source") == "note" or "備考" in str(column.get("header") or ""):
+                class_names.append("remarks-cell")
+            class_name = " ".join(class_names)
             cell_html.append(
                 f'<td class="col-{col_idx} {class_name}" contenteditable="true" data-edit="r-{row_idx}-c-{col_idx}">'
                 f"{escape(_format_delivery_html_cell(value))}</td>"
@@ -428,7 +440,8 @@ def _render_editable_delivery_note_html(
     .col-0 {{ width: 9%; }}
     .col-1 {{ width: 6%; }}
     .col-2 {{ width: 9%; }}
-    .col-3 {{ width: 24%; }}
+    .col-3 {{ width: 18%; }}
+    th.remarks-cell, td.remarks-cell {{ width: 14%; }}
     th[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3),
     td[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3) {{ width: 7%; }}
     [contenteditable="true"] {{ cursor: text; }}
@@ -718,7 +731,12 @@ def _delivery_facility_name(order_id: str) -> str:
             continue
         if str(entry.get("facility_id") or "").strip() != facility_id:
             continue
-        official_name = str(entry.get("facility_name") or entry.get("name") or "").strip()
+        official_name = str(
+            entry.get("delivery_note_facility_name")
+            or entry.get("facility_name")
+            or entry.get("name")
+            or ""
+        ).strip()
         if official_name:
             return official_name
     facility = facility_service.get_facility(facility_id)
@@ -768,11 +786,38 @@ def _parse_iso_date(value: str) -> dt_date:
 
 
 @router.get("/labels", dependencies=[Depends(require_role("operator"))])
-def download_labels(order_id: str):
+def download_labels(order_id: str, date: str | None = None):
+    if date:
+        try:
+            target_date = _parse_iso_date(date)
+            path, filename = build_label_csv_for_order(order_id, target_date=target_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"label csv build failed: {exc}") from exc
+        logger.info("Output download", order_id=order_id, output="labels_csv", path=path)
+        return FileResponse(path, media_type="text/csv", filename=filename)
     outputs = build_output_preview(order_id, "labels")
     path = outputs["labels"]
     logger.info("Output download", order_id=order_id, output="labels", path=path)
     return FileResponse(path, media_type="text/csv", filename=f"{order_id}_labels.csv")
+
+
+@router.get("/labels.xlsx", dependencies=[Depends(require_role("operator"))])
+def download_labels_xlsx(order_id: str, date: str | None = None):
+    try:
+        target_date = _parse_iso_date(date) if date else None
+        path, filename = build_label_workbook_for_order(order_id, target_date=target_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"label workbook build failed: {exc}") from exc
+    logger.info("Output download", order_id=order_id, output="labels_xlsx", path=path)
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+    )
 
 
 @router.get("/delivery-notes", dependencies=[Depends(require_role("operator"))])

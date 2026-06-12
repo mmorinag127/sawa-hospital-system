@@ -1152,9 +1152,16 @@ export default function DailyDeliveryNotesPage() {
                       <button
                         className="btn ghost"
                         type="button"
-                        onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`, "ラベルCSV")}
+                        onClick={() => openOutput(`/outputs/labels?order_id=${order.id}&date=${date}`, "ラベルCSV")}
                       >
-                        ラベル
+                        ラベルCSV
+                      </button>
+                      <button
+                        className="btn ghost"
+                        type="button"
+                        onClick={() => openOutput(`/outputs/labels.xlsx?order_id=${order.id}&date=${date}`, "ラベルExcel")}
+                      >
+                        ラベルExcel
                       </button>
                       <button
                         className="btn ghost"

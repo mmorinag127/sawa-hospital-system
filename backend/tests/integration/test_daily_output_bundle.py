@@ -3,6 +3,7 @@ import sys
 from datetime import date as dt_date
 from datetime import datetime
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -370,6 +371,51 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
     assert "大和なでしこ,FAC002,ORD-3,献立C" in content
 
 
+def test_build_label_csv_for_order_filters_target_date(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id, **kwargs: {
+            "facility_config": {"facility_name": "春日苑"},
+            "label_profile": {},
+            "bags": [
+                {
+                    "facility": "FAC00003",
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "当日メニュー",
+                    "menu_category": "主菜",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "quantity": 1,
+                },
+                {
+                    "facility": "FAC00003",
+                    "date": dt_date(2026, 3, 23),
+                    "daypart": "昼",
+                    "menu_name": "翌日メニュー",
+                    "menu_category": "主菜",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "quantity": 1,
+                },
+            ],
+        },
+    )
+
+    path, filename = output_builder.build_label_csv_for_order("ORD-DAY", target_date=TARGET_DATE)
+
+    content = path.read_text(encoding="cp932")
+    assert filename.endswith("_labels.csv")
+    assert "当日メニュー" in content
+    assert "翌日メニュー" not in content
+
+
 def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):
     order = {
         "id": "ORD-DRAFT",
@@ -468,6 +514,45 @@ def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materializ
         assert "draft_newer_than_lines requires materialized draft lines" in str(exc)
     else:
         raise AssertionError("expected draft materialization blocker")
+
+
+def test_workflow_v2_materialization_rebuilds_incomplete_bagging_candidate(monkeypatch):
+    order = {"id": "ORD-WF2", "facility": "FAC00003", "stored_week_value": "2026-06 (06/21-06/27)"}
+    workflow = SimpleNamespace(
+        state="output_review",
+        secondary_actions_json={"workflow_v2": {"bagging_result": {"materialization_candidate": {"lines": [{"menu_name": "old"}]}}}},
+    )
+    draft = SimpleNamespace(
+        id="ODS-1",
+        order_id="ORD-WF2",
+        template_version_id="T1",
+        base_evidence_run_id=None,
+        base_template_resolution_id=None,
+        base_menu_snapshot_id=None,
+        draft_sheet_json={},
+        draft_state="saved",
+        blockers_json=[],
+        warnings_json=[],
+    )
+    monkeypatch.setattr(
+        output_builder.order_output_artifact_service,
+        "enrich_workflow_meta_with_artifacts",
+        lambda session, meta: meta,
+    )
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "_build_materialization_candidate_from_draft_record",
+        lambda *args, **kwargs: {"lines": [{"menu_name": "new-1"}, {"menu_name": "new-2"}]},
+    )
+
+    candidate = output_builder._workflow_v2_materialization_candidate(  # noqa: SLF001
+        SimpleNamespace(get=lambda *args, **kwargs: None),
+        order,
+        workflow,
+        draft,
+    )
+
+    assert [line["menu_name"] for line in candidate["lines"]] == ["new-1", "new-2"]
 
 
 def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bootstrap(monkeypatch):
@@ -1742,8 +1827,86 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
 
     assert len(rows) == 1
     assert rows[0]["menu_name"] == "白身魚フライ"
-    assert rows[0]["menu_display"] == "主 白身魚フライ 添）キャベツ 添）ソース"
+    assert rows[0]["menu_display"] == "主 白身魚フライ 添)キャベツ 添）ソース"
     assert rows[0]["note"] == "青魚1、添え10、ソース10"
+
+
+def test_daily_label_regular_bag_keeps_bag_split_suffix():
+    rows, _fields, _label_format = output_builder._build_label_rows(  # noqa: SLF001
+        [
+            {
+                "facility": "FAC00005",
+                "date": TARGET_DATE,
+                "daypart": "昼",
+                "menu_name": "玉子焼き",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "area_id": "X",
+                "menu_unit_type": "個",
+                "menu_qty_per_serving": 1,
+                "menu_temp_type": "温菜",
+                "quantity": 2,
+                "daily_label_comparable_diet_types": ["soft", "regular_bag"],
+            },
+            {
+                "facility": "FAC00005",
+                "date": TARGET_DATE,
+                "daypart": "昼",
+                "menu_name": "玉子焼き",
+                "menu_category": "主菜",
+                "diet_type": "regular_bag",
+                "area_id": "X",
+                "menu_unit_type": "個",
+                "menu_qty_per_serving": 1,
+                "menu_temp_type": "温菜",
+                "quantity": 3,
+                "daily_label_comparable_diet_types": ["soft", "regular_bag"],
+            },
+        ],
+        {},
+        "池袋病院",
+    )
+
+    categories = {row["メニュー"] for row in rows}
+    assert "主菜（軟菜）" in categories
+    assert "主菜（袋分け）" in categories
+
+
+def test_label_bags_apply_monthly_bag_max_before_splitting(monkeypatch):
+    order = {
+        "id": "ORD-bag-max",
+        "facility": "FAC00003",
+        "stored_week_value": "2026-06 (06/21-06/27)",
+        "lines": [
+            {
+                "date": TARGET_DATE,
+                "daypart": "昼",
+                "menu_name": "サワラの幽庵焼き",
+                "menu_category": "主菜",
+                "diet_type": "regular",
+                "area_id": "X",
+                "quantity_original": 25,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        output_builder,
+        "_collect_cached_menu_items_for_week",
+        lambda week_value, facility_id: [
+            {
+                "name": "サワラの幽庵焼き",
+                "unit_type": "切",
+                "qty_per_serving": 1,
+                "bag_max_qty": 9,
+                "bag_max_unit": "切",
+            }
+        ],
+    )
+
+    bags = output_builder.build_bag_rows_for_outputs(order, facility_config={"facility_name": "春日苑"})
+
+    assert [bag["quantity"] for bag in bags] == [9, 9, 7]
+    assert all(bag["menu_bag_max_qty"] == 9 for bag in bags)
 
 
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):

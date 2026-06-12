@@ -1606,6 +1606,7 @@
     },
     {
       "facility_name": "佐古",
+      "delivery_note_facility_name": "医療法人　松岡会　佐古グループホーム",
       "aliases": [
         "佐古グループホームサコ"
       ],
@@ -1945,6 +1946,7 @@
     },
     {
       "facility_name": "山城",
+      "delivery_note_facility_name": "医療法人　松岡会　山城グループホーム",
       "aliases": [
         "山城グループホームヤマシロ",
         "松岡会山城グループホーム",

@@ -583,7 +583,9 @@ def _daily_label_display_diet_key(bag: dict) -> str:
 
 def _daily_label_category_suffix_for_bag(bag: dict) -> str:
     diet_key = _daily_label_display_diet_key(bag)
-    if not diet_key or diet_key in {"regular", "regular_bag", "standard"}:
+    if diet_key == "regular_bag":
+        return "袋分け"
+    if not diet_key or diet_key in {"regular", "standard"}:
         return ""
     facility_id = str(bag.get("facility") or "").strip()
     configured_diets = bag.get("daily_label_comparable_diet_types")
@@ -1464,6 +1466,8 @@ def _delivery_explicit_accessory_names_by_slot(lines: list[dict]) -> dict[tuple[
 def _append_condiments_to_delivery_menu_name(menu_name: object, condiments: object) -> str:
     text = str(menu_name or "").strip()
     labels = _normalize_condiments(condiments)
+    text_key = _normalize_menu_key(text)
+    labels = [label for label in labels if _normalize_menu_key(label) not in text_key]
     if not labels:
         return text
     suffix = " ".join(f"添）{label}" for label in labels)
@@ -1824,6 +1828,21 @@ def _workflow_v2_materialization_candidate(
     workflow: OrderWorkflowState,
     draft: OrderSheetDraft,
 ) -> dict | None:
+    rebuilt_candidate: dict | None = None
+
+    def rebuild_from_saved_sheet() -> dict | None:
+        nonlocal rebuilt_candidate
+        if rebuilt_candidate is not None:
+            return rebuilt_candidate
+        rebuilt_candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
+            str(order.get("id") or ""),
+            draft_record=_workflow_v2_draft_record_for_outputs(draft),
+            facility_id=order.get("facility") or order.get("facility_code"),
+            existing_week_code=order.get("stored_week_value") or order.get("week_value") or order.get("week") or order.get("week_code"),
+            received_at=order.get("received_at"),
+        )
+        return rebuilt_candidate
+
     meta = workflow.secondary_actions_json if isinstance(workflow.secondary_actions_json, dict) else {}
     workflow_meta = meta.get("workflow_v2") if isinstance(meta.get("workflow_v2"), dict) else {}
     workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta)
@@ -1844,14 +1863,30 @@ def _workflow_v2_materialization_candidate(
             raise ValueError("workflow-v2 bagging result template does not match saved sheet")
         candidate = bagging_result.get("materialization_candidate")
         if isinstance(candidate, dict):
+            candidate_lines = candidate.get("lines") if not candidate.get("error") else None
+            rebuilt_lines = None
+            if isinstance(candidate_lines, list):
+                try:
+                    rebuilt_candidate = rebuild_from_saved_sheet()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Workflow-v2 saved sheet rebuild skipped while validating bagging materialization candidate",
+                        order_id=order.get("id"),
+                        error=str(exc),
+                    )
+                    rebuilt_candidate = None
+                rebuilt_lines = rebuilt_candidate.get("lines") if isinstance(rebuilt_candidate, dict) and not rebuilt_candidate.get("error") else None
+            if isinstance(candidate_lines, list) and isinstance(rebuilt_lines, list) and len(candidate_lines) < len(rebuilt_lines):
+                logger.warning(
+                    "Workflow-v2 bagging materialization candidate is incomplete; rebuilding from saved sheet",
+                    order_id=order.get("id"),
+                    candidate_lines=len(candidate_lines),
+                    rebuilt_lines=len(rebuilt_lines),
+                    saved_sheet_id=draft.id,
+                )
+                return rebuilt_candidate
             return candidate
-    return order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
-        str(order.get("id") or ""),
-        draft_record=_workflow_v2_draft_record_for_outputs(draft),
-        facility_id=order.get("facility") or order.get("facility_code"),
-        existing_week_code=order.get("stored_week_value") or order.get("week_value") or order.get("week") or order.get("week_code"),
-        received_at=order.get("received_at"),
-    )
+    return rebuild_from_saved_sheet()
 
 
 def _workflow_v2_draft_record_for_outputs(draft: OrderSheetDraft) -> dict:
@@ -2174,6 +2209,27 @@ def _split_bags_by_max(bags: list[dict]) -> list[dict]:
     return split
 
 
+def _build_final_label_bags(
+    order_for_outputs: dict,
+    *,
+    packaging_policy: dict,
+    quantity_rules: dict,
+    week_value: str,
+    facility_id: str | None,
+    facility_config: dict | None,
+) -> list[dict]:
+    bags = _build_bags(order_for_outputs, packaging_policy, quantity_rules)
+    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
+    bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
+    bags = _clear_stale_menu_qty_from_monthly_entry(bags)
+    bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
+    bags = _apply_builtin_menu_defaults(bags)
+    bag_types = _resolve_bag_types(facility_config or {})
+    bags = _assign_bag_type_for_bags(bags, bag_types)
+    bags = _split_bags_by_max(bags)
+    return _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
+
+
 def _serialize_bag_payload_rows(rows: list[dict]) -> list[dict]:
     payload = [
         {
@@ -2222,7 +2278,6 @@ def build_bag_rows_for_outputs(
     resolved_lines = order_lines if isinstance(order_lines, list) else build_order_lines_for_outputs(order)
     order_for_outputs = {**order, "lines": resolved_lines}
 
-    bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
     week_value = (
         str(order.get("stored_week_value") or "").strip()
         or str(order.get("week_value") or "").strip()
@@ -2230,14 +2285,14 @@ def build_bag_rows_for_outputs(
         or str(order.get("week") or "").strip()
         or str(order.get("week_code") or "").strip()
     )
-    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
-    bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
-    bags = _clear_stale_menu_qty_from_monthly_entry(bags)
-    bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
-    bags = _apply_builtin_menu_defaults(bags)
-    bag_types = _resolve_bag_types(resolved_facility_config)
-    bags = _assign_bag_type_for_bags(bags, bag_types)
-    return _apply_daily_label_facility_rules_to_bags(bags, resolved_facility_config, facility_id)
+    return _build_final_label_bags(
+        order_for_outputs,
+        packaging_policy=packaging_policy,
+        quantity_rules=quantity_rules,
+        week_value=week_value,
+        facility_id=facility_id,
+        facility_config=resolved_facility_config,
+    )
 
 
 def build_bag_payload_for_outputs(
@@ -3865,6 +3920,7 @@ def _build_delivery_rows(
         if qty is None:
             continue
         menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
+        delivery_menu_display_name = str(raw_menu_name or menu_name or "").strip() if split_condiments else str(menu_name or "").strip()
         if menu_name:
             menu_names.append(menu_name)
         menu_key = _normalize_menu_key(menu_name)
@@ -3881,12 +3937,15 @@ def _build_delivery_rows(
                 "date": line_date,
                 "daypart": daypart_key,
                 "menu_name": menu_name,
+                "_delivery_menu_display_name": delivery_menu_display_name,
                 "menu_category": menu_category,
                 "menu_display": "",
                 "_order_index": order_index,
                 "_delivery_condiments": [],
             },
         )
+        if delivery_menu_display_name and not row.get("_delivery_menu_display_name"):
+            row["_delivery_menu_display_name"] = delivery_menu_display_name
         if menu_category and not row.get("menu_category"):
             row["menu_category"] = menu_category
         if order_index is not None and row.get("_order_index") is None:
@@ -3928,6 +3987,7 @@ def _build_delivery_rows(
                 continue
             raw_menu_name = _delivery_menu_entry_name(entry)
             menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
+            delivery_menu_display_name = str(raw_menu_name or menu_name or "").strip() if split_condiments else str(menu_name or "").strip()
             menu_key = _normalize_menu_key(menu_name)
             if not entry_date or not menu_key:
                 continue
@@ -3941,12 +4001,15 @@ def _build_delivery_rows(
                     "date": entry_date,
                     "daypart": daypart_key,
                     "menu_name": menu_name,
+                    "_delivery_menu_display_name": delivery_menu_display_name,
                     "menu_category": menu_category,
                     "menu_display": "",
                     "_order_index": entry.get("index"),
                     "_delivery_condiments": [],
                 },
             )
+            if delivery_menu_display_name and not row.get("_delivery_menu_display_name"):
+                row["_delivery_menu_display_name"] = delivery_menu_display_name
             entry_condiments = _normalize_condiments(entry.get("condiments"))
             if not entry_condiments:
                 entry_condiments = _normalize_condiments(entry_defaults.get(str(menu_name or "").strip(), {}).get("condiments"))
@@ -3988,8 +4051,9 @@ def _build_delivery_rows(
         row["menu_category"] = _delivery_display_category_label(row.get("daypart"), row.get("menu_category"))
         condiments = _normalize_condiments(row.get("_delivery_condiments"))
         _apply_condiment_note(row, condiments, quantity_columns)
+        display_source_name = row.get("_delivery_menu_display_name") or row.get("menu_name")
         delivery_menu_name = _append_condiments_to_delivery_menu_name(
-            row.get("menu_name"),
+            display_source_name,
             row.get("_delivery_condiments"),
         )
         if row.get("menu_category"):
@@ -5022,6 +5086,54 @@ def _create_daily_label_workbook_bytes(
     facility_name = str(group.get("facility_name") or group.get("facility_code") or sheet_name or "facility").strip()
     filename = _safe_output_filename(f"{target_date.isoformat()}_{facility_name}_labels.xlsx", "daily_labels.xlsx")
     return buffer.getvalue(), filename
+
+
+def build_label_workbook_for_order(order_id: str, *, target_date: dt_date | None = None) -> tuple[Path, str]:
+    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False)
+    bags = ctx.get("bags") or []
+    if target_date is not None:
+        bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
+    if not bags:
+        raise ValueError("label rows not found")
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    used_titles: set[str] = set()
+    facility_config = ctx.get("facility_config") or {}
+    order_for_outputs = ctx.get("order_for_outputs") or ctx.get("order") or {}
+    facility_code = str(order_for_outputs.get("facility") or "").strip()
+    facility_name = str(facility_config.get("facility_name") or facility_code or "").strip()
+    sheet_name = _create_daily_labels_sheet(
+        workbook,
+        used_titles,
+        title_seed=_daily_label_sheet_name(facility_code, facility_name),
+        bags=bags,
+        label_profile=ctx["label_profile"],
+        facility_name=facility_name,
+    )
+    date_part = target_date.isoformat() if target_date else "all"
+    filename = _safe_output_filename(f"{date_part}_{facility_name or sheet_name}_labels.xlsx", f"{order_id}_labels.xlsx")
+    path = OUTPUT_DIR / f"{order_id}_labels_{date_part}_{uuid4().hex}.xlsx"
+    workbook.save(path)
+    return path, filename
+
+
+def build_label_csv_for_order(order_id: str, *, target_date: dt_date | None = None) -> tuple[Path, str]:
+    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False)
+    bags = ctx.get("bags") or []
+    if target_date is not None:
+        bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
+    if not bags:
+        raise ValueError("label rows not found")
+    facility_config = ctx.get("facility_config") or {}
+    facility_name = str(facility_config.get("facility_name") or "").strip()
+    labels, label_fields, _ = _build_label_rows(bags, ctx["label_profile"], facility_name)
+    if not labels:
+        raise ValueError("label rows not found")
+    date_part = target_date.isoformat() if target_date else "all"
+    filename = _safe_output_filename(f"{date_part}_{facility_name or order_id}_labels.csv", f"{order_id}_labels.csv")
+    path = OUTPUT_DIR / f"{order_id}_labels_{date_part}_{uuid4().hex}.csv"
+    _write_label_csv(path, labels, label_fields)
+    return path, filename
 
 
 def _create_daily_delivery_sheet(
@@ -6059,15 +6171,14 @@ def _prepare_output_context(
     bags = []
     if include_bags:
         bags_started = time.perf_counter()
-        bags = _split_bags_by_max(_build_bags(order_for_outputs, packaging_policy, quantity_rules))
-        menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
-        bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
-        bags = _clear_stale_menu_qty_from_monthly_entry(bags)
-        bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
-        bags = _apply_builtin_menu_defaults(bags)
-        bag_types = _resolve_bag_types(facility_config)
-        bags = _assign_bag_type_for_bags(bags, bag_types)
-        bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
+        bags = _build_final_label_bags(
+            order_for_outputs,
+            packaging_policy=packaging_policy,
+            quantity_rules=quantity_rules,
+            week_value=week_value,
+            facility_id=facility_id,
+            facility_config=facility_config,
+        )
         if timings is not None:
             timings["prepare_bags_ms"] = round((time.perf_counter() - bags_started) * 1000, 1)
     return {
