@@ -274,6 +274,24 @@ def _format_delivery_html_cell(value: object) -> str:
     return str(value)
 
 
+def _format_delivery_facility_name_html(facility_name: str | None) -> str:
+    text = str(facility_name or "").strip()
+    if not text:
+        return ""
+    corporate_prefixes = (
+        "医療法人　松岡会　",
+        "医療法人 松岡会 ",
+        "医療法人 松岡会　",
+        "医療法人　松岡会 ",
+    )
+    for prefix in corporate_prefixes:
+        if text.startswith(prefix):
+            suffix = text[len(prefix) :].strip()
+            if suffix:
+                return f"{escape(prefix.strip())}<br>{escape(suffix)}"
+    return escape(text)
+
+
 def _delivery_render_cell_value(row: dict, column: dict) -> object:
     if column.get("kind") == "quantity":
         total = 0.0
@@ -352,7 +370,7 @@ def _render_editable_delivery_note_html(
     body_html = "".join(row_html)
     safe_title = escape(title)
     safe_order_id = escape(order_id)
-    safe_facility_name = escape(facility_name or "")
+    safe_facility_name = _format_delivery_facility_name_html(facility_name)
     return f"""<!doctype html>
 <html lang="ja">
 <head>

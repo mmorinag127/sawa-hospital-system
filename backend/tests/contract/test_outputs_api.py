@@ -68,6 +68,21 @@ def test_delivery_html_render_uses_display_menu_name_with_garnish():
     )
 
 
+def test_delivery_html_facility_name_breaks_matsuokakai_name_into_two_lines():
+    html = outputs_api._render_editable_delivery_note_html(  # noqa: SLF001
+        "ORDTEST",
+        "ORDTEST 納品書",
+        headers=["日付", "区分", "献立区分", "メニュー名", "備考欄"],
+        rows=[],
+        facility_name="医療法人　松岡会　佐古グループホーム",
+        columns=[],
+        raw_rows=[],
+    )
+
+    assert "医療法人　松岡会<br>佐古グループホーム" in html
+    assert "医療法人　松岡会　佐古グループホーム" not in html
+
+
 def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"
