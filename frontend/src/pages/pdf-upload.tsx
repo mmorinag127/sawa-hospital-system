@@ -97,6 +97,24 @@ type UploadedPdfRow = {
   lease_expires_at?: string | null;
 };
 
+type FacilityOption = {
+  id: string;
+  name?: string | null;
+};
+
+type WeekOption = {
+  week_id: string;
+  label?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+};
+
+const currentMonthId = () => {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  return `${now.getFullYear()}-${month}`;
+};
+
 const uploadedPdfStatusLabel = (value?: string | null) => {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "pending") return "未処理";
@@ -152,6 +170,13 @@ export default function PdfUploadPage() {
   const [facilityHint, setFacilityHint] = useState("");
   const [weekHint, setWeekHint] = useState("");
   const [facilityName, setFacilityName] = useState("");
+  const [targetMonth, setTargetMonth] = useState(currentMonthId());
+  const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
+  const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
+  const [facilityOptionsError, setFacilityOptionsError] = useState("");
+  const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
+  const [weekOptionsLoading, setWeekOptionsLoading] = useState(false);
+  const [weekOptionsError, setWeekOptionsError] = useState("");
   const [receivedAt, setReceivedAt] = useState("");
   const [force, setForce] = useState(false);
   const [skipOcr, setSkipOcr] = useState(false);
@@ -165,6 +190,74 @@ export default function PdfUploadPage() {
   const [uploadsNotice, setUploadsNotice] = useState("");
   const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const selectedFacility = facilityOptions.find((option) => option.id === facilityHint);
+  const selectedWeek = weekOptions.find((option) => option.week_id === weekHint);
+
+  const loadFacilityOptions = async () => {
+    setFacilityOptionsLoading(true);
+    setFacilityOptionsError("");
+    try {
+      const res = await apiClient.get("/facilities");
+      const facilities = Array.isArray(res.data?.facilities) ? res.data.facilities : [];
+      setFacilityOptions(
+        facilities
+          .map((item: any) => ({
+            id: String(item?.id || item?.facility_id || "").trim(),
+            name: String(item?.name || item?.facility_name || "").trim(),
+          }))
+          .filter((item: FacilityOption) => item.id)
+      );
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "施設一覧の取得に失敗しました。";
+      setFacilityOptionsError(String(detail));
+    } finally {
+      setFacilityOptionsLoading(false);
+    }
+  };
+
+  const loadWeekOptions = async () => {
+    const month = targetMonth.trim();
+    if (!month) {
+      setWeekOptions([]);
+      return;
+    }
+    setWeekOptionsLoading(true);
+    setWeekOptionsError("");
+    try {
+      const res = await apiClient.get("/ingest/week-options", {
+        params: {
+          month_id: month,
+          facility_id: facilityHint.trim() || undefined,
+        },
+      });
+      const options = Array.isArray(res.data?.options) ? res.data.options : [];
+      setWeekOptions(
+        options
+          .map((item: any) => ({
+            week_id: String(item?.week_id || "").trim(),
+            label: String(item?.label || "").trim(),
+            date_from: String(item?.date_from || "").trim(),
+            date_to: String(item?.date_to || "").trim(),
+          }))
+          .filter((item: WeekOption) => item.week_id)
+      );
+    } catch (err: any) {
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "週候補の取得に失敗しました。";
+      setWeekOptionsError(String(detail));
+      setWeekOptions([]);
+    } finally {
+      setWeekOptionsLoading(false);
+    }
+  };
 
   const loadUploadedRows = async () => {
     setUploadsLoading(true);
@@ -188,6 +281,26 @@ export default function PdfUploadPage() {
   useEffect(() => {
     void loadUploadedRows();
   }, [uploadedStatusFilter]);
+
+  useEffect(() => {
+    void loadFacilityOptions();
+  }, []);
+
+  useEffect(() => {
+    void loadWeekOptions();
+  }, [targetMonth, facilityHint]);
+
+  useEffect(() => {
+    if (facilityName || !selectedFacility?.name) return;
+    setFacilityName(selectedFacility.name);
+  }, [facilityName, selectedFacility]);
+
+  useEffect(() => {
+    if (!weekHint) return;
+    if (!weekOptions.some((option) => option.week_id === weekHint)) {
+      setWeekHint("");
+    }
+  }, [weekHint, weekOptions]);
 
   const retryUploadedPdf = async (row: UploadedPdfRow) => {
     if (!uploadedPdfCanRetry(row)) return;
@@ -216,6 +329,14 @@ export default function PdfUploadPage() {
       setMessage("PDFを1件以上選択してください。");
       return;
     }
+    if (!facilityHint.trim()) {
+      setMessage("施設を選択してください。");
+      return;
+    }
+    if (!weekHint.trim()) {
+      setMessage("対象週を選択してください。");
+      return;
+    }
     setLoading(true);
     setMessage(pdfFiles.length === 1 ? "アップロードしています..." : `${pdfFiles.length}件のPDFをまとめて登録しています...`);
     setResults([]);
@@ -227,8 +348,8 @@ export default function PdfUploadPage() {
         formData.append("pdf_files", pdfFile);
       }
     }
-    if (facilityHint.trim()) formData.append("facility_hint", facilityHint.trim());
-    if (weekHint.trim()) formData.append("week_hint", weekHint.trim());
+    formData.append("facility_hint", facilityHint.trim());
+    formData.append("week_hint", weekHint.trim());
     if (facilityName.trim()) formData.append("facility_name", facilityName.trim());
     if (receivedAt.trim()) formData.append("received_at", new Date(receivedAt).toISOString());
     if (force) formData.append("force", "true");
@@ -310,13 +431,13 @@ export default function PdfUploadPage() {
           </article>
           <article className="step-card">
             <p className="step-number">2</p>
-            <p className="step-title">そのまま登録</p>
-            <p className="step-text">通常は補助入力なしでそのまま登録して大丈夫です。PDFごとに別の注文として受け付けます。</p>
+            <p className="step-title">施設と週を固定</p>
+            <p className="step-text">アップロード前に施設と対象週を選び、OCRより優先する前提として保存します。</p>
           </article>
           <article className="step-card">
             <p className="step-number">3</p>
-            <p className="step-title">注文一覧で確認</p>
-            <p className="step-text">登録後は注文一覧を開き、OCR結果とシートを確認します。</p>
+            <p className="step-title">STEP3で数量確認</p>
+            <p className="step-text">登録後はシート確認画面でOCR数量とFAX原本の一致を確認します。</p>
           </article>
         </div>
       </section>
@@ -325,11 +446,62 @@ export default function PdfUploadPage() {
         <header className="panel-header">
           <h2>アップロード</h2>
           <p className="subtle">
-            PDFのみ受け付けます。迷ったらPDFだけ選んで登録してください。細かい入力は下の「補助入力」を開いたときだけ使います。
+            PDFのみ受け付けます。施設と対象週はすべての選択PDFへ同じ前提として適用されます。
           </p>
         </header>
 
         <div className="form-grid">
+          <label className="field">
+            <span className="field-label">施設</span>
+            <select
+              className="input"
+              value={facilityHint}
+              onChange={(e) => {
+                const nextFacility = e.target.value;
+                setFacilityHint(nextFacility);
+                const nextOption = facilityOptions.find((option) => option.id === nextFacility);
+                setFacilityName(nextOption?.name || "");
+              }}
+              disabled={facilityOptionsLoading}
+            >
+              <option value="">施設を選択</option>
+              {facilityOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name ? `${option.name} (${option.id})` : option.id}
+                </option>
+              ))}
+            </select>
+            {facilityOptionsError ? <span className="field-help field-help-error">{facilityOptionsError}</span> : null}
+          </label>
+
+          <label className="field">
+            <span className="field-label">対象月</span>
+            <input
+              className="input"
+              type="month"
+              value={targetMonth}
+              onChange={(e) => setTargetMonth(e.target.value)}
+            />
+          </label>
+
+          <label className="field field-span">
+            <span className="field-label">対象週</span>
+            <select
+              className="input"
+              value={weekHint}
+              onChange={(e) => setWeekHint(e.target.value)}
+              disabled={!targetMonth.trim() || weekOptionsLoading}
+            >
+              <option value="">{weekOptionsLoading ? "週候補を取得中..." : "対象週を選択"}</option>
+              {weekOptions.map((option) => (
+                <option key={option.week_id} value={option.week_id}>
+                  {option.label || option.week_id}
+                </option>
+              ))}
+            </select>
+            {weekOptionsError ? <span className="field-help field-help-error">{weekOptionsError}</span> : null}
+          </label>
+
           <label className="field field-span">
             <span className="field-label">注文書PDF</span>
             <input
@@ -341,46 +513,33 @@ export default function PdfUploadPage() {
               onChange={(e) => setPdfFiles(Array.from(e.target.files || []))}
             />
           </label>
+        </div>
 
-          <label className="field field-span">
-            <span className="field-label">施設名メモ（わかるときだけ）</span>
-            <input
-              className="input"
-              value={facilityName}
-              onChange={(e) => setFacilityName(e.target.value)}
-              placeholder="例: 大和なでしこ"
-            />
-          </label>
+        <div className="context-banner">
+          <strong>アップロード前提</strong>
+          <span>施設: {selectedFacility?.name || facilityHint || "未選択"}</span>
+          <span>対象週: {selectedWeek?.label || weekHint || "未選択"}</span>
+          <span>PDF: {pdfFiles.length ? `${pdfFiles.length}件` : "未選択"}</span>
         </div>
 
         <details className="advanced">
           <summary>補助入力・管理者向け設定を開く</summary>
           <div className="advanced-body">
             <p className="subtle">
-              通常は使いません。施設コードや週が分かっている場合、または管理者から指示があった場合だけ入力してください。
+              通常は使いません。施設名メモ、受信日時、再登録、OCR保留が必要な場合だけ入力してください。
             </p>
             <div className="form-grid">
-          <label className="field">
-                <span className="field-label">施設コード（わかるときだけ）</span>
+              <label className="field">
+                <span className="field-label">施設名メモ</span>
                 <input
                   className="input"
-                  value={facilityHint}
-                  onChange={(e) => setFacilityHint(e.target.value)}
-                  placeholder="例: FAC00001"
+                  value={facilityName}
+                  onChange={(e) => setFacilityName(e.target.value)}
+                  placeholder="例: 大和なでしこ"
                 />
-          </label>
+              </label>
 
-          <label className="field">
-                <span className="field-label">対象の週ID（管理者向け）</span>
-                <input
-                  className="input"
-                  value={weekHint}
-                  onChange={(e) => setWeekHint(e.target.value)}
-                  placeholder="例: 2026-02@2026-02-15~2026-02-21"
-                />
-          </label>
-
-          <label className="field">
+              <label className="field">
                 <span className="field-label">受信日時（通常は空欄）</span>
                 <input
                   className="input"
@@ -388,8 +547,8 @@ export default function PdfUploadPage() {
                   value={receivedAt}
                   onChange={(e) => setReceivedAt(e.target.value)}
                 />
-          </label>
-        </div>
+              </label>
+            </div>
 
             <div className="checks">
               <label>
@@ -789,12 +948,40 @@ export default function PdfUploadPage() {
         .field-label {
           font-weight: 700;
         }
+        .field-help {
+          color: #5f6b67;
+          font-size: 12px;
+        }
+        .field-help-error {
+          color: #8b2d1f;
+        }
         .input {
           width: 100%;
           border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.12);
           padding: 12px 14px;
           background: #fcfbf7;
+        }
+        .context-banner {
+          margin-top: 16px;
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          align-items: center;
+          padding: 12px 14px;
+          border-radius: 14px;
+          background: #edf5ef;
+          border: 1px solid rgba(52, 104, 71, 0.16);
+          color: #233c2c;
+        }
+        .context-banner span {
+          display: inline-flex;
+          min-height: 28px;
+          align-items: center;
+          padding: 0 10px;
+          border-radius: 999px;
+          background: #ffffff;
+          border: 1px solid rgba(52, 104, 71, 0.12);
         }
         .checks {
           display: flex;
