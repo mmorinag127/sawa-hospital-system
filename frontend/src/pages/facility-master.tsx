@@ -24,6 +24,7 @@ type FaxColumn = {
   index: string;
   sourceIndex: string;
   role: string;
+  headerSuperGroup: string;
   header: string;
   headerGroup: string;
   name: string;
@@ -234,6 +235,7 @@ const readFaxOverride = (facility?: FacilityEntry) => {
           index: toStringValue(col.index),
           sourceIndex: toStringValue(col.source_index),
           role: readString(col.role),
+          headerSuperGroup: readString(col.header_super_group),
           header: readString(col.header),
           headerGroup: readString(col.header_group),
           name: readString(col.name),
@@ -254,6 +256,7 @@ const readFaxOverride = (facility?: FacilityEntry) => {
               (col.index ||
                 col.sourceIndex ||
                 col.role ||
+                col.headerSuperGroup ||
                 col.header ||
                 col.headerGroup ||
                 col.name ||
@@ -281,6 +284,7 @@ const normalizeFaxColumn = (column: FaxColumn) => {
     next.source_index = Number.isFinite(parsed) ? parsed : column.sourceIndex.trim();
   }
   if (column.role.trim()) next.role = column.role.trim();
+  if (column.headerSuperGroup.trim()) next.header_super_group = column.headerSuperGroup.trim();
   if (column.header.trim()) next.header = column.header.trim();
   if (column.headerGroup.trim()) next.header_group = column.headerGroup.trim();
   if (column.name.trim()) next.name = column.name.trim();
@@ -301,6 +305,37 @@ const normalizeAreaToken = (value: string) => {
   if (raw === "2" || raw === "2f" || raw === "2階") return "2f";
   if (raw === "3" || raw === "3f" || raw === "3階") return "3f";
   return raw.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "x";
+};
+
+const isQuantityColumn = (column: FaxColumn) => {
+  const role = column.role.trim();
+  return role === "quantity" || role === "quantity_change";
+};
+
+const orderHeaderLabel = (column: FaxColumn) => {
+  const role = column.role.trim();
+  if (role === "date") return "日付";
+  if (role === "daypart") return "区分";
+  if (role === "menu_name") return "メニュー名";
+  if (role === "note") return "備考";
+  return column.header || column.name || "数量";
+};
+
+const deliveryHeaderLabel = (column: FaxColumn) =>
+  column.deliveryName || column.deliveryHeader || orderHeaderLabel(column);
+
+const buildHeaderBands = (columns: FaxColumn[], readLabel: (column: FaxColumn) => string) => {
+  const bands: { label: string; span: number }[] = [];
+  columns.forEach((column) => {
+    const label = readLabel(column).trim();
+    const last = bands[bands.length - 1];
+    if (last && last.label === label) {
+      last.span += 1;
+    } else {
+      bands.push({ label, span: 1 });
+    }
+  });
+  return bands;
 };
 
 const deriveFaxRowFields = (columns: FaxColumn[]) => {
@@ -566,6 +601,7 @@ export default function FacilityMasterPage() {
         index: "",
         sourceIndex: "",
         role: "quantity",
+        headerSuperGroup: "",
         header: "",
         headerGroup: "",
         name: "",
@@ -720,14 +756,21 @@ export default function FacilityMasterPage() {
 
   const faxColumns = facilityInfo?.faxOverride.columns || [];
   const quantityColumns = faxColumns.filter((column) => {
-    const role = column.role.trim();
-    return role === "quantity" || role === "quantity_change";
+    return isQuantityColumn(column);
   });
   const visibleFaxColumns = faxColumns.filter((column) => {
     const role = column.role.trim();
     return role === "date" || role === "daypart" || role === "menu_name" || role === "note" || role === "quantity" || role === "quantity_change";
   });
   const deliveryColumns = quantityColumns.filter((column) => column.deliveryEnabled !== false);
+  const orderSuperBands = buildHeaderBands(visibleFaxColumns, (column) => column.headerSuperGroup);
+  const orderGroupBands = buildHeaderBands(visibleFaxColumns, (column) => column.headerGroup);
+  const hasOrderSuperBand = orderSuperBands.some((band) => band.label);
+  const hasOrderGroupBand = orderGroupBands.some((band) => band.label);
+  const deliverySuperBands = buildHeaderBands(deliveryColumns, (column) => column.headerSuperGroup);
+  const deliveryGroupBands = buildHeaderBands(deliveryColumns, (column) => column.headerGroup);
+  const hasDeliverySuperBand = deliverySuperBands.some((band) => band.label);
+  const hasDeliveryGroupBand = deliveryGroupBands.some((band) => band.label);
   const selectedFaxColumn =
     selectedFaxColumnIndex >= 0 && selectedFaxColumnIndex < faxColumns.length ? faxColumns[selectedFaxColumnIndex] : null;
   const selectedFaxColumnTitle = selectedFaxColumn
@@ -741,7 +784,7 @@ export default function FacilityMasterPage() {
         <div>
           <p className="eyebrow">Facilities</p>
           <h1>施設一覧</h1>
-          <p className="subtle">施設情報とFAXテンプレート設定を更新します。</p>
+          <p className="subtle">施設情報と発注書・納品書のヘッダー設定を更新します。</p>
         </div>
         <TopNav />
       </header>
@@ -794,7 +837,7 @@ export default function FacilityMasterPage() {
                   value={searchText}
                   disabled={isEditing}
                   onChange={(e) => setSearchText(e.target.value)}
-                  placeholder="施設名、ID、納品書表示名で検索"
+                  placeholder="施設名、納品書表示名で検索"
                 />
               </label>
               <p className="list-count">{filteredFacilities.length} / {facilities.length} 件</p>
@@ -803,6 +846,7 @@ export default function FacilityMasterPage() {
                 const id = String(facility.facility_id || "unknown");
                 const name = String(facility.facility_name || "未設定");
                 const deliveryName = String(facility.delivery_note_facility_name || "");
+                const hasColumns = readFaxOverride(facility).columns.length > 0;
                 const isActive = index === selectedIndex;
                 return (
                   <button
@@ -812,7 +856,7 @@ export default function FacilityMasterPage() {
                   >
                     <div>
                       <p className="list-title">{name}</p>
-                      <p className="list-meta">{id}</p>
+                      <p className="list-meta">{hasColumns ? "発注書設定あり" : "発注書設定なし"}</p>
                       {deliveryName ? <p className="list-meta">納品書: {deliveryName}</p> : null}
                     </div>
                     <span className="ghost-link">{isActive ? "選択中" : "選択"}</span>
@@ -858,8 +902,8 @@ export default function FacilityMasterPage() {
                     </p>
                   </div>
                   <div className="detail-card">
-                    <p className="detail-label">FAXテンプレート</p>
-                    <p className="detail-value">{facilityInfo?.faxTemplateId || "-"}</p>
+                    <p className="detail-label">発注書設定</p>
+                    <p className="detail-value">{visibleFaxColumns.length ? "設定済み" : "未設定"}</p>
                   </div>
                 </div>
               </div>
@@ -872,15 +916,6 @@ export default function FacilityMasterPage() {
                   </div>
                 </div>
                 <div className="form-grid">
-                  <label className="field">
-                    <span className="field-label">施設ID</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.id || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("facility_id", e.target.value)}
-                    />
-                  </label>
                   <label className="field">
                     <span className="field-label">施設名</span>
                     <input
@@ -914,103 +949,6 @@ export default function FacilityMasterPage() {
               <div className="form-section">
                 <div className="section-title-row">
                   <div>
-                    <h3>注文書・FAX</h3>
-                    <p className="mode-text">OCRと注文書作成で使うテンプレートの基本設定です。</p>
-                  </div>
-                </div>
-                <div className="form-grid">
-                  <label className="field">
-                    <span className="field-label">注文書パターンID</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.orderFormPatternId || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("order_form_pattern_id", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field-label">FAXテンプレートID</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.faxTemplateId || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("fax_template_id", e.target.value)}
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div className="form-section">
-                <div className="section-title-row">
-                  <h3>別名</h3>
-                  <button className="btn compact" onClick={() => addStringListItem("aliases")} disabled={!isEditing}>
-                    追加
-                  </button>
-                </div>
-                {facilityInfo?.aliases.length ? (
-                  <div className="row-list">
-                    {facilityInfo.aliases.map((alias, index) => (
-                      <div className="row-editor" key={`${alias}-${index}`}>
-                        <input
-                          className="input"
-                          value={alias}
-                          disabled={!isEditing}
-                          onChange={(e) => updateStringListItem("aliases", index, e.target.value)}
-                        />
-                        <button
-                          className="btn danger compact"
-                          onClick={() => removeStringListItem("aliases", index)}
-                          disabled={!isEditing}
-                        >
-                          削除
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="subtle">未設定です。追加ボタンから登録してください。</p>
-                )}
-              </div>
-
-              <div className="form-section">
-                <div className="section-title-row">
-                  <h3>FAXテンプレート候補</h3>
-                  <button
-                    className="btn compact"
-                    onClick={() => addStringListItem("fax_template_ids")}
-                    disabled={!isEditing}
-                  >
-                    追加
-                  </button>
-                </div>
-                {facilityInfo?.faxTemplateIds.length ? (
-                  <div className="row-list">
-                    {facilityInfo.faxTemplateIds.map((templateId, index) => (
-                      <div className="row-editor" key={`${templateId}-${index}`}>
-                        <input
-                          className="input"
-                          value={templateId}
-                          disabled={!isEditing}
-                          onChange={(e) => updateStringListItem("fax_template_ids", index, e.target.value)}
-                        />
-                        <button
-                          className="btn danger compact"
-                          onClick={() => removeStringListItem("fax_template_ids", index)}
-                          disabled={!isEditing}
-                        >
-                          削除
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="subtle">未設定です。単一テンプレートの場合は基本情報のFAXテンプレートIDを使用します。</p>
-                )}
-              </div>
-
-              <div className="form-section">
-                <div className="section-title-row">
-                  <div>
                     <h3>発注書ヘッダー設定</h3>
                     <p className="mode-text">発注書の上部からメニュー行までを見ながら、数量列の意味を設定します。</p>
                   </div>
@@ -1030,18 +968,28 @@ export default function FacilityMasterPage() {
                       </div>
                       <table className="document-table">
                         <thead>
-                          <tr>
-                            <th colSpan={Math.min(3, visibleFaxColumns.length)} className="document-band">
-                              献立
-                            </th>
-                            <th colSpan={Math.max(1, visibleFaxColumns.length - 3)} className="document-band">
-                              数量・備考
-                            </th>
-                          </tr>
+                          {hasOrderSuperBand && (
+                            <tr>
+                              {orderSuperBands.map((band, idx) => (
+                                <th key={`order-super-${band.label}-${idx}`} colSpan={band.span} className="document-band super-band">
+                                  {band.label || ""}
+                                </th>
+                              ))}
+                            </tr>
+                          )}
+                          {hasOrderGroupBand && (
+                            <tr>
+                              {orderGroupBands.map((band, idx) => (
+                                <th key={`order-group-${band.label}-${idx}`} colSpan={band.span} className="document-band">
+                                  {band.label || ""}
+                                </th>
+                              ))}
+                            </tr>
+                          )}
                           <tr>
                             {visibleFaxColumns.map((col, idx) => {
                               const role = col.role.trim();
-                              const isQuantity = role === "quantity" || role === "quantity_change";
+                              const isQuantity = isQuantityColumn(col);
                               const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
                               return (
                                 <th key={`${col.index}-${col.role}-${idx}`} className={isQuantity ? "quantity-preview-col editable-column" : ""}>
@@ -1051,13 +999,12 @@ export default function FacilityMasterPage() {
                                       type="button"
                                       onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
                                     >
-                                      <span>{col.header || col.name || "数量"}</span>
+                                      <span>{orderHeaderLabel(col)}</span>
                                       <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
                                     </button>
                                   ) : (
                                     <>
-                                      <span>{col.header || col.name || ROLE_LABELS[role] || "未設定"}</span>
-                                      <small>{ROLE_LABELS[role] || role || "列"}</small>
+                                      <span>{orderHeaderLabel(col)}</span>
                                     </>
                                   )}
                                 </th>
@@ -1065,24 +1012,6 @@ export default function FacilityMasterPage() {
                             })}
                           </tr>
                         </thead>
-                        <tbody>
-                          <tr>
-                            {visibleFaxColumns.map((col, idx) => {
-                              const role = col.role.trim();
-                              const sample =
-                                role === "date"
-                                  ? "6/21"
-                                  : role === "daypart"
-                                    ? "昼"
-                                    : role === "menu_name"
-                                      ? "カレイの照焼き 添)小松菜"
-                                      : role === "note"
-                                        ? "卵禁1"
-                                        : "12";
-                              return <td key={`${col.index}-${col.name}-${idx}`}>{sample}</td>;
-                            })}
-                          </tr>
-                        </tbody>
                       </table>
                     </div>
                     <div className="column-editor">
@@ -1100,6 +1029,26 @@ export default function FacilityMasterPage() {
                               disabled={!isEditing}
                               onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { header: e.target.value })}
                               placeholder="発注書に書かれている見出し"
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="field-label">拡大ヘッダー</span>
+                            <input
+                              className="input"
+                              value={selectedFaxColumn.headerSuperGroup || ""}
+                              disabled={!isEditing}
+                              onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { headerSuperGroup: e.target.value })}
+                              placeholder="例: 禁食、魚"
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="field-label">上段ヘッダー</span>
+                            <input
+                              className="input"
+                              value={selectedFaxColumn.headerGroup || ""}
+                              disabled={!isEditing}
+                              onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { headerGroup: e.target.value })}
+                              placeholder="例: 常食、軟菜、ミキサー"
                             />
                           </label>
                           <label className="field">
@@ -1169,6 +1118,28 @@ export default function FacilityMasterPage() {
                   </div>
                   <table className="document-table delivery-header-table">
                     <thead>
+                      {hasDeliverySuperBand && (
+                        <tr>
+                          <th className="document-band super-band" colSpan={3} />
+                          {deliverySuperBands.map((band, idx) => (
+                            <th key={`delivery-super-${band.label}-${idx}`} colSpan={band.span} className="document-band super-band">
+                              {band.label || ""}
+                            </th>
+                          ))}
+                          <th className="document-band super-band" />
+                        </tr>
+                      )}
+                      {hasDeliveryGroupBand && (
+                        <tr>
+                          <th className="document-band" colSpan={3} />
+                          {deliveryGroupBands.map((band, idx) => (
+                            <th key={`delivery-group-${band.label}-${idx}`} colSpan={band.span} className="document-band">
+                              {band.label || ""}
+                            </th>
+                          ))}
+                          <th className="document-band" />
+                        </tr>
+                      )}
                       <tr>
                         <th className="document-band">日付</th>
                         <th className="document-band">区分</th>
@@ -1182,7 +1153,7 @@ export default function FacilityMasterPage() {
                                 type="button"
                                 onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
                               >
-                                <span>{col.deliveryName || col.deliveryHeader || col.header || col.name || "数量"}</span>
+                                <span>{deliveryHeaderLabel(col)}</span>
                                 <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
                               </button>
                             </th>
@@ -1191,17 +1162,6 @@ export default function FacilityMasterPage() {
                         <th className="document-band">備考</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      <tr>
-                        <td>6/21</td>
-                        <td>昼</td>
-                        <td>カレイの照焼き 添)小松菜</td>
-                        {deliveryColumns.map((col, idx) => (
-                          <td key={`${col.index}-${idx}`}>12</td>
-                        ))}
-                        <td>添え12 / 卵禁1</td>
-                      </tr>
-                    </tbody>
                   </table>
                 </div>
                 <div className="delivery-editor-grid">
@@ -1247,7 +1207,99 @@ export default function FacilityMasterPage() {
                 {visibleFaxColumns.length ? (
                   <>
                     <details className="advanced-details">
-                      <summary>内部列設定を開く</summary>
+                      <summary>上級設定を開く</summary>
+                      <div className="legacy-settings">
+                        <label className="field">
+                          <span className="field-label">内部施設ID</span>
+                          <input
+                            className="input"
+                            value={facilityInfo?.id || ""}
+                            disabled={!isEditing}
+                            onChange={(e) => updateSelectedField("facility_id", e.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <span className="field-label">旧 注文書パターンID</span>
+                          <input
+                            className="input"
+                            value={facilityInfo?.orderFormPatternId || ""}
+                            disabled={!isEditing}
+                            onChange={(e) => updateSelectedField("order_form_pattern_id", e.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <span className="field-label">旧 FAXテンプレートID</span>
+                          <input
+                            className="input"
+                            value={facilityInfo?.faxTemplateId || ""}
+                            disabled={!isEditing}
+                            onChange={(e) => updateSelectedField("fax_template_id", e.target.value)}
+                          />
+                        </label>
+                      </div>
+                      <details className="nested-details">
+                        <summary>読み取り名・旧テンプレート候補</summary>
+                        <div className="legacy-list-block">
+                          <div className="section-title-row">
+                            <h4>読み取り名</h4>
+                            <button className="btn compact" onClick={() => addStringListItem("aliases")} disabled={!isEditing}>
+                              追加
+                            </button>
+                          </div>
+                          {facilityInfo?.aliases.length ? (
+                            <div className="row-list">
+                              {facilityInfo.aliases.map((alias, index) => (
+                                <div className="row-editor" key={`${alias}-${index}`}>
+                                  <input
+                                    className="input"
+                                    value={alias}
+                                    disabled={!isEditing}
+                                    onChange={(e) => updateStringListItem("aliases", index, e.target.value)}
+                                  />
+                                  <button
+                                    className="btn danger compact"
+                                    onClick={() => removeStringListItem("aliases", index)}
+                                    disabled={!isEditing}
+                                  >
+                                    削除
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="subtle">未設定です。</p>
+                          )}
+                          <div className="section-title-row">
+                            <h4>旧FAXテンプレート候補</h4>
+                            <button className="btn compact" onClick={() => addStringListItem("fax_template_ids")} disabled={!isEditing}>
+                              追加
+                            </button>
+                          </div>
+                          {facilityInfo?.faxTemplateIds.length ? (
+                            <div className="row-list">
+                              {facilityInfo.faxTemplateIds.map((templateId, index) => (
+                                <div className="row-editor" key={`${templateId}-${index}`}>
+                                  <input
+                                    className="input"
+                                    value={templateId}
+                                    disabled={!isEditing}
+                                    onChange={(e) => updateStringListItem("fax_template_ids", index, e.target.value)}
+                                  />
+                                  <button
+                                    className="btn danger compact"
+                                    onClick={() => removeStringListItem("fax_template_ids", index)}
+                                    disabled={!isEditing}
+                                  >
+                                    削除
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="subtle">未設定です。</p>
+                          )}
+                        </div>
+                      </details>
                       <div className="section-title-row advanced-title-row">
                         <p className="mode-text">列番号・role・内部名など、システム向けの詳細設定です。</p>
                         <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
@@ -2056,6 +2108,42 @@ export default function FacilityMasterPage() {
 
         .advanced-title-row {
           margin-top: 12px;
+        }
+
+        .legacy-settings {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          margin-top: 12px;
+          padding: 12px;
+          border: 1px solid rgba(31, 42, 42, 0.1);
+          border-radius: 8px;
+          background: #fbfaf7;
+        }
+
+        .nested-details {
+          margin-top: 12px;
+          border: 1px solid rgba(31, 42, 42, 0.1);
+          border-radius: 8px;
+          padding: 10px 12px;
+          background: #ffffff;
+        }
+
+        .nested-details summary {
+          cursor: pointer;
+          font-weight: 800;
+          color: #40514c;
+        }
+
+        .legacy-list-block {
+          display: grid;
+          gap: 12px;
+          margin-top: 12px;
+        }
+
+        .legacy-list-block h4 {
+          margin: 0;
+          font-size: 14px;
         }
 
         .empty-guide {
