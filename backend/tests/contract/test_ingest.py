@@ -66,6 +66,7 @@ def test_ingest_upload_requires_operator_auth(monkeypatch):
     authorized = client.post(
         "/ingest/upload",
         files={"pdf_file": ("upload.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
     assert authorized.status_code == 202
@@ -82,7 +83,7 @@ def test_ingest_upload_single_response_keeps_legacy_fields_and_items(monkeypatch
     res = client.post(
         "/ingest/upload",
         files={"pdf_file": ("single.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001"},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -106,6 +107,43 @@ def test_ingest_upload_single_response_keeps_legacy_fields_and_items(monkeypatch
     assert body["total_pages"] == 1
 
 
+def test_ingest_upload_requires_facility_and_week_context(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    client = TestClient(app)
+
+    res = client.post(
+        "/ingest/upload",
+        files={"pdf_file": ("single.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
+        data={"facility_hint": "FAC001"},
+        headers=_basic_header("operator", "secret"),
+    )
+
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert detail["error"] == "upload_context_required"
+    assert detail["missing"] == ["week_hint"]
+
+
+def test_ingest_week_options_returns_upload_week_choices(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    client = TestClient(app)
+
+    res = client.get(
+        "/ingest/week-options?month_id=2026-02&facility_id=FAC001",
+        headers=_basic_header("operator", "secret"),
+    )
+
+    assert res.status_code == 200
+    options = res.json()["options"]
+    assert options
+    assert all(option["week_id"].startswith("2026-02@") for option in options)
+    assert all(option["label"] for option in options)
+
+
 def test_ingest_upload_splits_two_page_pdf_into_two_items(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("OPERATOR_USER", "operator")
@@ -116,7 +154,7 @@ def test_ingest_upload_splits_two_page_pdf_into_two_items(monkeypatch):
     res = client.post(
         "/ingest/upload",
         files={"pdf_file": ("multi.pdf", _two_page_pdf_bytes(), "application/pdf")},
-        data={"facility_hint": "FAC001"},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -168,6 +206,7 @@ def test_ingest_upload_multiple_files_preserves_request_order_under_parallel_pro
             ("pdf_files", ("first.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
             ("pdf_files", ("second.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
         ],
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -186,6 +225,7 @@ def test_ingest_upload_rejects_non_pdf(monkeypatch):
     res = client.post(
         "/ingest/upload",
         files={"pdf_file": ("upload.txt", b"hello world", "text/plain")},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -202,6 +242,7 @@ def test_ingest_upload_rejects_placeholder_pdf(monkeypatch):
     res = client.post(
         "/ingest/upload",
         files={"pdf_file": ("first.pdf", _placeholder_pdf_bytes(), "application/pdf")},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -521,6 +562,7 @@ def test_ingest_upload_multiple_pdfs_preserves_duplicate_detection_per_file(monk
     first = client.post(
         "/ingest/upload",
         files=first_batch,
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
     assert first.status_code == 202
@@ -534,6 +576,7 @@ def test_ingest_upload_multiple_pdfs_preserves_duplicate_detection_per_file(monk
     second = client.post(
         "/ingest/upload",
         files=second_batch,
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 
@@ -557,7 +600,7 @@ def test_ingest_uploads_endpoints_expose_uploaded_pdf_rows(monkeypatch):
     upload = client.post(
         "/ingest/upload",
         files={"pdf_file": ("visible.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001"},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
         headers=_basic_header("operator", "secret"),
     )
 

@@ -36,7 +36,7 @@ from src.services.uploaded_pdf_service import (
 from src.db import session_scope
 from src.models.order import Order
 from src.workers.ingest_mail_adapter import IngestEmailPayload
-from src.services import order_service
+from src.services import order_service, week_candidate_service
 
 router = APIRouter()
 
@@ -97,6 +97,30 @@ def _parse_form_bool(value: str | None, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off", ""}:
         return False
     raise HTTPException(status_code=400, detail="invalid boolean form value")
+
+
+def _normalize_required_upload_context(
+    *,
+    facility_hint: str | None,
+    week_hint: str | None,
+) -> tuple[str, str]:
+    normalized_facility = str(facility_hint or "").strip()
+    normalized_week = str(week_hint or "").strip()
+    missing: list[str] = []
+    if not normalized_facility:
+        missing.append("facility_hint")
+    if not normalized_week:
+        missing.append("week_hint")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "upload_context_required",
+                "message": "facility_hint and week_hint are required for PDF upload",
+                "missing": missing,
+            },
+        )
+    return normalized_facility, normalized_week
 
 
 def _find_latest_order_id_by_message_id(message_id: str) -> str | None:
@@ -262,6 +286,10 @@ async def ingest_upload(
 ):
     _enforce_upload_content_length(request)
     upload_files = _normalize_upload_files(pdf_file, pdf_files)
+    facility_hint, week_hint = _normalize_required_upload_context(
+        facility_hint=facility_hint,
+        week_hint=week_hint,
+    )
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)
     skip_ocr_value = _parse_form_bool(skip_ocr, default=False)
@@ -288,6 +316,20 @@ async def ingest_upload(
     primary = items[0]
     response = {**primary, "accepted": True, "count": len(items), "items": items}
     return response
+
+
+@router.get("/week-options", dependencies=[Depends(require_role("operator"))])
+def list_upload_week_options(month_id: str, facility_id: str | None = None):
+    normalized_month = str(month_id or "").strip()
+    if not normalized_month:
+        raise HTTPException(status_code=400, detail="month_id is required")
+    options = week_candidate_service.build_week_option_entries(
+        normalized_month,
+        str(facility_id or "").strip() or None,
+    )
+    if not options:
+        raise HTTPException(status_code=400, detail="invalid month_id")
+    return {"options": options}
 
 
 @router.post("/retry", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("admin"))])

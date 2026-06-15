@@ -71,6 +71,8 @@ tasks:
       - |
         curl -X POST http://localhost:8000/ingest/upload \
           -F "pdf_file=@{{.FAX_PDF}};type=application/pdf" \
+          -F "facility_hint=FAC00002" \
+          -F "week_hint=2025-12@2025-12-28~2025-12-31" \
           -F "received_at=2025-12-28T10:00:00"
 
   ocr_test_cloud:
