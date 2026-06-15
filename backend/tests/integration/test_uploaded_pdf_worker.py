@@ -1,6 +1,7 @@
 import pathlib
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -495,11 +496,89 @@ def test_wait_for_pipeline_output_on_ingest_defaults_false_without_http_trigger(
     assert ingest_worker._wait_for_pipeline_output_on_ingest() is False
 
 
+def test_wait_for_pipeline_output_on_ingest_defaults_false_with_http_trigger(monkeypatch):
+    monkeypatch.delenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", raising=False)
+    monkeypatch.setenv("OCR_PIPELINE_URL", "https://ocr-pipeline.example.test")
+
+    assert ingest_worker._wait_for_pipeline_output_on_ingest() is False
+
+
 def test_wait_for_pipeline_output_on_ingest_can_be_enabled_explicitly(monkeypatch):
     monkeypatch.setenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "true")
     monkeypatch.delenv("OCR_PIPELINE_URL", raising=False)
 
     assert ingest_worker._wait_for_pipeline_output_on_ingest() is True
+
+
+def test_process_ingest_inline_marks_async_first_pass_output_as_awaiting(monkeypatch):
+    order_service.clear_all()
+    with session_scope() as session:
+        session.query(OcrJob).delete()
+
+    monkeypatch.setattr(
+        ingest_worker.config_service,
+        "load_ingest_policy",
+        lambda: {"ocr_retry_limit": 1, "quantity_rules": {}},
+    )
+    monkeypatch.setattr(
+        ingest_worker.config_service,
+        "load_facility_master",
+        lambda: {"fax_template_base": {}, "facilities": []},
+    )
+    monkeypatch.setattr(ingest_worker, "load_bytes_from_uri", lambda _uri: b"%PDF-test")
+    monkeypatch.setattr(
+        ingest_worker,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            "status": "running",
+            "input_reference": "gs://bucket/input/async-first-pass.pdf",
+            "output_reference": "gs://bucket/output/async-first-pass.pdf.json",
+        },
+    )
+    monkeypatch.setattr(
+        ingest_worker,
+        "get_default_output_bucket",
+        lambda: (_ for _ in ()).throw(AssertionError("pending OCR output must not be saved as completed output")),
+    )
+    monkeypatch.setattr(
+        ingest_worker,
+        "extract_fax_data",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            facility_name=None,
+            date_strings=[],
+            tokens=[],
+            table_rows=[],
+        ),
+    )
+    monkeypatch.setattr(ingest_worker, "_enqueue_auto_llm_reparse", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ingest_worker, "create_order_from_ingest", lambda *_args, **_kwargs: {"id": "ORDasyncfirstpass"})
+
+    ingest_worker._process_ingest_inline(
+        message_id="upload:sha256:async-first-pass",
+        pdf_uri="gs://bucket/manual-uploads/async-first-pass.pdf",
+        received_at=datetime.utcnow().isoformat(),
+        facility_hint="FAC00001",
+        week_hint="2026-06@2026-06-07~2026-06-13",
+        facility_name=None,
+        date_hints=[],
+        skip_ocr=False,
+        source_kind="manual_upload",
+        original_filename="async-first-pass.pdf",
+        content_sha256="sha-async-first-pass",
+        ocr_job_id="OCR-ORDasyncfirstpass",
+        order_id="ORDasyncfirstpass",
+    )
+
+    job = get_job("OCR-ORDasyncfirstpass")
+    assert job is not None
+    assert job["status"] == "awaiting_output"
+    assert job["input_reference"] == "gs://bucket/input/async-first-pass.pdf"
+    assert job["output_reference"] == "gs://bucket/output/async-first-pass.pdf.json"
+    metrics = job.get("metrics") or {}
+    assert metrics.get("request_mode") == "ingest_first_pass"
+    assert metrics.get("result_state") == "awaiting_output"
+    assert metrics.get("facility_id") == "FAC00001"
+    assert metrics.get("order_id") == "ORDasyncfirstpass"
 
 
 def test_run_uploaded_pdf_recovery_once_resets_stale_ingest_jobs_before_listing(monkeypatch):

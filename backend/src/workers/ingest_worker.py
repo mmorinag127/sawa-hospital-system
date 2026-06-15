@@ -100,7 +100,7 @@ def _wait_for_pipeline_output_on_ingest() -> bool:
     raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
     if raw:
         return raw not in {"0", "false", "no", "off"}
-    return bool(str(os.getenv("OCR_PIPELINE_URL", "") or "").strip())
+    return False
 
 
 def _next_ocr_job_recovery_at() -> str:
@@ -795,34 +795,47 @@ def _process_ingest_inline(**kwargs):
                             preferred_template_ids=preferred_template_ids,
                             wait_for_output=_wait_for_pipeline_output_on_ingest(),
                         )
-                        pipeline_output = output if _looks_like_first_pass_ocr_payload(output) else None
-                        output_ref = None
-                        bucket = get_default_output_bucket()
-                        if bucket:
-                            output_bytes = json.dumps(output, ensure_ascii=False).encode("utf-8")
-                            output_ref = save_output_bytes_to_gcs(
-                                bucket,
+                        if is_ocr_pipeline_output_pending(output):
+                            _mark_ocr_job_awaiting_output(
                                 ocr_job_id,
-                                "ocr_output.json",
-                                output_bytes,
-                                content_type="application/json; charset=utf-8",
+                                error_message="ocr_output_pending",
+                                input_reference=str(output.get("input_reference") or payload.pdf_uri or "").strip() or None,
+                                output_reference=str(output.get("output_reference") or "").strip() or None,
+                                request_mode="ingest_first_pass",
+                                facility_id=payload.facility_hint,
+                                order_id=payload.order_id,
+                                preferred_template_id=preferred_template_id,
+                                preferred_template_ids=preferred_template_ids,
                             )
                         else:
-                            storage = _get_ocr_storage()
-                            output_ref = save_output_json(storage, ocr_job_id, "ocr_output.json", output)
-                        update_job(
-                            ocr_job_id,
-                            status=output.get("status") or "done",
-                            template_id=output.get("template_id"),
-                            output_reference=output_ref,
-                            error_message=None,
-                            metrics=_first_pass_job_metrics(
+                            pipeline_output = output if _looks_like_first_pass_ocr_payload(output) else None
+                            output_ref = None
+                            bucket = get_default_output_bucket()
+                            if bucket:
+                                output_bytes = json.dumps(output, ensure_ascii=False).encode("utf-8")
+                                output_ref = save_output_bytes_to_gcs(
+                                    bucket,
+                                    ocr_job_id,
+                                    "ocr_output.json",
+                                    output_bytes,
+                                    content_type="application/json; charset=utf-8",
+                                )
+                            else:
+                                storage = _get_ocr_storage()
+                                output_ref = save_output_json(storage, ocr_job_id, "ocr_output.json", output)
+                            update_job(
                                 ocr_job_id,
-                                processing_stage="ocr_pipeline",
-                                result_state="done",
-                                failed_cells=len(output.get("failed_cells") or []),
-                            ),
-                        )
+                                status=output.get("status") or "done",
+                                template_id=output.get("template_id"),
+                                output_reference=output_ref,
+                                error_message=None,
+                                metrics=_first_pass_job_metrics(
+                                    ocr_job_id,
+                                    processing_stage="ocr_pipeline",
+                                    result_state="done",
+                                    failed_cells=len(output.get("failed_cells") or []),
+                                ),
+                            )
                     except OCRPipelineOutputPendingError as exc:
                         logger.info(
                             "ROI OCR pipeline awaiting output",
@@ -837,6 +850,7 @@ def _process_ingest_inline(**kwargs):
                             output_reference=exc.output_reference,
                             request_mode="ingest_first_pass",
                             facility_id=payload.facility_hint,
+                            order_id=payload.order_id,
                             preferred_template_id=preferred_template_id,
                             preferred_template_ids=preferred_template_ids,
                         )
