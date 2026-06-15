@@ -791,27 +791,6 @@ export default function FacilityMasterPage() {
 
       <section className="panel">
         <header className="panel-header">
-          <h2>概要</h2>
-          <span className="badge">{facilities.length}</span>
-        </header>
-        <div className="summary">
-          <div>
-            <p className="summary-label">schema_version</p>
-            <p className="summary-value">{master?.schema_version || "-"}</p>
-          </div>
-          <div>
-            <p className="summary-label">updated_at</p>
-            <p className="summary-value">{master?.updated_at || "-"}</p>
-          </div>
-          <div>
-            <p className="summary-label">path</p>
-            <p className="summary-value">{path || "-"}</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="panel">
-        <header className="panel-header">
           <div>
             <h2>施設一覧</h2>
             <p className="panel-subtitle">施設を選んで確認し、必要な時だけ編集を開始します。</p>
