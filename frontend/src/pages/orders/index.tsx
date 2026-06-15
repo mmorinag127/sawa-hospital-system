@@ -134,7 +134,7 @@ const effectiveOrderStatus = (order: Order) => {
   return String(order.status || "").trim();
 };
 
-const ORDER_LIST_PAGE_SIZE = 100;
+const ORDER_LIST_PAGE_SIZE = 50;
 
 const mergeOrdersById = (current: Order[], incoming: Order[]) => {
   const byId = new Map<string, Order>();
@@ -417,10 +417,11 @@ export default function OrdersPage() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!unresolvedOnly) return;
     const unresolved = orders
       .filter((order) => !order.facility && order.id && !inlineFacilityHint(order))
       .sort(compareOrdersByReceivedAt)
-      .slice(0, 60)
+      .slice(0, 20)
       .map((order) => String(order.id || ""))
       .filter((orderId) => orderId && !facilityHints[orderId]);
 
@@ -453,7 +454,7 @@ export default function OrdersPage() {
     return () => {
       cancelled = true;
     };
-  }, [orders, facilityHints]);
+  }, [facilityHints, orders, unresolvedOnly]);
 
   const facilityLabel = (order: Order) => {
     const facilityId = order.facility || "";

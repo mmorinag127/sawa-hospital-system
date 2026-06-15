@@ -115,6 +115,48 @@ const currentMonthId = () => {
   return `${now.getFullYear()}-${month}`;
 };
 
+const normalizeMonthId = (value: string) => {
+  const trimmed = String(value || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(trimmed)) return "";
+  return trimmed;
+};
+
+const formatWeekOption = (monthId: string, startDate: Date, endDate: Date): WeekOption => {
+  const dateFrom = `${startDate.getFullYear()}-${`${startDate.getMonth() + 1}`.padStart(2, "0")}-${`${startDate.getDate()}`.padStart(2, "0")}`;
+  const dateTo = `${endDate.getFullYear()}-${`${endDate.getMonth() + 1}`.padStart(2, "0")}-${`${endDate.getDate()}`.padStart(2, "0")}`;
+  const labelFrom = `${`${startDate.getMonth() + 1}`.padStart(2, "0")}/${`${startDate.getDate()}`.padStart(2, "0")}`;
+  const labelTo = `${`${endDate.getMonth() + 1}`.padStart(2, "0")}/${`${endDate.getDate()}`.padStart(2, "0")}`;
+  return {
+    week_id: `${monthId}@${dateFrom}~${dateTo}`,
+    label: `${monthId} (${labelFrom}-${labelTo})`,
+    date_from: dateFrom,
+    date_to: dateTo,
+  };
+};
+
+const buildCalendarWeekOptions = (monthId: string): WeekOption[] => {
+  const normalizedMonth = normalizeMonthId(monthId);
+  if (!normalizedMonth) return [];
+  const [yearText, monthText] = normalizedMonth.split("-");
+  const year = Number(yearText);
+  const monthIndex = Number(monthText) - 1;
+  if (!Number.isInteger(year) || !Number.isInteger(monthIndex) || monthIndex < 0 || monthIndex > 11) return [];
+  const monthStart = new Date(year, monthIndex, 1);
+  const monthEnd = new Date(year, monthIndex + 1, 0);
+  const options: WeekOption[] = [];
+  let cursor = new Date(monthStart);
+  while (cursor.getTime() <= monthEnd.getTime()) {
+    const start = new Date(cursor);
+    const rawEnd = new Date(start);
+    rawEnd.setDate(start.getDate() + (6 - start.getDay()));
+    const end = rawEnd.getTime() > monthEnd.getTime() ? new Date(monthEnd) : rawEnd;
+    options.push(formatWeekOption(normalizedMonth, start, end));
+    cursor = new Date(end);
+    cursor.setDate(end.getDate() + 1);
+  }
+  return options;
+};
+
 const uploadedPdfStatusLabel = (value?: string | null) => {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "pending") return "未処理";
@@ -174,9 +216,7 @@ export default function PdfUploadPage() {
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
-  const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
-  const [weekOptionsLoading, setWeekOptionsLoading] = useState(false);
-  const [weekOptionsError, setWeekOptionsError] = useState("");
+  const [weekOptions, setWeekOptions] = useState<WeekOption[]>(() => buildCalendarWeekOptions(currentMonthId()));
   const [receivedAt, setReceivedAt] = useState("");
   const [force, setForce] = useState(false);
   const [skipOcr, setSkipOcr] = useState(false);
@@ -220,45 +260,6 @@ export default function PdfUploadPage() {
     }
   };
 
-  const loadWeekOptions = async () => {
-    const month = targetMonth.trim();
-    if (!month) {
-      setWeekOptions([]);
-      return;
-    }
-    setWeekOptionsLoading(true);
-    setWeekOptionsError("");
-    try {
-      const res = await apiClient.get("/ingest/week-options", {
-        params: {
-          month_id: month,
-          facility_id: facilityHint.trim() || undefined,
-        },
-      });
-      const options = Array.isArray(res.data?.options) ? res.data.options : [];
-      setWeekOptions(
-        options
-          .map((item: any) => ({
-            week_id: String(item?.week_id || "").trim(),
-            label: String(item?.label || "").trim(),
-            date_from: String(item?.date_from || "").trim(),
-            date_to: String(item?.date_to || "").trim(),
-          }))
-          .filter((item: WeekOption) => item.week_id)
-      );
-    } catch (err: any) {
-      const detail =
-        err?.response?.data?.detail ||
-        err?.response?.data?.message ||
-        err?.message ||
-        "週候補の取得に失敗しました。";
-      setWeekOptionsError(String(detail));
-      setWeekOptions([]);
-    } finally {
-      setWeekOptionsLoading(false);
-    }
-  };
-
   const loadUploadedRows = async () => {
     setUploadsLoading(true);
     setUploadsError("");
@@ -279,16 +280,12 @@ export default function PdfUploadPage() {
   };
 
   useEffect(() => {
-    void loadUploadedRows();
-  }, [uploadedStatusFilter]);
-
-  useEffect(() => {
     void loadFacilityOptions();
   }, []);
 
   useEffect(() => {
-    void loadWeekOptions();
-  }, [targetMonth, facilityHint]);
+    setWeekOptions(buildCalendarWeekOptions(targetMonth));
+  }, [targetMonth]);
 
   useEffect(() => {
     if (facilityName || !selectedFacility?.name) return;
@@ -490,16 +487,15 @@ export default function PdfUploadPage() {
               className="input"
               value={weekHint}
               onChange={(e) => setWeekHint(e.target.value)}
-              disabled={!targetMonth.trim() || weekOptionsLoading}
+              disabled={!targetMonth.trim()}
             >
-              <option value="">{weekOptionsLoading ? "週候補を取得中..." : "対象週を選択"}</option>
+              <option value="">対象週を選択</option>
               {weekOptions.map((option) => (
                 <option key={option.week_id} value={option.week_id}>
                   {option.label || option.week_id}
                 </option>
               ))}
             </select>
-            {weekOptionsError ? <span className="field-help field-help-error">{weekOptionsError}</span> : null}
           </label>
 
           <label className="field field-span">
@@ -526,7 +522,7 @@ export default function PdfUploadPage() {
           <summary>補助入力・管理者向け設定を開く</summary>
           <div className="advanced-body">
             <p className="subtle">
-              通常は使いません。施設名メモ、受信日時、再登録、OCR保留が必要な場合だけ入力してください。
+              通常は使いません。施設名メモ、受信日時、同じPDFの再登録が必要な場合だけ入力してください。
             </p>
             <div className="form-grid">
               <label className="field">
@@ -555,6 +551,17 @@ export default function PdfUploadPage() {
                 <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}
                 同じPDFでも再登録する
               </label>
+            </div>
+          </div>
+        </details>
+
+        <details className="advanced advanced-danger">
+          <summary>OCRを開始しない検証用設定を開く</summary>
+          <div className="advanced-body">
+            <p className="message message-error">
+              通常の注文処理テストでは使わないでください。ONにするとPDF登録後の自動OCRが始まりません。
+            </p>
+            <div className="checks">
               <label>
                 <input type="checkbox" checked={skipOcr} onChange={(e) => setSkipOcr(e.target.checked)} />{" "}
                 OCRをあとで実行する
@@ -754,7 +761,7 @@ export default function PdfUploadPage() {
               </select>
             </label>
             <button className="btn secondary" type="button" onClick={() => void loadUploadedRows()} disabled={uploadsLoading}>
-              {uploadsLoading ? "更新中..." : "最新に更新"}
+              {uploadsLoading ? "更新中..." : uploadedRows.length ? "最新に更新" : "取込済みPDFを表示"}
             </button>
           </div>
         </header>
@@ -765,7 +772,7 @@ export default function PdfUploadPage() {
         {uploadsLoading && uploadedRows.length === 0 ? (
           <p className="subtle">読み込み中...</p>
         ) : uploadedRows.length === 0 ? (
-          <p className="subtle">該当する取込済みPDFはありません。</p>
+          <p className="subtle">必要なときだけ「取込済みPDFを表示」を押してください。初期表示では重い一覧取得を行いません。</p>
         ) : (
           <div className="history-list">
             {uploadedRows.map((row) => {
