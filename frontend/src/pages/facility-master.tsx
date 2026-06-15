@@ -38,8 +38,10 @@ type FaxColumn = {
 };
 
 const DAILY_LABEL_DIET_OPTIONS = [
+  { value: "regular", label: "常食" },
   { value: "soft", label: "軟菜" },
   { value: "mixer", label: "ミキサー" },
+  { value: "regular_bag", label: "常食(袋分け)" },
   { value: "daycare", label: "通所" },
   { value: "staff", label: "職員" },
   { value: "diabetes", label: "糖尿" },
@@ -49,6 +51,37 @@ const DAILY_LABEL_DIET_OPTIONS = [
   { value: "forbidden_other", label: "その他禁食" },
   { value: "sesame_allergy", label: "ごま禁" },
 ];
+
+const ROLE_LABELS: Record<string, string> = {
+  date: "日付",
+  daypart: "朝昼夕",
+  menu_name: "メニュー名",
+  note: "備考",
+  quantity: "数量",
+  quantity_change: "変更数量",
+};
+
+const AREA_OPTIONS = [
+  { value: "X", label: "共通" },
+  { value: "2F", label: "2F" },
+  { value: "3F", label: "3F" },
+  { value: "2f", label: "2F" },
+  { value: "3f", label: "3F" },
+];
+
+const EXTRA_DIET_LABELS: Record<string, string> = {
+  unknown: "不明",
+  change_1: "変更1",
+  change_2: "変更2",
+};
+
+const dietLabel = (value: string) =>
+  DAILY_LABEL_DIET_OPTIONS.find((option) => option.value === value)?.label || EXTRA_DIET_LABELS[value] || value || "未設定";
+
+const areaLabel = (value: string) => {
+  const normalized = value.trim();
+  return AREA_OPTIONS.find((option) => option.value.toLowerCase() === normalized.toLowerCase())?.label || normalized || "共通";
+};
 
 const DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID: Record<string, string[]> = {
   FAC00001: ["no_meat", "no_fish"],
@@ -119,6 +152,16 @@ const readDailyLabelDietTypes = (facility?: FacilityEntry | null) => {
   }
   const facilityId = readString((facility as Record<string, unknown>).facility_id);
   return DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID[facilityId] || [];
+};
+
+const formatDeliveryNamePreview = (value: string) => {
+  const text = value.trim();
+  const prefix = "医療法人　松岡会　";
+  if (text.startsWith(prefix)) {
+    const suffix = text.slice(prefix.length).trim();
+    if (suffix) return `医療法人　松岡会\n${suffix}`;
+  }
+  return text;
 };
 
 const readAreas = (value: unknown) => {
@@ -321,11 +364,32 @@ export default function FacilityMasterPage() {
   const [message, setMessage] = useState("");
   const [path, setPath] = useState("");
   const [saving, setSaving] = useState(false);
+  const [searchText, setSearchText] = useState("");
 
   const facilities = useMemo(() => {
     if (!master?.facilities || !Array.isArray(master.facilities)) return [];
     return master.facilities;
   }, [master]);
+
+  const filteredFacilities = useMemo(() => {
+    const query = searchText.trim().toLowerCase();
+    if (!query) return facilities.map((facility, index) => ({ facility, index }));
+    return facilities
+      .map((facility, index) => ({ facility, index }))
+      .filter(({ facility }) => {
+        const record = facility as Record<string, unknown>;
+        const haystack = [
+          record.facility_id,
+          record.facility_name,
+          record.delivery_note_facility_name,
+          record.fax_template_id,
+          ...(readStringList(record.aliases) || []),
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(query);
+      });
+  }, [facilities, searchText]);
 
   const loadMaster = async () => {
     try {
@@ -550,6 +614,27 @@ export default function FacilityMasterPage() {
     setMessage("新規施設を追加しました。編集内容を保存してください。");
   };
 
+  const duplicateSelectedFacility = () => {
+    if (!master || !selectedFacility || typeof selectedFacility !== "object" || isEditing) return;
+    const existing = new Set(facilities.map((facility) => String(facility.facility_id || "")));
+    const facilityId = generateFacilityId(existing);
+    const sourceName = readString((selectedFacility as Record<string, unknown>).facility_name);
+    const nextFacility = {
+      ...(cloneFacility(selectedFacility) || {}),
+      facility_id: facilityId,
+      facility_name: sourceName ? `${sourceName} コピー` : "",
+    };
+    const nextFacilities = [...facilities, nextFacility];
+    const nextMaster = { ...master, facilities: nextFacilities };
+    setMaster(nextMaster);
+    setMasterText(prettyJson(nextMaster));
+    setSelectedIndex(nextFacilities.length - 1);
+    setEditingIndex(nextFacilities.length - 1);
+    setEditBaseline(null);
+    setSearchText("");
+    setMessage("選択中の施設を複製しました。施設名と表示名を確認して保存してください。");
+  };
+
   const applyMasterJson = () => {
     const parsed = parseJson(masterText);
     if (parsed.error) {
@@ -588,7 +673,7 @@ export default function FacilityMasterPage() {
       setPath(res.data.path || path);
       setEditingIndex(-1);
       setEditBaseline(null);
-      setMessage("保存しました。画面の内容は本番に反映済みです。");
+      setMessage("保存しました。反映先の環境で表示を確認してください。");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       if (detail?.errors) {
@@ -616,6 +701,7 @@ export default function FacilityMasterPage() {
     return {
       id: readString(record.facility_id),
       name: readString(record.facility_name),
+      deliveryNoteFacilityName: readString(record.delivery_note_facility_name),
       address: readString(record.address),
       phone: readString(record.phone),
       orderFormPatternId: readString(record.order_form_pattern_id),
@@ -627,6 +713,17 @@ export default function FacilityMasterPage() {
       dailyLabelDietTypes: readDailyLabelDietTypes(selectedFacility),
     };
   }, [selectedFacility]);
+
+  const faxColumns = facilityInfo?.faxOverride.columns || [];
+  const quantityColumns = faxColumns.filter((column) => {
+    const role = column.role.trim();
+    return role === "quantity" || role === "quantity_change";
+  });
+  const visibleFaxColumns = faxColumns.filter((column) => {
+    const role = column.role.trim();
+    return role === "date" || role === "daypart" || role === "menu_name" || role === "note" || role === "quantity" || role === "quantity_change";
+  });
+  const labelPreviewItems = (facilityInfo?.dailyLabelDietTypes || []).map((dietType) => dietLabel(dietType));
 
   return (
     <main className="page">
@@ -662,19 +759,40 @@ export default function FacilityMasterPage() {
 
       <section className="panel">
         <header className="panel-header">
-          <h2>施設一覧</h2>
-          <button className="btn" onClick={addFacility} disabled={!master || isEditing}>
-            新規追加
-          </button>
+          <div>
+            <h2>施設一覧</h2>
+            <p className="panel-subtitle">施設を選んで確認し、必要な時だけ編集を開始します。</p>
+          </div>
+          <div className="actions">
+            <button className="btn ghost" onClick={duplicateSelectedFacility} disabled={!master || !selectedFacility || isEditing}>
+              選択施設を複製
+            </button>
+            <button className="btn" onClick={addFacility} disabled={!master || isEditing}>
+              新規施設を追加
+            </button>
+          </div>
         </header>
         {facilities.length === 0 ? (
           <p className="subtle">まだ施設がありません。</p>
         ) : (
           <div className="facility-grid">
             <div className="list">
-              {facilities.map((facility, index) => {
+              <label className="field search-field">
+                <span className="field-label">検索</span>
+                <input
+                  className="input"
+                  value={searchText}
+                  disabled={isEditing}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  placeholder="施設名、ID、納品書表示名で検索"
+                />
+              </label>
+              <p className="list-count">{filteredFacilities.length} / {facilities.length} 件</p>
+              {filteredFacilities.length === 0 && <p className="subtle">一致する施設がありません。</p>}
+              {filteredFacilities.map(({ facility, index }) => {
                 const id = String(facility.facility_id || "unknown");
                 const name = String(facility.facility_name || "未設定");
+                const deliveryName = String(facility.delivery_note_facility_name || "");
                 const isActive = index === selectedIndex;
                 return (
                   <button
@@ -685,6 +803,7 @@ export default function FacilityMasterPage() {
                     <div>
                       <p className="list-title">{name}</p>
                       <p className="list-meta">{id}</p>
+                      {deliveryName ? <p className="list-meta">納品書: {deliveryName}</p> : null}
                     </div>
                     <span className="ghost-link">{isActive ? "選択中" : "選択"}</span>
                   </button>
@@ -695,7 +814,7 @@ export default function FacilityMasterPage() {
               <div className="form-section">
                 <div className="section-title-row">
                   <div>
-                    <h3>基本情報</h3>
+                    <h3>施設概要</h3>
                     <p className="mode-text">
                       {isEditing
                         ? "編集中です。変更後は保存するかキャンセルしてください。"
@@ -716,6 +835,31 @@ export default function FacilityMasterPage() {
                       この施設の編集を開始
                     </button>
                   )}
+                </div>
+                <div className="detail-grid overview-grid">
+                  <div className="detail-card">
+                    <p className="detail-label">施設名</p>
+                    <p className="detail-value">{facilityInfo?.name || "-"}</p>
+                  </div>
+                  <div className="detail-card">
+                    <p className="detail-label">納品書表示</p>
+                    <p className="detail-value multiline">
+                      {formatDeliveryNamePreview(facilityInfo?.deliveryNoteFacilityName || facilityInfo?.name || "-")}
+                    </p>
+                  </div>
+                  <div className="detail-card">
+                    <p className="detail-label">FAXテンプレート</p>
+                    <p className="detail-value">{facilityInfo?.faxTemplateId || "-"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <div>
+                    <h3>基本情報</h3>
+                    <p className="mode-text">施設一覧や候補選択で使う名前と連絡先です。</p>
+                  </div>
                 </div>
                 <div className="form-grid">
                   <label className="field">
@@ -754,6 +898,44 @@ export default function FacilityMasterPage() {
                       onChange={(e) => updateSelectedField("phone", e.target.value)}
                     />
                   </label>
+                </div>
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <div>
+                    <h3>納品書</h3>
+                    <p className="mode-text">納品書に表示する施設名です。未設定の場合は基本情報の施設名を使います。</p>
+                  </div>
+                </div>
+                <div className="form-grid">
+                  <label className="field detail-wide">
+                    <span className="field-label">納品書表示名</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.deliveryNoteFacilityName || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("delivery_note_facility_name", e.target.value)}
+                      placeholder="例: 医療法人　松岡会　佐古グループホーム"
+                    />
+                  </label>
+                  <div className="detail-card delivery-preview">
+                    <p className="detail-label">表示プレビュー</p>
+                    <p className="detail-value multiline">
+                      {formatDeliveryNamePreview(facilityInfo?.deliveryNoteFacilityName || facilityInfo?.name || "-")}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <div>
+                    <h3>注文書・FAX</h3>
+                    <p className="mode-text">OCRと注文書作成で使うテンプレートの基本設定です。</p>
+                  </div>
+                </div>
+                <div className="form-grid">
                   <label className="field">
                     <span className="field-label">注文書パターンID</span>
                     <input
@@ -846,16 +1028,116 @@ export default function FacilityMasterPage() {
               <div className="form-section">
                 <div className="section-title-row">
                   <div>
-                    <h3>FAXテンプレート列設定</h3>
-                    <p className="mode-text">FAX注文書の列を、日付・献立・数量などの意味へ対応付けます。</p>
+                    <h3>発注書の読み取り設定</h3>
+                    <p className="mode-text">発注書で見える列を、そのまま食種・施設区分へ対応付けます。</p>
                   </div>
-                  <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
-                    列を追加
-                  </button>
                 </div>
-                {facilityInfo?.faxOverride.columns.length ? (
-                  <div className="table-wrap">
-                    <table className="invoice-table">
+                {visibleFaxColumns.length ? (
+                  <>
+                    <div className="order-sheet-preview" aria-label="発注書プレビュー">
+                      <table className="preview-table">
+                        <thead>
+                          <tr>
+                            {visibleFaxColumns.map((col, idx) => {
+                              const role = col.role.trim();
+                              const isQuantity = role === "quantity" || role === "quantity_change";
+                              return (
+                                <th key={`${col.index}-${col.role}-${idx}`} className={isQuantity ? "quantity-preview-col" : ""}>
+                                  <span>{col.header || col.name || ROLE_LABELS[role] || "未設定"}</span>
+                                  {isQuantity ? (
+                                    <small>
+                                      {dietLabel(col.dietType)} / {areaLabel(col.areaId)}
+                                    </small>
+                                  ) : (
+                                    <small>{ROLE_LABELS[role] || role || "列"}</small>
+                                  )}
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            {visibleFaxColumns.map((col, idx) => {
+                              const role = col.role.trim();
+                              const sample =
+                                role === "date"
+                                  ? "6/21"
+                                  : role === "daypart"
+                                    ? "昼"
+                                    : role === "menu_name"
+                                      ? "カレイの照焼き 添)小松菜"
+                                      : role === "note"
+                                        ? "卵禁1"
+                                        : "12";
+                              return <td key={`${col.index}-${col.name}-${idx}`}>{sample}</td>;
+                            })}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="quantity-card-grid">
+                      {quantityColumns.map((col) => {
+                        const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
+                        return (
+                          <div className="quantity-card" key={`${col.index}-${sourceIndex}`}>
+                            <div>
+                              <p className="detail-label">数量列</p>
+                              <p className="quantity-title">{col.header || col.name || `列 ${col.index || sourceIndex + 1}`}</p>
+                            </div>
+                            <label className="field">
+                              <span className="field-label">食種</span>
+                              <select
+                                className="input"
+                                value={col.dietType || ""}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(sourceIndex, { dietType: e.target.value })}
+                              >
+                                <option value="">未設定</option>
+                                {col.dietType && EXTRA_DIET_LABELS[col.dietType] ? (
+                                  <option value={col.dietType}>{EXTRA_DIET_LABELS[col.dietType]}</option>
+                                ) : null}
+                                {DAILY_LABEL_DIET_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="field">
+                              <span className="field-label">施設区分</span>
+                              <input
+                                className="input"
+                                value={areaLabel(col.areaId)}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(sourceIndex, { areaId: e.target.value })}
+                                placeholder="例: 2F、3F、通所、共通"
+                              />
+                            </label>
+                            <label className="field">
+                              <span className="field-label">納品書での列名</span>
+                              <input
+                                className="input"
+                                value={col.deliveryName || ""}
+                                disabled={!isEditing}
+                                onChange={(e) => updateFaxColumn(sourceIndex, { deliveryName: e.target.value })}
+                                placeholder={col.header || col.name || "例: 常食2F"}
+                              />
+                            </label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <details className="advanced-details">
+                      <summary>内部列設定を開く</summary>
+                      <div className="section-title-row advanced-title-row">
+                        <p className="mode-text">列番号・role・内部名など、システム向けの詳細設定です。</p>
+                        <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                          列を追加
+                        </button>
+                      </div>
+                      <div className="table-wrap">
+                        <table className="invoice-table">
                       <thead>
                         <tr>
                           <th>列番号</th>
@@ -958,9 +1240,16 @@ export default function FacilityMasterPage() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                      </div>
+                    </details>
+                  </>
                 ) : (
-                  <p className="subtle">FAX列設定が未設定です。汎用テンプレートを使わず、施設専用の列設定を追加してください。</p>
+                  <div className="empty-guide">
+                    <p className="subtle">発注書の列設定が未設定です。既存施設を複製するか、上級設定から列を追加してください。</p>
+                    <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                      数量列を追加
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1005,30 +1294,54 @@ export default function FacilityMasterPage() {
               </div>
 
               <div className="form-section">
-                <h3>ラベル比較・表示対象区分</h3>
-                <p className="section-help">
-                  日別ラベルの照合で、常食とは別枠として表示・比較する食種です。ここに入れたものだけが
-                  ラベル比較表で独立した区分になります。納品書側に同じ区分がない施設では選ばないでください。
-                </p>
-                <div className="toggle-grid">
-                  {DAILY_LABEL_DIET_OPTIONS.map((option) => {
-                    const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
-                    return (
-                      <label key={option.value} className={`toggle-item ${checked ? "checked" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleDailyLabelDietType(option.value)}
-                          disabled={!isEditing}
-                        />
-                        <span>{option.label}</span>
-                      </label>
-                    );
-                  })}
+                <div className="section-title-row">
+                  <div>
+                    <h3>ラベルの表示設定</h3>
+                    <p className="mode-text">ラベルで常食とは別に確認したい食種を選びます。選んだものが下のプレビューに出ます。</p>
+                  </div>
                 </div>
-                <p className="detail-meta">
-                  未選択の場合はシステム既定値を使用します。施設固有に確定した区分だけ選択してください。
-                </p>
+                <div className="label-config-layout">
+                  <div>
+                    <div className="toggle-grid">
+                      {DAILY_LABEL_DIET_OPTIONS.map((option) => {
+                        const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
+                        return (
+                          <label key={option.value} className={`toggle-item ${checked ? "checked" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleDailyLabelDietType(option.value)}
+                              disabled={!isEditing}
+                            />
+                            <span>{option.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="detail-meta">
+                      施設で実際に分けて確認する食種だけ選んでください。未選択の場合はシステム既定値を使います。
+                    </p>
+                  </div>
+                  <div className="label-preview">
+                    <p className="detail-label">ラベル表示プレビュー</p>
+                    <div className="label-preview-body">
+                      <p className="label-menu-name">白身魚フライ 添)キャベツ</p>
+                      <div className="label-chip-row">
+                        <span className="label-chip">常食</span>
+                        {labelPreviewItems.length ? (
+                          labelPreviewItems.map((item) => (
+                            <span className="label-chip muted" key={item}>
+                              {item}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="label-chip muted">既定設定</span>
+                        )}
+                      </div>
+                      <p className="label-meta-line">温菜 / 1人前 / 2026年6月21日</p>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {isEditing && (
@@ -1161,7 +1474,7 @@ export default function FacilityMasterPage() {
 
         .panel {
           background: #ffffff;
-          border-radius: 18px;
+          border-radius: 8px;
           padding: 20px;
           border: 1px solid rgba(25, 32, 30, 0.08);
           box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
@@ -1172,7 +1485,15 @@ export default function FacilityMasterPage() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 16px;
           margin-bottom: 16px;
+        }
+
+        .panel-subtitle {
+          margin: 6px 0 0;
+          color: #5f7b74;
+          font-size: 13px;
+          line-height: 1.5;
         }
 
         h2 {
@@ -1219,13 +1540,28 @@ export default function FacilityMasterPage() {
           gap: 10px;
         }
 
+        .search-field {
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          background: #ffffff;
+          padding-bottom: 4px;
+        }
+
+        .list-count {
+          margin: 0;
+          color: #5f7b74;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
         .list-item {
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 12px;
           padding: 12px 14px;
-          border-radius: 14px;
+          border-radius: 8px;
           border: 1px solid rgba(31, 42, 42, 0.1);
           background: #f7f5f1;
           text-align: left;
@@ -1260,7 +1596,7 @@ export default function FacilityMasterPage() {
         }
 
         .form-section {
-          border-radius: 10px;
+          border-radius: 8px;
           border: 1px solid rgba(31, 42, 42, 0.12);
           background: #ffffff;
           padding: 14px;
@@ -1334,8 +1670,12 @@ export default function FacilityMasterPage() {
           gap: 12px;
         }
 
+        .overview-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
         .detail-card {
-          border-radius: 14px;
+          border-radius: 8px;
           border: 1px solid rgba(31, 42, 42, 0.12);
           background: #f7f5f1;
           padding: 12px;
@@ -1357,6 +1697,15 @@ export default function FacilityMasterPage() {
           margin: 0;
           font-weight: 600;
           word-break: break-word;
+        }
+
+        .detail-value.multiline {
+          white-space: pre-line;
+          line-height: 1.6;
+        }
+
+        .delivery-preview {
+          min-height: 78px;
         }
 
         .detail-meta {
@@ -1385,6 +1734,156 @@ export default function FacilityMasterPage() {
           grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
           gap: 8px;
           margin-bottom: 10px;
+        }
+
+        .order-sheet-preview {
+          width: 100%;
+          overflow-x: auto;
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          border-radius: 8px;
+          background: #fffdf8;
+          margin-bottom: 14px;
+        }
+
+        .preview-table {
+          width: 100%;
+          min-width: 680px;
+          border-collapse: collapse;
+          font-size: 12px;
+        }
+
+        .preview-table th,
+        .preview-table td {
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          padding: 9px 10px;
+          text-align: center;
+          vertical-align: middle;
+        }
+
+        .preview-table th {
+          background: #f2f5f2;
+          font-weight: 800;
+        }
+
+        .preview-table th span,
+        .preview-table th small {
+          display: block;
+          line-height: 1.45;
+        }
+
+        .preview-table th small {
+          color: #5f7b74;
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .quantity-preview-col {
+          min-width: 98px;
+        }
+
+        .quantity-card-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+
+        .quantity-card {
+          display: grid;
+          gap: 10px;
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          border-radius: 8px;
+          background: #fbfaf7;
+          padding: 12px;
+        }
+
+        .quantity-title {
+          margin: 0;
+          font-size: 15px;
+          font-weight: 800;
+          word-break: break-word;
+        }
+
+        .advanced-details {
+          border-top: 1px solid rgba(31, 42, 42, 0.1);
+          padding-top: 12px;
+          margin-top: 10px;
+        }
+
+        .advanced-details summary {
+          cursor: pointer;
+          color: #40514c;
+          font-weight: 800;
+        }
+
+        .advanced-title-row {
+          margin-top: 12px;
+        }
+
+        .empty-guide {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          border: 1px dashed rgba(31, 42, 42, 0.22);
+          border-radius: 8px;
+          padding: 14px;
+          background: #fbfaf7;
+        }
+
+        .label-config-layout {
+          display: grid;
+          grid-template-columns: minmax(260px, 1.2fr) minmax(240px, 0.8fr);
+          gap: 14px;
+          align-items: start;
+        }
+
+        .label-preview {
+          border: 1px solid rgba(31, 42, 42, 0.14);
+          border-radius: 8px;
+          background: #fffdf8;
+          padding: 12px;
+        }
+
+        .label-preview-body {
+          border: 2px solid #1f2a2a;
+          border-radius: 6px;
+          padding: 12px;
+          background: #ffffff;
+        }
+
+        .label-menu-name {
+          margin: 0 0 10px;
+          font-size: 16px;
+          font-weight: 900;
+          line-height: 1.45;
+        }
+
+        .label-chip-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-bottom: 10px;
+        }
+
+        .label-chip {
+          border: 1px solid #1f2a2a;
+          border-radius: 6px;
+          padding: 4px 8px;
+          font-size: 12px;
+          font-weight: 800;
+          background: #eef3f1;
+        }
+
+        .label-chip.muted {
+          background: #ffffff;
+        }
+
+        .label-meta-line {
+          margin: 0;
+          color: #40514c;
+          font-size: 12px;
+          font-weight: 700;
         }
 
         .toggle-item {
@@ -1427,7 +1926,7 @@ export default function FacilityMasterPage() {
 
         .input,
         .textarea {
-          border-radius: 12px;
+          border-radius: 8px;
           border: 1px solid rgba(31, 42, 42, 0.2);
           padding: 10px 12px;
           font-family: "JetBrains Mono", "Noto Sans JP", monospace;
@@ -1534,13 +2033,13 @@ export default function FacilityMasterPage() {
           justify-content: flex-end;
           padding: 14px;
           border: 1px solid rgba(31, 42, 42, 0.1);
-          border-radius: 10px;
+          border-radius: 8px;
           background: #f7f9f8;
         }
 
         .btn {
           border: none;
-          border-radius: 999px;
+          border-radius: 8px;
           padding: 10px 18px;
           font-weight: 600;
           cursor: pointer;
@@ -1566,7 +2065,6 @@ export default function FacilityMasterPage() {
         .edit-start-button {
           min-width: 220px;
           min-height: 46px;
-          border-radius: 10px;
           box-shadow: 0 8px 18px rgba(31, 42, 42, 0.16);
         }
 
@@ -1618,6 +2116,19 @@ export default function FacilityMasterPage() {
 
         @media (max-width: 900px) {
           .facility-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .overview-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .panel-header {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .label-config-layout {
             grid-template-columns: 1fr;
           }
         }
