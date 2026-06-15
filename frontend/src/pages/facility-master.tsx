@@ -789,6 +789,48 @@ export default function FacilityMasterPage() {
         <TopNav />
       </header>
 
+      <section className="panel help-panel">
+        <header className="panel-header">
+          <div>
+            <h2>編集の流れ</h2>
+            <p className="panel-subtitle">施設を選び、編集を開始してから、発注書と納品書の見た目を直接確認しながら設定します。</p>
+          </div>
+          <a className="btn ghost" href="/manuals/current-stg-20260519/facility_management_detail_current_stg_20260615.md" target="_blank" rel="noreferrer">
+            施設編集マニュアル
+          </a>
+        </header>
+        <div className="guide-steps" aria-label="施設編集の手順">
+          <div className="guide-step">
+            <span className="step-number">1</span>
+            <div>
+              <p className="guide-title">施設を選ぶ</p>
+              <p className="guide-text">左の一覧から修正する施設を選択します。新規施設は既存施設を複製すると設定漏れを減らせます。</p>
+            </div>
+          </div>
+          <div className="guide-step">
+            <span className="step-number">2</span>
+            <div>
+              <p className="guide-title">編集を開始</p>
+              <p className="guide-text">閲覧中は入力できません。右上の「この施設の編集を開始」を押すと保存ボタンが有効になります。</p>
+            </div>
+          </div>
+          <div className="guide-step">
+            <span className="step-number">3</span>
+            <div>
+              <p className="guide-title">列をクリック</p>
+              <p className="guide-text">発注書または納品書の数量列をクリックして、見出し・食種・階/通所などを編集します。</p>
+            </div>
+          </div>
+          <div className="guide-step">
+            <span className="step-number">4</span>
+            <div>
+              <p className="guide-title">保存して確認</p>
+              <p className="guide-text">保存後、発注書取込・ラベル・納品書で想定どおりに表示されるか確認します。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="panel">
         <header className="panel-header">
           <div>
@@ -929,8 +971,13 @@ export default function FacilityMasterPage() {
                 <div className="section-title-row">
                   <div>
                     <h3>発注書ヘッダー設定</h3>
-                    <p className="mode-text">発注書の上部からメニュー行までを見ながら、数量列の意味を設定します。</p>
+                    <p className="mode-text">発注書の上部からメニュー行までを見ながら、数量列の意味を設定します。薄緑の数量列をクリックしてください。</p>
                   </div>
+                </div>
+                <div className="inline-guide">
+                  <span>発注書の見出し: 原稿に書かれている列名</span>
+                  <span>拡大ヘッダー: 禁食など複数列をまとめる上段名</span>
+                  <span>食種/施設区分: ラベル・納品書の集計単位</span>
                 </div>
                 {visibleFaxColumns.length ? (
                   <>
@@ -938,7 +985,7 @@ export default function FacilityMasterPage() {
                       <div className="document-title-row">
                         <div>
                           <p className="document-kicker">発注書</p>
-                          <p className="document-title">{facilityInfo?.faxTemplateId || facilityInfo?.name || "施設発注書"}</p>
+                          <p className="document-title">{facilityInfo?.name || "施設発注書"}</p>
                         </div>
                         <div className="document-meta">
                           <span>対象週</span>
@@ -996,9 +1043,12 @@ export default function FacilityMasterPage() {
                     <div className="column-editor">
                       {selectedFaxColumn ? (
                         <>
-                          <div>
+                          <div className="selected-column-summary">
                             <p className="detail-label">選択中の列</p>
                             <p className="quantity-title">{selectedFaxColumnTitle}</p>
+                            <p className="detail-meta">
+                              この列は発注書OCRの読み取り先です。食種と施設区分を変えると、ラベル・納品書・袋分けの表示単位にも反映されます。
+                            </p>
                           </div>
                           <label className="field">
                             <span className="field-label">発注書の見出し</span>
@@ -1059,6 +1109,17 @@ export default function FacilityMasterPage() {
                               placeholder="例: 共通、2F、3F、通所"
                             />
                           </label>
+                          <div className="impact-box">
+                            <p className="detail-label">反映先</p>
+                            <div className="impact-grid">
+                              <span>発注書OCR</span>
+                              <strong>{orderHeaderLabel(selectedFaxColumn)}</strong>
+                              <span>ラベル</span>
+                              <strong>{dietLabel(selectedFaxColumn.dietType)} / {areaLabel(selectedFaxColumn.areaId)}</strong>
+                              <span>納品書</span>
+                              <strong>{deliveryHeaderLabel(selectedFaxColumn)}</strong>
+                            </div>
+                          </div>
                         </>
                       ) : (
                         <p className="subtle">発注書ヘッダーの数量列を選択すると、ここで内容を編集できます。</p>
@@ -1079,7 +1140,7 @@ export default function FacilityMasterPage() {
                 <div className="section-title-row">
                   <div>
                     <h3>納品書ヘッダー設定</h3>
-                    <p className="mode-text">納品書の上部からメニュー行までを見ながら、表示名と列名を確認します。</p>
+                    <p className="mode-text">納品書の上部からメニュー行までを見ながら、施設名と列名を確認します。発注書と同じ列をクリックして編集します。</p>
                   </div>
                 </div>
                 <div className="document-fragment delivery-fragment" aria-label="納品書ヘッダー">
@@ -1409,13 +1470,14 @@ export default function FacilityMasterPage() {
                     {facilityInfo.areas.map((area, index) => (
                       <div className="area-row" key={`${area.id}-${area.name}-${index}`}>
                         <label className="field">
-                          <span className="field-label">区分ID</span>
+                          <span className="field-label">区分キー</span>
                           <input
                             className="input"
                             value={area.id}
                             disabled={!isEditing}
                             onChange={(e) => updateArea(index, { id: e.target.value })}
                           />
+                          <span className="field-help">通常は区分名と同じ値で問題ありません。例: 2F、3F、通所</span>
                         </label>
                         <label className="field">
                           <span className="field-label">区分名</span>
@@ -1505,7 +1567,7 @@ export default function FacilityMasterPage() {
 
       <section className="panel">
         <details className="json-panel">
-          <summary>Master JSON (上級)</summary>
+          <summary>システム担当者向け: Master JSON</summary>
           <div className="actions">
             <button className="btn ghost" onClick={applyMasterJson} disabled={!isEditing}>
               JSON を反映
@@ -1625,6 +1687,10 @@ export default function FacilityMasterPage() {
           margin-bottom: 20px;
         }
 
+        .help-panel {
+          background: #fbfaf7;
+        }
+
         .panel-header {
           display: flex;
           justify-content: space-between;
@@ -1653,23 +1719,46 @@ export default function FacilityMasterPage() {
           font-size: 12px;
         }
 
-        .summary {
+        .guide-steps {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-          gap: 16px;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
         }
 
-        .summary-label {
-          font-size: 12px;
-          color: #5f7b74;
-          margin: 0 0 6px;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
+        .guide-step {
+          display: grid;
+          grid-template-columns: auto 1fr;
+          gap: 10px;
+          min-height: 112px;
+          padding: 12px;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          border-radius: 8px;
+          background: #ffffff;
         }
 
-        .summary-value {
+        .step-number {
+          display: grid;
+          place-items: center;
+          width: 28px;
+          height: 28px;
+          border-radius: 50%;
+          background: #1f2a2a;
+          color: #fffdf8;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .guide-title {
           margin: 0;
-          font-weight: 600;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .guide-text {
+          margin: 4px 0 0;
+          color: #51615c;
+          font-size: 12px;
+          line-height: 1.55;
         }
 
         .facility-grid {
@@ -1772,6 +1861,22 @@ export default function FacilityMasterPage() {
           line-height: 1.6;
         }
 
+        .inline-guide {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 0 0 12px;
+        }
+
+        .inline-guide span {
+          padding: 6px 10px;
+          border-radius: 8px;
+          background: #eef3f1;
+          color: #40514c;
+          font-size: 12px;
+          font-weight: 800;
+        }
+
         .compact-actions {
           align-items: center;
         }
@@ -1854,6 +1959,14 @@ export default function FacilityMasterPage() {
           font-size: 12px;
           color: #5f7b74;
           word-break: break-word;
+        }
+
+        .field-help {
+          display: block;
+          margin-top: 5px;
+          color: #5f7b74;
+          font-size: 11px;
+          line-height: 1.5;
         }
 
         .chip-row {
@@ -2048,6 +2161,36 @@ export default function FacilityMasterPage() {
           background: #f7f9f8;
           padding: 12px;
           margin-bottom: 12px;
+        }
+
+        .selected-column-summary,
+        .impact-box {
+          align-self: stretch;
+        }
+
+        .impact-box {
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 10px;
+        }
+
+        .impact-grid {
+          display: grid;
+          grid-template-columns: max-content minmax(0, 1fr);
+          gap: 6px 10px;
+          font-size: 12px;
+          line-height: 1.45;
+        }
+
+        .impact-grid span {
+          color: #5f7b74;
+          font-weight: 800;
+        }
+
+        .impact-grid strong {
+          min-width: 0;
+          word-break: break-word;
         }
 
         .quantity-card-grid {
@@ -2420,6 +2563,10 @@ export default function FacilityMasterPage() {
         }
 
         @media (max-width: 900px) {
+          .guide-steps {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
           .facility-grid {
             grid-template-columns: 1fr;
           }
@@ -2434,6 +2581,17 @@ export default function FacilityMasterPage() {
           }
 
           .label-config-layout {
+            grid-template-columns: 1fr;
+          }
+        }
+
+        @media (max-width: 560px) {
+          .guide-steps,
+          .overview-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .area-row {
             grid-template-columns: 1fr;
           }
         }

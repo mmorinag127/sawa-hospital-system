@@ -88,6 +88,14 @@
       "key": "facility_management",
       "title": "施設一覧 修正・新規追加マニュアル",
       "kind": "detail",
+      "md": "facility_management_detail_current_stg_20260615.md",
+      "pdf": "",
+      "updatedAt": "2026-06-15 17:20 JST"
+    },
+    {
+      "key": "facility_management",
+      "title": "施設一覧 修正・新規追加マニュアル",
+      "kind": "detail",
       "md": "facility_management_detail_current_stg_20260519_0805.md",
       "pdf": "facility_management_detail_current_stg_20260519_0805.pdf"
     },

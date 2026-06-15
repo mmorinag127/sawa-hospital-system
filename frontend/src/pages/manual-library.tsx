@@ -92,11 +92,16 @@ const groups = [
   {
     "key": "facility_management",
     "title": "施設一覧 修正・新規追加",
-    "description": "施設一覧から施設を開き、基本情報やテンプレートを更新します。",
+    "description": "施設一覧から施設を開き、基本情報、発注書ヘッダー、納品書ヘッダー、ラベル表示を更新します。",
     "manuals": [
       {
         "kind": "detail",
-        "label": "詳細版",
+        "label": "更新版",
+        "href": "/manuals/current-stg-20260519/facility_management_detail_current_stg_20260615.md"
+      },
+      {
+        "kind": "detail",
+        "label": "旧詳細版",
         "href": "/manuals/current-stg-20260519/facility_management_detail_current_stg_20260519_0805.pdf"
       },
       {
