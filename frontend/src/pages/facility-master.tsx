@@ -365,6 +365,7 @@ export default function FacilityMasterPage() {
   const [path, setPath] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchText, setSearchText] = useState("");
+  const [selectedFaxColumnIndex, setSelectedFaxColumnIndex] = useState<number>(-1);
 
   const facilities = useMemo(() => {
     if (!master?.facilities || !Array.isArray(master.facilities)) return [];
@@ -426,6 +427,7 @@ export default function FacilityMasterPage() {
       return;
     }
     setSelectedIndex(index);
+    setSelectedFaxColumnIndex(-1);
   };
 
   const updateFacilityState = (nextFacility: FacilityEntry) => {
@@ -610,6 +612,7 @@ export default function FacilityMasterPage() {
     setSelectedIndex(nextFacilities.length - 1);
     setEditingIndex(nextFacilities.length - 1);
     setEditBaseline(null);
+    setSelectedFaxColumnIndex(-1);
     setMasterText(prettyJson(nextMaster));
     setMessage("新規施設を追加しました。編集内容を保存してください。");
   };
@@ -632,6 +635,7 @@ export default function FacilityMasterPage() {
     setEditingIndex(nextFacilities.length - 1);
     setEditBaseline(null);
     setSearchText("");
+    setSelectedFaxColumnIndex(-1);
     setMessage("選択中の施設を複製しました。施設名と表示名を確認して保存してください。");
   };
 
@@ -723,6 +727,12 @@ export default function FacilityMasterPage() {
     const role = column.role.trim();
     return role === "date" || role === "daypart" || role === "menu_name" || role === "note" || role === "quantity" || role === "quantity_change";
   });
+  const deliveryColumns = quantityColumns.filter((column) => column.deliveryEnabled !== false);
+  const selectedFaxColumn =
+    selectedFaxColumnIndex >= 0 && selectedFaxColumnIndex < faxColumns.length ? faxColumns[selectedFaxColumnIndex] : null;
+  const selectedFaxColumnTitle = selectedFaxColumn
+    ? selectedFaxColumn.header || selectedFaxColumn.deliveryName || selectedFaxColumn.name || `列 ${selectedFaxColumn.index || selectedFaxColumnIndex + 1}`
+    : "";
   const labelPreviewItems = (facilityInfo?.dailyLabelDietTypes || []).map((dietType) => dietLabel(dietType));
 
   return (
@@ -904,33 +914,6 @@ export default function FacilityMasterPage() {
               <div className="form-section">
                 <div className="section-title-row">
                   <div>
-                    <h3>納品書</h3>
-                    <p className="mode-text">納品書に表示する施設名です。未設定の場合は基本情報の施設名を使います。</p>
-                  </div>
-                </div>
-                <div className="form-grid">
-                  <label className="field detail-wide">
-                    <span className="field-label">納品書表示名</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.deliveryNoteFacilityName || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("delivery_note_facility_name", e.target.value)}
-                      placeholder="例: 医療法人　松岡会　佐古グループホーム"
-                    />
-                  </label>
-                  <div className="detail-card delivery-preview">
-                    <p className="detail-label">表示プレビュー</p>
-                    <p className="detail-value multiline">
-                      {formatDeliveryNamePreview(facilityInfo?.deliveryNoteFacilityName || facilityInfo?.name || "-")}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="form-section">
-                <div className="section-title-row">
-                  <div>
                     <h3>注文書・FAX</h3>
                     <p className="mode-text">OCRと注文書作成で使うテンプレートの基本設定です。</p>
                   </div>
@@ -1028,28 +1011,54 @@ export default function FacilityMasterPage() {
               <div className="form-section">
                 <div className="section-title-row">
                   <div>
-                    <h3>発注書の読み取り設定</h3>
-                    <p className="mode-text">発注書で見える列を、そのまま食種・施設区分へ対応付けます。</p>
+                    <h3>発注書ヘッダー設定</h3>
+                    <p className="mode-text">発注書の上部からメニュー行までを見ながら、数量列の意味を設定します。</p>
                   </div>
                 </div>
                 {visibleFaxColumns.length ? (
                   <>
-                    <div className="order-sheet-preview" aria-label="発注書プレビュー">
-                      <table className="preview-table">
+                    <div className="document-fragment order-fragment" aria-label="発注書ヘッダー">
+                      <div className="document-title-row">
+                        <div>
+                          <p className="document-kicker">発注書</p>
+                          <p className="document-title">{facilityInfo?.faxTemplateId || facilityInfo?.name || "施設発注書"}</p>
+                        </div>
+                        <div className="document-meta">
+                          <span>対象週</span>
+                          <strong>2026/6/21 - 6/27</strong>
+                        </div>
+                      </div>
+                      <table className="document-table">
                         <thead>
+                          <tr>
+                            <th colSpan={Math.min(3, visibleFaxColumns.length)} className="document-band">
+                              献立
+                            </th>
+                            <th colSpan={Math.max(1, visibleFaxColumns.length - 3)} className="document-band">
+                              数量・備考
+                            </th>
+                          </tr>
                           <tr>
                             {visibleFaxColumns.map((col, idx) => {
                               const role = col.role.trim();
                               const isQuantity = role === "quantity" || role === "quantity_change";
+                              const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
                               return (
-                                <th key={`${col.index}-${col.role}-${idx}`} className={isQuantity ? "quantity-preview-col" : ""}>
-                                  <span>{col.header || col.name || ROLE_LABELS[role] || "未設定"}</span>
+                                <th key={`${col.index}-${col.role}-${idx}`} className={isQuantity ? "quantity-preview-col editable-column" : ""}>
                                   {isQuantity ? (
-                                    <small>
-                                      {dietLabel(col.dietType)} / {areaLabel(col.areaId)}
-                                    </small>
+                                    <button
+                                      className={`cell-edit-button ${sourceIndex === selectedFaxColumnIndex ? "active" : ""}`}
+                                      type="button"
+                                      onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
+                                    >
+                                      <span>{col.header || col.name || "数量"}</span>
+                                      <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
+                                    </button>
                                   ) : (
-                                    <small>{ROLE_LABELS[role] || role || "列"}</small>
+                                    <>
+                                      <span>{col.header || col.name || ROLE_LABELS[role] || "未設定"}</span>
+                                      <small>{ROLE_LABELS[role] || role || "列"}</small>
+                                    </>
                                   )}
                                 </th>
                               );
@@ -1076,58 +1085,167 @@ export default function FacilityMasterPage() {
                         </tbody>
                       </table>
                     </div>
-                    <div className="quantity-card-grid">
-                      {quantityColumns.map((col) => {
-                        const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
-                        return (
-                          <div className="quantity-card" key={`${col.index}-${sourceIndex}`}>
-                            <div>
-                              <p className="detail-label">数量列</p>
-                              <p className="quantity-title">{col.header || col.name || `列 ${col.index || sourceIndex + 1}`}</p>
-                            </div>
-                            <label className="field">
-                              <span className="field-label">食種</span>
-                              <select
-                                className="input"
-                                value={col.dietType || ""}
-                                disabled={!isEditing}
-                                onChange={(e) => updateFaxColumn(sourceIndex, { dietType: e.target.value })}
-                              >
-                                <option value="">未設定</option>
-                                {col.dietType && EXTRA_DIET_LABELS[col.dietType] ? (
-                                  <option value={col.dietType}>{EXTRA_DIET_LABELS[col.dietType]}</option>
-                                ) : null}
-                                {DAILY_LABEL_DIET_OPTIONS.map((option) => (
-                                  <option key={option.value} value={option.value}>
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="field">
-                              <span className="field-label">施設区分</span>
-                              <input
-                                className="input"
-                                value={areaLabel(col.areaId)}
-                                disabled={!isEditing}
-                                onChange={(e) => updateFaxColumn(sourceIndex, { areaId: e.target.value })}
-                                placeholder="例: 2F、3F、通所、共通"
-                              />
-                            </label>
-                            <label className="field">
-                              <span className="field-label">納品書での列名</span>
-                              <input
-                                className="input"
-                                value={col.deliveryName || ""}
-                                disabled={!isEditing}
-                                onChange={(e) => updateFaxColumn(sourceIndex, { deliveryName: e.target.value })}
-                                placeholder={col.header || col.name || "例: 常食2F"}
-                              />
-                            </label>
+                    <div className="column-editor">
+                      {selectedFaxColumn ? (
+                        <>
+                          <div>
+                            <p className="detail-label">選択中の列</p>
+                            <p className="quantity-title">{selectedFaxColumnTitle}</p>
                           </div>
-                        );
-                      })}
+                          <label className="field">
+                            <span className="field-label">発注書の見出し</span>
+                            <input
+                              className="input"
+                              value={selectedFaxColumn.header || ""}
+                              disabled={!isEditing}
+                              onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { header: e.target.value })}
+                              placeholder="発注書に書かれている見出し"
+                            />
+                          </label>
+                          <label className="field">
+                            <span className="field-label">食種</span>
+                            <select
+                              className="input"
+                              value={selectedFaxColumn.dietType || ""}
+                              disabled={!isEditing}
+                              onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { dietType: e.target.value })}
+                            >
+                              <option value="">未設定</option>
+                              {selectedFaxColumn.dietType && EXTRA_DIET_LABELS[selectedFaxColumn.dietType] ? (
+                                <option value={selectedFaxColumn.dietType}>{EXTRA_DIET_LABELS[selectedFaxColumn.dietType]}</option>
+                              ) : null}
+                              {DAILY_LABEL_DIET_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span className="field-label">施設区分</span>
+                            <input
+                              className="input"
+                              value={areaLabel(selectedFaxColumn.areaId)}
+                              disabled={!isEditing}
+                              onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { areaId: e.target.value })}
+                              placeholder="例: 共通、2F、3F、通所"
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <p className="subtle">発注書ヘッダーの数量列を選択すると、ここで内容を編集できます。</p>
+                      )}
                     </div>
+                  </>
+                ) : (
+                  <div className="empty-guide">
+                    <p className="subtle">発注書の列設定が未設定です。既存施設を複製するか、上級設定から列を追加してください。</p>
+                    <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                      数量列を追加
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="form-section">
+                <div className="section-title-row">
+                  <div>
+                    <h3>納品書ヘッダー設定</h3>
+                    <p className="mode-text">納品書の上部からメニュー行までを見ながら、表示名と列名を確認します。</p>
+                  </div>
+                </div>
+                <div className="document-fragment delivery-fragment" aria-label="納品書ヘッダー">
+                  <div className="document-title-row">
+                    <div>
+                      <p className="document-kicker">納品書</p>
+                      <p className="document-title multiline">
+                        {formatDeliveryNamePreview(facilityInfo?.deliveryNoteFacilityName || facilityInfo?.name || "施設名")}
+                      </p>
+                    </div>
+                    <div className="document-meta">
+                      <span>株式会社アドオンミール</span>
+                      <strong>2026/6/21</strong>
+                    </div>
+                  </div>
+                  <table className="document-table delivery-header-table">
+                    <thead>
+                      <tr>
+                        <th className="document-band">日付</th>
+                        <th className="document-band">区分</th>
+                        <th className="document-band menu-column">メニュー名</th>
+                        {deliveryColumns.map((col) => {
+                          const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
+                          return (
+                            <th key={`${col.index}-${sourceIndex}`} className="editable-column">
+                              <button
+                                className={`cell-edit-button ${sourceIndex === selectedFaxColumnIndex ? "active" : ""}`}
+                                type="button"
+                                onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
+                              >
+                                <span>{col.deliveryName || col.deliveryHeader || col.header || col.name || "数量"}</span>
+                                <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
+                              </button>
+                            </th>
+                          );
+                        })}
+                        <th className="document-band">備考</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>6/21</td>
+                        <td>昼</td>
+                        <td>カレイの照焼き 添)小松菜</td>
+                        {deliveryColumns.map((col, idx) => (
+                          <td key={`${col.index}-${idx}`}>12</td>
+                        ))}
+                        <td>添え12 / 卵禁1</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="delivery-editor-grid">
+                  <label className="field">
+                    <span className="field-label">納品書の施設名</span>
+                    <input
+                      className="input"
+                      value={facilityInfo?.deliveryNoteFacilityName || ""}
+                      disabled={!isEditing}
+                      onChange={(e) => updateSelectedField("delivery_note_facility_name", e.target.value)}
+                      placeholder="未設定の場合は施設名を使用"
+                    />
+                  </label>
+                  {selectedFaxColumn ? (
+                    <>
+                      <label className="field">
+                        <span className="field-label">納品書での列名</span>
+                        <input
+                          className="input"
+                          value={selectedFaxColumn.deliveryName || ""}
+                          disabled={!isEditing}
+                          onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { deliveryName: e.target.value })}
+                          placeholder={selectedFaxColumn.header || selectedFaxColumn.name || "例: 常食2F"}
+                        />
+                      </label>
+                      <label className="field">
+                        <span className="field-label">納品書で表示</span>
+                        <select
+                          className="input"
+                          value={selectedFaxColumn.deliveryEnabled === false ? "false" : "true"}
+                          disabled={!isEditing}
+                          onChange={(e) => updateFaxColumn(selectedFaxColumnIndex, { deliveryEnabled: e.target.value === "true" })}
+                        >
+                          <option value="true">表示する</option>
+                          <option value="false">表示しない</option>
+                        </select>
+                      </label>
+                    </>
+                  ) : (
+                    <p className="subtle">納品書ヘッダーの数量列を選択すると、列名と表示有無を編集できます。</p>
+                  )}
+                </div>
+                {visibleFaxColumns.length ? (
+                  <>
                     <details className="advanced-details">
                       <summary>内部列設定を開く</summary>
                       <div className="section-title-row advanced-title-row">
@@ -1244,12 +1362,7 @@ export default function FacilityMasterPage() {
                     </details>
                   </>
                 ) : (
-                  <div className="empty-guide">
-                    <p className="subtle">発注書の列設定が未設定です。既存施設を複製するか、上級設定から列を追加してください。</p>
-                    <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
-                      数量列を追加
-                    </button>
-                  </div>
+                  null
                 )}
               </div>
 
@@ -1541,9 +1654,6 @@ export default function FacilityMasterPage() {
         }
 
         .search-field {
-          position: sticky;
-          top: 0;
-          z-index: 1;
           background: #ffffff;
           padding-bottom: 4px;
         }
@@ -1779,6 +1889,134 @@ export default function FacilityMasterPage() {
 
         .quantity-preview-col {
           min-width: 98px;
+        }
+
+        .document-fragment {
+          width: 100%;
+          overflow-x: auto;
+          border: 1px solid rgba(31, 42, 42, 0.18);
+          border-radius: 8px;
+          background: #fffdf8;
+          margin-bottom: 12px;
+        }
+
+        .document-title-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+          min-width: 760px;
+          padding: 14px 16px;
+          border-bottom: 1px solid rgba(31, 42, 42, 0.16);
+          background: #ffffff;
+        }
+
+        .document-kicker {
+          margin: 0 0 6px;
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          color: #5f7b74;
+        }
+
+        .document-title {
+          margin: 0;
+          font-size: 20px;
+          line-height: 1.4;
+          font-weight: 900;
+        }
+
+        .document-title.multiline {
+          white-space: pre-line;
+        }
+
+        .document-meta {
+          display: grid;
+          gap: 4px;
+          min-width: 160px;
+          text-align: right;
+          font-size: 12px;
+          color: #40514c;
+        }
+
+        .document-meta strong {
+          color: #1f2a2a;
+          font-size: 14px;
+        }
+
+        .document-table {
+          width: 100%;
+          min-width: 900px;
+          border-collapse: collapse;
+          table-layout: auto;
+          font-size: 12px;
+        }
+
+        .document-table th,
+        .document-table td {
+          border: 1px solid rgba(31, 42, 42, 0.24);
+          padding: 9px 8px;
+          text-align: center;
+          vertical-align: middle;
+          background: #fffefa;
+          min-width: 84px;
+          white-space: normal;
+        }
+
+        .document-table th {
+          background: #f2f5f2;
+          font-weight: 900;
+        }
+
+        .document-band {
+          background: #e9efec !important;
+        }
+
+        .menu-column {
+          min-width: 180px;
+        }
+
+        .editable-column {
+          padding: 0 !important;
+        }
+
+        .cell-edit-button {
+          display: grid;
+          gap: 3px;
+          width: 100%;
+          min-height: 58px;
+          padding: 8px;
+          border: 2px solid transparent;
+          background: transparent;
+          color: #1f2a2a;
+          font: inherit;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .cell-edit-button:hover,
+        .cell-edit-button.active {
+          border-color: #1f2a2a;
+          background: #eef3f1;
+        }
+
+        .cell-edit-button small {
+          color: #5f7b74;
+          font-size: 11px;
+          font-weight: 800;
+        }
+
+        .column-editor,
+        .delivery-editor-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          align-items: end;
+          border: 1px solid rgba(31, 42, 42, 0.12);
+          border-radius: 8px;
+          background: #f7f9f8;
+          padding: 12px;
+          margin-bottom: 12px;
         }
 
         .quantity-card-grid {
