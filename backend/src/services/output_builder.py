@@ -616,6 +616,18 @@ def _daily_label_comparable_diet_types_for_facility(facility_config: dict | None
         configured = facility_config.get("daily_label_comparable_diet_types")
         if isinstance(configured, list):
             return [str(item).strip() for item in configured if str(item).strip()]
+        override = facility_config.get("fax_template_override")
+        columns = override.get("columns") if isinstance(override, dict) else None
+        if isinstance(columns, list):
+            derived: set[str] = set()
+            for column in columns:
+                if not isinstance(column, dict) or str(column.get("role") or "").strip() != "quantity":
+                    continue
+                diet_key = _normalize_diet_key(column.get("diet_type"))
+                if diet_key and diet_key not in {"regular", "standard"}:
+                    derived.add(diet_key)
+            if derived:
+                return sorted(derived)
     return sorted(DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID.get(str(facility_id or "").strip(), set()))
 
 
@@ -2103,6 +2115,9 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
                 # 付属品は area/diet を跨いで1袋にまとめる。
                 key_parts.append("__condiment__")
                 continue
+            if part == "diet_type" and line.get("source_diet_type"):
+                key_parts.append(line.get("source_diet_type"))
+                continue
             key_parts.append(line.get(part))
         key = tuple(key_parts)
         if key not in grouped:
@@ -2114,6 +2129,7 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
                 "menu_name": line.get("menu_name"),
                 "menu_category": menu_category,
                 "diet_type": None if is_condiment else line.get("diet_type"),
+                "source_diet_type": None if is_condiment else line.get("source_diet_type"),
                 "area_id": None if is_condiment else line.get("area_id"),
                 "bag_type": "condiment" if is_condiment else default_bag_type,
                 "parent_menu_name": line.get("parent_menu_name"),

@@ -60,6 +60,79 @@ def test_daily_labels_use_source_diet_for_diabetes_after_regular_output_mapping(
     assert menus == ["副菜①（糖尿）"]
 
 
+def test_daily_labels_derive_comparable_soft_from_facility_quantity_columns():
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(
+        [
+            {
+                "facility": "FAC00005",
+                "date": "2026-06-21",
+                "daypart": "昼",
+                "menu_name": "カレイの照焼き",
+                "menu_category": "主菜",
+                "diet_type": "soft",
+                "quantity": 3,
+                "menu_qty_per_serving": 100,
+                "menu_unit_type": "g",
+            }
+        ],
+        {
+            "fax_template_override": {
+                "columns": [
+                    {"role": "quantity", "diet_type": "soft", "area_id": "X"},
+                    {"role": "quantity", "diet_type": "regular_bag", "area_id": "X"},
+                ]
+            }
+        },
+        "FAC00005",
+    )
+
+    assert _label_menu_values_for_bags(bags) == ["主菜（軟菜）"]
+
+
+def test_bag_rows_preserve_source_diet_type_for_label_display_after_output_mapping():
+    bags = output_builder._build_bags(
+        {
+            "id": "ORD-ikebukuro",
+            "facility": "FAC00005",
+            "lines": [
+                {
+                    "date": "2026-06-21",
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "regular",
+                    "source_diet_type": "soft",
+                    "area_id": "X",
+                    "quantity": 3,
+                    "menu_qty_per_serving": 100,
+                    "menu_unit_type": "g",
+                },
+                {
+                    "date": "2026-06-21",
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "regular_bag",
+                    "area_id": "X",
+                    "quantity": 2,
+                    "menu_qty_per_serving": 100,
+                    "menu_unit_type": "g",
+                },
+            ],
+        },
+        {},
+        {"zero_as_empty": True},
+    )
+
+    assert [
+        (bag["diet_type"], bag.get("source_diet_type"), bag["quantity"])
+        for bag in sorted(bags, key=lambda item: str(item.get("diet_type")))
+    ] == [
+        ("regular", "soft", 3.0),
+        ("regular_bag", None, 2.0),
+    ]
+
+
 def test_daily_labels_separate_soft_and_mixer_categories():
     menus = _label_menu_values_for_bags(
         [

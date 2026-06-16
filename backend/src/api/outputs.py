@@ -264,6 +264,46 @@ def _build_delivery_render_columns(columns: list | None) -> list[dict]:
     return render_columns
 
 
+def _delivery_column_widths(render_columns: list[dict]) -> list[float]:
+    quantity_indexes = [
+        idx
+        for idx, column in enumerate(render_columns)
+        if column.get("kind") == "quantity"
+        and column.get("source") not in {"date", "daypart", "menu_category", "menu_display", "note"}
+    ]
+    fixed_widths: dict[int, float] = {}
+    for idx, column in enumerate(render_columns):
+        source = column.get("source")
+        if source == "date":
+            fixed_widths[idx] = 8.0
+        elif source == "daypart":
+            fixed_widths[idx] = 5.0
+        elif source == "menu_category":
+            fixed_widths[idx] = 8.0
+        elif source == "menu_display":
+            fixed_widths[idx] = 30.0
+        elif source == "note":
+            fixed_widths[idx] = 18.0
+    remaining = max(100.0 - sum(fixed_widths.values()), 0.0)
+    quantity_width = remaining / len(quantity_indexes) if quantity_indexes else 0.0
+    widths: list[float] = []
+    fallback_width = 100.0 / len(render_columns) if render_columns else 100.0
+    for idx, _column in enumerate(render_columns):
+        if idx in fixed_widths:
+            widths.append(fixed_widths[idx])
+        elif idx in quantity_indexes and quantity_width:
+            widths.append(quantity_width)
+        else:
+            widths.append(fallback_width)
+    total = sum(widths)
+    return [(width / total * 100.0) if total else fallback_width for width in widths]
+
+
+def _delivery_colgroup_html(render_columns: list[dict]) -> str:
+    col_tags = [f'<col style="width: {width:.3f}%">' for width in _delivery_column_widths(render_columns)]
+    return f"<colgroup>{''.join(col_tags)}</colgroup>" if col_tags else ""
+
+
 def _format_delivery_html_cell(value: object) -> str:
     if value is None:
         return ""
@@ -349,6 +389,7 @@ def _render_editable_delivery_note_html(
             f'<th class="{" ".join(class_names)}" contenteditable="true" data-edit="h-{idx}">{escape(str(column.get("header") or ""))}</th>'
         )
     header_html = "".join(header_cells)
+    colgroup_html = _delivery_colgroup_html(render_columns)
     row_html: list[str] = []
     for row_idx, row in enumerate(render_rows):
         daypart = str(row.get("daypart") or "")
@@ -440,7 +481,7 @@ def _render_editable_delivery_note_html(
     table {{
       width: 100%;
       border-collapse: collapse;
-      table-layout: auto;
+      table-layout: fixed;
       border: 2px solid #111827;
       background: #ffffff;
     }}
@@ -461,13 +502,7 @@ def _render_editable_delivery_note_html(
     th:first-child, td:first-child {{ border-left-width: 2px; }}
     th:last-child, td:last-child {{ border-right-width: 2px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
-    .col-0 {{ width: 9%; }}
-    .col-1 {{ width: 6%; }}
-    .col-2 {{ width: 9%; }}
-    .col-3 {{ width: 18%; }}
-    th.remarks-cell, td.remarks-cell {{ width: 14%; }}
-    th[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3),
-    td[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3) {{ width: 7%; }}
+    th.remarks-cell, td.remarks-cell {{ font-size: 12px; }}
     [contenteditable="true"] {{ cursor: text; }}
     [contenteditable="true"]:focus {{
       outline: 2px solid #2563eb;
@@ -508,6 +543,7 @@ def _render_editable_delivery_note_html(
       </div>
     </section>
     <table aria-label="納品書">
+      {colgroup_html}
       <thead><tr>{header_html}</tr></thead>
       <tbody>{body_html}</tbody>
     </table>
@@ -644,7 +680,7 @@ def _render_editable_daily_delivery_note_html(
     .facility-box {{ border: 2px solid #111827; min-height: 18mm; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; padding: 4mm; }}
     .company-name {{ font-size: 18px; font-weight: 800; margin-bottom: 5mm; }}
     .company-line {{ font-size: 10px; font-weight: 700; margin: 0 0 3mm; }}
-    table {{ width: 100%; border-collapse: collapse; table-layout: auto; border: 2px solid #111827; background: #ffffff; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; border: 2px solid #111827; background: #ffffff; }}
     th, td {{ border: 1px solid #111827; min-height: 7mm; height: 7mm; padding: 2px 4px; text-align: center; vertical-align: middle; white-space: pre-wrap; word-break: break-word; }}
     th {{ font-weight: 400; font-size: 14px; height: 12mm; min-height: 12mm; }}
     thead th {{ border-top-width: 2px; border-bottom-width: 2px; }}
@@ -653,12 +689,7 @@ def _render_editable_daily_delivery_note_html(
     th:first-child, td:first-child {{ border-left-width: 2px; }}
     th:last-child, td:last-child {{ border-right-width: 2px; }}
     td.menu-cell {{ text-align: left; font-weight: 700; }}
-    .col-0 {{ width: 9%; }}
-    .col-1 {{ width: 6%; }}
-    .col-2 {{ width: 9%; }}
-    .col-3 {{ width: 24%; }}
-    th[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3),
-    td[class*="col-"]:not(.col-0):not(.col-1):not(.col-2):not(.col-3) {{ width: 7%; }}
+    th.remarks-cell, td.remarks-cell {{ font-size: 12px; }}
     [contenteditable="true"] {{ cursor: text; }}
     [contenteditable="true"]:focus {{ outline: 2px solid #2563eb; outline-offset: -2px; background: #eff6ff; }}
     .bundle-page {{ break-after: page; page-break-after: always; }}

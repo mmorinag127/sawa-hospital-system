@@ -83,6 +83,25 @@ def test_delivery_html_facility_name_breaks_matsuokakai_name_into_two_lines():
     assert "医療法人　松岡会　佐古グループホーム" not in html
 
 
+def test_delivery_html_uses_explicit_colgroup_for_menu_and_remarks_widths():
+    render_columns = outputs_api._build_delivery_render_columns(  # noqa: SLF001
+        [
+            {"name": "常食", "source": "quantity", "diet_type": "regular", "area_id": "X", "header": "常食"},
+            {"name": "軟菜", "source": "quantity", "diet_type": "soft", "area_id": "X", "header": "軟菜"},
+            {"name": "ミキサー", "source": "quantity", "diet_type": "mixer", "area_id": "X", "header": "ミキサー"},
+        ]
+    )
+
+    widths = outputs_api._delivery_column_widths(render_columns)  # noqa: SLF001
+    html = outputs_api._delivery_colgroup_html(render_columns)  # noqa: SLF001
+
+    assert round(sum(widths), 3) == 100.0
+    assert widths[3] == 30.0
+    assert widths[-1] == 18.0
+    assert '<col style="width: 30.000%">' in html
+    assert '<col style="width: 18.000%">' in html
+
+
 def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"
