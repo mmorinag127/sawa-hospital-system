@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import zipfile
 
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
@@ -102,12 +103,15 @@ def test_delivery_html_uses_explicit_colgroup_for_menu_and_remarks_widths():
     assert '<col style="width: 18.000%">' in html
 
 
-def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
+def test_daily_label_bundle_returns_zip(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.xlsx"
+    workbook_path = tmp_path / "daily_outputs_2026-03-22_labels.zip"
     workbook = Workbook()
     workbook.active.title = "そよかぜ"
-    workbook.save(workbook_path)
+    inner_path = tmp_path / "2026-03-22_そよかぜ_labels.xlsx"
+    workbook.save(inner_path)
+    with zipfile.ZipFile(workbook_path, "w") as archive:
+        archive.write(inner_path, inner_path.name)
 
     monkeypatch.setattr(
         outputs_api,
@@ -119,7 +123,7 @@ def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
                 "total_orders": 1,
                 "success_orders": 1,
                 "error_orders": 0,
-                "file_format": "xlsx",
+                "file_format": "zip",
             },
         ),
     )
@@ -131,16 +135,17 @@ def test_daily_label_bundle_returns_xlsx(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith(
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    assert "daily_outputs_2026-03-22_labels.xlsx" in response.headers["content-disposition"]
+    assert response.headers["content-type"].startswith("application/zip")
+    assert "daily_outputs_2026-03-22_labels.zip" in response.headers["content-disposition"]
 
 
-def test_daily_label_csv_bundle_returns_csv(monkeypatch, tmp_path):
+def test_daily_label_csv_bundle_returns_zip(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    csv_path = tmp_path / "daily_outputs_2026-03-22_labels_csv.csv"
-    csv_path.write_text("施設名,メニュー\nそよかぜ,献立A\n", encoding="cp932")
+    csv_path = tmp_path / "daily_outputs_2026-03-22_labels_csv.zip"
+    inner_path = tmp_path / "2026-03-22_そよかぜ_labels.csv"
+    inner_path.write_text("メニュー\n献立A\n", encoding="cp932")
+    with zipfile.ZipFile(csv_path, "w") as archive:
+        archive.write(inner_path, inner_path.name)
 
     monkeypatch.setattr(
         outputs_api,
@@ -152,7 +157,7 @@ def test_daily_label_csv_bundle_returns_csv(monkeypatch, tmp_path):
                 "total_orders": 1,
                 "success_orders": 1,
                 "error_orders": 0,
-                "file_format": "csv",
+                "file_format": "zip",
             },
         ),
     )
@@ -164,8 +169,8 @@ def test_daily_label_csv_bundle_returns_csv(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/csv")
-    assert "daily_outputs_2026-03-22_labels_csv.csv" in response.headers["content-disposition"]
+    assert response.headers["content-type"].startswith("application/zip")
+    assert "daily_outputs_2026-03-22_labels_csv.zip" in response.headers["content-disposition"]
 
 
 def test_weekly_weight_returns_xlsx(monkeypatch, tmp_path):

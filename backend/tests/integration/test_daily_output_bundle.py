@@ -1,5 +1,7 @@
+import csv
 import pathlib
 import sys
+import zipfile
 from datetime import date as dt_date
 from datetime import datetime
 from io import BytesIO
@@ -304,13 +306,16 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
         bundle_type="labels",
     )
 
-    assert bundle_path.suffix == ".xlsx"
-    assert summary["file_format"] == "xlsx"
+    assert bundle_path.suffix == ".zip"
+    assert summary["file_format"] == "zip"
     assert summary["success_orders"] == 2
-    workbook = load_workbook(bundle_path)
-    assert workbook.sheetnames == ["メニュー", "大和なでしこ", "そよかぜ"]
-    soyokaze = workbook
-    yamato = workbook
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = sorted(archive.namelist())
+        assert names == ["2026-03-22_そよかぜ_labels.xlsx", "2026-03-22_大和なでしこ_labels.xlsx"]
+        soyokaze = load_workbook(BytesIO(archive.read("2026-03-22_そよかぜ_labels.xlsx")))
+        yamato = load_workbook(BytesIO(archive.read("2026-03-22_大和なでしこ_labels.xlsx")))
+    assert soyokaze.sheetnames == ["そよかぜ"]
+    assert yamato.sheetnames == ["大和なでしこ"]
     assert soyokaze["そよかぜ"].max_row == 3
     assert yamato["大和なでしこ"].max_row == 2
     assert soyokaze["そよかぜ"]["A2"].value == "献立A"
@@ -361,14 +366,16 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
         bundle_type="labels_csv",
     )
 
-    assert bundle_path.suffix == ".csv"
-    assert summary["file_format"] == "csv"
+    assert bundle_path.suffix == ".zip"
+    assert summary["file_format"] == "zip"
     assert summary["success_orders"] == 2
-    content = bundle_path.read_text(encoding="cp932")
-    assert "施設名,施設コード,注文ID,メニュー" in content
-    assert "そよかぜ,FAC001,ORD-1 / ORD-2,献立A" in content
-    assert "そよかぜ,FAC001,ORD-1 / ORD-2,献立B" in content
-    assert "大和なでしこ,FAC002,ORD-3,献立C" in content
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = sorted(archive.namelist())
+        assert names == ["2026-03-22_そよかぜ_labels.csv", "2026-03-22_大和なでしこ_labels.csv"]
+        soyokaze_csv = archive.read("2026-03-22_そよかぜ_labels.csv").decode("cp932")
+        yamato_csv = archive.read("2026-03-22_大和なでしこ_labels.csv").decode("cp932")
+    assert list(csv.DictReader(soyokaze_csv.splitlines())) == [{"メニュー": "献立A"}, {"メニュー": "献立B"}]
+    assert list(csv.DictReader(yamato_csv.splitlines())) == [{"メニュー": "献立C"}]
 
 
 def test_build_label_csv_for_order_filters_target_date(tmp_path, monkeypatch):

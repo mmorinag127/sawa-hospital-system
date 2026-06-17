@@ -990,8 +990,7 @@ export default function DailyDeliveryNotesPage() {
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
-      const defaultExt = bundleType === "labels_csv" ? "csv" : "xlsx";
-      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.${defaultExt}`;
+      const filename = extractFilename(contentDisposition) || `daily_outputs_${date}_${bundleType}.zip`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
