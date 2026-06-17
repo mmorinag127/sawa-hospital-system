@@ -5007,6 +5007,7 @@ def _line_to_label_bag(order_id: str, facility_code: str | None, line: dict) -> 
         "menu_name": line.get("menu_name"),
         "menu_category": line.get("menu_category"),
         "diet_type": line.get("diet_type"),
+        "source_diet_type": line.get("source_diet_type"),
         "area_id": line.get("area_id"),
         "bag_type": line.get("bag_type"),
         "menu_unit_type": line.get("menu_unit_type"),
@@ -5051,7 +5052,13 @@ def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_dat
         )
         if key in existing_keys:
             continue
-        group.setdefault("bags", []).append(_line_to_label_bag(order_id, facility_code, line))
+        zero_bag = _line_to_label_bag(order_id, facility_code, line)
+        zero_bags = _apply_daily_label_facility_rules_to_bags(
+            [zero_bag],
+            group.get("facility_config") if isinstance(group.get("facility_config"), dict) else None,
+            facility_code,
+        )
+        group.setdefault("bags", []).extend(zero_bags)
         existing_keys.add(key)
 
 

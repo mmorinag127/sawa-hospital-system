@@ -378,6 +378,74 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
     assert list(csv.DictReader(yamato_csv.splitlines())) == [{"メニュー": "献立C"}]
 
 
+def test_daily_label_csv_zero_quantity_rows_keep_facility_diet_suffix(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda target_date, status=None: [{"id": "ORD-IKEBUKURO", "facility": "FAC00005"}],
+    )
+    facility_config = {
+        "facility_name": "池袋病院内事業所 傑合同会社",
+        "fax_template_override": {
+            "columns": [
+                {"role": "quantity", "diet_type": "soft", "area_id": "X"},
+                {"role": "quantity", "diet_type": "regular_bag", "area_id": "X"},
+            ],
+        },
+    }
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: facility_config)
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id, **kwargs: {
+            "bags": [],
+            "label_profile": {},
+            "facility_config": facility_config,
+            "order_lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "soft",
+                    "area_id": "X",
+                    "quantity_original": 0,
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "menu_temp_type": "温菜",
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "regular_bag",
+                    "area_id": "X",
+                    "quantity_original": 0,
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "menu_temp_type": "温菜",
+                },
+            ],
+            "order_for_outputs": {"id": order_id, "facility": "FAC00005", "lines": []},
+            "delivery_source_for_outputs": {"id": order_id, "facility": "FAC00005", "lines": []},
+            "invoice_template": {"columns": [], "include_menu_name": True},
+            "quantity_rules": {"zero_as_empty": True},
+        },
+    )
+
+    bundle_path, summary = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="labels_csv")
+
+    assert summary["success_orders"] == 1
+    with zipfile.ZipFile(bundle_path) as archive:
+        [csv_name] = archive.namelist()
+        rows = list(csv.DictReader(archive.read(csv_name).decode("cp932").splitlines()))
+    assert {row["メニュー"] for row in rows} == {"主菜（軟菜）", "主菜（袋分け）"}
+    assert {row["内容量"] for row in rows} == {"0g"}
+    assert {row[""] for row in rows} == {"0人前"}
+
+
 def test_build_label_csv_for_order_filters_target_date(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
