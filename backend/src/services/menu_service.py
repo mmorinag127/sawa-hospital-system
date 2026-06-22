@@ -1085,10 +1085,21 @@ def _index_menu_master_resolutions(menu_master_resolutions: list[dict] | None) -
     for raw in menu_master_resolutions or []:
         if not isinstance(raw, dict):
             continue
-        source_name = str(raw.get("source_name") or "").strip()
-        if not source_name:
-            continue
-        indexed[source_name] = raw
+        keys = [
+            str(raw.get("source_name") or "").strip(),
+            str(raw.get("name") or "").strip(),
+            str(raw.get("issue_key") or "").strip(),
+            str(raw.get("normalized_name") or "").strip(),
+        ]
+        normalized_source = _normalize_menu_name(raw.get("source_name"))
+        if normalized_source:
+            keys.append(normalized_source)
+        normalized_name = _normalize_menu_name(raw.get("name"))
+        if normalized_name:
+            keys.append(normalized_name)
+        for key in keys:
+            if key:
+                indexed[key] = raw
     return indexed
 
 
@@ -1097,9 +1108,11 @@ def _build_menu_master_resolution_issue(
     seed_patch: dict[str, object] | None,
     candidates: list[dict],
 ) -> dict:
+    normalized_name = _normalize_menu_name(name)
     return {
         "source_name": name,
-        "normalized_name": _normalize_menu_name(name),
+        "normalized_name": normalized_name,
+        "issue_key": normalized_name or name,
         "reason": "candidate_review_required" if candidates else "missing",
         "suggested_patch": {
             "name": name,
@@ -1310,6 +1323,14 @@ def _build_upload_menu_master_plan(
         issue["candidates"] = candidates
         return {"issue": issue}
     return {"issue": _build_menu_master_resolution_issue(name, seed_patch, candidates)}
+
+
+def _resolve_menu_master_resolution(resolution_map: dict[str, dict], name: str) -> dict | None:
+    normalized_name = _normalize_menu_name(name)
+    for key in (name, normalized_name):
+        if key and key in resolution_map:
+            return resolution_map[key]
+    return None
 
 
 def _get_or_create_menu_master_without_rename(
@@ -2008,7 +2029,7 @@ def create_menu(
                 session,
                 name,
                 seed_patch,
-                resolution_map.get(name),
+                _resolve_menu_master_resolution(resolution_map, name),
                 require_bagging_review=False,
             )
             issue = plan.get("issue") if isinstance(plan, dict) else None

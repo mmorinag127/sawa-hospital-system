@@ -341,6 +341,25 @@ def test_monthly_menus_upload_passes_review_resolutions(monkeypatch):
     assert captured["require_menu_master_review"] is True
 
 
+def test_menu_master_resolution_index_accepts_issue_key_and_normalized_name():
+    indexed = menus_api.menu_service._index_menu_master_resolutions(  # noqa: SLF001
+        [
+            {
+                "issue_key": "白身魚フライ",
+                "source_name": "白身魚フライ 添)キャベツ",
+                "name": "白身魚フライ",
+                "action": "create",
+                "unit_type": "count",
+                "qty_per_serving": 1,
+            }
+        ]
+    )
+
+    assert indexed["白身魚フライ"]["action"] == "create"
+    assert indexed["白身魚フライ 添)キャベツ"]["action"] == "create"
+    assert indexed[menus_api.menu_service._normalize_menu_name("白身魚フライ 添)キャベツ")]["action"] == "create"  # noqa: SLF001
+
+
 def test_monthly_menus_upload_returns_review_required_payload(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("OPERATOR_USER", "operator")

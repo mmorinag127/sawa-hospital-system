@@ -780,6 +780,22 @@ export default function MonthlyMenuEditorPage() {
     setPendingReview(null);
   };
 
+  const applyPendingReviewIssues = (targetFile: File, issues: MenuMasterReviewIssue[]) => {
+    const filteredIssues = issues.filter(Boolean);
+    const resolutions = Object.fromEntries(
+      filteredIssues.map((issue, index) => {
+        const nextResolution = buildInitialReviewResolution(issue, index);
+        const existingResolution = pendingReview?.resolutions[nextResolution.issue_key];
+        return [nextResolution.issue_key, existingResolution || nextResolution];
+      }),
+    );
+    setPendingReview({
+      file: targetFile,
+      issues: filteredIssues,
+      resolutions,
+    });
+  };
+
   const confirmPendingReview = async () => {
     if (!monthId || Array.isArray(monthId) || !pendingReview) return;
     const unresolved = pendingReview.issues.find((issue, index) => {
@@ -822,6 +838,16 @@ export default function MonthlyMenuEditorPage() {
       const status = err?.response?.status;
       if (status === 403) {
         setMessage("アップロード失敗: 権限がありません。");
+      } else if (
+        status === 409 &&
+        detail &&
+        typeof detail === "object" &&
+        (detail as { code?: string }).code === "menu_master_review_required" &&
+        Array.isArray((detail as { issues?: unknown[] }).issues)
+      ) {
+        const issues = ((detail as { issues?: MenuMasterReviewIssue[] }).issues || []).filter(Boolean);
+        applyPendingReviewIssues(pendingReview.file, issues);
+        setMessage("未登録メニューの確認がまだ残っています。表示された項目を確認してください。");
       } else {
         setMessage(`アップロード失敗: ${formatErrorDetail(detail, "アップロードに失敗しました。")}`);
       }
