@@ -52,88 +52,74 @@ def test_list_orders_default_is_lightweight_without_runtime(monkeypatch) -> None
     assert res.json()["orders"][0]["id"] == "ORD-LIST-DEFAULT-001"
 
 
-def test_get_draft_sheet_reads_saved_artifacts_without_rebuilding_hakodate_projection(monkeypatch) -> None:
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_order_by_id",
-        lambda order_id: {"id": order_id, "status": "要確認"},
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_latest_sheet_draft",
-        lambda order_id, **_kwargs: {
-            "id": "ODR-SAVED-001",
-            "order_id": order_id,
-            "base_evidence_run_id": "EVD-SAVED-001",
-            "draft_state": "draft_ready",
-            "blockers_json": [],
-            "warnings_json": ["review_required"],
-            "draft_sheet_json": {
-                "fields": ["date", "menu", "qty.normal"],
-                "header": ["日付", "献立", "常食"],
-                "rows": [["04/26", "大豆のトマト煮", "41"]],
-                "row_ids": ["row-1"],
-                "source": "hakodate_ocr_evidence_sheet",
-                "blockers": [],
-                "warnings": [],
-            },
-        },
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_cached_hakodate_assignment_preview",
-        lambda _order_id: {
-            "status": "ready",
-            "target_cells": [{"target_cell_id": "cell-1", "sheet_cell": "D3", "bbox": [1, 2, 3, 4]}],
-            "assignments": [{"target_cell_id": "cell-1", "assigned_value": "41"}],
-            "sheet_output": {"cells": {"D3": {"value_normalized": "41"}}},
-        },
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "build_order_hakodate_projected_sheet",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("draft-sheet read path must not rebuild Hakodate projection")
-        ),
-    )
+def test_list_orders_passes_limit_and_cursor_to_service(monkeypatch) -> None:
+    calls = []
 
-    res = client.get("/orders/ORD-DRAFT-READ/draft-sheet?compact=1&quantity_assignment_strategy=hakodate")
+    def _list_orders_page(
+        status=None,
+        include_archived=False,
+        limit=None,
+        before_received_at=None,
+        before_id=None,
+    ):
+        calls.append(
+            {
+                "status": status,
+                "include_archived": include_archived,
+                "limit": limit,
+                "before_received_at": before_received_at,
+                "before_id": before_id,
+            }
+        )
+        return {
+            "orders": [
+                {
+                    "id": "ORD-LIST-LIMIT-001",
+                    "status": "要確認",
+                    "document": "file://dummy.pdf",
+                    "message_id": "msg-list-limit-001",
+                    "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
+                }
+            ],
+            "next_cursor": {"received_at": "2026-03-24T09:00:00", "id": "ORD-LIST-LIMIT-001"},
+            "has_more": True,
+        }
+
+    monkeypatch.setattr(orders_api.order_service, "list_orders_page", _list_orders_page)
+
+    res = client.get(
+        "/orders?include_runtime=false&limit=25"
+        "&before_received_at=2026-03-24T09:00:00&before_id=ORD-CURSOR&include_archived=false"
+    )
 
     assert res.status_code == 200
-    payload = res.json()
-    assert payload["draft_id"] == "ODR-SAVED-001"
-    assert payload["rows"] == [["04/26", "大豆のトマト煮", "41"]]
-    assert payload["hakodate_assignment"]["assignments"] == [
-        {"target_cell_id": "cell-1", "assigned_value": "41"}
+    assert res.json()["orders"][0]["id"] == "ORD-LIST-LIMIT-001"
+    assert res.json()["has_more"] is True
+    assert calls == [
+        {
+            "status": None,
+            "include_archived": False,
+            "limit": 25,
+            "before_received_at": "2026-03-24T09:00:00",
+            "before_id": "ORD-CURSOR",
+        }
     ]
 
 
-def test_get_draft_sheet_blocks_when_saved_artifact_is_missing(monkeypatch) -> None:
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_order_by_id",
-        lambda order_id: {"id": order_id, "status": "要確認"},
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_latest_sheet_draft",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "build_order_hakodate_projected_sheet",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("missing saved artifact must not trigger read-time projection")
-        ),
-    )
+def test_get_draft_sheet_returns_gone_for_legacy_workflow_endpoint() -> None:
+    res = client.get("/orders/ORD-DRAFT-READ/draft-sheet?compact=1&quantity_assignment_strategy=hakodate")
 
+    assert res.status_code == 410
+    assert res.json()["detail"]["error"] == "legacy_order_workflow_disabled"
+    assert res.json()["detail"]["replacement"] == "workflow-v2"
+
+
+def test_get_draft_sheet_missing_artifact_path_returns_gone_for_legacy_workflow_endpoint() -> None:
     res = client.get("/orders/ORD-DRAFT-MISSING/draft-sheet?compact=1&quantity_assignment_strategy=hakodate")
 
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["rows"] == []
-    assert payload["review_state"] == "blocked"
-    assert "hakodate_sheet_artifact_missing" in payload["blockers"]
+    assert res.status_code == 410
+    assert res.json()["detail"]["error"] == "legacy_order_workflow_disabled"
+    assert res.json()["detail"]["endpoint"] == "draft-sheet"
 
 
 def test_hakodate_overlay_preview_endpoint_uses_canonical_service(monkeypatch) -> None:

@@ -1186,10 +1186,6 @@ def list_orders(
         for order in orders:
             job_id = order.get("ocr_job_id")
             job = jobs.get(job_id) if job_id else None
-            if not job:
-                order_id = str(order.get("id") or "").strip()
-                if order_id:
-                    job = get_latest_order_job(order_id)
             if job:
                 error_message = job.get("error_message")
                 if job.get("status") == "failed" and _is_read_timeout_error(error_message):
