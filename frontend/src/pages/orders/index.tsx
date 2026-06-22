@@ -384,11 +384,13 @@ export default function OrdersPage() {
           status: statusFilter,
           include_ocr: false,
           include_archived: showArchived,
+          include_candidate_summary: true,
           limit: runtimeLimit,
         }
       : {
           include_ocr: false,
           include_archived: showArchived,
+          include_candidate_summary: true,
           limit: runtimeLimit,
         };
     setIsHydratingRuntime(true);
