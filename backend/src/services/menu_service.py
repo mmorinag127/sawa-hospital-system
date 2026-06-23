@@ -2021,6 +2021,7 @@ def create_menu(
     resolution_map = _index_menu_master_resolutions(menu_master_resolutions)
     with session_scope() as session:
         master_plans: dict[str, dict] = {}
+        master_plans_by_normalized_name: dict[str, dict] = {}
         issues: list[dict] = []
         for name in names:
             meta = next((item for item in parsed_items if str(item.get("name") or "") == name), {})
@@ -2043,6 +2044,9 @@ def create_menu(
                     "seed_fields": dict(seed_patch or {}),
                 }
             master_plans[name] = plan
+            normalized_plan_name = _normalize_menu_name(name)
+            if normalized_plan_name:
+                master_plans_by_normalized_name[normalized_plan_name] = plan
         if issues and require_menu_master_review:
             raise MenuMasterResolutionRequired(issues)
     with session_scope() as session:
@@ -2079,7 +2083,12 @@ def create_menu(
             if not name:
                 continue
             item_id = f"MMI{uuid4().hex[:6]}"
-            master = _materialize_upload_menu_master_plan(session, name, master_plans[name])
+            plan = master_plans.get(name)
+            if plan is None:
+                plan = master_plans_by_normalized_name.get(_normalize_menu_name(name))
+            if plan is None:
+                raise ValueError(f"menu master resolution plan not found: {name}")
+            master = _materialize_upload_menu_master_plan(session, name, plan)
             item_patch = _extract_master_patch(meta, _MASTER_FIELDS)
             session.add(
                 MonthlyMenuItem(

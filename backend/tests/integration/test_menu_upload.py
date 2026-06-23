@@ -945,6 +945,58 @@ def test_create_menu_dedupes_duplicate_names_within_single_upload(monkeypatch):
         assert [item.name for item in items] == ["ほうれん草和え", "筑前煮"]
 
 
+def test_create_menu_uses_normalized_master_plan_for_name_variants(monkeypatch):
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+    def _parse_name_variants(*_args, **_kwargs):
+        return None, None, [
+            {"name": "ブロッコリーの和え物", "daypart": "朝食", "category": "副菜"},
+            {"name": "ブロッコリ-の和え物", "daypart": "昼食", "category": "副菜"},
+        ], [
+            {
+                "menu_date": date(2026, 7, 1),
+                "daypart": "朝食",
+                "name": "ブロッコリーの和え物",
+                "category": "副菜",
+                "slot_index": 1,
+            },
+            {
+                "menu_date": date(2026, 7, 1),
+                "daypart": "昼食",
+                "name": "ブロッコリ-の和え物",
+                "category": "副菜",
+                "slot_index": 1,
+            },
+        ]
+
+    monkeypatch.setattr(menu_service, "_parse_monthly_menu", _parse_name_variants)
+
+    payload, replaced, item_count = menu_service.create_menu(
+        "2026-07",
+        b"dummy",
+        "july.xlsx",
+        menu_master_resolutions=[_create_resolution("ブロッコリーの和え物")],
+        require_menu_master_review=True,
+    )
+
+    assert replaced is False
+    assert item_count == 2
+    assert payload["id"] == "2026-07"
+
+    with session_scope() as session:
+        masters = session.query(MenuMaster).all()
+        items = session.query(MonthlyMenuItem).order_by(MonthlyMenuItem.daypart.asc()).all()
+        assert len(masters) == 1
+        assert {item.name for item in items} == {"ブロッコリーの和え物", "ブロッコリ-の和え物"}
+        assert {item.menu_master_id for item in items} == {masters[0].id}
+
+
 def test_create_menu_normalizes_temp_type_from_japanese(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()
