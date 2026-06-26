@@ -39,6 +39,28 @@ def test_reject_destructive_row_dewarp_detects_added_dark_bands() -> None:
     assert rejection["reason"] == "row_dewarp_destructive_dark_band_rejected"
 
 
+def test_reject_destructive_row_dewarp_detects_diagonal_local_dark_bands() -> None:
+    source = np.full((160, 240, 3), 255, dtype=np.uint8)
+    candidate = source.copy()
+    for x in range(30, 210):
+        y = int(round(45.0 + 35.0 * (float(x - 30) / 180.0)))
+        candidate[y - 3 : y + 4, x - 2 : x + 3] = 0
+    for x in range(30, 210):
+        y = int(round(105.0 + 30.0 * (float(x - 30) / 180.0)))
+        candidate[y - 3 : y + 4, x - 2 : x + 3] = 0
+
+    rejection = _reject_destructive_row_dewarp(
+        source_bgr=source,
+        candidate_bgr=candidate,
+        xs=[20.0, 220.0],
+        ys=[20.0, 145.0],
+    )
+
+    assert rejection is not None
+    assert rejection["reason"] == "row_dewarp_destructive_dark_band_rejected"
+    assert rejection["candidate_dark_band_score"]["window_thick_band_count"] > 0
+
+
 def test_slant_rejection_keeps_vertical_row_dewarp_image() -> None:
     raw_like = np.zeros((4, 4, 3), dtype=np.uint8)
     vertical_dewarped = np.full((4, 4, 3), 128, dtype=np.uint8)

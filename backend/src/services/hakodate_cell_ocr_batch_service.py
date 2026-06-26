@@ -59,7 +59,7 @@ def _dark_horizontal_band_score(
     ys: list[float],
 ) -> dict[str, float | int]:
     if image_bgr.size == 0:
-        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0}
+        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0, "window_thick_band_count": 0}
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
     height, width = gray.shape[:2]
     x0 = max(0, min(width - 1, int(round(float(min(xs))))))
@@ -68,24 +68,44 @@ def _dark_horizontal_band_score(
     y1 = min(height, max(y0 + 1, int(round(float(max(ys))))))
     roi = gray[y0:y1, x0:x1]
     if roi.size == 0:
-        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0}
-    dark_ratio = (roi < 80).sum(axis=1).astype(np.float32) / max(1, roi.shape[1])
-    thick_rows = dark_ratio >= 0.42
-    thick_band_count = 0
-    run_length = 0
-    for is_thick in thick_rows.tolist():
-        if is_thick:
-            run_length += 1
-            continue
-        if run_length >= 4:
-            thick_band_count += 1
+        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0, "window_thick_band_count": 0}
+
+    def count_thick_bands(dark_ratio: np.ndarray, *, threshold: float) -> int:
+        thick_rows = dark_ratio >= threshold
+        count = 0
         run_length = 0
-    if run_length >= 4:
-        thick_band_count += 1
+        for is_thick in thick_rows.tolist():
+            if is_thick:
+                run_length += 1
+                continue
+            if run_length >= 4:
+                count += 1
+            run_length = 0
+        if run_length >= 4:
+            count += 1
+        return count
+
+    dark_ratio = (roi < 80).sum(axis=1).astype(np.float32) / max(1, roi.shape[1])
+    thick_band_count = count_thick_bands(dark_ratio, threshold=0.42)
+    window_thick_band_count = 0
+    max_window_ratio = 0.0
+    window_count = min(12, max(1, roi.shape[1] // 80))
+    window_edges = np.linspace(0, roi.shape[1], window_count + 1, dtype=np.int32)
+    for left, right in zip(window_edges[:-1], window_edges[1:]):
+        if right <= left:
+            continue
+        window = roi[:, int(left) : int(right)]
+        if window.size == 0:
+            continue
+        window_ratio = (window < 80).sum(axis=1).astype(np.float32) / max(1, window.shape[1])
+        max_window_ratio = max(max_window_ratio, float(window_ratio.max(initial=0.0)))
+        window_thick_band_count += count_thick_bands(window_ratio, threshold=0.62)
     return {
         "row_count": int(roi.shape[0]),
         "max_ratio": round(float(dark_ratio.max(initial=0.0)), 4),
+        "max_window_ratio": round(max_window_ratio, 4),
         "thick_band_count": int(thick_band_count),
+        "window_thick_band_count": int(window_thick_band_count),
     }
 
 
@@ -100,7 +120,9 @@ def _reject_destructive_row_dewarp(
     candidate_score = _dark_horizontal_band_score(candidate_bgr, xs=xs, ys=ys)
     source_bands = int(source_score.get("thick_band_count") or 0)
     candidate_bands = int(candidate_score.get("thick_band_count") or 0)
-    if candidate_bands >= source_bands + 2:
+    source_window_bands = int(source_score.get("window_thick_band_count") or 0)
+    candidate_window_bands = int(candidate_score.get("window_thick_band_count") or 0)
+    if candidate_bands >= source_bands + 2 or candidate_window_bands >= source_window_bands + 4:
         return {
             "reason": "row_dewarp_destructive_dark_band_rejected",
             "source_dark_band_score": source_score,
