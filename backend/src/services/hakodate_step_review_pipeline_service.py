@@ -918,6 +918,24 @@ def snap_regions_x_to_local_fax_rulings(
     snapped_regions: list[dict[str, Any]] = []
     snapped_count = 0
     fallback_count = 0
+    fallback_reason_counts: dict[str, int] = {}
+
+    def append_fallback(region: dict[str, Any], reason: str) -> None:
+        nonlocal fallback_count
+        fallback_count += 1
+        fallback_reason_counts[reason] = fallback_reason_counts.get(reason, 0) + 1
+        snapped_regions.append(
+            {
+                **region,
+                "local_grid_snap": {
+                    "applied": False,
+                    "fallback_reason": reason,
+                    "method": "row_edge_local_fax_ruling_polygon_snap_v5",
+                    "y_snap_enabled": bool(snap_y),
+                },
+            }
+        )
+
     for region in regions:
         box = region.get("bbox")
         if not isinstance(box, list) or len(box) != 4:
@@ -971,16 +989,23 @@ def snap_regions_x_to_local_fax_rulings(
             or snapped_top is None
             or snapped_bottom is None
         ):
-            fallback_count += 1
-            snapped_regions.append(region)
+            missing_parts = []
+            if len(snapped_left_values) < 2:
+                missing_parts.append("left_x")
+            if len(snapped_right_values) < 2:
+                missing_parts.append("right_x")
+            if snapped_top is None:
+                missing_parts.append("top_y")
+            if snapped_bottom is None:
+                missing_parts.append("bottom_y")
+            append_fallback(region, "missing_snapped_edges:" + ",".join(missing_parts))
             continue
         snapped_x0 = float(np.mean(snapped_left_values))
         snapped_x1 = float(np.mean(snapped_right_values))
         snapped_y0 = float(snapped_top)
         snapped_y1 = float(snapped_bottom)
         if snapped_x1 <= snapped_x0 + 8.0 or snapped_y1 <= snapped_y0 + 8.0:
-            fallback_count += 1
-            snapped_regions.append(region)
+            append_fallback(region, "invalid_snapped_axis_bbox")
             continue
         polygon, display_polygon, polygon_ok, column_curve_applied = row_curve_polygon_for_cell(
             row_boundary_curves,
@@ -998,8 +1023,7 @@ def snap_regions_x_to_local_fax_rulings(
         if not polygon_ok:
             shared_row_curve_available = top_key in row_boundary_curves and bottom_key in row_boundary_curves
             if shared_row_curve_available:
-                fallback_count += 1
-                snapped_regions.append(region)
+                append_fallback(region, "shared_row_curve_polygon_rejected")
                 continue
             polygon, polygon_ok = side_y_edges_for_cell(
                 snapped_x0,
@@ -1058,6 +1082,7 @@ def snap_regions_x_to_local_fax_rulings(
             "column_boundary_curve_count": len(column_boundary_curves),
             "snapped_region_count": snapped_count,
             "fallback_region_count": fallback_count,
+            "fallback_reason_counts": fallback_reason_counts,
             "required_min_snapped_region_count": required_min,
             "row_debug": row_debug,
             "row_curve_debug": row_curve_debug,
@@ -1079,6 +1104,7 @@ def snap_regions_x_to_local_fax_rulings(
         },
         "snapped_region_count": snapped_count,
         "fallback_region_count": fallback_count,
+        "fallback_reason_counts": fallback_reason_counts,
         "row_debug": row_debug,
         "row_curve_debug": row_curve_debug,
         "column_curve_debug": column_curve_debug,

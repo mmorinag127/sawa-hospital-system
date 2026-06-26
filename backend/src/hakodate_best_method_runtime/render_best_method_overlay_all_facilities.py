@@ -846,6 +846,7 @@ def build_best_method_for_manifest_item(
             "target_grid_snap_source": snap_debug.get("source") or "runtime_resnap",
             "target_grid_snap_snapped_region_count": snap_debug.get("snapped_region_count"),
             "target_grid_snap_fallback_region_count": snap_debug.get("fallback_region_count"),
+            "target_grid_snap_fallback_reason_counts": snap_debug.get("fallback_reason_counts"),
             "target_grid_snap_required_min_snapped_region_count": snap_debug.get("required_min_snapped_region_count"),
             "target_grid_snap_row_boundary_count": snap_debug.get("row_boundary_count"),
             "target_grid_snap_row_boundary_curve_count": snap_debug.get("row_boundary_curve_count"),
