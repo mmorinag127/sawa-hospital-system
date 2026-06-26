@@ -458,7 +458,7 @@ def snap_regions_x_to_local_fax_rulings(
     y_threshold = max(15.0, float(y_smooth.max(initial=0.0)) * 0.35)
     detected_y_edges = projection_centers(y_smooth, threshold=y_threshold, min_len=2)
     y_edge_snaps = {
-        int(boundary): nearest(float(boundary), detected_y_edges, max_distance=18.0)
+        int(boundary): nearest(float(boundary), detected_y_edges, max_distance=45.0)
         for boundary in row_boundaries
     }
     top_boundary = int(min(row_boundaries))
@@ -528,13 +528,13 @@ def snap_regions_x_to_local_fax_rulings(
             snapped_top = float(y0)
             snapped_bottom = float(y1)
         local_y_edges = detected_y_edges_for_x_span(x0, x1) if snap_y else []
-        local_top = nearest(float(top_key), local_y_edges, max_distance=24.0) if snap_y else None
-        local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=24.0) if snap_y else None
+        local_top = nearest(float(top_key), local_y_edges, max_distance=70.0) if snap_y else None
+        local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=70.0) if snap_y else None
         expected_height = max(1.0, float(y1) - float(y0))
         local_height_ok = (
             local_top is not None
             and local_bottom is not None
-            and expected_height * 0.72 <= float(local_bottom) - float(local_top) <= expected_height * 1.34
+            and expected_height * 0.50 <= float(local_bottom) - float(local_top) <= expected_height * 1.85
         )
         if (
             local_top is not None
