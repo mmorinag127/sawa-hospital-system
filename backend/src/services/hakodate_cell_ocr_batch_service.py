@@ -52,6 +52,63 @@ _LOCAL_YOMITOKU_ANALYZER = None
 _LOCAL_YOMITOKU_ANALYZER_KEY: tuple[str, bool] | None = None
 
 
+def _dark_horizontal_band_score(
+    image_bgr: np.ndarray,
+    *,
+    xs: list[float],
+    ys: list[float],
+) -> dict[str, float | int]:
+    if image_bgr.size == 0:
+        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0}
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
+    height, width = gray.shape[:2]
+    x0 = max(0, min(width - 1, int(round(float(min(xs))))))
+    x1 = min(width, max(x0 + 1, int(round(float(max(xs))))))
+    y0 = max(0, min(height - 1, int(round(float(min(ys))))))
+    y1 = min(height, max(y0 + 1, int(round(float(max(ys))))))
+    roi = gray[y0:y1, x0:x1]
+    if roi.size == 0:
+        return {"row_count": 0, "max_ratio": 0.0, "thick_band_count": 0}
+    dark_ratio = (roi < 80).sum(axis=1).astype(np.float32) / max(1, roi.shape[1])
+    thick_rows = dark_ratio >= 0.42
+    thick_band_count = 0
+    run_length = 0
+    for is_thick in thick_rows.tolist():
+        if is_thick:
+            run_length += 1
+            continue
+        if run_length >= 4:
+            thick_band_count += 1
+        run_length = 0
+    if run_length >= 4:
+        thick_band_count += 1
+    return {
+        "row_count": int(roi.shape[0]),
+        "max_ratio": round(float(dark_ratio.max(initial=0.0)), 4),
+        "thick_band_count": int(thick_band_count),
+    }
+
+
+def _reject_destructive_row_dewarp(
+    *,
+    source_bgr: np.ndarray,
+    candidate_bgr: np.ndarray,
+    xs: list[float],
+    ys: list[float],
+) -> dict[str, Any] | None:
+    source_score = _dark_horizontal_band_score(source_bgr, xs=xs, ys=ys)
+    candidate_score = _dark_horizontal_band_score(candidate_bgr, xs=xs, ys=ys)
+    source_bands = int(source_score.get("thick_band_count") or 0)
+    candidate_bands = int(candidate_score.get("thick_band_count") or 0)
+    if candidate_bands >= source_bands + 2:
+        return {
+            "reason": "row_dewarp_destructive_dark_band_rejected",
+            "source_dark_band_score": source_score,
+            "candidate_dark_band_score": candidate_score,
+        }
+    return None
+
+
 @dataclass(frozen=True)
 class HakodateCellOcrCaseResult:
     page: int
@@ -1036,6 +1093,20 @@ def _build_preprocess_for_ocr(
         corrected_xs=[float(value) for value in aligned_xs],
         template_ys=[float(value) for value in template_ys],
     )
+    if row_slant_dewarp_evidence.get("applied"):
+        destructive_rejection = _reject_destructive_row_dewarp(
+            source_bgr=dewarped_rectified,
+            candidate_bgr=row_slant_rectified,
+            xs=[float(value) for value in aligned_xs],
+            ys=[float(value) for value in template_ys],
+        )
+        if destructive_rejection:
+            row_slant_rectified = dewarped_rectified
+            row_slant_dewarp_evidence = {
+                **row_slant_dewarp_evidence,
+                "applied": False,
+                **destructive_rejection,
+            }
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
     working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)

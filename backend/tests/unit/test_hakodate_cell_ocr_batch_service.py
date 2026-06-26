@@ -8,12 +8,34 @@ from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
     _accepted_header_intersection_points,
     _analysis_to_yomitoku_words,
+    _reject_destructive_row_dewarp,
     assign_yomitoku_words_to_contact_regions,
     build_cell_contact_sheet,
     sheet_assignments_from_ocr_regions,
     sheet_value_grid_from_assignments,
     validate_cell_ocr_mapping,
 )
+
+
+def test_reject_destructive_row_dewarp_detects_added_dark_bands() -> None:
+    source = np.full((120, 160, 3), 255, dtype=np.uint8)
+    candidate = source.copy()
+    source[20:22, 20:140] = 0
+    source[70:72, 20:140] = 0
+    candidate[20:22, 20:140] = 0
+    candidate[45:51, 20:140] = 0
+    candidate[70:72, 20:140] = 0
+    candidate[92:99, 20:140] = 0
+
+    rejection = _reject_destructive_row_dewarp(
+        source_bgr=source,
+        candidate_bgr=candidate,
+        xs=[20.0, 140.0],
+        ys=[10.0, 110.0],
+    )
+
+    assert rejection is not None
+    assert rejection["reason"] == "row_dewarp_destructive_dark_band_rejected"
 
 
 def test_live_cell_ocr_overlay_uses_only_accepted_header_intersections() -> None:
