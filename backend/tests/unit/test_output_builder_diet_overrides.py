@@ -501,6 +501,64 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order():
     assert komatsuna["メニュー"] == "副菜②"
 
 
+def test_label_meal_slots_skip_parent_prefixed_garnish_category():
+    lines = [
+        {
+            "date": "2026-06-21",
+            "daypart": "昼",
+            "menu_name": "主菜確認メニュー",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 1,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-21",
+            "daypart": "昼",
+            "menu_name": "ｻﾂﾏ芋",
+            "menu_category": "主菜　添え",
+            "diet_type": "regular",
+            "source_row_index": 2,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-21",
+            "daypart": "昼",
+            "menu_name": "茄子と揚げの田舎煮",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 3,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-06-21",
+            "daypart": "昼",
+            "menu_name": "ピーマンと人参のお浸し",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 4,
+            "quantity_original": 3,
+        },
+    ]
+
+    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            for line in enriched
+        ],
+        {},
+        None,
+    )
+
+    garnish = next(row for row in labels if row["商品名１"] == "ｻﾂﾏ芋")
+    eggplant = next(row for row in labels if row["商品名１"] == "茄子と揚げの田舎煮")
+    pepper = next(row for row in labels if row["商品名１"] == "ピーマンと人参のお浸し")
+    assert garnish["メニュー"] == "主菜 添え"
+    assert eggplant["メニュー"] == "副菜①"
+    assert pepper["メニュー"] == "副菜②"
+
+
 def test_label_meal_slots_are_applied_after_menu_master_defaults(monkeypatch):
     lines = [
         {

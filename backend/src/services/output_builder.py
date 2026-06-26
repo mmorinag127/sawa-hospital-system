@@ -657,6 +657,13 @@ def _append_daily_label_category_suffix(category: str, suffix: str) -> str:
 
 def _normalize_daily_label_category_text(category: str) -> str:
     text = str(category or "").strip()
+    compact = re.sub(r"[\s　]+", "", text)
+    if compact in {"主菜添え", "主添え", "主A添え", "主Ａ添え"}:
+        return "主菜 添え"
+    if compact in {"副菜①添え", "副菜1添え", "副①添え", "副1添え"}:
+        return "副菜① 添え"
+    if compact in {"副菜②添え", "副菜2添え", "副②添え", "副2添え"}:
+        return "副菜② 添え"
     if text in {"主", "主菜", "主Ａ", "主A"}:
         return "主菜"
     if text in {"副", "副①", "副1", "副菜1", "副菜①"}:
@@ -664,6 +671,12 @@ def _normalize_daily_label_category_text(category: str) -> str:
     if text in {"副②", "副2", "副菜2", "副菜②"}:
         return "副菜②"
     return text
+
+
+def _is_daily_label_garnish_category(category: object) -> bool:
+    normalized = _normalize_daily_label_category_text(_normalize_delivery_category_label(category))
+    compact = re.sub(r"[\s　]+", "", normalized)
+    return normalized in {"添え", "付属品"} or compact.endswith("添え")
 
 
 def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
@@ -1239,7 +1252,7 @@ def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
         current_parent = ""
         for line in sorted(daypart_lines, key=_line_order_key):
             category = _normalize_delivery_category_label(line.get("menu_category"))
-            if category == "添え":
+            if _is_daily_label_garnish_category(category):
                 if current_parent:
                     parent_by_id[id(line)] = current_parent
                 continue
@@ -1250,7 +1263,7 @@ def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
     enriched: list[dict] = []
     for line in lines:
         if (
-            _normalize_delivery_category_label(line.get("menu_category")) == "添え"
+            _is_daily_label_garnish_category(line.get("menu_category"))
             and not line.get("parent_menu_category")
             and parent_by_id.get(id(line))
         ):
@@ -1287,7 +1300,7 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
         menu_names: list[str] = []
         for line in sorted(daypart_lines, key=_line_order_key):
             category = _normalize_delivery_category_label(line.get("menu_category"))
-            if category == "添え":
+            if _is_daily_label_garnish_category(category):
                 continue
             menu_name = str(line.get("menu_name") or "").strip()
             if not menu_name:
@@ -3901,7 +3914,6 @@ def _build_delivery_rows(
         )
     if timings is not None:
         timings["build_rows_setup_ms"] = round((time.perf_counter() - setup_started) * 1000, 1)
-    prefer_ocr_rows = bool(template.get("prefer_ocr_raw_rows", False))
     if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
         ocr_started = time.perf_counter()
         menu_meta = _build_ocr_menu_meta(order, facility_config)
@@ -5062,6 +5074,16 @@ def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_dat
         existing_keys.add(key)
 
 
+def _append_zero_quantity_label_bags_for_order_context(bags: list[dict], ctx: dict, target_date: dt_date) -> list[dict]:
+    facility_config = ctx.get("facility_config") if isinstance(ctx.get("facility_config"), dict) else {}
+    group = {
+        "bags": list(bags),
+        "facility_config": facility_config,
+    }
+    _append_zero_quantity_label_bags(group, ctx, target_date)
+    return group.get("bags") or []
+
+
 def _create_daily_labels_sheet(
     workbook,
     used_titles: set[str],
@@ -5136,6 +5158,7 @@ def build_label_workbook_for_order(order_id: str, *, target_date: dt_date | None
     bags = ctx.get("bags") or []
     if target_date is not None:
         bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
+        bags = _append_zero_quantity_label_bags_for_order_context(bags, ctx, target_date)
     if not bags:
         raise ValueError("label rows not found")
     workbook = Workbook()
@@ -5165,6 +5188,7 @@ def build_label_csv_for_order(order_id: str, *, target_date: dt_date | None = No
     bags = ctx.get("bags") or []
     if target_date is not None:
         bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
+        bags = _append_zero_quantity_label_bags_for_order_context(bags, ctx, target_date)
     if not bags:
         raise ValueError("label rows not found")
     facility_config = ctx.get("facility_config") or {}

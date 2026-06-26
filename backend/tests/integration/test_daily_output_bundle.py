@@ -491,6 +491,57 @@ def test_build_label_csv_for_order_filters_target_date(tmp_path, monkeypatch):
     assert "翌日メニュー" not in content
 
 
+def test_build_label_csv_for_order_date_uses_daily_zero_quantity_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    facility_config = {
+        "facility_name": "池袋病院",
+        "daily_label_comparable_diet_types": ["soft", "regular_bag"],
+    }
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda order_id, **kwargs: {
+            "facility_config": facility_config,
+            "label_profile": {},
+            "bags": [],
+            "order_lines": [
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "soft",
+                    "area_id": "X",
+                    "quantity_original": 0,
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "menu_temp_type": "温菜",
+                },
+                {
+                    "date": TARGET_DATE,
+                    "daypart": "昼",
+                    "menu_name": "カレイの照焼き",
+                    "menu_category": "主菜",
+                    "diet_type": "regular_bag",
+                    "area_id": "X",
+                    "quantity_original": 0,
+                    "menu_unit_type": "g",
+                    "menu_qty_per_serving": 100,
+                    "menu_temp_type": "温菜",
+                },
+            ],
+            "order_for_outputs": {"id": order_id, "facility": "FAC00005", "lines": []},
+        },
+    )
+
+    path, _filename = output_builder.build_label_csv_for_order("ORD-DAY", target_date=TARGET_DATE)
+
+    rows = list(csv.DictReader(path.read_text(encoding="cp932").splitlines()))
+    assert {row["メニュー"] for row in rows} == {"主菜（軟菜）", "主菜（袋分け）"}
+    assert {row["内容量"] for row in rows} == {"0g"}
+    assert {row[""] for row in rows} == {"0人前"}
+
+
 def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):
     order = {
         "id": "ORD-DRAFT",
