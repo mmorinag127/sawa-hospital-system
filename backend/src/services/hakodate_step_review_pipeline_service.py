@@ -522,59 +522,19 @@ def snap_regions_x_to_local_fax_rulings(
         m = len(candidate_values)
         if n < 2 or m < 2:
             return {}, {"used": False, "reason": "insufficient_interval_row_candidates", "candidate_count": m}
-        template_span = max(1.0, template_values[-1] - template_values[0])
-        candidate_span = max(1.0, candidate_values[-1] - candidate_values[0])
-        projected = [
-            candidate_values[0] + ((template_y - template_values[0]) / template_span) * candidate_span
-            for template_y in template_values
+        best_by_template: dict[int, tuple[int, float, float]] = {}
+        for candidate_index, candidate in enumerate(candidate_values):
+            template_index = min(range(n), key=lambda index: abs(template_values[index] - float(candidate)))
+            distance = abs(template_values[template_index] - float(candidate))
+            if distance > 86.0:
+                continue
+            current = best_by_template.get(template_index)
+            if current is None or distance < float(current[2]):
+                best_by_template[template_index] = (candidate_index, float(candidate), distance)
+        matched_pairs = [
+            (template_index, int(candidate_index))
+            for template_index, (candidate_index, _candidate, _distance) in sorted(best_by_template.items())
         ]
-        dp = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
-        prev: list[list[tuple[int, int, str] | None]] = [[None for _ in range(m + 1)] for _ in range(n + 1)]
-        dp[0, 0] = 0.0
-        skip_template_penalty = 0.001
-        skip_candidate_penalty = 0.018
-        for i in range(n + 1):
-            for j in range(m + 1):
-                base = float(dp[i, j])
-                if not np.isfinite(base):
-                    continue
-                if i < n and j < m:
-                    distance = abs(float(projected[i]) - float(candidate_values[j]))
-                    if distance <= 86.0:
-                        cost = distance / candidate_span
-                        if i > 0 and j > 0:
-                            template_gap = (template_values[i] - template_values[i - 1]) / template_span
-                            candidate_gap = (candidate_values[j] - candidate_values[j - 1]) / candidate_span
-                            cost += 0.20 * abs(template_gap - candidate_gap)
-                        if base + cost < float(dp[i + 1, j + 1]):
-                            dp[i + 1, j + 1] = base + cost
-                            prev[i + 1][j + 1] = (i, j, "match")
-                if i < n and (n - (i + 1)) >= (m - j):
-                    if base + skip_template_penalty < float(dp[i + 1, j]):
-                        dp[i + 1, j] = base + skip_template_penalty
-                        prev[i + 1][j] = (i, j, "skip_template")
-                if j < m and (m - (j + 1)) >= (n - i):
-                    if base + skip_candidate_penalty < float(dp[i, j + 1]):
-                        dp[i, j + 1] = base + skip_candidate_penalty
-                        prev[i][j + 1] = (i, j, "skip_candidate")
-        if not np.isfinite(float(dp[n, m])):
-            return {}, {
-                "used": False,
-                "reason": "no_ordered_interval_row_match",
-                "candidate_count": m,
-                "template_count": n,
-            }
-        i, j = n, m
-        matched_pairs: list[tuple[int, int]] = []
-        while i > 0 or j > 0:
-            step = prev[i][j]
-            if step is None:
-                break
-            pi, pj, action = step
-            if action == "match":
-                matched_pairs.append((i - 1, j - 1))
-            i, j = pi, pj
-        matched_pairs.reverse()
         min_matches = max(2, min(8, int(np.ceil(float(min(m, n)) * 0.50))))
         if len(matched_pairs) < min_matches:
             return {}, {
@@ -586,6 +546,12 @@ def snap_regions_x_to_local_fax_rulings(
             }
         matched_template_indexes = [template_index for template_index, _candidate_index in matched_pairs]
         matched_candidate_values = [candidate_values[candidate_index] for _template_index, candidate_index in matched_pairs]
+        if not np.all(np.diff(np.array(matched_template_indexes, dtype=np.int32)) > 0):
+            return {}, {
+                "used": False,
+                "reason": "ordered_interval_template_match_not_unique",
+                "match_count": len(matched_pairs),
+            }
         corrected = np.interp(
             np.array(template_values, dtype=np.float64),
             np.array([template_values[index] for index in matched_template_indexes], dtype=np.float64),
@@ -602,10 +568,13 @@ def snap_regions_x_to_local_fax_rulings(
             for row_boundary, snapped in zip(row_boundaries, corrected, strict=False)
         }, {
             "used": True,
-            "method": "ordered_interval_row_boundary_match",
+            "method": "unique_nearest_interval_row_boundary_match",
             "match_count": len(matched_pairs),
             "candidate_count": m,
-            "score": round(float(dp[n, m] / max(1, len(matched_pairs))), 6),
+            "mean_abs_distance": round(
+                float(np.mean([abs(template_values[t] - candidate_values[c]) for t, c in matched_pairs])),
+                3,
+            ),
         }
 
     def build_row_boundary_curves() -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
@@ -649,12 +618,14 @@ def snap_regions_x_to_local_fax_rulings(
                     continue
                 ordered_interval_count += 1
                 samples.append((float(mid_x), float(snapped)))
-            if len(samples) < max(3, min(7, len(intervals) // 2)):
+            required_curve_samples = max(2, min(7, len(intervals) // 2))
+            if len(samples) < required_curve_samples:
                 debug.append(
                     {
                         "row_y": int(row_boundary),
                         "used": False,
                         "sample_count": len(samples),
+                        "required_sample_count": required_curve_samples,
                         "reason": "insufficient_curve_samples",
                         "curve_boundary_count": len(curve_boundaries),
                         "left_curve_boundary_count": len(left_table_candidates),
@@ -684,12 +655,13 @@ def snap_regions_x_to_local_fax_rulings(
                 else:
                     collapsed_x.append(float(x_value))
                     collapsed_y.append(float(y_value))
-            if len(collapsed_x) < 3:
+            if len(collapsed_x) < required_curve_samples:
                 debug.append(
                     {
                         "row_y": int(row_boundary),
                         "used": False,
                         "sample_count": len(samples),
+                        "required_sample_count": required_curve_samples,
                         "reason": "insufficient_unique_curve_samples",
                         "curve_boundary_count": len(curve_boundaries),
                         "left_curve_boundary_count": len(left_table_candidates),
@@ -1130,19 +1102,45 @@ def snap_regions_x_to_local_fax_rulings(
         if snapped_x1 <= snapped_x0 + 8.0 or snapped_y1 <= snapped_y0 + 8.0:
             append_fallback(region, "invalid_snapped_axis_bbox")
             continue
-        polygon, display_polygon, polygon_ok, column_curve_applied, polygon_reject_reason = row_curve_polygon_for_cell(
-            row_boundary_curves,
-            column_boundary_curves,
-            snapped_x0,
-            snapped_x1,
-            left_key=left_key,
-            right_key=right_key,
-            top_key=top_key,
-            bottom_key=bottom_key,
-        )
-        polygon_method = "shared_row_boundary_curve"
-        if polygon_ok and column_curve_applied:
-            polygon_method = "shared_row_and_column_boundary_curve"
+        polygon: list[list[float]] = []
+        display_polygon: list[list[float]] = []
+        polygon_ok = False
+        column_curve_applied = False
+        polygon_reject_reason: str | None = None
+        polygon_method = "cell_side_local_fax_ruling"
+        if local_height_ok and len(target_regions) <= 2:
+            polygon, polygon_ok = side_y_edges_for_cell(
+                snapped_x0,
+                snapped_x1,
+                top_key=float(top_key),
+                bottom_key=float(bottom_key),
+                snapped_top=snapped_y0,
+                snapped_bottom=snapped_y1,
+            )
+            display_polygon = polygon
+            if not polygon_ok:
+                polygon = [
+                    [snapped_x0, snapped_y0],
+                    [snapped_x1, snapped_y0],
+                    [snapped_x1, snapped_y1],
+                    [snapped_x0, snapped_y1],
+                ]
+                display_polygon = polygon
+                polygon_ok = True
+        if not polygon_ok:
+            polygon, display_polygon, polygon_ok, column_curve_applied, polygon_reject_reason = row_curve_polygon_for_cell(
+                row_boundary_curves,
+                column_boundary_curves,
+                snapped_x0,
+                snapped_x1,
+                left_key=left_key,
+                right_key=right_key,
+                top_key=top_key,
+                bottom_key=bottom_key,
+            )
+            polygon_method = "shared_row_boundary_curve"
+            if polygon_ok and column_curve_applied:
+                polygon_method = "shared_row_and_column_boundary_curve"
         if not polygon_ok:
             if shared_row_curve_available:
                 append_fallback(region, "shared_row_curve_polygon_rejected:" + str(polygon_reject_reason or "unknown"))
