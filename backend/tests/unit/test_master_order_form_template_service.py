@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -309,6 +310,84 @@ def test_build_facility_template_from_master_can_embed_week_menu_identity(tmp_pa
     schema_values = {row[0]: row[1] for row in schema.iter_rows(values_only=True) if row and row[0]}
     assert schema_values["week_value"] == "2026-04@2026-04-26~2026-04-30"
     assert schema_values["week_menu_rows"] == 4
+
+
+def test_build_facility_template_from_master_keeps_week_menu_overflow_as_review_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dayparts = [
+        ("朝", ["朝①", "朝②"]),
+        ("昼", ["主菜", "副菜", "副菜"]),
+        ("夕", ["主菜", "副菜", "副菜"]),
+    ]
+    entries: list[dict[str, str]] = []
+    for day in range(5, 12):
+        menu_date = f"2026-07-{day:02d}"
+        for daypart, categories in dayparts:
+            for index, category in enumerate(categories, start=1):
+                entries.append(
+                    {
+                        "menu_date": menu_date,
+                        "daypart": daypart,
+                        "category": category,
+                        "name": f"{menu_date}-{daypart}-{index}",
+                    }
+                )
+        if day == 7:
+            entries.insert(
+                len(entries) - 3,
+                {
+                    "menu_date": "2026-07-07",
+                    "daypart": "昼",
+                    "category": "",
+                    "name": "小松菜のおかか和え",
+                },
+            )
+
+    def fake_get_menu_for_facility(month_id: str, facility_id: str) -> dict:
+        assert month_id == "2026-07"
+        assert facility_id == "FACTEST"
+        return {"entries": entries}
+
+    monkeypatch.setattr(service.menu_service, "get_menu_for_facility", fake_get_menu_for_facility)
+
+    output = service.build_facility_template_xlsx(
+        facility_config=_facility_config(
+            [
+                {"index": 0, "role": "date", "header": "日付", "name": "date_mmdd"},
+                {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+                {"index": 2, "role": "menu_name", "header": "献立", "name": "menu"},
+                {"index": 3, "role": "quantity", "header": "常食", "name": "qty.regular_x"},
+                {"index": 4, "role": "quantity", "header": "肉禁", "name": "qty.no_meat_x"},
+                {"index": 5, "role": "note", "header": "備考欄", "name": "remarks"},
+            ]
+        ),
+        output_path=tmp_path / "facility_template_with_week_menu_overflow.xlsx",
+        week_value="2026-07@2026-07-05~2026-07-11",
+    )
+
+    workbook = load_workbook(output)
+    worksheet = workbook["facility_template"]
+    schema_values = {
+        row[0]: row[1]
+        for row in workbook["generated_template_schema"].iter_rows(values_only=True)
+        if row and row[0]
+    }
+
+    assert worksheet.cell(row=service.BODY_END_ROW, column=4).value == "2026-07-11-夕-3"
+    assert schema_values["week_menu_rows"] == 56
+    assert schema_values["week_menu_source_rows"] == 57
+    assert schema_values["week_menu_overflow_rows"] == 1
+    overflow_entries = json.loads(schema_values["week_menu_overflow_entries"])
+    assert overflow_entries == [
+        {
+            "category": "",
+            "date": "2026-07-07",
+            "daypart": "昼",
+            "name": "小松菜のおかか和え",
+        }
+    ]
 
 
 def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path) -> None:

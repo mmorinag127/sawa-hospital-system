@@ -843,19 +843,81 @@ def _write_cell_if_writable(ws: Worksheet, *, row: int, column: int, value: obje
     cell.value = value
 
 
-def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> int:
+def _week_menu_overflow_entry_payload(entry: dict[str, Any]) -> dict[str, str]:
+    menu_date = entry.get("_menu_date_obj")
+    return {
+        "date": menu_date.isoformat() if isinstance(menu_date, date) else "",
+        "daypart": str(entry.get("daypart") or "").strip(),
+        "category": str(entry.get("category") or "").strip(),
+        "name": str(entry.get("name") or "").strip(),
+    }
+
+
+def _week_menu_daypart_key(daypart: object) -> str:
+    text = str(daypart or "").strip()
+    if text.startswith("朝"):
+        return "朝"
+    if text.startswith("昼"):
+        return "昼"
+    if text.startswith("夕"):
+        return "夕"
+    return text
+
+
+def _week_menu_daypart_capacity(daypart: object) -> int | None:
+    key = _week_menu_daypart_key(daypart)
+    if key == "朝":
+        return 2
+    if key in {"昼", "夕"}:
+        return 3
+    return None
+
+
+def _split_week_menu_identity_entries(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]], int]:
+    valid_entries = [entry for entry in entries if isinstance(entry.get("_menu_date_obj"), date)]
+    body_capacity = BODY_END_ROW - BODY_START_ROW + 1
+    if len(valid_entries) <= body_capacity:
+        return valid_entries, [], len(valid_entries)
+
+    physical_entries: list[dict[str, Any]] = []
+    overflow_entries: list[dict[str, str]] = []
+    counts_by_daypart: dict[tuple[date, str], int] = {}
+    for entry in valid_entries:
+        menu_date = entry["_menu_date_obj"]
+        daypart_key = _week_menu_daypart_key(entry.get("daypart"))
+        capacity = _week_menu_daypart_capacity(entry.get("daypart"))
+        if capacity is None:
+            physical_entries.append(entry)
+            continue
+        counter_key = (menu_date, daypart_key)
+        counts_by_daypart[counter_key] = counts_by_daypart.get(counter_key, 0) + 1
+        if counts_by_daypart[counter_key] > capacity:
+            overflow_entries.append(_week_menu_overflow_entry_payload(entry))
+            continue
+        physical_entries.append(entry)
+
+    if len(physical_entries) > body_capacity:
+        overflow_entries.extend(
+            _week_menu_overflow_entry_payload(entry)
+            for entry in physical_entries[body_capacity:]
+        )
+        physical_entries = physical_entries[:body_capacity]
+
+    return physical_entries, overflow_entries, len(valid_entries)
+
+
+def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> dict[str, Any]:
     _clear_body_identity_values(ws)
+    physical_entries, overflow_entries, source_rows = _split_week_menu_identity_entries(entries)
     row_idx = BODY_START_ROW
     current_date: date | None = None
     date_start_row = BODY_START_ROW
     current_daypart = ""
     written = 0
-    for entry in entries:
+    for entry in physical_entries:
         menu_date = entry.get("_menu_date_obj")
         if not isinstance(menu_date, date):
             continue
-        if row_idx > BODY_END_ROW:
-            raise FacilityTemplateBuildError("facility_template_week_menu_exceeds_supported_rows")
         daypart = str(entry.get("daypart") or "").strip()
         category = str(entry.get("category") or "").strip()
         name = str(entry.get("name") or "").strip()
@@ -874,7 +936,12 @@ def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> i
         written += 1
     if current_date is not None and row_idx - 1 > date_start_row:
         _write_cell_if_writable(ws, row=row_idx - 1, column=1, value=_weekday_label(current_date))
-    return written
+    return {
+        "written_rows": written,
+        "source_rows": source_rows,
+        "overflow_rows": len(overflow_entries),
+        "overflow_entries": overflow_entries,
+    }
 
 
 def _apply_week_menu_identity(
@@ -883,19 +950,19 @@ def _apply_week_menu_identity(
     facility_config: dict[str, Any],
     week_value: object | None,
     week_menu_entries: Any | None = None,
-) -> int:
+) -> dict[str, Any]:
     if not week_value:
-        return 0
+        return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
     facility_id = str(facility_config.get("facility_id") or facility_config.get("id") or "").strip()
     if not facility_id:
-        return 0
+        return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
     entries = (
         _normalize_week_menu_entries(entries=week_menu_entries, week_value=week_value)
         if week_menu_entries is not None
         else _collect_week_menu_entries(facility_id=facility_id, week_value=week_value)
     )
     if not entries:
-        return 0
+        return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
     return _write_week_menu_identity(ws, entries)
 
 
@@ -959,7 +1026,7 @@ def build_facility_template_workbook(
 
     facility_name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
     _write_facility_name(ws, facility_name)
-    written_menu_rows = _apply_week_menu_identity(
+    week_menu_identity_result = _apply_week_menu_identity(
         ws,
         facility_config=facility_config,
         week_value=week_value,
@@ -983,7 +1050,15 @@ def build_facility_template_workbook(
     ws.print_area = f"A1:{get_column_letter(end_col)}{PRINT_END_ROW}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
     wb["generated_template_schema"].append(["week_value", str(week_value or "")])
-    wb["generated_template_schema"].append(["week_menu_rows", written_menu_rows])
+    wb["generated_template_schema"].append(["week_menu_rows", int(week_menu_identity_result.get("written_rows") or 0)])
+    wb["generated_template_schema"].append(["week_menu_source_rows", int(week_menu_identity_result.get("source_rows") or 0)])
+    wb["generated_template_schema"].append(["week_menu_overflow_rows", int(week_menu_identity_result.get("overflow_rows") or 0)])
+    wb["generated_template_schema"].append(
+        [
+            "week_menu_overflow_entries",
+            json.dumps(week_menu_identity_result.get("overflow_entries") or [], ensure_ascii=False, sort_keys=True),
+        ]
+    )
     wb["generated_template_schema"].append(["configured_body_merged_ranges", len(applied_body_merges)])
     wb["generated_template_schema"].append(
         ["configured_body_merged_range_details", json.dumps(applied_body_merges, ensure_ascii=False, sort_keys=True)]
