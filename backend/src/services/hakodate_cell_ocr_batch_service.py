@@ -1104,6 +1104,21 @@ def _build_preprocess_for_ocr(
         source_ys=[float(value) for value in row_source_ys],
         template_ys=[float(value) for value in template_ys],
     )
+    if row_dewarp_evidence.get("applied"):
+        vertical_destructive_rejection = _reject_destructive_row_dewarp(
+            source_bgr=raw_rectified,
+            candidate_bgr=dewarped_rectified,
+            xs=[float(value) for value in aligned_xs],
+            ys=[float(value) for value in aligned_ys],
+        )
+        if vertical_destructive_rejection:
+            dewarped_rectified = raw_rectified
+            row_dewarp_evidence = {
+                **row_dewarp_evidence,
+                "applied": False,
+                "reason": "row_dewarp_destructive_dark_band_rejected",
+                "vertical_rejection": vertical_destructive_rejection,
+            }
     row_slant_rectified, row_slant_dewarp_evidence = dewarp_rectified_rows_by_bounded_slant(
         dewarped_rectified,
         corrected_xs=[float(value) for value in aligned_xs],
