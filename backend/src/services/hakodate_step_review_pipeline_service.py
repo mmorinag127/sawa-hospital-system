@@ -784,7 +784,8 @@ def snap_regions_x_to_local_fax_rulings(
             and right_height > 8.0
         ):
             return [], [], False, False
-        max_side_delta = max(7.0, expected_height * 0.65)
+        expected_width = max(1.0, float(x1) - float(x0))
+        max_side_delta = max(7.0, expected_height * 0.65, min(24.0, expected_width * 0.10))
         if (
             abs(float(top_right) - float(top_left)) > max_side_delta
             or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
@@ -795,7 +796,6 @@ def snap_regions_x_to_local_fax_rulings(
         right_top_x = curve_x(column_curves, right_key, float(top_right))
         right_bottom_x = curve_x(column_curves, right_key, float(bottom_right))
         column_curve_applied = True
-        expected_width = max(1.0, float(x1) - float(x0))
         max_column_skew = min(10.0, max(4.0, expected_width * 0.08))
         max_width_delta = min(14.0, max(6.0, expected_width * 0.10))
         if None in (left_top_x, left_bottom_x, right_top_x, right_bottom_x):
@@ -992,6 +992,11 @@ def snap_regions_x_to_local_fax_rulings(
         if polygon_ok and column_curve_applied:
             polygon_method = "shared_row_and_column_boundary_curve"
         if not polygon_ok:
+            shared_row_curve_available = top_key in row_boundary_curves and bottom_key in row_boundary_curves
+            if shared_row_curve_available:
+                fallback_count += 1
+                snapped_regions.append(region)
+                continue
             polygon, polygon_ok = side_y_edges_for_cell(
                 snapped_x0,
                 snapped_x1,
