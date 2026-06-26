@@ -194,6 +194,8 @@ def dewarp_rectified_y_to_template_rows(
 def snap_regions_x_to_local_fax_rulings(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],
+    *,
+    snap_y: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     target_regions = [
         region
@@ -386,11 +388,15 @@ def snap_regions_x_to_local_fax_rulings(
             snapped_right_values.append(float(top_snaps[right_index]))
         if bottom_snaps and right_index is not None and right_index < len(bottom_snaps) and bottom_snaps[right_index] is not None:
             snapped_right_values.append(float(bottom_snaps[right_index]))
-        snapped_top = y_edge_snaps.get(top_key)
-        snapped_bottom = y_edge_snaps.get(bottom_key)
-        local_y_edges = detected_y_edges_for_x_span(x0, x1)
-        local_top = nearest(float(top_key), local_y_edges, max_distance=24.0)
-        local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=24.0)
+        if snap_y:
+            snapped_top = y_edge_snaps.get(top_key)
+            snapped_bottom = y_edge_snaps.get(bottom_key)
+        else:
+            snapped_top = float(y0)
+            snapped_bottom = float(y1)
+        local_y_edges = detected_y_edges_for_x_span(x0, x1) if snap_y else []
+        local_top = nearest(float(top_key), local_y_edges, max_distance=24.0) if snap_y else None
+        local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=24.0) if snap_y else None
         expected_height = max(1.0, float(y1) - float(y0))
         local_height_ok = (
             local_top is not None
@@ -433,7 +439,8 @@ def snap_regions_x_to_local_fax_rulings(
                     "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
                     "y_delta": [snapped_y0 - y0, snapped_y1 - y1],
                     "method": "row_edge_local_fax_ruling_snap_v2",
-                    "local_y_snap_applied": bool(local_height_ok),
+                    "y_snap_enabled": bool(snap_y),
+                    "local_y_snap_applied": bool(snap_y and local_height_ok),
                 },
             }
         )
@@ -452,6 +459,7 @@ def snap_regions_x_to_local_fax_rulings(
     return snapped_regions, {
         "applied": True,
         "method": "row_edge_local_fax_ruling_snap_v1",
+        "y_snap_enabled": bool(snap_y),
         "original_boundaries": original_boundaries,
         "row_boundary_count": len(row_boundaries),
         "outer_y_snap": {

@@ -94,6 +94,34 @@ def test_snap_regions_uses_cell_local_y_rulings_for_slanted_rows() -> None:
     assert by_cell["F11"]["local_grid_snap"]["local_y_snap_applied"] is True
 
 
+def test_snap_regions_can_preserve_template_y_after_row_dewarp() -> None:
+    rectified = np.full((80, 120, 3), 255, dtype=np.uint8)
+    for x in (39, 61, 81):
+        rectified[8:55, x - 1 : x + 2] = 0
+    rectified[22:24, 40:60] = 0
+    rectified[42:44, 40:60] = 0
+    rectified[15:17, 60:80] = 0
+    rectified[35:37, 60:80] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [40.0, 20.0, 60.0, 40.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [60.0, 20.0, 80.0, 40.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions, snap_y=False)
+
+    by_cell = {str(region["sheet_cell"]): region for region in snapped}
+    assert evidence["applied"] is True
+    assert evidence["y_snap_enabled"] is False
+    assert by_cell["E11"]["bbox"][1] == 20.0
+    assert by_cell["E11"]["bbox"][3] == 40.0
+    assert by_cell["F11"]["bbox"][1] == 20.0
+    assert by_cell["F11"]["bbox"][3] == 40.0
+    assert abs(float(by_cell["E11"]["bbox"][0]) - 39.0) < 1.0
+    assert abs(float(by_cell["F11"]["bbox"][2]) - 81.0) < 1.0
+    assert by_cell["F11"]["local_grid_snap"]["y_snap_enabled"] is False
+    assert by_cell["F11"]["local_grid_snap"]["local_y_snap_applied"] is False
+
+
 def test_dewarp_rectified_y_to_template_rows_moves_source_rows_to_template_positions() -> None:
     rectified = np.full((80, 100, 3), 255, dtype=np.uint8)
     source_ys = [10.0, 24.0, 43.0, 68.0]

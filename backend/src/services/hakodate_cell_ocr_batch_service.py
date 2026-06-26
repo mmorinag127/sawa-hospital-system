@@ -1040,6 +1040,20 @@ def _build_preprocess_for_ocr(
             header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
             row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
         )
+        row_match_after_dewarp = (
+            axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
+        )
+        aligned_ys = [float(value) for value in template_ys]
+        axis_evidence = {
+            **axis_evidence,
+            "row_intersection_y_match": {
+                **(row_match_after_dewarp if isinstance(row_match_after_dewarp, dict) else {}),
+                "used": True,
+                "method": "row_dewarp_template_y_axis_lock",
+                "reason": "row_dewarp_applied_then_template_y_axis_locked",
+                "corrected_ys": [round(float(value), 3) for value in aligned_ys],
+            },
+        }
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
         rectified_fax=raw_rectified,
@@ -1054,7 +1068,11 @@ def _build_preprocess_for_ocr(
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
-    target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(raw_rectified, target_regions)
+    target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
+        raw_rectified,
+        target_regions,
+        snap_y=not bool(row_dewarp_evidence.get("applied")),
+    )
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
     target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     target_overlay = _draw_row_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
