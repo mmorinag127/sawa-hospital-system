@@ -16,7 +16,7 @@ def test_extract_template_axes_fills_partial_header_line_by_gap_without_table_ex
     xs = [10, 100, 250, 390]
     external_y = 80
     partial_header_y = 180
-    table_ys = [120, 240] + [300 + (index * 60) for index in range(56)]
+    table_ys = [120, 240] + [300 + (index * 60) for index in range(57)]
     for x in xs:
         cv2.line(image, (x, 0), (x, 3999), (0, 0, 0), 2)
     cv2.line(image, (0, external_y), (399, external_y), (0, 0, 0), 2)
@@ -36,14 +36,14 @@ def test_extract_template_axes_fills_partial_header_line_by_gap_without_table_ex
     assert external_y not in table_ys
     assert partial_header_y in table_ys
     assert table_ys[:3] == [120, partial_header_y, 240]
-    assert len(table_ys) == 59
+    assert len(table_ys) == 60
 
 
 def test_extract_template_axes_blocks_incomplete_table_instead_of_using_external_line() -> None:
     image = np.full((900, 400, 3), 255, dtype=np.uint8)
     xs = [10, 100, 250, 390]
     external_y = 80
-    table_ys = [120 + (index * 10) for index in range(58)]
+    table_ys = [120 + (index * 10) for index in range(59)]
     for x in xs:
         cv2.line(image, (x, 0), (x, 899), (0, 0, 0), 2)
     cv2.line(image, (0, external_y), (399, external_y), (0, 0, 0), 2)
@@ -77,7 +77,7 @@ def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path)
     )
 
     assert len(xs) == 9
-    assert len(ys) == 59
+    assert len(ys) == 60
     assert ys == sorted(ys)
     assert all(ys[index] < ys[index + 1] for index in range(len(ys) - 1))
 
@@ -85,7 +85,7 @@ def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path)
 def test_manifest_explicit_template_axes_are_used_without_image_line_detection() -> None:
     image = np.full((100, 100, 3), 255, dtype=np.uint8)
     xs = [10, 30, 60, 90]
-    ys = [10 + index for index in range(59)]
+    ys = [10 + index for index in range(60)]
 
     resolved_xs, resolved_ys, all_xs, all_ys = resolve_template_axes_from_manifest_or_image(
         item={"template_axes_x": xs, "template_axes_y": ys},

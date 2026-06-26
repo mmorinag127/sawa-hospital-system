@@ -19,10 +19,10 @@ FORBIDDEN_DOWNSTREAM_METHODS = [
     "drop_one_extra_fax_line_by_min_affine_residual",
     "ordered_affine_dp_match_with_interpolated_missing_lines",
 ]
-ORDER_FORM_TEMPLATE_Y_EDGE_COUNT = 59
+ORDER_FORM_TEMPLATE_Y_EDGE_COUNT = 60
 TWO_STAGE_HEADER_BOUNDARY_MIN_WIDTH_RATIO = 0.12
 ORDER_FORM_TEMPLATE_HEADER_EDGE_ROWS = (7, 9)
-ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS = tuple(range(11, 68))
+ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS = tuple(range(11, 69))
 
 
 @dataclass(frozen=True)
