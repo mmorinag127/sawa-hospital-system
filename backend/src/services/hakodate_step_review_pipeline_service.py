@@ -515,6 +515,99 @@ def snap_regions_x_to_local_fax_rulings(
         all_heights = [float(b) - float(a) for a, b in zip(row_boundaries[:-1], row_boundaries[1:]) if float(b) > float(a)]
         return max(1.0, float(np.median(np.array(all_heights, dtype=np.float32)))) if all_heights else 24.0
 
+    def ordered_row_boundary_snaps_for_interval(candidates: list[float]) -> tuple[dict[int, float], dict[str, Any]]:
+        candidate_values = sorted(float(value) for value in candidates)
+        template_values = [float(value) for value in row_boundaries]
+        n = len(template_values)
+        m = len(candidate_values)
+        if n < 2 or m < 2:
+            return {}, {"used": False, "reason": "insufficient_interval_row_candidates", "candidate_count": m}
+        template_span = max(1.0, template_values[-1] - template_values[0])
+        candidate_span = max(1.0, candidate_values[-1] - candidate_values[0])
+        projected = [
+            candidate_values[0] + ((template_y - template_values[0]) / template_span) * candidate_span
+            for template_y in template_values
+        ]
+        dp = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
+        prev: list[list[tuple[int, int, str] | None]] = [[None for _ in range(m + 1)] for _ in range(n + 1)]
+        dp[0, 0] = 0.0
+        skip_template_penalty = 0.001
+        skip_candidate_penalty = 0.018
+        for i in range(n + 1):
+            for j in range(m + 1):
+                base = float(dp[i, j])
+                if not np.isfinite(base):
+                    continue
+                if i < n and j < m:
+                    distance = abs(float(projected[i]) - float(candidate_values[j]))
+                    if distance <= 86.0:
+                        cost = distance / candidate_span
+                        if i > 0 and j > 0:
+                            template_gap = (template_values[i] - template_values[i - 1]) / template_span
+                            candidate_gap = (candidate_values[j] - candidate_values[j - 1]) / candidate_span
+                            cost += 0.20 * abs(template_gap - candidate_gap)
+                        if base + cost < float(dp[i + 1, j + 1]):
+                            dp[i + 1, j + 1] = base + cost
+                            prev[i + 1][j + 1] = (i, j, "match")
+                if i < n and (n - (i + 1)) >= (m - j):
+                    if base + skip_template_penalty < float(dp[i + 1, j]):
+                        dp[i + 1, j] = base + skip_template_penalty
+                        prev[i + 1][j] = (i, j, "skip_template")
+                if j < m and (m - (j + 1)) >= (n - i):
+                    if base + skip_candidate_penalty < float(dp[i, j + 1]):
+                        dp[i, j + 1] = base + skip_candidate_penalty
+                        prev[i][j + 1] = (i, j, "skip_candidate")
+        if not np.isfinite(float(dp[n, m])):
+            return {}, {
+                "used": False,
+                "reason": "no_ordered_interval_row_match",
+                "candidate_count": m,
+                "template_count": n,
+            }
+        i, j = n, m
+        matched_pairs: list[tuple[int, int]] = []
+        while i > 0 or j > 0:
+            step = prev[i][j]
+            if step is None:
+                break
+            pi, pj, action = step
+            if action == "match":
+                matched_pairs.append((i - 1, j - 1))
+            i, j = pi, pj
+        matched_pairs.reverse()
+        min_matches = max(2, min(8, int(np.ceil(float(min(m, n)) * 0.50))))
+        if len(matched_pairs) < min_matches:
+            return {}, {
+                "used": False,
+                "reason": "too_few_ordered_interval_row_matches",
+                "match_count": len(matched_pairs),
+                "required_match_count": min_matches,
+                "candidate_count": m,
+            }
+        matched_template_indexes = [template_index for template_index, _candidate_index in matched_pairs]
+        matched_candidate_values = [candidate_values[candidate_index] for _template_index, candidate_index in matched_pairs]
+        corrected = np.interp(
+            np.array(template_values, dtype=np.float64),
+            np.array([template_values[index] for index in matched_template_indexes], dtype=np.float64),
+            np.array(matched_candidate_values, dtype=np.float64),
+        ).tolist()
+        if not np.all(np.diff(np.array(corrected, dtype=np.float64)) > 1.5):
+            return {}, {
+                "used": False,
+                "reason": "ordered_interval_row_match_not_monotonic",
+                "match_count": len(matched_pairs),
+            }
+        return {
+            int(row_boundary): float(snapped)
+            for row_boundary, snapped in zip(row_boundaries, corrected, strict=False)
+        }, {
+            "used": True,
+            "method": "ordered_interval_row_boundary_match",
+            "match_count": len(matched_pairs),
+            "candidate_count": m,
+            "score": round(float(dp[n, m] / max(1, len(matched_pairs))), 6),
+        }
+
     def build_row_boundary_curves() -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
         curves: dict[int, dict[str, Any]] = {}
         debug: list[dict[str, Any]] = []
@@ -539,16 +632,23 @@ def snap_regions_x_to_local_fax_rulings(
         intervals = list(zip(curve_boundaries[:-1], curve_boundaries[1:]))
         if len(intervals) < 2:
             return curves, debug
+        interval_snaps: list[tuple[float, dict[int, float], dict[str, Any]]] = []
+        for left, right in intervals:
+            if float(right) <= float(left) + 8.0:
+                continue
+            candidates = detected_y_edges_for_x_span(float(left), float(right)) if snap_y else []
+            ordered_snaps, ordered_debug = ordered_row_boundary_snaps_for_interval(candidates)
+            if ordered_snaps:
+                interval_snaps.append(((float(left) + float(right)) / 2.0, ordered_snaps, ordered_debug))
         for row_boundary in row_boundaries:
             samples: list[tuple[float, float]] = []
-            for left, right in intervals:
-                if float(right) <= float(left) + 8.0:
-                    continue
-                candidates = detected_y_edges_for_x_span(float(left), float(right)) if snap_y else []
-                snapped = nearest(float(row_boundary), candidates, max_distance=70.0) if snap_y else None
+            ordered_interval_count = 0
+            for mid_x, ordered_snaps, _ordered_debug in interval_snaps:
+                snapped = ordered_snaps.get(int(row_boundary))
                 if snapped is None:
                     continue
-                samples.append(((float(left) + float(right)) / 2.0, float(snapped)))
+                ordered_interval_count += 1
+                samples.append((float(mid_x), float(snapped)))
             if len(samples) < max(3, min(7, len(intervals) // 2)):
                 debug.append(
                     {
@@ -558,6 +658,7 @@ def snap_regions_x_to_local_fax_rulings(
                         "reason": "insufficient_curve_samples",
                         "curve_boundary_count": len(curve_boundaries),
                         "left_curve_boundary_count": len(left_table_candidates),
+                        "ordered_interval_count": ordered_interval_count,
                     }
                 )
                 continue
@@ -592,6 +693,7 @@ def snap_regions_x_to_local_fax_rulings(
                         "reason": "insufficient_unique_curve_samples",
                         "curve_boundary_count": len(curve_boundaries),
                         "left_curve_boundary_count": len(left_table_candidates),
+                        "ordered_interval_count": ordered_interval_count,
                     }
                 )
                 continue
@@ -613,6 +715,7 @@ def snap_regions_x_to_local_fax_rulings(
                     "span_delta": round(span_delta, 3),
                     "curve_boundary_count": len(curve_boundaries),
                     "left_curve_boundary_count": len(left_table_candidates),
+                    "ordered_interval_count": ordered_interval_count,
                 }
             )
         return curves, debug

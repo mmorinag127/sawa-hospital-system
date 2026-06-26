@@ -243,8 +243,42 @@ def test_snap_regions_keeps_strong_wide_cell_curve_instead_of_template_fallback(
     wide_cell = by_cell["G12"]
     assert wide_cell["local_grid_snap"]["polygon_method"] == "shared_row_boundary_curve"
     assert wide_cell["bbox"] != regions[5]["bbox"]
-    assert float(wide_cell["polygon"][3][1]) > float(wide_cell["polygon"][2][1]) + 18.0
-    assert abs(float(wide_cell["polygon"][2][1]) - 84.0) < 6.0
+    assert float(wide_cell["polygon"][2][1]) > float(wide_cell["polygon"][3][1]) + 18.0
+    assert abs(float(wide_cell["polygon"][2][1]) - 132.0) < 6.0
+
+
+def test_snap_regions_does_not_reuse_one_detected_row_for_neighbor_boundaries() -> None:
+    rectified = np.full((150, 180, 3), 255, dtype=np.uint8)
+    x_edges = [30, 70, 110, 150]
+    for x in x_edges:
+        rectified[18:130, x - 1 : x + 2] = 0
+    for base_y in (30.0, 58.0, 86.0, 114.0):
+        for x in range(x_edges[0], x_edges[-1] + 1):
+            y = int(round(base_y + 12.0 * ((x - x_edges[0]) / (x_edges[-1] - x_edges[0]))))
+            rectified[y - 1 : y + 2, x] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [30.0, 30.0, 70.0, 58.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [70.0, 30.0, 110.0, 58.0]},
+        {"region_id": "G11", "sheet_cell": "G11", "bbox": [110.0, 30.0, 150.0, 58.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [30.0, 58.0, 70.0, 86.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [70.0, 58.0, 110.0, 86.0]},
+        {"region_id": "G12", "sheet_cell": "G12", "bbox": [110.0, 58.0, 150.0, 86.0]},
+        {"region_id": "E13", "sheet_cell": "E13", "bbox": [30.0, 86.0, 70.0, 114.0]},
+        {"region_id": "F13", "sheet_cell": "F13", "bbox": [70.0, 86.0, 110.0, 114.0]},
+        {"region_id": "G13", "sheet_cell": "G13", "bbox": [110.0, 86.0, 150.0, 114.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    assert evidence["applied"] is True
+    assert evidence["fallback_reason_counts"] == {}
+    by_cell = {str(region["sheet_cell"]): region for region in snapped}
+    for cell in ("E11", "G11", "E12", "G12", "E13", "G13"):
+        polygon = by_cell[cell]["polygon"]
+        left_height = float(polygon[3][1]) - float(polygon[0][1])
+        right_height = float(polygon[2][1]) - float(polygon[1][1])
+        assert left_height > 20.0
+        assert right_height > 20.0
 
 
 def test_snap_regions_uses_column_boundary_curves_for_vertical_distortion() -> None:
