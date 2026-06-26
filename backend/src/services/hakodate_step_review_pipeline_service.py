@@ -699,6 +699,23 @@ def snap_regions_x_to_local_fax_rulings(
             )
         return curves, debug
 
+    def interpolate_with_linear_edge_extrapolation(axis: list[float], values: list[float], probe: float) -> float | None:
+        if len(axis) < 2 or len(axis) != len(values):
+            return None
+        x_axis = [float(item) for item in axis]
+        y_values = [float(item) for item in values]
+        if float(probe) < x_axis[0]:
+            dx = x_axis[1] - x_axis[0]
+            if abs(dx) <= 1e-6:
+                return y_values[0]
+            return y_values[0] + (float(probe) - x_axis[0]) * ((y_values[1] - y_values[0]) / dx)
+        if float(probe) > x_axis[-1]:
+            dx = x_axis[-1] - x_axis[-2]
+            if abs(dx) <= 1e-6:
+                return y_values[-1]
+            return y_values[-1] + (float(probe) - x_axis[-1]) * ((y_values[-1] - y_values[-2]) / dx)
+        return float(np.interp(float(probe), x_axis, y_values))
+
     def curve_y(curves: dict[int, dict[str, Any]], boundary: int, x_value: float) -> float | None:
         curve = curves.get(int(boundary))
         if not curve:
@@ -707,7 +724,7 @@ def snap_regions_x_to_local_fax_rulings(
         ys = curve.get("ys")
         if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) < 2 or len(xs) != len(ys):
             return None
-        return float(np.interp(float(x_value), [float(item) for item in xs], [float(item) for item in ys]))
+        return interpolate_with_linear_edge_extrapolation(xs, ys, float(x_value))
 
     def curve_x(curves: dict[int, dict[str, Any]], boundary: int, y_value: float) -> float | None:
         curve = curves.get(int(boundary))
@@ -717,7 +734,7 @@ def snap_regions_x_to_local_fax_rulings(
         xs = curve.get("xs")
         if not isinstance(ys, list) or not isinstance(xs, list) or len(ys) < 2 or len(ys) != len(xs):
             return None
-        return float(np.interp(float(y_value), [float(item) for item in ys], [float(item) for item in xs]))
+        return interpolate_with_linear_edge_extrapolation(ys, xs, float(y_value))
 
     def row_curve_display_polygon_for_cell(
         curves: dict[int, dict[str, Any]],

@@ -29,7 +29,7 @@ def test_snap_regions_x_to_fax_lines_uses_row_local_ruling_shift() -> None:
     bottom_delta = by_cell["E12"]["bbox"][0] - regions[2]["bbox"][0]
     assert top_delta > 0.0
     assert bottom_delta > top_delta + 5.0
-    assert by_cell["E12"]["local_grid_snap"]["method"] == "row_edge_local_fax_ruling_snap_v1"
+    assert by_cell["E12"]["local_grid_snap"]["method"] == "row_edge_local_fax_ruling_polygon_snap_v5"
 
 
 def test_snap_regions_x_to_fax_lines_blocks_when_matches_are_insufficient() -> None:

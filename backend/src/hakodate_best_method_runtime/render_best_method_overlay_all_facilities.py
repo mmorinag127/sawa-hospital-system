@@ -801,9 +801,20 @@ def build_best_method_for_manifest_item(
     preprocess_seconds = time.perf_counter() - preprocess_t0
     eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
-    snap_t0 = time.perf_counter()
-    snapped_regions, snap_debug = _snap_regions_x_to_fax_lines_all_targets(pre["raw_rectified"], eval_regions)
-    snap_seconds = time.perf_counter() - snap_t0
+    preprocess_axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
+    preprocess_snap_debug = (
+        preprocess_axis_evidence.get("target_local_grid_snap")
+        if isinstance(preprocess_axis_evidence.get("target_local_grid_snap"), dict)
+        else {}
+    )
+    if preprocess_snap_debug.get("applied"):
+        snapped_regions = eval_regions
+        snap_debug = {**preprocess_snap_debug, "source": "preprocess_target_regions"}
+        snap_seconds = 0.0
+    else:
+        snap_t0 = time.perf_counter()
+        snapped_regions, snap_debug = _snap_regions_x_to_fax_lines_all_targets(pre["raw_rectified"], eval_regions)
+        snap_seconds = time.perf_counter() - snap_t0
     facility_dir = output_dir / f"{page_index:02d}_{facility_code}_{order_id}"
     facility_dir.mkdir(parents=True, exist_ok=True)
     records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
@@ -830,6 +841,15 @@ def build_best_method_for_manifest_item(
             "contact_sheet_region_count": ocr_metrics.get("contact_sheet_region_count"),
             "contact_sheet_usable_region_count": ocr_metrics.get("contact_sheet_usable_region_count"),
             "contact_sheet_skipped_region_count": ocr_metrics.get("contact_sheet_skipped_region_count"),
+            "target_grid_snap_applied": bool(snap_debug.get("applied")),
+            "target_grid_snap_reason": snap_debug.get("reason"),
+            "target_grid_snap_source": snap_debug.get("source") or "runtime_resnap",
+            "target_grid_snap_snapped_region_count": snap_debug.get("snapped_region_count"),
+            "target_grid_snap_fallback_region_count": snap_debug.get("fallback_region_count"),
+            "target_grid_snap_required_min_snapped_region_count": snap_debug.get("required_min_snapped_region_count"),
+            "target_grid_snap_row_boundary_count": snap_debug.get("row_boundary_count"),
+            "target_grid_snap_row_boundary_curve_count": snap_debug.get("row_boundary_curve_count"),
+            "target_grid_snap_column_boundary_curve_count": snap_debug.get("column_boundary_curve_count"),
         }
     )
     axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
