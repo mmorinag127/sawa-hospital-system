@@ -436,6 +436,7 @@ def build_recognizer_contact_sheet(
         warped_cell = _warp_polygon_cell_to_axis_aligned_crop(rectified_fax_bgr, polygon) if mode.startswith("corner_cc") else None
         if warped_cell is not None:
             crop, preprocess_cell_box, preprocess_px_box, source_px_box = warped_cell
+            px_box = source_px_box
         elif polygon and mode.startswith("corner_cc"):
             px_box = _safe_int_box_for_polygon(
                 polygon,
@@ -524,7 +525,7 @@ def build_recognizer_contact_sheet(
             )
             continue
         if is_candidate:
-            candidate_items.append((slot_index, prepared_region, crop_image, px_box, ink_stats))
+            candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
         else:
             skipped_regions.append(
                 {
