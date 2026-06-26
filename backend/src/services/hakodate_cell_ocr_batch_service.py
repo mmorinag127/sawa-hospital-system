@@ -1107,6 +1107,12 @@ def _build_preprocess_for_ocr(
                 "applied": False,
                 **destructive_rejection,
             }
+            dewarped_rectified = raw_rectified
+            row_dewarp_evidence = {
+                **row_dewarp_evidence,
+                "applied": False,
+                "reason": "row_dewarp_requires_safe_slant_rejected",
+            }
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
     working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
