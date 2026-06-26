@@ -369,7 +369,7 @@ def _mask_crop_to_region_polygon(
 def _warp_polygon_cell_to_axis_aligned_crop(
     rectified_fax_bgr: np.ndarray,
     polygon: list[list[float]] | None,
-) -> tuple[np.ndarray, list[float], tuple[int, int, int, int]] | None:
+) -> tuple[np.ndarray, list[float], tuple[int, int, int, int], tuple[int, int, int, int]] | None:
     if not polygon or len(polygon) < 4:
         return None
     pts = np.array([[float(point[0]), float(point[1])] for point in polygon[:4]], dtype=np.float32)
@@ -409,7 +409,7 @@ def _warp_polygon_cell_to_axis_aligned_crop(
         int(np.ceil(max(xs))),
         int(np.ceil(max(ys))),
     )
-    return warped, [0.0, 0.0, float(out_w), float(out_h)], source_box
+    return warped, [0.0, 0.0, float(out_w), float(out_h)], (0, 0, out_w, out_h), source_box
 
 
 def build_recognizer_contact_sheet(
@@ -435,7 +435,7 @@ def build_recognizer_contact_sheet(
         polygon = _region_polygon(region)
         warped_cell = _warp_polygon_cell_to_axis_aligned_crop(rectified_fax_bgr, polygon) if mode.startswith("corner_cc") else None
         if warped_cell is not None:
-            crop, preprocess_cell_box, px_box = warped_cell
+            crop, preprocess_cell_box, preprocess_px_box, source_px_box = warped_cell
         elif polygon and mode.startswith("corner_cc"):
             px_box = _safe_int_box_for_polygon(
                 polygon,
@@ -459,6 +459,8 @@ def build_recognizer_contact_sheet(
                 continue
             crop = _mask_crop_to_region_polygon(crop, polygon=polygon, crop_box=px_box)
             preprocess_cell_box = box
+            preprocess_px_box = px_box
+            source_px_box = px_box
         if crop.size == 0:
             continue
         crop_line_mask = None if warped_cell is not None or line_mask is None else line_mask[y0:y1, x0:x1]
@@ -466,7 +468,7 @@ def build_recognizer_contact_sheet(
             crop_image, ink_stats = _preprocess_dynamic_crop_for_recognizer(
                 crop,
                 cell_box=preprocess_cell_box,
-                crop_box=px_box,
+                crop_box=preprocess_px_box,
                 slot_width=slot_width,
                 slot_height=slot_height,
             )
@@ -474,7 +476,7 @@ def build_recognizer_contact_sheet(
             crop_image, ink_stats = _preprocess_corner_component_crop_for_recognizer(
                 crop,
                 cell_box=preprocess_cell_box,
-                crop_box=px_box,
+                crop_box=preprocess_px_box,
                 slot_width=slot_width,
                 slot_height=slot_height,
                 mode=mode,
@@ -495,7 +497,7 @@ def build_recognizer_contact_sheet(
         prepared_region = {
             **region,
             "ocr_contact_slot_index": slot_index,
-            "ocr_cell_crop_bbox_px": [x0, y0, x1, y1],
+            "ocr_cell_crop_bbox_px": [int(value) for value in source_px_box],
             "recognizer_crop_mode": mode,
             "recognizer_ink_stats": ink_stats,
             "recognizer_candidate": is_candidate,
