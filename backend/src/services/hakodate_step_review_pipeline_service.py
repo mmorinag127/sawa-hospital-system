@@ -26,7 +26,7 @@ from src.services.hakodate_fixed_quad_registration_service import (
 WEEK_SHEET_NAME = "4月26日～4月30日"
 TARGET_RULE = "all columns strictly right of menu(献立)"
 STEP_REVIEW_BODY_START_ROW = 11
-STEP_REVIEW_BODY_END_ROW = 66
+STEP_REVIEW_BODY_END_ROW = 67
 STEP_REVIEW_HEADER_BANDS = 2
 
 

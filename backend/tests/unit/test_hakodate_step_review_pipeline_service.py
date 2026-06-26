@@ -72,15 +72,19 @@ def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary()
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.cell(row=11, column=4, value="先頭メニュー")
-    worksheet.cell(row=66, column=4, value="最終メニュー")
-    worksheet.cell(row=67, column=4, value="")
+    worksheet.cell(row=66, column=4, value="56行目メニュー")
+    worksheet.cell(row=67, column=4, value="57行目メニュー")
+    worksheet.cell(row=68, column=4, value="")
 
-    rows = _step_review_physical_row_map(worksheet, row_count=58)
+    rows = _step_review_physical_row_map(worksheet, row_count=59)
 
     assert rows[2]["worksheet_row"] == 11
     assert rows[2]["menu_name"] == "先頭メニュー"
     assert rows[57]["worksheet_row"] == 66
-    assert 58 not in rows
+    assert rows[57]["menu_name"] == "56行目メニュー"
+    assert rows[58]["worksheet_row"] == 67
+    assert rows[58]["menu_name"] == "57行目メニュー"
+    assert 59 not in rows
 
 
 def test_step_review_worksheet_row_to_grid_index_preserves_two_stage_header_boundary() -> None:
@@ -91,7 +95,8 @@ def test_step_review_worksheet_row_to_grid_index_preserves_two_stage_header_boun
     assert _step_review_worksheet_row_to_grid_index(11) == 2
     assert _step_review_worksheet_row_to_grid_index(12) == 3
     assert _step_review_worksheet_row_to_grid_index(66) == 57
-    assert _step_review_worksheet_row_to_grid_index(67) is None
+    assert _step_review_worksheet_row_to_grid_index(67) == 58
+    assert _step_review_worksheet_row_to_grid_index(68) is None
 
 
 def test_full_table_row_axis_match_interpolates_missing_template_rows() -> None:
@@ -303,6 +308,28 @@ def test_step_review_target_regions_include_all_post_menu_columns() -> None:
     assert evidence["target_selection_mode"] == "all_physical_columns_right_of_menu"
     assert evidence["target_worksheet_cols"] == [5, 6, 7, 8, 9]
     assert evidence["canonical_target_worksheet_cols"] == [5, 6, 7]
+
+
+def test_step_review_target_regions_include_57th_body_row() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D7"] = "献立"
+    for row in range(11, 68):
+        worksheet.cell(row=row, column=4, value=f"メニュー{row}")
+    for col, header in zip(("E", "F", "G", "H", "I", "J", "K"), ("常食", "糖尿", "備考欄", "肉禁", "魚禁", "軟菜", "袋分け")):
+        worksheet[f"{col}7"] = header
+    row_edges = [float(index * 10) for index in range(60)]
+    column_edges = [float(index * 10) for index in range(12)]
+
+    regions, evidence = _post_menu_target_regions(
+        worksheet=worksheet,
+        column_edges=column_edges,
+        row_edges=row_edges,
+    )
+
+    target_cells = {str(region["sheet_cell"]) for region in regions}
+    assert evidence["logical_target_count"] == 57 * 7
+    assert all(f"{col}67" in target_cells for col in ("E", "F", "G", "H", "I", "J", "K"))
 
 
 def test_step_review_target_regions_skip_blank_menu_rows() -> None:
