@@ -1127,7 +1127,7 @@ def _build_preprocess_for_ocr(
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
         working_rectified,
         target_regions,
-        snap_y=not bool(row_dewarp_evidence.get("applied")),
+        snap_y=not bool(row_slant_dewarp_evidence.get("applied")),
     )
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
     target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
