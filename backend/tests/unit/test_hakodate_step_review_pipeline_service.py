@@ -123,6 +123,41 @@ def test_snap_regions_preserves_slanted_cell_rulings_as_polygon() -> None:
     assert float(region["bbox"][3]) >= max(float(point[1]) for point in polygon)
 
 
+def test_snap_regions_uses_shared_row_boundary_curves_for_distorted_table() -> None:
+    rectified = np.full((140, 180, 3), 255, dtype=np.uint8)
+    x_edges = [30, 60, 90, 120, 150]
+    for x in x_edges:
+        rectified[18:112, x - 1 : x + 2] = 0
+    for base_y in (30.0, 58.0, 86.0):
+        for x in range(x_edges[0], x_edges[-1] + 1):
+            y = int(round(base_y + 10.0 * ((x - x_edges[0]) / (x_edges[-1] - x_edges[0]))))
+            rectified[y - 1 : y + 2, x] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [30.0, 30.0, 60.0, 58.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [60.0, 30.0, 90.0, 58.0]},
+        {"region_id": "G11", "sheet_cell": "G11", "bbox": [90.0, 30.0, 120.0, 58.0]},
+        {"region_id": "H11", "sheet_cell": "H11", "bbox": [120.0, 30.0, 150.0, 58.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [30.0, 58.0, 60.0, 86.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [60.0, 58.0, 90.0, 86.0]},
+        {"region_id": "G12", "sheet_cell": "G12", "bbox": [90.0, 58.0, 120.0, 86.0]},
+        {"region_id": "H12", "sheet_cell": "H12", "bbox": [120.0, 58.0, 150.0, 86.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    assert evidence["applied"] is True
+    assert evidence["row_boundary_curve_count"] == 3
+    by_cell = {str(region["sheet_cell"]): region for region in snapped}
+    left_polygon = by_cell["E11"]["polygon"]
+    right_polygon = by_cell["H11"]["polygon"]
+    assert by_cell["E11"]["local_grid_snap"]["polygon_method"] == "shared_row_boundary_curve"
+    assert by_cell["H11"]["local_grid_snap"]["polygon_method"] == "shared_row_boundary_curve"
+    assert abs(float(left_polygon[0][1]) - 30.0) < 3.0
+    assert abs(float(left_polygon[1][1]) - 32.5) < 3.0
+    assert abs(float(right_polygon[0][1]) - 37.5) < 3.0
+    assert abs(float(right_polygon[1][1]) - 40.0) < 3.0
+
+
 def test_snap_regions_can_preserve_template_y_after_row_dewarp() -> None:
     rectified = np.full((80, 120, 3), 255, dtype=np.uint8)
     for x in (39, 61, 81):

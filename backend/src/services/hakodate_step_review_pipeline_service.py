@@ -474,6 +474,145 @@ def snap_regions_x_to_local_fax_rulings(
         ]
         return polygon, bool(height_ok and side_delta_ok and detected_side_count == 2)
 
+    def median_row_height_for_boundary(boundary: float) -> float:
+        rounded_boundary = int(round(float(boundary)))
+        index = row_boundaries.index(rounded_boundary) if rounded_boundary in row_boundaries else -1
+        neighbor_heights: list[float] = []
+        if index > 0:
+            neighbor_heights.append(float(row_boundaries[index]) - float(row_boundaries[index - 1]))
+        if 0 <= index < len(row_boundaries) - 1:
+            neighbor_heights.append(float(row_boundaries[index + 1]) - float(row_boundaries[index]))
+        if neighbor_heights:
+            return max(1.0, float(np.median(np.array(neighbor_heights, dtype=np.float32))))
+        all_heights = [float(b) - float(a) for a, b in zip(row_boundaries[:-1], row_boundaries[1:]) if float(b) > float(a)]
+        return max(1.0, float(np.median(np.array(all_heights, dtype=np.float32)))) if all_heights else 24.0
+
+    def build_row_boundary_curves() -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+        curves: dict[int, dict[str, Any]] = {}
+        debug: list[dict[str, Any]] = []
+        intervals = list(zip(original_boundaries[:-1], original_boundaries[1:]))
+        if len(intervals) < 2:
+            return curves, debug
+        for row_boundary in row_boundaries:
+            samples: list[tuple[float, float]] = []
+            for left, right in intervals:
+                if float(right) <= float(left) + 8.0:
+                    continue
+                candidates = detected_y_edges_for_x_span(float(left), float(right)) if snap_y else []
+                snapped = nearest(float(row_boundary), candidates, max_distance=70.0) if snap_y else None
+                if snapped is None:
+                    continue
+                samples.append(((float(left) + float(right)) / 2.0, float(snapped)))
+            if len(samples) < max(3, min(7, len(intervals) // 2)):
+                debug.append(
+                    {
+                        "row_y": int(row_boundary),
+                        "used": False,
+                        "sample_count": len(samples),
+                        "reason": "insufficient_curve_samples",
+                    }
+                )
+                continue
+            x_values = np.array([item[0] for item in samples], dtype=np.float64)
+            y_values = np.array([item[1] for item in samples], dtype=np.float64)
+            deltas = y_values - float(row_boundary)
+            median_delta = float(np.median(deltas))
+            tolerance = max(9.0, median_row_height_for_boundary(float(row_boundary)) * 0.62)
+            keep = np.abs(deltas - median_delta) <= tolerance
+            if int(np.sum(keep)) >= 3 and int(np.sum(keep)) < len(samples):
+                x_values = x_values[keep]
+                y_values = y_values[keep]
+            order = np.argsort(x_values)
+            x_values = x_values[order]
+            y_values = y_values[order]
+            # Collapse duplicate probe centers without letting a single noisy
+            # interval create a discontinuity in the row boundary.
+            collapsed_x: list[float] = []
+            collapsed_y: list[float] = []
+            for x_value, y_value in zip(x_values.tolist(), y_values.tolist()):
+                if collapsed_x and abs(float(x_value) - float(collapsed_x[-1])) <= 1.0:
+                    collapsed_y[-1] = (float(collapsed_y[-1]) + float(y_value)) / 2.0
+                else:
+                    collapsed_x.append(float(x_value))
+                    collapsed_y.append(float(y_value))
+            if len(collapsed_x) < 3:
+                debug.append(
+                    {
+                        "row_y": int(row_boundary),
+                        "used": False,
+                        "sample_count": len(samples),
+                        "reason": "insufficient_unique_curve_samples",
+                    }
+                )
+                continue
+            curves[int(row_boundary)] = {
+                "xs": collapsed_x,
+                "ys": collapsed_y,
+                "median_delta": median_delta,
+            }
+            span_delta = float(np.interp(float(original_boundaries[-1]), collapsed_x, collapsed_y)) - float(
+                np.interp(float(original_boundaries[0]), collapsed_x, collapsed_y)
+            )
+            debug.append(
+                {
+                    "row_y": int(row_boundary),
+                    "used": True,
+                    "sample_count": len(samples),
+                    "kept_sample_count": len(collapsed_x),
+                    "median_delta": round(median_delta, 3),
+                    "span_delta": round(span_delta, 3),
+                }
+            )
+        return curves, debug
+
+    def curve_y(curves: dict[int, dict[str, Any]], boundary: int, x_value: float) -> float | None:
+        curve = curves.get(int(boundary))
+        if not curve:
+            return None
+        xs = curve.get("xs")
+        ys = curve.get("ys")
+        if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) < 2 or len(xs) != len(ys):
+            return None
+        return float(np.interp(float(x_value), [float(item) for item in xs], [float(item) for item in ys]))
+
+    def row_curve_polygon_for_cell(
+        curves: dict[int, dict[str, Any]],
+        x0: float,
+        x1: float,
+        *,
+        top_key: int,
+        bottom_key: int,
+    ) -> tuple[list[list[float]], bool]:
+        top_left = curve_y(curves, top_key, float(x0))
+        top_right = curve_y(curves, top_key, float(x1))
+        bottom_left = curve_y(curves, bottom_key, float(x0))
+        bottom_right = curve_y(curves, bottom_key, float(x1))
+        if None in (top_left, top_right, bottom_left, bottom_right):
+            return [], False
+        expected_height = max(1.0, float(bottom_key) - float(top_key))
+        left_height = float(bottom_left) - float(top_left)
+        right_height = float(bottom_right) - float(top_right)
+        if not (
+            expected_height * 0.50 <= left_height <= expected_height * 1.85
+            and expected_height * 0.50 <= right_height <= expected_height * 1.85
+            and left_height > 8.0
+            and right_height > 8.0
+        ):
+            return [], False
+        max_side_delta = max(7.0, expected_height * 0.65)
+        if (
+            abs(float(top_right) - float(top_left)) > max_side_delta
+            or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
+        ):
+            return [], False
+        return [
+            [float(x0), float(top_left)],
+            [float(x1), float(top_right)],
+            [float(x1), float(bottom_right)],
+            [float(x0), float(bottom_left)],
+        ], True
+
+    row_boundary_curves, row_curve_debug = build_row_boundary_curves()
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
     def snapped_x_edges_for_y(y_value: float) -> list[float | None] | None:
@@ -621,14 +760,24 @@ def snap_regions_x_to_local_fax_rulings(
             fallback_count += 1
             snapped_regions.append(region)
             continue
-        polygon, polygon_ok = side_y_edges_for_cell(
+        polygon, polygon_ok = row_curve_polygon_for_cell(
+            row_boundary_curves,
             snapped_x0,
             snapped_x1,
-            top_key=float(top_key),
-            bottom_key=float(bottom_key),
-            snapped_top=snapped_y0,
-            snapped_bottom=snapped_y1,
+            top_key=top_key,
+            bottom_key=bottom_key,
         )
+        polygon_method = "shared_row_boundary_curve"
+        if not polygon_ok:
+            polygon, polygon_ok = side_y_edges_for_cell(
+                snapped_x0,
+                snapped_x1,
+                top_key=float(top_key),
+                bottom_key=float(bottom_key),
+                snapped_top=snapped_y0,
+                snapped_bottom=snapped_y1,
+            )
+            polygon_method = "cell_side_local_fax_ruling"
         if polygon_ok:
             px_values = [float(point[0]) for point in polygon]
             py_values = [float(point[1]) for point in polygon]
@@ -654,10 +803,11 @@ def snap_regions_x_to_local_fax_rulings(
                     "snapped_polygon": polygon,
                     "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
                     "y_delta": [snapped_bbox[1] - y0, snapped_bbox[3] - y1],
-                    "method": "row_edge_local_fax_ruling_polygon_snap_v3",
+                    "method": "row_edge_local_fax_ruling_polygon_snap_v4",
                     "y_snap_enabled": bool(snap_y),
                     "local_y_snap_applied": bool(snap_y and local_height_ok),
                     "local_polygon_snap_applied": bool(polygon_ok),
+                    "polygon_method": polygon_method if polygon_ok else None,
                 },
             }
         )
@@ -672,13 +822,15 @@ def snap_regions_x_to_local_fax_rulings(
             "fallback_region_count": fallback_count,
             "required_min_snapped_region_count": required_min,
             "row_debug": row_debug,
+            "row_curve_debug": row_curve_debug,
         }
     return snapped_regions, {
         "applied": True,
-        "method": "row_edge_local_fax_ruling_polygon_snap_v3",
+        "method": "row_edge_local_fax_ruling_polygon_snap_v4",
         "y_snap_enabled": bool(snap_y),
         "original_boundaries": original_boundaries,
         "row_boundary_count": len(row_boundaries),
+        "row_boundary_curve_count": len(row_boundary_curves),
         "outer_y_snap": {
             "top_template_y": top_boundary,
             "top_snapped_y": y_edge_snaps.get(top_boundary),
@@ -688,6 +840,7 @@ def snap_regions_x_to_local_fax_rulings(
         "snapped_region_count": snapped_count,
         "fallback_region_count": fallback_count,
         "row_debug": row_debug,
+        "row_curve_debug": row_curve_debug,
     }
 
 
