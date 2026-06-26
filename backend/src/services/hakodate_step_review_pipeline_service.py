@@ -526,7 +526,8 @@ def snap_regions_x_to_local_fax_rulings(
         for candidate_index, candidate in enumerate(candidate_values):
             template_index = min(range(n), key=lambda index: abs(template_values[index] - float(candidate)))
             distance = abs(template_values[template_index] - float(candidate))
-            if distance > 86.0:
+            max_distance = max(18.0, min(45.0, median_row_height_for_boundary(template_values[template_index]) * 1.25))
+            if distance > max_distance:
                 continue
             current = best_by_template.get(template_index)
             if current is None or distance < float(current[2]):
