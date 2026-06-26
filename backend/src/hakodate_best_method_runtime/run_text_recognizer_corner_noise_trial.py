@@ -366,6 +366,52 @@ def _mask_crop_to_region_polygon(
     return masked
 
 
+def _warp_polygon_cell_to_axis_aligned_crop(
+    rectified_fax_bgr: np.ndarray,
+    polygon: list[list[float]] | None,
+) -> tuple[np.ndarray, list[float], tuple[int, int, int, int]] | None:
+    if not polygon or len(polygon) < 4:
+        return None
+    pts = np.array([[float(point[0]), float(point[1])] for point in polygon[:4]], dtype=np.float32)
+    top_w = float(np.linalg.norm(pts[1] - pts[0]))
+    bottom_w = float(np.linalg.norm(pts[2] - pts[3]))
+    left_h = float(np.linalg.norm(pts[3] - pts[0]))
+    right_h = float(np.linalg.norm(pts[2] - pts[1]))
+    out_w = int(round(max(top_w, bottom_w)))
+    out_h = int(round(max(left_h, right_h)))
+    if out_w < 8 or out_h < 8:
+        return None
+    out_w = min(max(out_w, 8), 360)
+    out_h = min(max(out_h, 8), 220)
+    dst = np.array(
+        [
+            [0.0, 0.0],
+            [float(out_w - 1), 0.0],
+            [float(out_w - 1), float(out_h - 1)],
+            [0.0, float(out_h - 1)],
+        ],
+        dtype=np.float32,
+    )
+    matrix = cv2.getPerspectiveTransform(pts, dst)
+    warped = cv2.warpPerspective(
+        rectified_fax_bgr,
+        matrix,
+        (out_w, out_h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    xs = [float(point[0]) for point in polygon[:4]]
+    ys = [float(point[1]) for point in polygon[:4]]
+    source_box = (
+        int(np.floor(min(xs))),
+        int(np.floor(min(ys))),
+        int(np.ceil(max(xs))),
+        int(np.ceil(max(ys))),
+    )
+    return warped, [0.0, 0.0, float(out_w), float(out_h)], source_box
+
+
 def build_recognizer_contact_sheet(
     *,
     rectified_fax_bgr: np.ndarray,
@@ -387,7 +433,10 @@ def build_recognizer_contact_sheet(
         if not isinstance(box, list):
             continue
         polygon = _region_polygon(region)
-        if polygon and mode.startswith("corner_cc"):
+        warped_cell = _warp_polygon_cell_to_axis_aligned_crop(rectified_fax_bgr, polygon) if mode.startswith("corner_cc") else None
+        if warped_cell is not None:
+            crop, preprocess_cell_box, px_box = warped_cell
+        elif polygon and mode.startswith("corner_cc"):
             px_box = _safe_int_box_for_polygon(
                 polygon,
                 width=width,
@@ -403,16 +452,20 @@ def build_recognizer_contact_sheet(
             px_box = _safe_int_box(box, width=width, height=height, margin_ratio=margin_ratio)
         if not px_box:
             continue
-        x0, y0, x1, y1 = px_box
-        crop = rectified_fax_bgr[y0:y1, x0:x1]
+        if warped_cell is None:
+            x0, y0, x1, y1 = px_box
+            crop = rectified_fax_bgr[y0:y1, x0:x1]
+            if crop.size == 0:
+                continue
+            crop = _mask_crop_to_region_polygon(crop, polygon=polygon, crop_box=px_box)
+            preprocess_cell_box = box
         if crop.size == 0:
             continue
-        crop = _mask_crop_to_region_polygon(crop, polygon=polygon, crop_box=px_box)
-        crop_line_mask = line_mask[y0:y1, x0:x1] if line_mask is not None else None
+        crop_line_mask = None if warped_cell is not None or line_mask is None else line_mask[y0:y1, x0:x1]
         if mode == "dynamic":
             crop_image, ink_stats = _preprocess_dynamic_crop_for_recognizer(
                 crop,
-                cell_box=box,
+                cell_box=preprocess_cell_box,
                 crop_box=px_box,
                 slot_width=slot_width,
                 slot_height=slot_height,
@@ -420,7 +473,7 @@ def build_recognizer_contact_sheet(
         elif mode.startswith("corner_cc"):
             crop_image, ink_stats = _preprocess_corner_component_crop_for_recognizer(
                 crop,
-                cell_box=box,
+                cell_box=preprocess_cell_box,
                 crop_box=px_box,
                 slot_width=slot_width,
                 slot_height=slot_height,
