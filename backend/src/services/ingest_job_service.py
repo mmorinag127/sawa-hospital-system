@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import os
 from typing import Any
 
-from sqlalchemy import select, update, func, desc
+from sqlalchemy import and_, or_, select, update, func, desc
 
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
@@ -131,6 +131,48 @@ def _stale_threshold() -> datetime:
     return datetime.utcnow() - timedelta(minutes=minutes)
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = str(os.getenv(name, str(default)) or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    return max(value, minimum)
+
+
+def _auto_recovery_window_hours() -> int:
+    return _env_int("INGEST_JOB_AUTO_RECOVERY_WINDOW_HOURS", 24)
+
+
+def _auto_recovery_cutoff() -> datetime:
+    return datetime.utcnow() - timedelta(hours=_auto_recovery_window_hours())
+
+
+def _max_auto_attempts() -> int:
+    return _env_int("INGEST_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", 3)
+
+
+def _eligible_ingest_job_condition(stale_before: datetime, recovery_cutoff: datetime):
+    max_attempts = _max_auto_attempts()
+    return or_(
+        and_(
+            IngestJob.status == "pending",
+            IngestJob.updated_at >= recovery_cutoff,
+            IngestJob.attempts < max_attempts,
+        ),
+        and_(
+            IngestJob.status == "error",
+            IngestJob.updated_at >= recovery_cutoff,
+            IngestJob.attempts < max_attempts,
+        ),
+        and_(
+            IngestJob.status == "processing",
+            IngestJob.started_at < stale_before,
+            IngestJob.attempts < max_attempts,
+        ),
+    )
+
+
 def claim_ingest_job(job_id: str) -> bool:
     now = datetime.utcnow()
     stale_before = _stale_threshold()
@@ -174,15 +216,13 @@ def fail_ingest_job(job_id: str, error_message: str) -> None:
 
 def list_pending_jobs(limit: int = 10) -> list[str]:
     stale_before = _stale_threshold()
+    recovery_cutoff = _auto_recovery_cutoff()
     with session_scope() as session:
         rows = (
             session.execute(
                 select(IngestJob.id)
-                .where(
-                    (IngestJob.status.in_(["pending", "error"]))
-                    | ((IngestJob.status == "processing") & (IngestJob.started_at < stale_before))
-                )
-                .order_by(IngestJob.created_at.asc())
+                .where(_eligible_ingest_job_condition(stale_before, recovery_cutoff))
+                .order_by(IngestJob.updated_at.desc(), IngestJob.created_at.desc())
                 .limit(limit)
             )
             .scalars()
@@ -246,6 +286,8 @@ def reset_stale_processing(minutes: int | None = None, limit: int = 100) -> list
 
 def summarize_ingest_jobs() -> dict[str, Any]:
     stale_before = _stale_threshold()
+    recovery_cutoff = _auto_recovery_cutoff()
+    max_attempts = _max_auto_attempts()
     now = datetime.utcnow()
     with session_scope() as session:
         rows = session.execute(
@@ -253,8 +295,9 @@ def summarize_ingest_jobs() -> dict[str, Any]:
             .group_by(IngestJob.status)
         ).all()
         counts = {status: int(count) for status, count in rows if status}
+        eligible_condition = _eligible_ingest_job_condition(stale_before, recovery_cutoff)
         oldest_pending_at = session.execute(
-            select(func.min(IngestJob.created_at)).where(IngestJob.status.in_(["pending", "error"]))
+            select(func.min(IngestJob.created_at)).where(eligible_condition)
         ).scalar_one_or_none()
         oldest_processing_at = session.execute(
             select(func.min(IngestJob.started_at)).where(IngestJob.status == "processing")
@@ -267,10 +310,29 @@ def summarize_ingest_jobs() -> dict[str, Any]:
             ).scalar_one()
             or 0
         )
-        eligible_backlog_count = (
-            counts.get("pending", 0)
-            + counts.get("error", 0)
-            + stale_processing_count
+        eligible_backlog_count = int(
+            session.execute(
+                select(func.count(IngestJob.id)).where(eligible_condition)
+            ).scalar_one()
+            or 0
+        )
+        blocked_old_pending_count = int(
+            session.execute(
+                select(func.count(IngestJob.id)).where(
+                    IngestJob.status.in_(["pending", "error"]),
+                    IngestJob.updated_at < recovery_cutoff,
+                )
+            ).scalar_one()
+            or 0
+        )
+        blocked_attempt_exhausted_count = int(
+            session.execute(
+                select(func.count(IngestJob.id)).where(
+                    IngestJob.status.in_(["pending", "error", "processing"]),
+                    IngestJob.attempts >= max_attempts,
+                )
+            ).scalar_one()
+            or 0
         )
         return {
             "total": sum(counts.values()),
@@ -281,6 +343,10 @@ def summarize_ingest_jobs() -> dict[str, Any]:
             "done_count": counts.get("done", 0),
             "stale_processing_count": stale_processing_count,
             "eligible_backlog_count": eligible_backlog_count,
+            "blocked_old_pending_count": blocked_old_pending_count,
+            "blocked_attempt_exhausted_count": blocked_attempt_exhausted_count,
+            "auto_recovery_window_hours": _auto_recovery_window_hours(),
+            "auto_recovery_max_attempts": max_attempts,
             "oldest_pending_at": oldest_pending_at.isoformat() if oldest_pending_at else None,
             "oldest_pending_seconds": (
                 max(int((now - oldest_pending_at).total_seconds()), 0) if oldest_pending_at else None

@@ -15,6 +15,7 @@ from src.models.shipping_tracking import ShippingTrackingLog  # noqa: E402
 from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
 from src.models.user import AuditLog  # noqa: E402
 from src.services import order_service  # noqa: E402
+from src.services import ingest_job_service  # noqa: E402
 from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
@@ -346,6 +347,65 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch):
     assert ocr.get("recent_backlog_skipped_count") == 1
     assert ocr.get("stale_count") == 1
     assert int(ocr.get("stale_oldest_seconds") or 0) > 0
+
+
+def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch):
+    order_service.clear_all()
+    monkeypatch.setenv("INGEST_JOB_AUTO_RECOVERY_WINDOW_HOURS", "24")
+    monkeypatch.setenv("INGEST_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", "3")
+    now = datetime.utcnow()
+    with session_scope() as session:
+        session.query(IngestJob).delete()
+    create_ingest_job(
+        {
+            "message_id": "msg-recent-pending",
+            "pdf_uri": "file://recent.pdf",
+            "received_at": now.isoformat(),
+        },
+        force=True,
+    )
+    create_ingest_job(
+        {
+            "message_id": "msg-old-pending",
+            "pdf_uri": "file://old.pdf",
+            "received_at": now.isoformat(),
+        },
+        force=True,
+    )
+    create_ingest_job(
+        {
+            "message_id": "msg-exhausted-error",
+            "pdf_uri": "file://exhausted.pdf",
+            "received_at": now.isoformat(),
+        },
+        force=True,
+    )
+    with session_scope() as session:
+        recent_job = session.get(IngestJob, "msg-recent-pending")
+        old_job = session.get(IngestJob, "msg-old-pending")
+        exhausted_job = session.get(IngestJob, "msg-exhausted-error")
+        assert recent_job is not None
+        assert old_job is not None
+        assert exhausted_job is not None
+        recent_job.created_at = now - timedelta(minutes=10)
+        recent_job.updated_at = now - timedelta(minutes=10)
+        old_job.created_at = now - timedelta(days=10)
+        old_job.updated_at = now - timedelta(days=10)
+        exhausted_job.status = "error"
+        exhausted_job.attempts = 3
+        exhausted_job.last_error = "template_resolution_failed"
+        exhausted_job.created_at = now - timedelta(minutes=5)
+        exhausted_job.updated_at = now - timedelta(minutes=5)
+
+    pending_ids = ingest_job_service.list_pending_jobs(limit=10)
+    summary = ingest_job_service.summarize_ingest_jobs()
+
+    assert pending_ids == ["msg-recent-pending"]
+    assert summary["pending_count"] == 2
+    assert summary["error_count"] == 1
+    assert summary["eligible_backlog_count"] == 1
+    assert summary["blocked_old_pending_count"] == 1
+    assert summary["blocked_attempt_exhausted_count"] == 1
 
 
 def test_health_backlog_requires_operator_when_auth_enabled(monkeypatch):
