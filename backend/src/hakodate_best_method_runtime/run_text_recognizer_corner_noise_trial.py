@@ -200,11 +200,10 @@ def _printed_zero_shape_candidate(ink: np.ndarray, component: dict[str, Any]) ->
 
 
 def _clear_printed_zero_digits(ink: np.ndarray, components: list[dict[str, Any]]) -> str:
-    kept_components = [item for item in components if item.get("kept")]
-    zero_like = [item for item in kept_components if _printed_zero_shape_candidate(ink, item)]
+    zero_like = [item for item in components if _printed_zero_shape_candidate(ink, item)]
     other_digit_like = [
         item
-        for item in kept_components
+        for item in components
         if item not in zero_like and item.get("digit_like")
     ]
     if len(zero_like) != 1 or other_digit_like:
@@ -294,9 +293,7 @@ def _preprocess_corner_component_crop_for_recognizer(
     cleaned_binary = 255 - kept
     image, stats_out = _foreground_centered(cleaned_binary, out_width=slot_width - 10, out_height=slot_height - 10)
     fast_digits = _clear_printed_zero_digits(kept, components)
-    zero_shape_candidate_count = sum(
-        1 for item in components if item.get("kept") and _printed_zero_shape_candidate(kept, item)
-    )
+    zero_shape_candidate_count = sum(1 for item in components if _printed_zero_shape_candidate(kept, item))
     stats_out.update(
         {
             "component_count": len(components),
@@ -451,7 +448,7 @@ def build_recognizer_contact_sheet(
             "recognizer_candidate": is_candidate,
         }
         fast_digits = str(ink_stats.get("fast_digits") or "").strip()
-        if is_candidate and fast_digits:
+        if fast_digits:
             skipped_regions.append(
                 {
                     **prepared_region,
