@@ -191,6 +191,139 @@ def dewarp_rectified_y_to_template_rows(
     }
 
 
+def dewarp_rectified_rows_by_bounded_slant(
+    rectified: np.ndarray,
+    *,
+    corrected_xs: list[float],
+    template_ys: list[int | float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if len(corrected_xs) < 2 or len(template_ys) < 3:
+        return rectified, {
+            "applied": False,
+            "reason": "row_slant_dewarp_insufficient_axes",
+            "x_count": len(corrected_xs),
+            "template_y_count": len(template_ys),
+        }
+    target = np.array([float(value) for value in template_ys], dtype=np.float32)
+    if not np.all(np.diff(target) > 0):
+        return rectified, {"applied": False, "reason": "row_slant_dewarp_template_not_monotonic"}
+    height, width = rectified.shape[:2]
+    horizontal_mask, _vertical_mask = _split_line_masks(rectified)
+    x0 = max(0, int(round(float(min(corrected_xs)))) + 8)
+    x1 = min(width, int(round(float(max(corrected_xs)))) - 8)
+    if x1 <= x0 + 80:
+        return rectified, {"applied": False, "reason": "row_slant_dewarp_empty_x_span"}
+    x_center = (float(x0) + float(x1)) / 2.0
+    sample_count = 13
+    edges = np.linspace(float(x0), float(x1), sample_count + 1)
+    row_slopes: list[float] = []
+    row_offsets: list[float] = []
+    fitted_rows: list[dict[str, Any]] = []
+    for row_index, template_y in enumerate(target.tolist()):
+        band_top = max(0, int(round(float(template_y) - 16.0)))
+        band_bottom = min(height, int(round(float(template_y) + 16.0)))
+        if band_bottom <= band_top:
+            row_slopes.append(0.0)
+            row_offsets.append(0.0)
+            continue
+        samples: list[tuple[float, float]] = []
+        for left, right in zip(edges[:-1], edges[1:]):
+            lx = max(0, int(round(float(left))))
+            rx = min(width, int(round(float(right))))
+            if rx <= lx:
+                continue
+            roi = horizontal_mask[band_top:band_bottom, lx:rx]
+            projection = roi.sum(axis=1).astype(np.float32) / 255.0
+            if float(projection.max(initial=0.0)) < max(4.0, float(rx - lx) * 0.10):
+                continue
+            yy = int(np.argmax(projection))
+            y_value = float(band_top + yy)
+            x_value = (float(lx) + float(rx)) / 2.0
+            samples.append((x_value, y_value))
+        if len(samples) < 5:
+            row_slopes.append(0.0)
+            row_offsets.append(0.0)
+            continue
+        xs = np.array([item[0] for item in samples], dtype=np.float64)
+        ys = np.array([item[1] for item in samples], dtype=np.float64)
+        slope, intercept = np.polyfit(xs, ys, 1)
+        residuals = ys - (slope * xs + intercept)
+        max_abs_residual = float(np.max(np.abs(residuals))) if residuals.size else 0.0
+        y_at_left = float(slope * float(x0) + intercept)
+        y_at_right = float(slope * float(x1) + intercept)
+        span_delta = y_at_right - y_at_left
+        if abs(float(slope)) > 0.045 or abs(span_delta) > 70.0 or max_abs_residual > 8.0:
+            row_slopes.append(0.0)
+            row_offsets.append(0.0)
+            continue
+        center_offset = float(slope * x_center + intercept - float(template_y))
+        if abs(center_offset) > 18.0:
+            row_slopes.append(0.0)
+            row_offsets.append(0.0)
+            continue
+        row_slopes.append(float(slope))
+        row_offsets.append(center_offset)
+        fitted_rows.append(
+            {
+                "row_index": row_index,
+                "template_y": round(float(template_y), 3),
+                "slope": round(float(slope), 6),
+                "center_offset": round(float(center_offset), 3),
+                "span_delta": round(float(span_delta), 3),
+                "sample_count": len(samples),
+                "max_abs_residual": round(max_abs_residual, 3),
+            }
+        )
+    nonzero = [abs(value) for value in row_slopes if abs(float(value)) > 0.003]
+    if len(nonzero) < max(3, int(round(float(len(target)) * 0.08))):
+        return rectified, {
+            "applied": False,
+            "reason": "row_slant_dewarp_insufficient_reliable_rows",
+            "fitted_row_count": len(fitted_rows),
+            "nonzero_slope_count": len(nonzero),
+        }
+    slope_axis = np.array(row_slopes, dtype=np.float32)
+    offset_axis = np.array(row_offsets, dtype=np.float32)
+    output_y = np.arange(height, dtype=np.float32)
+    x_positions = np.arange(width, dtype=np.float32)
+    map_y = np.empty((height, width), dtype=np.float32)
+    for x_index, x_value in enumerate(x_positions.tolist()):
+        slopes_for_y = np.interp(output_y, target, slope_axis).astype(np.float32)
+        offsets_for_y = np.interp(output_y, target, offset_axis).astype(np.float32)
+        source_y = output_y + offsets_for_y + slopes_for_y * (float(x_value) - x_center)
+        head_end = int(max(0, round(float(target[0]) - 32.0)))
+        if head_end > 0:
+            source_y[:head_end] = output_y[:head_end]
+        tail_start = int(min(height, max(0, round(float(target[-1]) + 32.0))))
+        if tail_start < height:
+            source_y[tail_start:] = output_y[tail_start:]
+        map_y[:, x_index] = source_y
+    if float(np.max(np.abs(map_y - output_y[:, None]))) > 42.0:
+        return rectified, {
+            "applied": False,
+            "reason": "row_slant_dewarp_shift_limit_exceeded",
+            "fitted_rows": fitted_rows[:20],
+        }
+    map_x = np.repeat(x_positions[None, :], height, axis=0)
+    dewarped = cv2.remap(
+        rectified,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return dewarped, {
+        "applied": True,
+        "method": "bounded_horizontal_row_slant_dewarp",
+        "fitted_row_count": len(fitted_rows),
+        "nonzero_slope_count": len(nonzero),
+        "max_abs_slope": round(float(max(nonzero)), 6),
+        "max_abs_shift": round(float(np.max(np.abs(map_y - output_y[:, None]))), 3),
+        "fitted_rows": fitted_rows[:20],
+    }
+
+
 def snap_regions_x_to_local_fax_rulings(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],
