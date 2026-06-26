@@ -983,11 +983,11 @@ def snap_regions_x_to_local_fax_rulings(
         ):
             snapped_top = local_top
             snapped_bottom = local_bottom
+        shared_row_curve_available = top_key in row_boundary_curves and bottom_key in row_boundary_curves
         if (
             len(snapped_left_values) < 2
             or len(snapped_right_values) < 2
-            or snapped_top is None
-            or snapped_bottom is None
+            or ((snapped_top is None or snapped_bottom is None) and not shared_row_curve_available)
         ):
             missing_parts = []
             if len(snapped_left_values) < 2:
@@ -1002,8 +1002,8 @@ def snap_regions_x_to_local_fax_rulings(
             continue
         snapped_x0 = float(np.mean(snapped_left_values))
         snapped_x1 = float(np.mean(snapped_right_values))
-        snapped_y0 = float(snapped_top)
-        snapped_y1 = float(snapped_bottom)
+        snapped_y0 = float(snapped_top) if snapped_top is not None else float(y0)
+        snapped_y1 = float(snapped_bottom) if snapped_bottom is not None else float(y1)
         if snapped_x1 <= snapped_x0 + 8.0 or snapped_y1 <= snapped_y0 + 8.0:
             append_fallback(region, "invalid_snapped_axis_bbox")
             continue
@@ -1021,7 +1021,6 @@ def snap_regions_x_to_local_fax_rulings(
         if polygon_ok and column_curve_applied:
             polygon_method = "shared_row_and_column_boundary_curve"
         if not polygon_ok:
-            shared_row_curve_available = top_key in row_boundary_curves and bottom_key in row_boundary_curves
             if shared_row_curve_available:
                 append_fallback(region, "shared_row_curve_polygon_rejected")
                 continue
@@ -1064,7 +1063,7 @@ def snap_regions_x_to_local_fax_rulings(
                     "y_delta": [snapped_bbox[1] - y0, snapped_bbox[3] - y1],
                     "method": "row_edge_local_fax_ruling_polygon_snap_v5",
                     "y_snap_enabled": bool(snap_y),
-                    "local_y_snap_applied": bool(snap_y and local_height_ok),
+                    "local_y_snap_applied": bool(snap_y and local_height_ok and snapped_top is not None and snapped_bottom is not None),
                     "local_polygon_snap_applied": bool(polygon_ok),
                     "column_curve_applied": bool(column_curve_applied if polygon_ok else False),
                     "polygon_method": polygon_method if polygon_ok else None,
