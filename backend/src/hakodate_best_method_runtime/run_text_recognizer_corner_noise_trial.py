@@ -172,6 +172,36 @@ def _preprocess_dynamic_crop_for_recognizer(
     return _foreground_centered(binary, out_width=slot_width - 10, out_height=slot_height - 10)
 
 
+def _clear_printed_zero_digits(ink: np.ndarray, components: list[dict[str, Any]]) -> str:
+    kept_components = [item for item in components if item.get("kept")]
+    if len(kept_components) != 1:
+        return ""
+    height, width = ink.shape[:2]
+    component = kept_components[0]
+    x, y, w, h = [int(value) for value in component.get("bbox") or [0, 0, 0, 0]]
+    area = int(component.get("area") or 0)
+    if w <= 0 or h <= 0 or area <= 0:
+        return ""
+    aspect = float(w) / max(1.0, float(h))
+    fill_ratio = float(area) / max(1.0, float(w * h))
+    cx, cy = [float(value) for value in component.get("centroid") or [0.0, 0.0]]
+    centered = width * 0.28 <= cx <= width * 0.72 and height * 0.20 <= cy <= height * 0.82
+    digit_sized = h >= max(10, int(round(height * 0.30))) and w >= max(5, int(round(width * 0.08)))
+    zero_shaped = 0.30 <= aspect <= 0.85 and 0.18 <= fill_ratio <= 0.58
+    if not (centered and digit_sized and zero_shaped):
+        return ""
+    component_mask = ink[y : y + h, x : x + w]
+    if component_mask.size == 0:
+        return ""
+    contours, hierarchy = cv2.findContours(component_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None or not contours:
+        return ""
+    hole_count = sum(1 for item in hierarchy[0] if int(item[3]) >= 0)
+    if hole_count != 1:
+        return ""
+    return "0"
+
+
 def _preprocess_corner_component_crop_for_recognizer(
     crop_bgr: np.ndarray,
     *,
@@ -245,6 +275,7 @@ def _preprocess_corner_component_crop_for_recognizer(
             kept[labels == label] = 255
     cleaned_binary = 255 - kept
     image, stats_out = _foreground_centered(cleaned_binary, out_width=slot_width - 10, out_height=slot_height - 10)
+    fast_digits = _clear_printed_zero_digits(kept, components)
     stats_out.update(
         {
             "component_count": len(components),
@@ -252,6 +283,8 @@ def _preprocess_corner_component_crop_for_recognizer(
             "removed_component_count": sum(1 for item in components if not item["kept"]),
             "components": components[:20],
             "crop_box": list(crop_box),
+            "fast_digits": fast_digits,
+            "fast_digit_source": "clear_printed_zero_shape" if fast_digits else "",
         }
     )
     return image, stats_out
@@ -392,6 +425,27 @@ def build_recognizer_contact_sheet(
             "recognizer_ink_stats": ink_stats,
             "recognizer_candidate": is_candidate,
         }
+        fast_digits = str(ink_stats.get("fast_digits") or "").strip()
+        if is_candidate and fast_digits:
+            skipped_regions.append(
+                {
+                    **prepared_region,
+                    "ocr_contact_slot": [],
+                    "ocr_contact_crop_box": [],
+                    "ocr_text": fast_digits,
+                    "ocr_normalized": fast_digits,
+                    "ocr_words": [],
+                    "ocr_word_count": 0,
+                    "recognizer_raw_text": fast_digits,
+                    "recognizer_score": 1.0,
+                    "recognizer_direction": "",
+                    "recognizer_accepted": True,
+                    "recognizer_skipped": False,
+                    "recognizer_fast_path": True,
+                    "recognizer_decision_source": str(ink_stats.get("fast_digit_source") or "fast_digits"),
+                }
+            )
+            continue
         if is_candidate:
             candidate_items.append((slot_index, prepared_region, crop_image, px_box, ink_stats))
         else:

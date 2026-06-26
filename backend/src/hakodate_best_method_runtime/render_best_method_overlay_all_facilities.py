@@ -362,6 +362,7 @@ def _run_text_recognizer_records(
         "contact_sheet_region_count": len(regions),
         "contact_sheet_usable_region_count": len(usable_regions),
         "contact_sheet_skipped_region_count": len(skipped_regions),
+        "recognizer_fast_path_count": sum(1 for region in skipped_regions if region.get("recognizer_fast_path")),
         "numeric_eval_cell_count": len(records),
         "pred_nonempty_count": sum(1 for record in records if str(record.get("pred_digits") or "").strip()),
     }

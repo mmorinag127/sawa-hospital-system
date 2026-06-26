@@ -461,7 +461,7 @@ def snap_regions_x_to_local_fax_rulings(
                 bool(top_right_detected or bottom_right_detected),
             )
         )
-        max_side_delta = max(6.0, expected_height * 0.75)
+        max_side_delta = max(5.0, expected_height * 0.35)
         side_delta_ok = (
             abs(float(top_right) - float(top_left)) <= max_side_delta
             and abs(float(bottom_right) - float(bottom_left)) <= max_side_delta

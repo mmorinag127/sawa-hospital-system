@@ -100,8 +100,8 @@ def test_snap_regions_preserves_slanted_cell_rulings_as_polygon() -> None:
     for x in (40, 90):
         rectified[15:85, x - 1 : x + 2] = 0
     for x in range(40, 91):
-        y_top = int(round(30.0 + 12.0 * ((x - 40) / 50.0)))
-        y_bottom = int(round(58.0 + 12.0 * ((x - 40) / 50.0)))
+        y_top = int(round(30.0 + 8.0 * ((x - 40) / 50.0)))
+        y_bottom = int(round(58.0 + 8.0 * ((x - 40) / 50.0)))
         rectified[y_top - 1 : y_top + 2, x] = 0
         rectified[y_bottom - 1 : y_bottom + 2, x] = 0
     regions = [
@@ -116,8 +116,8 @@ def test_snap_regions_preserves_slanted_cell_rulings_as_polygon() -> None:
     assert region["local_grid_snap"]["local_polygon_snap_applied"] is True
     assert len(polygon) == 4
     assert abs(float(polygon[0][1]) - 30.0) < 2.5
-    assert abs(float(polygon[1][1]) - 42.0) < 2.5
-    assert abs(float(polygon[2][1]) - 70.0) < 2.5
+    assert abs(float(polygon[1][1]) - 38.0) < 2.5
+    assert abs(float(polygon[2][1]) - 66.0) < 2.5
     assert abs(float(polygon[3][1]) - 58.0) < 2.5
     assert float(region["bbox"][1]) <= min(float(point[1]) for point in polygon)
     assert float(region["bbox"][3]) >= max(float(point[1]) for point in polygon)
