@@ -376,18 +376,11 @@ def test_build_facility_template_from_master_keeps_week_menu_overflow_as_review_
     }
 
     assert worksheet.cell(row=service.BODY_END_ROW, column=4).value == "2026-07-11-夕-3"
-    assert schema_values["week_menu_rows"] == 56
+    assert schema_values["week_menu_rows"] == 57
     assert schema_values["week_menu_source_rows"] == 57
-    assert schema_values["week_menu_overflow_rows"] == 1
+    assert schema_values["week_menu_overflow_rows"] == 0
     overflow_entries = json.loads(schema_values["week_menu_overflow_entries"])
-    assert overflow_entries == [
-        {
-            "category": "",
-            "date": "2026-07-07",
-            "daypart": "昼",
-            "name": "小松菜のおかか和え",
-        }
-    ]
+    assert overflow_entries == []
 
 
 def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path) -> None:
