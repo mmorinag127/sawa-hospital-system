@@ -40,6 +40,8 @@ from src.services.hakodate_step_review_pipeline_service import (
     _source_template_name,
     _split_line_masks,
     _write_pdf_from_pages,
+    dewarp_rectified_rows_by_bounded_slant,
+    dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
 )
 
@@ -1024,34 +1026,35 @@ def _build_preprocess_for_ocr(
     row_source_ys = row_match.get("corrected_ys") if isinstance(row_match, dict) else None
     if not isinstance(row_source_ys, list) or len(row_source_ys) != len(template_ys):
         row_source_ys = [float(value) for value in aligned_ys]
-    row_dewarp_evidence = {
-        "applied": False,
-        "reason": "destructive_row_image_dewarp_disabled",
-        "method": "row_intersection_target_region_alignment",
-        "source_count": len(row_source_ys),
-        "template_count": len(template_ys),
-    }
-    row_slant_dewarp_evidence = {
-        "applied": False,
-        "reason": "destructive_row_image_dewarp_disabled",
-        "method": "row_intersection_target_region_alignment",
-    }
+    dewarped_rectified, row_dewarp_evidence = dewarp_rectified_y_to_template_rows(
+        raw_rectified,
+        source_ys=[float(value) for value in row_source_ys],
+        template_ys=[float(value) for value in template_ys],
+    )
+    row_slant_rectified, row_slant_dewarp_evidence = dewarp_rectified_rows_by_bounded_slant(
+        dewarped_rectified,
+        corrected_xs=[float(value) for value in aligned_xs],
+        template_ys=[float(value) for value in template_ys],
+    )
+    working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
+    working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
+    horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
-        rectified_fax=raw_rectified,
+        rectified_fax=working_rectified,
         xs=aligned_xs,
-        ys=aligned_ys,
+        ys=working_ys,
         horizontal_line_mask=horizontal_line_mask,
     )
     target_regions, target_evidence = _post_menu_target_regions(
         worksheet=worksheet,
         column_edges=[float(value) for value in aligned_xs],
-        row_edges=[float(value) for value in aligned_ys],
+        row_edges=working_ys,
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
-        raw_rectified,
+        working_rectified,
         target_regions,
         snap_y=not bool(row_dewarp_evidence.get("applied")),
     )
@@ -1064,7 +1067,7 @@ def _build_preprocess_for_ocr(
         "facility_code": facility_code,
         "order_id": order_id,
         "worksheet": worksheet,
-        "raw_rectified": raw_rectified,
+        "raw_rectified": working_rectified,
         "target_regions": target_regions,
         "rectified_quad_points": rectified_quad_points,
         "template_outer_grid_bbox_used": table_bbox,
