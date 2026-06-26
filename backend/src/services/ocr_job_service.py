@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
@@ -271,7 +271,17 @@ def list_recoverable_jobs(limit: int = 50) -> list[dict[str, Any]]:
         jobs = (
             session.execute(
                 select(OcrJob)
-                .where(OcrJob.status.in_(["awaiting_output", "recovering", "failed", "error", "running", "pending"]))
+                .where(
+                    or_(
+                        OcrJob.status.in_(["awaiting_output", "recovering", "running", "pending"]),
+                        # Terminal hard-failed jobs stay in the DB for audit, but must not
+                        # consume recovery slots before newer output-waiting jobs are seen.
+                        and_(
+                            OcrJob.status.in_(["failed", "error"]),
+                            OcrJob.error_message.ilike("%ocr pipeline output not found%"),
+                        ),
+                    )
+                )
                 .order_by(OcrJob.updated_at.asc())
                 .limit(limit)
             )

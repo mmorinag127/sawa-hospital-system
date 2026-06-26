@@ -12,7 +12,7 @@ from src.models.ingest_job import IngestJob  # noqa: E402
 from src.models.ocr_job import OcrJob  # noqa: E402
 from src.models.order import Order  # noqa: E402
 from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
-from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
+from src.services.ocr_job_service import create_job, get_job, list_recoverable_jobs, update_job  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services.uploaded_pdf_service import (  # noqa: E402
     backfill_uploaded_pdfs_from_ingest_jobs,
@@ -728,6 +728,72 @@ def test_run_ocr_job_recovery_once_resubmits_missing_output(monkeypatch):
     assert job is not None
     assert job["status"] == "awaiting_output"
     assert job["output_reference"] == "gs://bucket/output/recovered.json"
+    assert (job.get("metrics") or {}).get("auto_recovery_count") == 1
+
+
+def test_ocr_job_recovery_ignores_terminal_failed_jobs_before_limit(monkeypatch):
+    order_service.clear_all()
+    with session_scope() as session:
+        session.query(OcrJob).delete()
+
+    for index in range(3):
+        job_id = f"OCR-terminal-{index}"
+        create_job(job_id, input_reference=f"gs://bucket/terminal-{index}.pdf")
+        update_job(
+            job_id,
+            status="failed",
+            output_reference=f"gs://bucket/output/terminal-{index}.json",
+            metrics={
+                "request_mode": "ingest_first_pass",
+                "processing_stage": "ocr_pipeline",
+                "result_state": "hard_failed",
+                "auto_recovery_count": 3,
+                "stage_updated_at": (datetime.utcnow() - timedelta(days=60, minutes=index)).isoformat(),
+                "next_recovery_at": None,
+            },
+            error_message="ocr_recovery_exhausted:OCR pipeline HTTP 429: Rate exceeded.",
+        )
+
+    create_job("OCR-active-awaiting", input_reference="gs://bucket/active.pdf")
+    update_job(
+        "OCR-active-awaiting",
+        status="awaiting_output",
+        output_reference="gs://bucket/output/active-missing.json",
+        metrics={
+            "request_mode": "ingest_first_pass",
+            "facility_id": "FAC00002",
+            "preferred_template_id": "fax_layout_regular_forbidden_v1",
+            "preferred_template_ids": ["fax_layout_regular_forbidden_v1"],
+            "auto_recovery_count": 0,
+            "stage_updated_at": (datetime.utcnow() - timedelta(minutes=10)).isoformat(),
+            "next_recovery_at": (datetime.utcnow() - timedelta(minutes=1)).isoformat(),
+        },
+        error_message="ocr_output_pending",
+    )
+
+    monkeypatch.setattr(
+        ingest_worker,
+        "load_bytes_from_uri",
+        lambda uri: b"%PDF-1.4" if uri == "gs://bucket/active.pdf" else (_ for _ in ()).throw(FileNotFoundError(uri)),
+    )
+    monkeypatch.setattr(
+        ingest_worker,
+        "run_ocr_pipeline",
+        lambda **_kwargs: {
+            "status": "running",
+            "input_reference": "gs://bucket/active.pdf",
+            "output_reference": "gs://bucket/output/active-recovered.json",
+        },
+    )
+
+    recoverable = list_recoverable_jobs(limit=1)
+
+    assert [job["id"] for job in recoverable] == ["OCR-active-awaiting"]
+    processed = ingest_worker.run_ocr_job_recovery_once(limit=1)
+    assert processed == 1
+    job = get_job("OCR-active-awaiting")
+    assert job is not None
+    assert job["output_reference"] == "gs://bucket/output/active-recovered.json"
     assert (job.get("metrics") or {}).get("auto_recovery_count") == 1
 
 
