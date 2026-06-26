@@ -333,10 +333,17 @@ def snap_regions_x_to_local_fax_rulings(
         local_y_edges = detected_y_edges_for_x_span(x0, x1)
         local_top = nearest(float(top_key), local_y_edges, max_distance=24.0)
         local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=24.0)
+        expected_height = max(1.0, float(y1) - float(y0))
+        local_height_ok = (
+            local_top is not None
+            and local_bottom is not None
+            and expected_height * 0.72 <= float(local_bottom) - float(local_top) <= expected_height * 1.34
+        )
         if (
             local_top is not None
             and local_bottom is not None
             and float(local_bottom) > float(local_top) + 8.0
+            and local_height_ok
         ):
             snapped_top = local_top
             snapped_bottom = local_bottom
@@ -368,7 +375,7 @@ def snap_regions_x_to_local_fax_rulings(
                     "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
                     "y_delta": [snapped_y0 - y0, snapped_y1 - y1],
                     "method": "row_edge_local_fax_ruling_snap_v2",
-                    "local_y_snap_applied": local_top is not None and local_bottom is not None,
+                    "local_y_snap_applied": bool(local_height_ok),
                 },
             }
         )
