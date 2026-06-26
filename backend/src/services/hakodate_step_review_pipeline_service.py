@@ -767,13 +767,13 @@ def snap_regions_x_to_local_fax_rulings(
         right_key: int,
         top_key: int,
         bottom_key: int,
-    ) -> tuple[list[list[float]], list[list[float]], bool, bool]:
+    ) -> tuple[list[list[float]], list[list[float]], bool, bool, str | None]:
         top_left = curve_y(curves, top_key, float(x0))
         top_right = curve_y(curves, top_key, float(x1))
         bottom_left = curve_y(curves, bottom_key, float(x0))
         bottom_right = curve_y(curves, bottom_key, float(x1))
         if None in (top_left, top_right, bottom_left, bottom_right):
-            return [], [], False, False
+            return [], [], False, False, "missing_row_curve_endpoint"
         expected_height = max(1.0, float(bottom_key) - float(top_key))
         left_height = float(bottom_left) - float(top_left)
         right_height = float(bottom_right) - float(top_right)
@@ -783,7 +783,7 @@ def snap_regions_x_to_local_fax_rulings(
             and left_height > 8.0
             and right_height > 8.0
         ):
-            return [], [], False, False
+            return [], [], False, False, "row_curve_height_out_of_range"
         expected_width = max(1.0, float(x1) - float(x0))
         # A distorted FAX can move a long cell's top/bottom rulings by more
         # than a single row height across the cell width.  Rejecting that case
@@ -794,7 +794,7 @@ def snap_regions_x_to_local_fax_rulings(
             abs(float(top_right) - float(top_left)) > max_side_delta
             or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
         ):
-            return [], [], False, False
+            return [], [], False, False, "row_curve_side_delta_too_large"
         left_top_x = curve_x(column_curves, left_key, float(top_left))
         left_bottom_x = curve_x(column_curves, left_key, float(bottom_left))
         right_top_x = curve_x(column_curves, right_key, float(top_right))
@@ -818,7 +818,7 @@ def snap_regions_x_to_local_fax_rulings(
             right_top_x = right_bottom_x = float(x1)
             column_curve_applied = False
         if min(float(right_top_x), float(right_bottom_x)) <= max(float(left_top_x), float(left_bottom_x)) + 8.0:
-            return [], [], False, False
+            return [], [], False, False, "row_curve_width_collapsed"
         display_polygon = row_curve_display_polygon_for_cell(
             curves,
             min(float(left_top_x), float(left_bottom_x)),
@@ -831,7 +831,7 @@ def snap_regions_x_to_local_fax_rulings(
             [float(right_top_x), float(top_right)],
             [float(right_bottom_x), float(bottom_right)],
             [float(left_bottom_x), float(bottom_left)],
-        ], display_polygon, True, column_curve_applied
+        ], display_polygon, True, column_curve_applied, None
 
     row_boundary_curves, row_curve_debug = build_row_boundary_curves()
     column_boundary_curves, column_curve_debug = build_column_boundary_curves()
@@ -1007,7 +1007,7 @@ def snap_regions_x_to_local_fax_rulings(
         if snapped_x1 <= snapped_x0 + 8.0 or snapped_y1 <= snapped_y0 + 8.0:
             append_fallback(region, "invalid_snapped_axis_bbox")
             continue
-        polygon, display_polygon, polygon_ok, column_curve_applied = row_curve_polygon_for_cell(
+        polygon, display_polygon, polygon_ok, column_curve_applied, polygon_reject_reason = row_curve_polygon_for_cell(
             row_boundary_curves,
             column_boundary_curves,
             snapped_x0,
@@ -1022,7 +1022,7 @@ def snap_regions_x_to_local_fax_rulings(
             polygon_method = "shared_row_and_column_boundary_curve"
         if not polygon_ok:
             if shared_row_curve_available:
-                append_fallback(region, "shared_row_curve_polygon_rejected")
+                append_fallback(region, "shared_row_curve_polygon_rejected:" + str(polygon_reject_reason or "unknown"))
                 continue
             polygon, polygon_ok = side_y_edges_for_cell(
                 snapped_x0,
