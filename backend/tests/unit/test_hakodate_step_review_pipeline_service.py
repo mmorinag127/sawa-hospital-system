@@ -186,10 +186,42 @@ def test_snap_regions_uses_column_boundary_curves_for_vertical_distortion() -> N
     assert evidence["column_boundary_curve_count"] >= 4
     by_cell = {str(region["sheet_cell"]): region for region in snapped}
     polygon = by_cell["E13"]["polygon"]
-    assert by_cell["E13"]["local_grid_snap"]["polygon_method"] == "shared_row_boundary_curve"
+    assert by_cell["E13"]["local_grid_snap"]["polygon_method"] == "shared_row_and_column_boundary_curve"
+    assert by_cell["E13"]["local_grid_snap"]["column_curve_applied"] is True
     assert float(polygon[3][0]) - float(polygon[0][0]) > 1.0
     assert abs(float(polygon[0][0]) - 45.0) < 3.0
     assert abs(float(polygon[3][0]) - 48.0) < 3.0
+
+
+def test_snap_regions_rejects_unsafe_column_curve_kink() -> None:
+    rectified = np.full((150, 190, 3), 255, dtype=np.uint8)
+    y_edges = [30, 58, 86, 114]
+    x_bases = [40, 80, 120, 160]
+    for y in y_edges:
+        rectified[y - 1 : y + 2, 35:166] = 0
+    for base_x in x_bases:
+        for y in range(y_edges[0], y_edges[-1] + 1):
+            x = int(round(base_x + 30.0 * ((y - y_edges[0]) / (y_edges[-1] - y_edges[0]))))
+            rectified[y, x - 1 : x + 2] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [40.0, 30.0, 80.0, 58.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [80.0, 30.0, 120.0, 58.0]},
+        {"region_id": "G11", "sheet_cell": "G11", "bbox": [120.0, 30.0, 160.0, 58.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [40.0, 58.0, 80.0, 86.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [80.0, 58.0, 120.0, 86.0]},
+        {"region_id": "G12", "sheet_cell": "G12", "bbox": [120.0, 58.0, 160.0, 86.0]},
+        {"region_id": "E13", "sheet_cell": "E13", "bbox": [40.0, 86.0, 80.0, 114.0]},
+        {"region_id": "F13", "sheet_cell": "F13", "bbox": [80.0, 86.0, 120.0, 114.0]},
+        {"region_id": "G13", "sheet_cell": "G13", "bbox": [120.0, 86.0, 160.0, 114.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "local_grid_snap_insufficient_matches"
+    assert evidence["column_boundary_curve_count"] >= 4
+    assert evidence["fallback_region_count"] >= 1
+    assert snapped == regions
 
 
 def test_snap_regions_can_preserve_template_y_after_row_dewarp() -> None:

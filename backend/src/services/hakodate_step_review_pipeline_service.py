@@ -627,14 +627,18 @@ def snap_regions_x_to_local_fax_rulings(
         ]
         if len(row_intervals) < 3:
             return curves, debug
+        interval_edges: list[tuple[float, list[float]]] = []
+        for top, bottom in row_intervals:
+            candidates = detected_x_edges_for_y_span(top, bottom) if snap_y else []
+            if candidates:
+                interval_edges.append(((top + bottom) / 2.0, candidates))
         for x_boundary in original_boundaries:
             samples: list[tuple[float, float]] = []
-            for top, bottom in row_intervals:
-                candidates = detected_x_edges_for_y_span(top, bottom) if snap_y else []
+            for mid_y, candidates in interval_edges:
                 snapped = nearest(float(x_boundary), candidates, max_distance=30.0) if snap_y else None
                 if snapped is None:
                     continue
-                samples.append(((top + bottom) / 2.0, float(snapped)))
+                samples.append((mid_y, float(snapped)))
             required_samples = max(3, min(16, len(row_intervals) // 4))
             if len(samples) < required_samples:
                 debug.append(
@@ -725,13 +729,13 @@ def snap_regions_x_to_local_fax_rulings(
         right_key: int,
         top_key: int,
         bottom_key: int,
-    ) -> tuple[list[list[float]], bool]:
+    ) -> tuple[list[list[float]], bool, bool]:
         top_left = curve_y(curves, top_key, float(x0))
         top_right = curve_y(curves, top_key, float(x1))
         bottom_left = curve_y(curves, bottom_key, float(x0))
         bottom_right = curve_y(curves, bottom_key, float(x1))
         if None in (top_left, top_right, bottom_left, bottom_right):
-            return [], False
+            return [], False, False
         expected_height = max(1.0, float(bottom_key) - float(top_key))
         left_height = float(bottom_left) - float(top_left)
         right_height = float(bottom_right) - float(top_right)
@@ -741,34 +745,44 @@ def snap_regions_x_to_local_fax_rulings(
             and left_height > 8.0
             and right_height > 8.0
         ):
-            return [], False
+            return [], False, False
         max_side_delta = max(7.0, expected_height * 0.65)
         if (
             abs(float(top_right) - float(top_left)) > max_side_delta
             or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
         ):
-            return [], False
+            return [], False, False
         left_top_x = curve_x(column_curves, left_key, float(top_left))
         left_bottom_x = curve_x(column_curves, left_key, float(bottom_left))
         right_top_x = curve_x(column_curves, right_key, float(top_right))
         right_bottom_x = curve_x(column_curves, right_key, float(bottom_right))
+        column_curve_applied = True
+        expected_width = max(1.0, float(x1) - float(x0))
+        max_column_skew = min(10.0, max(4.0, expected_width * 0.08))
+        max_width_delta = min(14.0, max(6.0, expected_width * 0.10))
         if None in (left_top_x, left_bottom_x, right_top_x, right_bottom_x):
             left_top_x = left_bottom_x = float(x0)
             right_top_x = right_bottom_x = float(x1)
-        if (
-            abs(float(left_bottom_x) - float(left_top_x)) > 32.0
-            or abs(float(right_bottom_x) - float(right_top_x)) > 32.0
+            column_curve_applied = False
+        top_width = float(right_top_x) - float(left_top_x)
+        bottom_width = float(right_bottom_x) - float(left_bottom_x)
+        if column_curve_applied and (
+            abs(float(left_bottom_x) - float(left_top_x)) > max_column_skew
+            or abs(float(right_bottom_x) - float(right_top_x)) > max_column_skew
+            or abs(top_width - expected_width) > max_width_delta
+            or abs(bottom_width - expected_width) > max_width_delta
         ):
             left_top_x = left_bottom_x = float(x0)
             right_top_x = right_bottom_x = float(x1)
+            column_curve_applied = False
         if min(float(right_top_x), float(right_bottom_x)) <= max(float(left_top_x), float(left_bottom_x)) + 8.0:
-            return [], False
+            return [], False, False
         return [
             [float(left_top_x), float(top_left)],
             [float(right_top_x), float(top_right)],
             [float(right_bottom_x), float(bottom_right)],
             [float(left_bottom_x), float(bottom_left)],
-        ], True
+        ], True, column_curve_applied
 
     row_boundary_curves, row_curve_debug = build_row_boundary_curves()
     column_boundary_curves, column_curve_debug = build_column_boundary_curves()
@@ -919,7 +933,7 @@ def snap_regions_x_to_local_fax_rulings(
             fallback_count += 1
             snapped_regions.append(region)
             continue
-        polygon, polygon_ok = row_curve_polygon_for_cell(
+        polygon, polygon_ok, column_curve_applied = row_curve_polygon_for_cell(
             row_boundary_curves,
             column_boundary_curves,
             snapped_x0,
@@ -930,6 +944,8 @@ def snap_regions_x_to_local_fax_rulings(
             bottom_key=bottom_key,
         )
         polygon_method = "shared_row_boundary_curve"
+        if polygon_ok and column_curve_applied:
+            polygon_method = "shared_row_and_column_boundary_curve"
         if not polygon_ok:
             polygon, polygon_ok = side_y_edges_for_cell(
                 snapped_x0,
@@ -969,6 +985,7 @@ def snap_regions_x_to_local_fax_rulings(
                     "y_snap_enabled": bool(snap_y),
                     "local_y_snap_applied": bool(snap_y and local_height_ok),
                     "local_polygon_snap_applied": bool(polygon_ok),
+                    "column_curve_applied": bool(column_curve_applied if polygon_ok else False),
                     "polygon_method": polygon_method if polygon_ok else None,
                 },
             }
@@ -980,6 +997,8 @@ def snap_regions_x_to_local_fax_rulings(
             "reason": "local_grid_snap_insufficient_matches",
             "original_boundaries": original_boundaries,
             "row_boundary_count": len(row_boundaries),
+            "row_boundary_curve_count": len(row_boundary_curves),
+            "column_boundary_curve_count": len(column_boundary_curves),
             "snapped_region_count": snapped_count,
             "fallback_region_count": fallback_count,
             "required_min_snapped_region_count": required_min,
