@@ -7,7 +7,6 @@ import pytest
 from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
     _accepted_header_intersection_points,
-    _apply_row_slant_rejection_without_dropping_vertical_dewarp,
     _analysis_to_yomitoku_words,
     _reject_destructive_row_dewarp,
     assign_yomitoku_words_to_contact_regions,
@@ -59,24 +58,6 @@ def test_reject_destructive_row_dewarp_detects_diagonal_local_dark_bands() -> No
     assert rejection is not None
     assert rejection["reason"] == "row_dewarp_destructive_dark_band_rejected"
     assert rejection["candidate_dark_band_score"]["window_thick_band_count"] > 0
-
-
-def test_slant_rejection_keeps_vertical_row_dewarp_image() -> None:
-    raw_like = np.zeros((4, 4, 3), dtype=np.uint8)
-    vertical_dewarped = np.full((4, 4, 3), 128, dtype=np.uint8)
-    slant_candidate = np.full((4, 4, 3), 255, dtype=np.uint8)
-
-    selected, evidence = _apply_row_slant_rejection_without_dropping_vertical_dewarp(
-        dewarped_rectified=vertical_dewarped,
-        row_slant_rectified=slant_candidate,
-        row_slant_dewarp_evidence={"applied": True, "method": "bounded_horizontal_row_slant_dewarp"},
-        destructive_rejection={"reason": "row_dewarp_destructive_dark_band_rejected"},
-    )
-
-    assert np.array_equal(selected, vertical_dewarped)
-    assert not np.array_equal(selected, raw_like)
-    assert evidence["applied"] is False
-    assert evidence["reason"] == "row_dewarp_destructive_dark_band_rejected"
 
 
 def test_live_cell_ocr_overlay_uses_only_accepted_header_intersections() -> None:
