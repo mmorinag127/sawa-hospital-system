@@ -218,6 +218,35 @@ def test_snap_regions_allows_shared_row_curve_on_wide_cells_without_noisy_fallba
     assert abs(float(by_cell["G11"]["polygon"][1][1]) - 48.0) < 5.0
 
 
+def test_snap_regions_keeps_strong_wide_cell_curve_instead_of_template_fallback() -> None:
+    rectified = np.full((190, 260, 3), 255, dtype=np.uint8)
+    x_edges = [30, 70, 110, 160, 210]
+    for x in x_edges:
+        rectified[28:170, x - 1 : x + 2] = 0
+    for base_y in (40.0, 68.0, 96.0):
+        for x in range(x_edges[0], x_edges[-1] + 1):
+            y = int(round(base_y + 36.0 * ((x - x_edges[0]) / (x_edges[-1] - x_edges[0]))))
+            rectified[y - 1 : y + 2, x] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [30.0, 40.0, 70.0, 68.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [70.0, 40.0, 110.0, 68.0]},
+        {"region_id": "G11", "sheet_cell": "G11", "bbox": [110.0, 40.0, 210.0, 68.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [30.0, 68.0, 70.0, 96.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [70.0, 68.0, 110.0, 96.0]},
+        {"region_id": "G12", "sheet_cell": "G12", "bbox": [110.0, 68.0, 210.0, 96.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    assert evidence["applied"] is True
+    by_cell = {str(region["sheet_cell"]): region for region in snapped}
+    wide_cell = by_cell["G12"]
+    assert wide_cell["local_grid_snap"]["polygon_method"] == "shared_row_boundary_curve"
+    assert wide_cell["bbox"] != regions[5]["bbox"]
+    assert float(wide_cell["polygon"][3][1]) > float(wide_cell["polygon"][2][1]) + 18.0
+    assert abs(float(wide_cell["polygon"][2][1]) - 84.0) < 6.0
+
+
 def test_snap_regions_uses_column_boundary_curves_for_vertical_distortion() -> None:
     rectified = np.full((150, 190, 3), 255, dtype=np.uint8)
     y_edges = [30, 58, 86, 114]

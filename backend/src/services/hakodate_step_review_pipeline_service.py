@@ -785,7 +785,11 @@ def snap_regions_x_to_local_fax_rulings(
         ):
             return [], [], False, False
         expected_width = max(1.0, float(x1) - float(x0))
-        max_side_delta = max(7.0, expected_height * 0.65, min(24.0, expected_width * 0.10))
+        # A distorted FAX can move a long cell's top/bottom rulings by more
+        # than a single row height across the cell width.  Rejecting that case
+        # pushes exactly the cells that need correction back to straight
+        # template boxes, so keep this guard for wild discontinuities only.
+        max_side_delta = max(18.0, expected_height * 1.35, min(90.0, expected_width * 0.18))
         if (
             abs(float(top_right) - float(top_left)) > max_side_delta
             or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
@@ -2908,6 +2912,27 @@ def _draw_target_regions(
     draw = ImageDraw.Draw(layer)
     font = ImageFont.load_default()
     for region in regions:
+        polygon = region.get("display_polygon") if isinstance(region.get("display_polygon"), list) else region.get("polygon")
+        polygon_points: list[tuple[int, int]] = []
+        if isinstance(polygon, list) and len(polygon) >= 4:
+            try:
+                polygon_points = [
+                    (int(round(float(point[0]))), int(round(float(point[1]))))
+                    for point in polygon
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ]
+            except Exception:
+                polygon_points = []
+        if len(polygon_points) >= 4:
+            cx = int(round(sum(point[0] for point in polygon_points) / len(polygon_points)))
+            cy = int(round(sum(point[1] for point in polygon_points) / len(polygon_points)))
+            draw.line(polygon_points + [polygon_points[0]], fill=(0, 120, 255, 150), width=1, joint="curve")
+            draw.ellipse((cx - 8, cy - 8, cx + 8, cy + 8), fill=(255, 255, 255, 230))
+            draw.ellipse((cx - 6, cy - 6, cx + 6, cy + 6), fill=(255, 0, 0, 255))
+            label = str(region.get("field_label") or "")
+            if label:
+                draw.text((cx + 5, cy - 5), label[:8], fill=(220, 0, 0, 210), font=font)
+            continue
         box = region.get("bbox")
         if not isinstance(box, list) or len(box) != 4:
             continue
