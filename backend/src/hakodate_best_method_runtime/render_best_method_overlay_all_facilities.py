@@ -241,13 +241,18 @@ def _restore_display_bboxes(
                 "ocr_crop_bbox": record.get("bbox"),
                 "bbox": list(display_region["bbox"]),
                 **({"polygon": list(display_region["polygon"])} if isinstance(display_region.get("polygon"), list) else {}),
+                **(
+                    {"display_polygon": list(display_region["display_polygon"])}
+                    if isinstance(display_region.get("display_polygon"), list)
+                    else {}
+                ),
             }
         )
     return restored
 
 
 def _region_polygon(region: dict[str, Any]) -> list[tuple[int, int]] | None:
-    polygon = region.get("polygon")
+    polygon = region.get("display_polygon") if isinstance(region.get("display_polygon"), list) else region.get("polygon")
     if not isinstance(polygon, list) or len(polygon) < 4:
         return None
     points: list[tuple[int, int]] = []

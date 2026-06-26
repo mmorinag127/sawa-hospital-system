@@ -719,6 +719,27 @@ def snap_regions_x_to_local_fax_rulings(
             return None
         return float(np.interp(float(y_value), [float(item) for item in ys], [float(item) for item in xs]))
 
+    def row_curve_display_polygon_for_cell(
+        curves: dict[int, dict[str, Any]],
+        x0: float,
+        x1: float,
+        *,
+        top_key: int,
+        bottom_key: int,
+    ) -> list[list[float]]:
+        sample_count = 7
+        xs = np.linspace(float(x0), float(x1), sample_count).tolist()
+        top_points: list[list[float]] = []
+        bottom_points: list[list[float]] = []
+        for x_value in xs:
+            top_y = curve_y(curves, top_key, float(x_value))
+            bottom_y = curve_y(curves, bottom_key, float(x_value))
+            if top_y is None or bottom_y is None:
+                return []
+            top_points.append([float(x_value), float(top_y)])
+            bottom_points.append([float(x_value), float(bottom_y)])
+        return [*top_points, *reversed(bottom_points)]
+
     def row_curve_polygon_for_cell(
         curves: dict[int, dict[str, Any]],
         column_curves: dict[int, dict[str, Any]],
@@ -729,13 +750,13 @@ def snap_regions_x_to_local_fax_rulings(
         right_key: int,
         top_key: int,
         bottom_key: int,
-    ) -> tuple[list[list[float]], bool, bool]:
+    ) -> tuple[list[list[float]], list[list[float]], bool, bool]:
         top_left = curve_y(curves, top_key, float(x0))
         top_right = curve_y(curves, top_key, float(x1))
         bottom_left = curve_y(curves, bottom_key, float(x0))
         bottom_right = curve_y(curves, bottom_key, float(x1))
         if None in (top_left, top_right, bottom_left, bottom_right):
-            return [], False, False
+            return [], [], False, False
         expected_height = max(1.0, float(bottom_key) - float(top_key))
         left_height = float(bottom_left) - float(top_left)
         right_height = float(bottom_right) - float(top_right)
@@ -745,13 +766,13 @@ def snap_regions_x_to_local_fax_rulings(
             and left_height > 8.0
             and right_height > 8.0
         ):
-            return [], False, False
+            return [], [], False, False
         max_side_delta = max(7.0, expected_height * 0.65)
         if (
             abs(float(top_right) - float(top_left)) > max_side_delta
             or abs(float(bottom_right) - float(bottom_left)) > max_side_delta
         ):
-            return [], False, False
+            return [], [], False, False
         left_top_x = curve_x(column_curves, left_key, float(top_left))
         left_bottom_x = curve_x(column_curves, left_key, float(bottom_left))
         right_top_x = curve_x(column_curves, right_key, float(top_right))
@@ -776,13 +797,20 @@ def snap_regions_x_to_local_fax_rulings(
             right_top_x = right_bottom_x = float(x1)
             column_curve_applied = False
         if min(float(right_top_x), float(right_bottom_x)) <= max(float(left_top_x), float(left_bottom_x)) + 8.0:
-            return [], False, False
+            return [], [], False, False
+        display_polygon = row_curve_display_polygon_for_cell(
+            curves,
+            min(float(left_top_x), float(left_bottom_x)),
+            max(float(right_top_x), float(right_bottom_x)),
+            top_key=top_key,
+            bottom_key=bottom_key,
+        )
         return [
             [float(left_top_x), float(top_left)],
             [float(right_top_x), float(top_right)],
             [float(right_bottom_x), float(bottom_right)],
             [float(left_bottom_x), float(bottom_left)],
-        ], True, column_curve_applied
+        ], display_polygon, True, column_curve_applied
 
     row_boundary_curves, row_curve_debug = build_row_boundary_curves()
     column_boundary_curves, column_curve_debug = build_column_boundary_curves()
@@ -933,7 +961,7 @@ def snap_regions_x_to_local_fax_rulings(
             fallback_count += 1
             snapped_regions.append(region)
             continue
-        polygon, polygon_ok, column_curve_applied = row_curve_polygon_for_cell(
+        polygon, display_polygon, polygon_ok, column_curve_applied = row_curve_polygon_for_cell(
             row_boundary_curves,
             column_boundary_curves,
             snapped_x0,
@@ -955,6 +983,7 @@ def snap_regions_x_to_local_fax_rulings(
                 snapped_top=snapped_y0,
                 snapped_bottom=snapped_y1,
             )
+            display_polygon = polygon
             polygon_method = "cell_side_local_fax_ruling"
         if polygon_ok:
             px_values = [float(point[0]) for point in polygon]
@@ -967,6 +996,7 @@ def snap_regions_x_to_local_fax_rulings(
                 [snapped_x1, snapped_y1],
                 [snapped_x0, snapped_y1],
             ]
+            display_polygon = polygon
             snapped_bbox = [snapped_x0, snapped_y0, snapped_x1, snapped_y1]
         snapped_count += 1
         snapped_regions.append(
@@ -974,6 +1004,7 @@ def snap_regions_x_to_local_fax_rulings(
                 **region,
                 "bbox": snapped_bbox,
                 "polygon": polygon,
+                "display_polygon": display_polygon if display_polygon else polygon,
                 "local_grid_snap": {
                     "source_bbox": [x0, y0, x1, y1],
                     "snapped_bbox": snapped_bbox,
