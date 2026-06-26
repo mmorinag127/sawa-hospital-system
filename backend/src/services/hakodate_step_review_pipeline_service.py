@@ -200,12 +200,26 @@ def snap_regions_x_to_local_fax_rulings(
         span_right = min(width, int(round(float(x1) - inset)))
         if span_right <= span_left:
             return []
-        projection = horizontal_mask[:, span_left:span_right].sum(axis=1).astype(np.float32) / 255.0
-        if float(projection.max(initial=0.0)) <= 0.0:
+        detected: list[float] = []
+        line_projection = horizontal_mask[:, span_left:span_right].sum(axis=1).astype(np.float32) / 255.0
+        if float(line_projection.max(initial=0.0)) > 0.0:
+            line_smooth = np.convolve(line_projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+            line_threshold = max(3.0, float(line_smooth.max(initial=0.0)) * 0.34)
+            detected.extend(projection_centers(line_smooth, threshold=line_threshold, min_len=2))
+        dark_projection = dark_mask[:, span_left:span_right].sum(axis=1).astype(np.float32)
+        if float(dark_projection.max(initial=0.0)) > 0.0:
+            dark_smooth = np.convolve(dark_projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+            dark_threshold = max(4.0, float(dark_smooth.max(initial=0.0)) * 0.44)
+            detected.extend(projection_centers(dark_smooth, threshold=dark_threshold, min_len=2))
+        if not detected:
             return []
-        smooth = np.convolve(projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
-        threshold = max(3.0, float(smooth.max(initial=0.0)) * 0.34)
-        return projection_centers(smooth, threshold=threshold, min_len=2)
+        merged: list[float] = []
+        for value in sorted(float(item) for item in detected):
+            if merged and abs(float(value) - float(merged[-1])) <= 2.0:
+                merged[-1] = (float(merged[-1]) + float(value)) / 2.0
+            else:
+                merged.append(float(value))
+        return merged
 
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
