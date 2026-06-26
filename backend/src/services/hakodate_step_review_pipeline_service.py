@@ -461,13 +461,18 @@ def snap_regions_x_to_local_fax_rulings(
                 bool(top_right_detected or bottom_right_detected),
             )
         )
+        max_side_delta = max(6.0, expected_height * 0.75)
+        side_delta_ok = (
+            abs(float(top_right) - float(top_left)) <= max_side_delta
+            and abs(float(bottom_right) - float(bottom_left)) <= max_side_delta
+        )
         polygon = [
             [float(x0), float(top_left)],
             [float(x1), float(top_right)],
             [float(x1), float(bottom_right)],
             [float(x0), float(bottom_left)],
         ]
-        return polygon, bool(height_ok and detected_side_count >= 1)
+        return polygon, bool(height_ok and side_delta_ok and detected_side_count == 2)
 
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
