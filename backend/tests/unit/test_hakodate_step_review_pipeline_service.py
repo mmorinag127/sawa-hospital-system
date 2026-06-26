@@ -10,10 +10,11 @@ from src.services.hakodate_step_review_pipeline_service import (
     _post_menu_boundary_preserving_xs,
     _post_menu_target_regions,
     _row_height_outlier_evidence,
-    snap_regions_x_to_local_fax_rulings,
     _step_review_merge_regions_for_grid,
     _step_review_physical_row_map,
     _step_review_worksheet_row_to_grid_index,
+    dewarp_rectified_y_to_template_rows,
+    snap_regions_x_to_local_fax_rulings,
 )
 
 
@@ -91,6 +92,28 @@ def test_snap_regions_uses_cell_local_y_rulings_for_slanted_rows() -> None:
     assert abs(float(by_cell["F11"]["bbox"][1]) - 15.0) < 1.0
     assert abs(float(by_cell["F11"]["bbox"][3]) - 35.0) < 1.0
     assert by_cell["F11"]["local_grid_snap"]["local_y_snap_applied"] is True
+
+
+def test_dewarp_rectified_y_to_template_rows_moves_source_rows_to_template_positions() -> None:
+    rectified = np.full((80, 100, 3), 255, dtype=np.uint8)
+    source_ys = [10.0, 24.0, 43.0, 68.0]
+    template_ys = [10.0, 30.0, 50.0, 70.0]
+    for y in source_ys:
+        yy = int(round(y))
+        rectified[yy - 1 : yy + 2, 20:80] = 0
+
+    dewarped, evidence = dewarp_rectified_y_to_template_rows(
+        rectified,
+        source_ys=source_ys,
+        template_ys=template_ys,
+    )
+
+    gray = dewarped[:, 20:80, 0]
+    projection = (gray < 80).sum(axis=1)
+    detected = [index for index, value in enumerate(projection.tolist()) if value >= 40]
+    assert evidence["applied"] is True
+    for expected_y in template_ys:
+        assert min(abs(index - int(round(expected_y))) for index in detected) <= 1
 
 
 def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary() -> None:

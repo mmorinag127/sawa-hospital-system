@@ -40,6 +40,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _source_template_name,
     _split_line_masks,
     _write_pdf_from_pages,
+    dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
 )
 
@@ -1018,6 +1019,27 @@ def _build_preprocess_for_ocr(
         header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
         row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
+    row_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_axis_not_available"}
+    row_match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
+    row_source_ys = row_match.get("corrected_ys") if isinstance(row_match, dict) else None
+    if not isinstance(row_source_ys, list) or len(row_source_ys) != len(template_ys):
+        row_source_ys = [float(value) for value in aligned_ys]
+    raw_rectified, row_dewarp_evidence = dewarp_rectified_y_to_template_rows(
+        raw_rectified,
+        source_ys=[float(value) for value in row_source_ys],
+        template_ys=[float(value) for value in template_ys],
+    )
+    if bool(row_dewarp_evidence.get("applied")):
+        horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
+        aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
+            rectified_fax=raw_rectified,
+            template_xs=template_xs,
+            template_ys=template_ys,
+            worksheet=worksheet,
+            fax_template=fax_template,
+            header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
+            row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
+        )
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
         rectified_fax=raw_rectified,
@@ -1053,6 +1075,7 @@ def _build_preprocess_for_ocr(
             "merge": merge_evidence,
             "target": target_evidence,
             "target_local_grid_snap": target_snap_evidence,
+            "row_dewarp": row_dewarp_evidence,
             "quad_estimate": quad_estimate,
         },
     }

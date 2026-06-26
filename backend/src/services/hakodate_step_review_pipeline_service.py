@@ -133,6 +133,64 @@ def _split_line_masks(image_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return h_lines, v_lines
 
 
+def dewarp_rectified_y_to_template_rows(
+    rectified: np.ndarray,
+    *,
+    source_ys: list[float],
+    template_ys: list[int | float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if len(source_ys) != len(template_ys) or len(source_ys) < 3:
+        return rectified, {
+            "applied": False,
+            "reason": "row_dewarp_axis_count_mismatch",
+            "source_count": len(source_ys),
+            "template_count": len(template_ys),
+        }
+    source = np.array([float(value) for value in source_ys], dtype=np.float32)
+    target = np.array([float(value) for value in template_ys], dtype=np.float32)
+    if not np.all(np.diff(source) > 0) or not np.all(np.diff(target) > 0):
+        return rectified, {"applied": False, "reason": "row_dewarp_axes_not_monotonic"}
+    source_heights = np.diff(source)
+    target_heights = np.diff(target)
+    if float(np.min(source_heights)) <= 4.0 or float(np.min(target_heights)) <= 4.0:
+        return rectified, {"applied": False, "reason": "row_dewarp_axis_gap_too_small"}
+    offsets = source - target
+    max_abs_offset = float(np.max(np.abs(offsets)))
+    if max_abs_offset <= 2.0:
+        return rectified, {
+            "applied": False,
+            "reason": "row_dewarp_offsets_within_tolerance",
+            "max_abs_offset": round(max_abs_offset, 3),
+        }
+
+    height, width = rectified.shape[:2]
+    output_y = np.arange(height, dtype=np.float32)
+    source_y = np.interp(output_y, target, source).astype(np.float32)
+    source_y[: int(max(0, round(float(target[0]))))] = output_y[: int(max(0, round(float(target[0]))))]
+    tail_start = int(min(height, max(0, round(float(target[-1])))))
+    if tail_start < height:
+        source_y[tail_start:] = output_y[tail_start:]
+    map_y = np.repeat(source_y[:, None], width, axis=1).astype(np.float32)
+    map_x = np.repeat(np.arange(width, dtype=np.float32)[None, :], height, axis=0)
+    dewarped = cv2.remap(
+        rectified,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return dewarped, {
+        "applied": True,
+        "method": "vertical_row_axis_dewarp_after_quad_rectification",
+        "source_count": len(source_ys),
+        "template_count": len(template_ys),
+        "max_abs_offset": round(max_abs_offset, 3),
+        "mean_abs_offset": round(float(np.mean(np.abs(offsets))), 3),
+        "source_height_quality": _row_height_outlier_evidence([float(value) for value in source.tolist()]),
+    }
+
+
 def snap_regions_x_to_local_fax_rulings(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],
