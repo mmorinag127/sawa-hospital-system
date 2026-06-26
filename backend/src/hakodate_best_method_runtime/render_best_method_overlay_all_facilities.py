@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -266,6 +267,7 @@ def _run_text_recognizer_records(
     regions: list[dict[str, Any]],
     truth: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
+    contact_t0 = time.perf_counter()
     contact_sheet, usable_regions, polygons, skipped_regions = build_recognizer_contact_sheet(
         rectified_fax_bgr=raw_rectified_bgr,
         regions=regions,
@@ -274,6 +276,7 @@ def _run_text_recognizer_records(
         min_ink_area=18,
         min_ink_height=8,
     )
+    contact_seconds = time.perf_counter() - contact_t0
     recognized_regions, metrics = run_text_recognizer_direct(
         recognizer=_get_text_recognizer(),
         contact_sheet=contact_sheet,
@@ -306,6 +309,11 @@ def _run_text_recognizer_records(
         records.append(record)
     metrics = {
         **metrics,
+        "contact_sheet_seconds": round(float(contact_seconds), 4),
+        "contact_sheet_size": [int(contact_sheet.width), int(contact_sheet.height)],
+        "contact_sheet_region_count": len(regions),
+        "contact_sheet_usable_region_count": len(usable_regions),
+        "contact_sheet_skipped_region_count": len(skipped_regions),
         "numeric_eval_cell_count": len(records),
         "pred_nonempty_count": sum(1 for record in records if str(record.get("pred_digits") or "").strip()),
     }
@@ -745,10 +753,15 @@ def build_best_method_for_manifest_item(
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
     order_id = str(item.get("order_id") or "")
+    total_t0 = time.perf_counter()
+    preprocess_t0 = time.perf_counter()
     pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width)
+    preprocess_seconds = time.perf_counter() - preprocess_t0
     eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
+    snap_t0 = time.perf_counter()
     snapped_regions, snap_debug = _snap_regions_x_to_fax_lines_all_targets(pre["raw_rectified"], eval_regions)
+    snap_seconds = time.perf_counter() - snap_t0
     facility_dir = output_dir / f"{page_index:02d}_{facility_code}_{order_id}"
     facility_dir.mkdir(parents=True, exist_ok=True)
     records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
@@ -768,6 +781,31 @@ def build_best_method_for_manifest_item(
             "candidate_digit_accept_count": ocr_metrics.get("candidate_digit_accept_count"),
             "digit_score_threshold": ocr_metrics.get("digit_score_threshold"),
             "candidate_digit_score_threshold": ocr_metrics.get("candidate_digit_score_threshold"),
+            "preprocess_seconds": round(float(preprocess_seconds), 4),
+            "snap_seconds": round(float(snap_seconds), 4),
+            "contact_sheet_seconds": ocr_metrics.get("contact_sheet_seconds"),
+            "contact_sheet_size": ocr_metrics.get("contact_sheet_size"),
+            "contact_sheet_region_count": ocr_metrics.get("contact_sheet_region_count"),
+            "contact_sheet_usable_region_count": ocr_metrics.get("contact_sheet_usable_region_count"),
+            "contact_sheet_skipped_region_count": ocr_metrics.get("contact_sheet_skipped_region_count"),
+        }
+    )
+    axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
+    row_dewarp_evidence = axis_evidence.get("row_dewarp") if isinstance(axis_evidence.get("row_dewarp"), dict) else {}
+    row_slant_evidence = (
+        axis_evidence.get("row_slant_dewarp") if isinstance(axis_evidence.get("row_slant_dewarp"), dict) else {}
+    )
+    metrics.update(
+        {
+            "row_dewarp_applied": bool(row_dewarp_evidence.get("applied")),
+            "row_dewarp_reason": row_dewarp_evidence.get("reason"),
+            "row_dewarp_method": row_dewarp_evidence.get("method"),
+            "row_slant_dewarp_applied": bool(row_slant_evidence.get("applied")),
+            "row_slant_dewarp_reason": row_slant_evidence.get("reason"),
+            "row_slant_dewarp_method": row_slant_evidence.get("method"),
+            "row_slant_dewarp_fitted_row_count": row_slant_evidence.get("fitted_row_count"),
+            "row_slant_dewarp_nonzero_slope_count": row_slant_evidence.get("nonzero_slope_count"),
+            "row_slant_dewarp_max_abs_shift": row_slant_evidence.get("max_abs_shift"),
         }
     )
     quad_points = [
@@ -830,6 +868,7 @@ def build_best_method_for_manifest_item(
         ocr_regions.append(region)
     regions_path.write_text(json.dumps(ocr_regions, ensure_ascii=False, indent=2), encoding="utf-8")
     sheet_values_path.write_text(json.dumps({"cells": {}, "rows": [], "columns": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    metrics["total_seconds"] = round(float(time.perf_counter() - total_t0), 4)
     summary = {
         "page": page_index,
         "facility_code": facility_code,

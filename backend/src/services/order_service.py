@@ -9413,6 +9413,8 @@ def _hakodate_canonical_payload_from_manifest_item(
             output_dir=output_dir,
             render_width=1864,
         )
+        runtime_metrics_raw = getattr(result, "metrics", None)
+        runtime_metrics = dict(runtime_metrics_raw) if isinstance(runtime_metrics_raw, dict) else {}
         outputs = dict(result.outputs or {})
         regions_path = outputs.get("ocr_regions")
         records_path = outputs.get("records")
@@ -9593,8 +9595,10 @@ def _hakodate_canonical_payload_from_manifest_item(
                 "target_cell_count": len(target_cells),
                 "evidence_record_count": len(evidence_records),
                 "assigned_target_count": assigned_target_count,
+                "metrics": runtime_metrics,
                 "outputs": outputs,
             },
+            "metrics": runtime_metrics,
         }
 
 
@@ -13884,6 +13888,7 @@ def rerun_ocr_evidence_only(
                 error=str(refresh_exc),
             )
         return None, error_code
+    runtime_metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
 
     persisted = persist_ocr_evidence_run(
         order_id,
@@ -13941,6 +13946,7 @@ def rerun_ocr_evidence_only(
             error_message=None,
             metrics_patch={
                 **pipeline_metrics_patch,
+                **runtime_metrics,
                 "evidence_run_id": persisted.get("id"),
                 "new_evidence_available": True,
                 "hakodate_live_pipeline": True,
@@ -13969,6 +13975,7 @@ def rerun_ocr_evidence_only(
             error_message=sync_error,
             metrics_patch={
                 **pipeline_metrics_patch,
+                **runtime_metrics,
                 "error": sync_error,
                 "evidence_run_id": persisted.get("id"),
                 "hakodate_live_pipeline": True,
@@ -14017,6 +14024,7 @@ def rerun_ocr_evidence_only(
             error_message="hakodate_current_sheet_sync_failed",
             metrics_patch={
                 **pipeline_metrics_patch,
+                **runtime_metrics,
                 "error": "hakodate_current_sheet_sync_failed",
                 "evidence_run_id": persisted.get("id"),
                 "hakodate_live_pipeline": True,
@@ -14053,6 +14061,7 @@ def rerun_ocr_evidence_only(
                 error_message=resync_error,
                 metrics_patch={
                     **pipeline_metrics_patch,
+                    **runtime_metrics,
                     "error": resync_error,
                     "evidence_run_id": persisted.get("id"),
                     "hakodate_live_pipeline": True,
@@ -14090,6 +14099,7 @@ def rerun_ocr_evidence_only(
         error_message=None,
         metrics_patch={
             **pipeline_metrics_patch,
+            **runtime_metrics,
             "evidence_run_id": persisted.get("id"),
             "new_evidence_available": False,
             "hakodate_live_pipeline": True,

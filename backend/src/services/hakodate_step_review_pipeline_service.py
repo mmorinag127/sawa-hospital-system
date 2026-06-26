@@ -252,12 +252,12 @@ def dewarp_rectified_rows_by_bounded_slant(
         y_at_left = float(slope * float(x0) + intercept)
         y_at_right = float(slope * float(x1) + intercept)
         span_delta = y_at_right - y_at_left
-        if abs(float(slope)) > 0.045 or abs(span_delta) > 70.0 or max_abs_residual > 8.0:
+        if abs(float(slope)) > 0.070 or abs(span_delta) > 110.0 or max_abs_residual > 10.0:
             row_slopes.append(0.0)
             row_offsets.append(0.0)
             continue
         center_offset = float(slope * x_center + intercept - float(template_y))
-        if abs(center_offset) > 18.0:
+        if abs(center_offset) > 65.0:
             row_slopes.append(0.0)
             row_offsets.append(0.0)
             continue
@@ -298,7 +298,7 @@ def dewarp_rectified_rows_by_bounded_slant(
         if tail_start < height:
             source_y[tail_start:] = output_y[tail_start:]
         map_y[:, x_index] = source_y
-    if float(np.max(np.abs(map_y - output_y[:, None]))) > 42.0:
+    if float(np.max(np.abs(map_y - output_y[:, None]))) > 95.0:
         return rectified, {
             "applied": False,
             "reason": "row_slant_dewarp_shift_limit_exceeded",

@@ -271,11 +271,8 @@ def build_recognizer_contact_sheet(
     min_ink_height: int = 8,
 ) -> tuple[Image.Image, list[dict[str, Any]], list[list[list[int]]], list[dict[str, Any]]]:
     height, width = rectified_fax_bgr.shape[:2]
-    row_count = max(1, (len(regions) + columns - 1) // columns)
-    sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
-    usable_regions: list[dict[str, Any]] = []
+    candidate_items: list[tuple[int, dict[str, Any], Image.Image, tuple[int, int, int, int], dict[str, Any]]] = []
     skipped_regions: list[dict[str, Any]] = []
-    polygons: list[list[list[int]]] = []
     for slot_index, region in enumerate(regions):
         box = region.get("bbox")
         if not isinstance(box, list):
@@ -318,40 +315,25 @@ def build_recognizer_contact_sheet(
                 slot_height=slot_height,
                 mode=mode,
             )
-        slot_col = slot_index % columns
-        slot_row = slot_index // columns
-        slot_x = slot_col * slot_width
-        slot_y = slot_row * slot_height
-        paste_x = slot_x + (slot_width - crop_image.width) // 2
-        paste_y = slot_y + (slot_height - crop_image.height) // 2
         is_candidate = bool(
             int(ink_stats["ink_area"]) >= min_ink_area and int(ink_stats["bbox_height"]) >= min_ink_height
         )
-        if is_candidate:
-            sheet.paste(crop_image, (paste_x, paste_y))
-        polygon = [
-            [paste_x, paste_y],
-            [paste_x + crop_image.width, paste_y],
-            [paste_x + crop_image.width, paste_y + crop_image.height],
-            [paste_x, paste_y + crop_image.height],
-        ]
         prepared_region = {
             **region,
             "ocr_contact_slot_index": slot_index,
-            "ocr_contact_slot": [slot_x, slot_y, slot_x + slot_width, slot_y + slot_height],
-            "ocr_contact_crop_box": [paste_x, paste_y, paste_x + crop_image.width, paste_y + crop_image.height],
             "ocr_cell_crop_bbox_px": [x0, y0, x1, y1],
             "recognizer_crop_mode": mode,
             "recognizer_ink_stats": ink_stats,
             "recognizer_candidate": is_candidate,
         }
         if is_candidate:
-            polygons.append(polygon)
-            usable_regions.append(prepared_region)
+            candidate_items.append((slot_index, prepared_region, crop_image, px_box, ink_stats))
         else:
             skipped_regions.append(
                 {
                     **prepared_region,
+                    "ocr_contact_slot": [],
+                    "ocr_contact_crop_box": [],
                     "ocr_text": "",
                     "ocr_normalized": "",
                     "ocr_words": [],
@@ -363,6 +345,33 @@ def build_recognizer_contact_sheet(
                     "recognizer_skipped": True,
                 }
             )
+    row_count = max(1, (len(candidate_items) + columns - 1) // columns)
+    sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
+    usable_regions: list[dict[str, Any]] = []
+    polygons: list[list[list[int]]] = []
+    for compact_index, (_slot_index, prepared_region, crop_image, _px_box, _ink_stats) in enumerate(candidate_items):
+        slot_col = compact_index % columns
+        slot_row = compact_index // columns
+        slot_x = slot_col * slot_width
+        slot_y = slot_row * slot_height
+        paste_x = slot_x + (slot_width - crop_image.width) // 2
+        paste_y = slot_y + (slot_height - crop_image.height) // 2
+        sheet.paste(crop_image, (paste_x, paste_y))
+        polygon = [
+            [paste_x, paste_y],
+            [paste_x + crop_image.width, paste_y],
+            [paste_x + crop_image.width, paste_y + crop_image.height],
+            [paste_x, paste_y + crop_image.height],
+        ]
+        polygons.append(polygon)
+        usable_regions.append(
+            {
+                **prepared_region,
+                "ocr_contact_compact_slot_index": compact_index,
+                "ocr_contact_slot": [slot_x, slot_y, slot_x + slot_width, slot_y + slot_height],
+                "ocr_contact_crop_box": [paste_x, paste_y, paste_x + crop_image.width, paste_y + crop_image.height],
+            }
+        )
     return sheet, usable_regions, polygons, skipped_regions
 
 
