@@ -414,6 +414,61 @@ def snap_regions_x_to_local_fax_rulings(
                 merged.append(float(value))
         return merged
 
+    def local_y_edge(
+        value: float,
+        candidates: list[float],
+        *,
+        expected_fallback: float | None,
+    ) -> tuple[float | None, bool]:
+        snapped = nearest(float(value), candidates, max_distance=70.0) if snap_y else None
+        if snapped is not None:
+            return float(snapped), True
+        if expected_fallback is not None:
+            return float(expected_fallback), False
+        return None, False
+
+    def side_y_edges_for_cell(
+        x0: float,
+        x1: float,
+        *,
+        top_key: float,
+        bottom_key: float,
+        snapped_top: float,
+        snapped_bottom: float,
+    ) -> tuple[list[list[float]], bool]:
+        cell_width = max(1.0, float(x1) - float(x0))
+        probe_width = max(8.0, min(48.0, cell_width * 0.32))
+        left_edges = detected_y_edges_for_x_span(float(x0), min(float(x1), float(x0) + probe_width)) if snap_y else []
+        right_edges = detected_y_edges_for_x_span(max(float(x0), float(x1) - probe_width), float(x1)) if snap_y else []
+        top_left, top_left_detected = local_y_edge(float(top_key), left_edges, expected_fallback=snapped_top)
+        bottom_left, bottom_left_detected = local_y_edge(float(bottom_key), left_edges, expected_fallback=snapped_bottom)
+        top_right, top_right_detected = local_y_edge(float(top_key), right_edges, expected_fallback=snapped_top)
+        bottom_right, bottom_right_detected = local_y_edge(float(bottom_key), right_edges, expected_fallback=snapped_bottom)
+        if None in (top_left, bottom_left, top_right, bottom_right):
+            return [], False
+        expected_height = max(1.0, float(bottom_key) - float(top_key))
+        left_height = float(bottom_left) - float(top_left)
+        right_height = float(bottom_right) - float(top_right)
+        height_ok = (
+            expected_height * 0.50 <= left_height <= expected_height * 1.85
+            and expected_height * 0.50 <= right_height <= expected_height * 1.85
+            and left_height > 8.0
+            and right_height > 8.0
+        )
+        detected_side_count = sum(
+            (
+                bool(top_left_detected or bottom_left_detected),
+                bool(top_right_detected or bottom_right_detected),
+            )
+        )
+        polygon = [
+            [float(x0), float(top_left)],
+            [float(x1), float(top_right)],
+            [float(x1), float(bottom_right)],
+            [float(x0), float(bottom_left)],
+        ]
+        return polygon, bool(height_ok and detected_side_count >= 1)
+
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
     def snapped_x_edges_for_y(y_value: float) -> list[float | None] | None:
@@ -561,19 +616,43 @@ def snap_regions_x_to_local_fax_rulings(
             fallback_count += 1
             snapped_regions.append(region)
             continue
+        polygon, polygon_ok = side_y_edges_for_cell(
+            snapped_x0,
+            snapped_x1,
+            top_key=float(top_key),
+            bottom_key=float(bottom_key),
+            snapped_top=snapped_y0,
+            snapped_bottom=snapped_y1,
+        )
+        if polygon_ok:
+            px_values = [float(point[0]) for point in polygon]
+            py_values = [float(point[1]) for point in polygon]
+            snapped_bbox = [min(px_values), min(py_values), max(px_values), max(py_values)]
+        else:
+            polygon = [
+                [snapped_x0, snapped_y0],
+                [snapped_x1, snapped_y0],
+                [snapped_x1, snapped_y1],
+                [snapped_x0, snapped_y1],
+            ]
+            snapped_bbox = [snapped_x0, snapped_y0, snapped_x1, snapped_y1]
         snapped_count += 1
         snapped_regions.append(
             {
                 **region,
-                "bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
+                "bbox": snapped_bbox,
+                "polygon": polygon,
                 "local_grid_snap": {
                     "source_bbox": [x0, y0, x1, y1],
-                    "snapped_bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
+                    "snapped_bbox": snapped_bbox,
+                    "snapped_axis_bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
+                    "snapped_polygon": polygon,
                     "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
-                    "y_delta": [snapped_y0 - y0, snapped_y1 - y1],
-                    "method": "row_edge_local_fax_ruling_snap_v2",
+                    "y_delta": [snapped_bbox[1] - y0, snapped_bbox[3] - y1],
+                    "method": "row_edge_local_fax_ruling_polygon_snap_v3",
                     "y_snap_enabled": bool(snap_y),
                     "local_y_snap_applied": bool(snap_y and local_height_ok),
+                    "local_polygon_snap_applied": bool(polygon_ok),
                 },
             }
         )
@@ -591,7 +670,7 @@ def snap_regions_x_to_local_fax_rulings(
         }
     return snapped_regions, {
         "applied": True,
-        "method": "row_edge_local_fax_ruling_snap_v1",
+        "method": "row_edge_local_fax_ruling_polygon_snap_v3",
         "y_snap_enabled": bool(snap_y),
         "original_boundaries": original_boundaries,
         "row_boundary_count": len(row_boundaries),

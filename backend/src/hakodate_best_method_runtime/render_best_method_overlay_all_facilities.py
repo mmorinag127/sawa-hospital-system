@@ -240,9 +240,57 @@ def _restore_display_bboxes(
                 **record,
                 "ocr_crop_bbox": record.get("bbox"),
                 "bbox": list(display_region["bbox"]),
+                **({"polygon": list(display_region["polygon"])} if isinstance(display_region.get("polygon"), list) else {}),
             }
         )
     return restored
+
+
+def _region_polygon(region: dict[str, Any]) -> list[tuple[int, int]] | None:
+    polygon = region.get("polygon")
+    if not isinstance(polygon, list) or len(polygon) < 4:
+        return None
+    points: list[tuple[int, int]] = []
+    for point in polygon:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            points.append((int(round(float(point[0]))), int(round(float(point[1])))))
+        except Exception:
+            return None
+    return points
+
+
+def _draw_region_outline(
+    draw: ImageDraw.ImageDraw,
+    region: dict[str, Any],
+    *,
+    outline: tuple[int, int, int, int],
+    width: int,
+) -> None:
+    polygon = _region_polygon(region)
+    if polygon:
+        draw.line(polygon + [polygon[0]], fill=outline, width=width, joint="curve")
+        return
+    box = region.get("bbox")
+    if not isinstance(box, list) or len(box) != 4:
+        return
+    rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
+    draw.rectangle((rx0, ry0, rx1, ry1), outline=outline, width=width)
+
+
+def _region_center(region: dict[str, Any]) -> tuple[int, int] | None:
+    polygon = _region_polygon(region)
+    if polygon:
+        return (
+            int(round(sum(point[0] for point in polygon) / len(polygon))),
+            int(round(sum(point[1] for point in polygon) / len(polygon))),
+        )
+    box = region.get("bbox")
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    rx0, ry0, rx1, ry1 = [float(v) for v in box]
+    return int(round((rx0 + rx1) / 2.0)), int(round((ry0 + ry1) / 2.0))
 
 
 def _confidence_score_for_region(region: dict[str, Any]) -> float:
@@ -337,11 +385,7 @@ def _draw_overlay(
     font = _font(30)
     small_font = _font(13)
     for region in regions:
-        box = region.get("bbox")
-        if not isinstance(box, list) or len(box) != 4:
-            continue
-        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
-        draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 190, 0, 220), width=3)
+        _draw_region_outline(draw, region, outline=(0, 190, 0, 220), width=3)
 
     for point in header_intersection_points or []:
         try:
@@ -356,16 +400,14 @@ def _draw_overlay(
 
     by_cell = {str(record.get("sheet_cell")): record for record in records}
     for region in regions:
-        box = region.get("bbox")
-        if not isinstance(box, list) or len(box) != 4:
-            continue
         record = by_cell.get(str(region.get("sheet_cell")))
         has_ink = bool(record.get("ocr_candidate")) if isinstance(record, dict) else True
         inner_fill = (255, 0, 0, 255) if has_ink else (0, 105, 255, 255)
-        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
-        cx = int(round((rx0 + rx1) / 2.0))
-        cy = int(round((ry0 + ry1) / 2.0))
-        draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 115, 255, 125), width=1)
+        center = _region_center(region)
+        if center is None:
+            continue
+        cx, cy = center
+        _draw_region_outline(draw, region, outline=(0, 115, 255, 125), width=1)
         draw.ellipse((cx - 8, cy - 8, cx + 8, cy + 8), fill=(255, 255, 255, 235))
         draw.ellipse((cx - 5, cy - 5, cx + 5, cy + 5), fill=inner_fill)
 
@@ -376,12 +418,10 @@ def _draw_overlay(
         value = str(record.get("pred_digits") or "").strip()
         if not value:
             continue
-        box = region.get("bbox")
-        if not isinstance(box, list) or len(box) != 4:
+        center = _region_center(region)
+        if center is None:
             continue
-        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
-        cx = int(round((rx0 + rx1) / 2.0))
-        cy = int(round((ry0 + ry1) / 2.0))
+        cx, cy = center
         label = value[:8]
         try:
             tb = draw.textbbox((0, 0), label, font=font)
@@ -417,11 +457,7 @@ def _draw_sheet_review_base(
     layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     for region in regions:
-        box = region.get("bbox")
-        if not isinstance(box, list) or len(box) != 4:
-            continue
-        rx0, ry0, rx1, ry1 = [int(round(float(v))) for v in box]
-        draw.rectangle((rx0, ry0, rx1, ry1), outline=(0, 190, 0, 220), width=3)
+        _draw_region_outline(draw, region, outline=(0, 190, 0, 220), width=3)
     image = Image.alpha_composite(base, layer).convert("RGB")
     return _draw_quad_points(image, quad_points, prefix="Q")
 

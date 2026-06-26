@@ -257,6 +257,62 @@ def _preprocess_corner_component_crop_for_recognizer(
     return image, stats_out
 
 
+def _region_polygon(region: dict[str, Any]) -> list[list[float]] | None:
+    polygon = region.get("polygon")
+    if not isinstance(polygon, list) or len(polygon) < 4:
+        return None
+    points: list[list[float]] = []
+    for point in polygon:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            points.append([float(point[0]), float(point[1])])
+        except Exception:
+            return None
+    return points
+
+
+def _safe_int_box_for_polygon(
+    polygon: list[list[float]],
+    *,
+    width: int,
+    height: int,
+    pad_x_px: int,
+    pad_y_px: int,
+) -> tuple[int, int, int, int] | None:
+    xs = [float(point[0]) for point in polygon]
+    ys = [float(point[1]) for point in polygon]
+    if not xs or not ys:
+        return None
+    x0 = max(0, int(np.floor(min(xs))) - pad_x_px)
+    y0 = max(0, int(np.floor(min(ys))) - pad_y_px)
+    x1 = min(width, int(np.ceil(max(xs))) + pad_x_px)
+    y1 = min(height, int(np.ceil(max(ys))) + pad_y_px)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _mask_crop_to_region_polygon(
+    crop_bgr: np.ndarray,
+    *,
+    polygon: list[list[float]] | None,
+    crop_box: tuple[int, int, int, int],
+) -> np.ndarray:
+    if not polygon:
+        return crop_bgr
+    x0, y0, _x1, _y1 = crop_box
+    points = np.array(
+        [[[int(round(float(px) - x0)), int(round(float(py) - y0))] for px, py in polygon]],
+        dtype=np.int32,
+    )
+    mask = np.zeros(crop_bgr.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, points, 255)
+    masked = crop_bgr.copy()
+    masked[mask == 0] = 255
+    return masked
+
+
 def build_recognizer_contact_sheet(
     *,
     rectified_fax_bgr: np.ndarray,
@@ -277,7 +333,16 @@ def build_recognizer_contact_sheet(
         box = region.get("bbox")
         if not isinstance(box, list):
             continue
-        if mode == "dynamic":
+        polygon = _region_polygon(region)
+        if polygon and mode.startswith("corner_cc"):
+            px_box = _safe_int_box_for_polygon(
+                polygon,
+                width=width,
+                height=height,
+                pad_x_px=2,
+                pad_y_px=10,
+            )
+        elif mode == "dynamic":
             px_box = _expanded_cell_box(box, width=width, height=height, pad_x_px=4, pad_y_px=12)
         elif mode == "corner_cc":
             px_box = _expanded_cell_box(box, width=width, height=height, pad_x_px=2, pad_y_px=10)
@@ -289,6 +354,7 @@ def build_recognizer_contact_sheet(
         crop = rectified_fax_bgr[y0:y1, x0:x1]
         if crop.size == 0:
             continue
+        crop = _mask_crop_to_region_polygon(crop, polygon=polygon, crop_box=px_box)
         crop_line_mask = line_mask[y0:y1, x0:x1] if line_mask is not None else None
         if mode == "dynamic":
             crop_image, ink_stats = _preprocess_dynamic_crop_for_recognizer(
