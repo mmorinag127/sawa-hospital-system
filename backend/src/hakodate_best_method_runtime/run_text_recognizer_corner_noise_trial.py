@@ -257,6 +257,13 @@ def _preprocess_corner_component_crop_for_recognizer(
         )
         edge_sliver = touches_side_edge and w <= max(3, int(round(width * 0.025))) and h >= height * 0.18
         tiny = area < min_digit_area and h < min_digit_h
+        aspect = float(w) / max(1.0, float(h))
+        digit_like = (
+            h >= min_digit_h
+            and area >= min_digit_area
+            and 0.08 <= aspect <= 1.65
+            and not line_like
+        )
         reject = bool(edge_sliver or (line_like and touches_edge) or (touches_edge and tiny) or (in_corner and area < min_digit_area * 2))
         components.append(
             {
@@ -268,6 +275,7 @@ def _preprocess_corner_component_crop_for_recognizer(
                 "in_corner": in_corner,
                 "line_like": line_like,
                 "tiny": tiny,
+                "digit_like": digit_like,
                 "kept": not reject,
             }
         )
@@ -280,6 +288,7 @@ def _preprocess_corner_component_crop_for_recognizer(
         {
             "component_count": len(components),
             "kept_component_count": sum(1 for item in components if item["kept"]),
+            "digit_like_component_count": sum(1 for item in components if item["kept"] and item.get("digit_like")),
             "removed_component_count": sum(1 for item in components if not item["kept"]),
             "components": components[:20],
             "crop_box": list(crop_box),
@@ -417,6 +426,8 @@ def build_recognizer_contact_sheet(
         is_candidate = bool(
             int(ink_stats["ink_area"]) >= min_ink_area and int(ink_stats["bbox_height"]) >= min_ink_height
         )
+        if mode.startswith("corner_cc") and int(ink_stats.get("digit_like_component_count") or 0) <= 0:
+            is_candidate = False
         prepared_region = {
             **region,
             "ocr_contact_slot_index": slot_index,
