@@ -783,6 +783,25 @@ def snap_regions_x_to_local_fax_rulings(
             and left_height > 8.0
             and right_height > 8.0
         ):
+            if len(row_curve_reject_samples) < 40:
+                row_curve_reject_samples.append(
+                    {
+                        "reason": "row_curve_height_out_of_range",
+                        "left_key": int(left_key),
+                        "right_key": int(right_key),
+                        "top_key": int(top_key),
+                        "bottom_key": int(bottom_key),
+                        "x0": round(float(x0), 3),
+                        "x1": round(float(x1), 3),
+                        "top_left": round(float(top_left), 3),
+                        "top_right": round(float(top_right), 3),
+                        "bottom_left": round(float(bottom_left), 3),
+                        "bottom_right": round(float(bottom_right), 3),
+                        "expected_height": round(float(expected_height), 3),
+                        "left_height": round(float(left_height), 3),
+                        "right_height": round(float(right_height), 3),
+                    }
+                )
             return [], [], False, False, "row_curve_height_out_of_range"
         expected_width = max(1.0, float(x1) - float(x0))
         # A distorted FAX can move a long cell's top/bottom rulings by more
@@ -919,6 +938,7 @@ def snap_regions_x_to_local_fax_rulings(
     snapped_count = 0
     fallback_count = 0
     fallback_reason_counts: dict[str, int] = {}
+    row_curve_reject_samples: list[dict[str, Any]] = []
 
     def append_fallback(region: dict[str, Any], reason: str) -> None:
         nonlocal fallback_count
@@ -1086,6 +1106,7 @@ def snap_regions_x_to_local_fax_rulings(
             "row_debug": row_debug,
             "row_curve_debug": row_curve_debug,
             "column_curve_debug": column_curve_debug,
+            "row_curve_reject_samples": row_curve_reject_samples,
         }
     return snapped_regions, {
         "applied": True,
@@ -1107,6 +1128,7 @@ def snap_regions_x_to_local_fax_rulings(
         "row_debug": row_debug,
         "row_curve_debug": row_curve_debug,
         "column_curve_debug": column_curve_debug,
+        "row_curve_reject_samples": row_curve_reject_samples,
     }
 
 

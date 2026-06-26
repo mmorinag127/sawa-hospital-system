@@ -851,6 +851,7 @@ def build_best_method_for_manifest_item(
             "target_grid_snap_row_boundary_count": snap_debug.get("row_boundary_count"),
             "target_grid_snap_row_boundary_curve_count": snap_debug.get("row_boundary_curve_count"),
             "target_grid_snap_column_boundary_curve_count": snap_debug.get("column_boundary_curve_count"),
+            "target_grid_snap_row_curve_reject_samples": snap_debug.get("row_curve_reject_samples"),
         }
     )
     axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
