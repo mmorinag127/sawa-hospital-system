@@ -10,6 +10,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _post_menu_boundary_preserving_xs,
     _post_menu_target_regions,
     _row_height_outlier_evidence,
+    snap_regions_x_to_local_fax_rulings,
     _step_review_merge_regions_for_grid,
     _step_review_physical_row_map,
     _step_review_worksheet_row_to_grid_index,
@@ -66,6 +67,30 @@ def test_physical_internal_horizontal_lines_ignores_unmerged_rows() -> None:
     )
 
     assert hits == []
+
+
+def test_snap_regions_uses_cell_local_y_rulings_for_slanted_rows() -> None:
+    rectified = np.full((80, 120, 3), 255, dtype=np.uint8)
+    for x in (40, 60, 80):
+        rectified[8:55, x - 1 : x + 2] = 0
+    rectified[22:24, 40:60] = 0
+    rectified[42:44, 40:60] = 0
+    rectified[15:17, 60:80] = 0
+    rectified[35:37, 60:80] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [40.0, 20.0, 60.0, 40.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [60.0, 20.0, 80.0, 40.0]},
+    ]
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    by_cell = {str(region["sheet_cell"]): region for region in snapped}
+    assert evidence["applied"] is True
+    assert abs(float(by_cell["E11"]["bbox"][1]) - 22.0) < 1.0
+    assert abs(float(by_cell["E11"]["bbox"][3]) - 42.0) < 1.0
+    assert abs(float(by_cell["F11"]["bbox"][1]) - 15.0) < 1.0
+    assert abs(float(by_cell["F11"]["bbox"][3]) - 35.0) < 1.0
+    assert by_cell["F11"]["local_grid_snap"]["local_y_snap_applied"] is True
 
 
 def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary() -> None:

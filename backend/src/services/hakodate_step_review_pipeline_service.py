@@ -164,6 +164,8 @@ def snap_regions_x_to_local_fax_rulings(
     else:
         dark_mask = (gray < 95).astype(np.uint8)
     height, width = dark_mask.shape[:2]
+    line_source = rectified if rectified.ndim == 3 else cv2.cvtColor(rectified, cv2.COLOR_GRAY2BGR)
+    horizontal_mask, _vertical_mask = _split_line_masks(line_source)
 
     def projection_centers(projection: np.ndarray, *, threshold: float, min_len: int) -> list[float]:
         if projection.size == 0:
@@ -190,6 +192,20 @@ def snap_regions_x_to_local_fax_rulings(
             return None
         best = min(candidates, key=lambda candidate: abs(float(candidate) - value))
         return float(best) if abs(float(best) - value) <= max_distance else None
+
+    def detected_y_edges_for_x_span(x0: float, x1: float) -> list[float]:
+        span_width = max(1.0, float(x1) - float(x0))
+        inset = min(6.0, span_width * 0.22)
+        span_left = max(0, int(round(float(x0) + inset)))
+        span_right = min(width, int(round(float(x1) - inset)))
+        if span_right <= span_left:
+            return []
+        projection = horizontal_mask[:, span_left:span_right].sum(axis=1).astype(np.float32) / 255.0
+        if float(projection.max(initial=0.0)) <= 0.0:
+            return []
+        smooth = np.convolve(projection, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+        threshold = max(3.0, float(smooth.max(initial=0.0)) * 0.34)
+        return projection_centers(smooth, threshold=threshold, min_len=2)
 
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
@@ -300,6 +316,16 @@ def snap_regions_x_to_local_fax_rulings(
             snapped_right_values.append(float(bottom_snaps[right_index]))
         snapped_top = y_edge_snaps.get(top_key)
         snapped_bottom = y_edge_snaps.get(bottom_key)
+        local_y_edges = detected_y_edges_for_x_span(x0, x1)
+        local_top = nearest(float(top_key), local_y_edges, max_distance=24.0)
+        local_bottom = nearest(float(bottom_key), local_y_edges, max_distance=24.0)
+        if (
+            local_top is not None
+            and local_bottom is not None
+            and float(local_bottom) > float(local_top) + 8.0
+        ):
+            snapped_top = local_top
+            snapped_bottom = local_bottom
         if (
             len(snapped_left_values) < 2
             or len(snapped_right_values) < 2
@@ -327,7 +353,8 @@ def snap_regions_x_to_local_fax_rulings(
                     "snapped_bbox": [snapped_x0, snapped_y0, snapped_x1, snapped_y1],
                     "x_delta": [snapped_x0 - x0, snapped_x1 - x1],
                     "y_delta": [snapped_y0 - y0, snapped_y1 - y1],
-                    "method": "row_edge_local_fax_ruling_snap_v1",
+                    "method": "row_edge_local_fax_ruling_snap_v2",
+                    "local_y_snap_applied": local_top is not None and local_bottom is not None,
                 },
             }
         )
