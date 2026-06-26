@@ -191,6 +191,127 @@ def dewarp_rectified_y_to_template_rows(
     }
 
 
+def dewarp_rectified_rows_by_intersections(
+    rectified: np.ndarray,
+    *,
+    corrected_xs: list[float],
+    template_ys: list[int | float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if len(corrected_xs) < 2 or len(template_ys) < 3:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_insufficient_axes",
+            "x_count": len(corrected_xs),
+            "template_y_count": len(template_ys),
+        }
+    target = np.array([float(value) for value in template_ys], dtype=np.float32)
+    if not np.all(np.diff(target) > 0):
+        return rectified, {"applied": False, "reason": "row_mesh_dewarp_template_not_monotonic"}
+    x_anchors = np.array([float(value) for value in corrected_xs], dtype=np.float32)
+    x_anchors = np.array(sorted(set(round(float(value), 3) for value in x_anchors.tolist())), dtype=np.float32)
+    if x_anchors.size < 2:
+        return rectified, {"applied": False, "reason": "row_mesh_dewarp_insufficient_unique_x_anchors"}
+
+    points, detection = _detect_table_intersections_for_row_axis(
+        rectified,
+        corrected_xs=[float(value) for value in x_anchors.tolist()],
+        template_ys=[int(round(float(value))) for value in target.tolist()],
+    )
+    if not points:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_no_intersections",
+            **detection,
+        }
+
+    source_grid = np.repeat(target[None, :], x_anchors.size, axis=0).astype(np.float32)
+    matched_counts: list[int] = []
+    max_abs_offset = 0.0
+    for anchor_index, x_value in enumerate(x_anchors.tolist()):
+        column_points = [
+            point
+            for point in points
+            if abs(float(point.get("x", -9999.0)) - float(x_value)) <= 28.0
+        ]
+        matched = 0
+        for row_index, template_y in enumerate(target.tolist()):
+            candidates = [
+                float(point.get("y", 0.0))
+                for point in column_points
+                if abs(float(point.get("y", 0.0)) - float(template_y)) <= 42.0
+            ]
+            if not candidates:
+                continue
+            source_y = min(candidates, key=lambda value: abs(float(value) - float(template_y)))
+            source_grid[anchor_index, row_index] = float(source_y)
+            max_abs_offset = max(max_abs_offset, abs(float(source_y) - float(template_y)))
+            matched += 1
+        matched_counts.append(matched)
+
+    required_per_anchor = max(3, int(round(float(len(target)) * 0.28)))
+    usable_anchor_indexes = [
+        index for index, count in enumerate(matched_counts) if int(count) >= required_per_anchor
+    ]
+    if len(usable_anchor_indexes) < 2:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_insufficient_matched_anchors",
+            **detection,
+            "matched_counts": matched_counts,
+            "required_per_anchor": required_per_anchor,
+        }
+    if max_abs_offset <= 2.0:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_offsets_within_tolerance",
+            **detection,
+            "matched_counts": matched_counts,
+            "max_abs_offset": round(max_abs_offset, 3),
+        }
+
+    height, width = rectified.shape[:2]
+    x_positions = np.arange(width, dtype=np.float32)
+    map_y = np.empty((height, width), dtype=np.float32)
+    output_y = np.arange(height, dtype=np.float32)
+    usable_x = x_anchors[usable_anchor_indexes]
+    usable_grid = source_grid[usable_anchor_indexes, :]
+    for x_index, x_value in enumerate(x_positions.tolist()):
+        source_axis = np.array(
+            [
+                np.interp(float(x_value), usable_x, usable_grid[:, row_index])
+                for row_index in range(len(target))
+            ],
+            dtype=np.float32,
+        )
+        source_y = np.interp(output_y, target, source_axis).astype(np.float32)
+        head_end = int(max(0, round(float(target[0]))))
+        if head_end > 0:
+            source_y[:head_end] = output_y[:head_end]
+        tail_start = int(min(height, max(0, round(float(target[-1])))))
+        if tail_start < height:
+            source_y[tail_start:] = output_y[tail_start:]
+        map_y[:, x_index] = source_y
+    map_x = np.repeat(x_positions[None, :], height, axis=0)
+    dewarped = cv2.remap(
+        rectified,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return dewarped, {
+        "applied": True,
+        "method": "intersection_row_mesh_dewarp",
+        **detection,
+        "x_anchor_count": int(x_anchors.size),
+        "usable_anchor_count": len(usable_anchor_indexes),
+        "matched_counts": matched_counts,
+        "required_per_anchor": required_per_anchor,
+        "max_abs_offset": round(max_abs_offset, 3),
+    }
+
+
 def snap_regions_x_to_local_fax_rulings(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],

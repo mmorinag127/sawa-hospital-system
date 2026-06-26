@@ -40,6 +40,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _source_template_name,
     _split_line_masks,
     _write_pdf_from_pages,
+    dewarp_rectified_rows_by_intersections,
     dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
 )
@@ -1029,6 +1030,10 @@ def _build_preprocess_for_ocr(
         source_ys=[float(value) for value in row_source_ys],
         template_ys=[float(value) for value in template_ys],
     )
+    row_mesh_dewarp_evidence: dict[str, Any] = {
+        "applied": False,
+        "reason": "row_dewarp_not_applied",
+    }
     if bool(row_dewarp_evidence.get("applied")):
         horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
         aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
@@ -1054,6 +1059,37 @@ def _build_preprocess_for_ocr(
                 "corrected_ys": [round(float(value), 3) for value in aligned_ys],
             },
         }
+        row_mesh_rectified, row_mesh_dewarp_evidence = dewarp_rectified_rows_by_intersections(
+            raw_rectified,
+            corrected_xs=[float(value) for value in aligned_xs],
+            template_ys=[float(value) for value in template_ys],
+        )
+        if bool(row_mesh_dewarp_evidence.get("applied")):
+            raw_rectified = row_mesh_rectified
+            horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
+            aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
+                rectified_fax=raw_rectified,
+                template_xs=template_xs,
+                template_ys=template_ys,
+                worksheet=worksheet,
+                fax_template=fax_template,
+                header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
+                row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
+            )
+            row_match_after_mesh = (
+                axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
+            )
+            aligned_ys = [float(value) for value in template_ys]
+            axis_evidence = {
+                **axis_evidence,
+                "row_intersection_y_match": {
+                    **(row_match_after_mesh if isinstance(row_match_after_mesh, dict) else {}),
+                    "used": True,
+                    "method": "row_mesh_dewarp_template_y_axis_lock",
+                    "reason": "row_mesh_dewarp_applied_then_template_y_axis_locked",
+                    "corrected_ys": [round(float(value), 3) for value in aligned_ys],
+                },
+            }
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
         rectified_fax=raw_rectified,
@@ -1094,6 +1130,7 @@ def _build_preprocess_for_ocr(
             "target": target_evidence,
             "target_local_grid_snap": target_snap_evidence,
             "row_dewarp": row_dewarp_evidence,
+            "row_mesh_dewarp": row_mesh_dewarp_evidence,
             "quad_estimate": quad_estimate,
         },
     }
