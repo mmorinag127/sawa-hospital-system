@@ -1164,11 +1164,53 @@ def _build_preprocess_for_ocr(
             ys=[float(value) for value in template_ys],
         )
         if destructive_rejection:
-            row_slant_rectified = dewarped_rectified
+            raw_slant_rectified, raw_slant_evidence = dewarp_rectified_rows_by_bounded_slant(
+                raw_rectified,
+                corrected_xs=[float(value) for value in aligned_xs],
+                template_ys=[float(value) for value in template_ys],
+            )
+            raw_slant_rejection = None
+            if raw_slant_evidence.get("applied"):
+                raw_slant_rejection = _reject_destructive_row_dewarp(
+                    source_bgr=raw_rectified,
+                    candidate_bgr=raw_slant_rectified,
+                    xs=[float(value) for value in aligned_xs],
+                    ys=[float(value) for value in aligned_ys],
+                )
+            if raw_slant_evidence.get("applied") and not raw_slant_rejection:
+                row_slant_rectified = raw_slant_rectified
+                row_slant_dewarp_evidence = {
+                    **raw_slant_evidence,
+                    "source": "raw_rectified_after_vertical_slant_rejected",
+                    "vertical_slant_rejection": destructive_rejection,
+                }
+                dewarped_rectified = raw_rectified
+                row_dewarp_evidence = {
+                    **row_dewarp_evidence,
+                    "applied": False,
+                    "reason": "row_dewarp_replaced_by_safe_raw_slant",
+                }
+            else:
+                row_slant_rectified = raw_rectified
+                row_slant_dewarp_evidence = {
+                    **row_slant_dewarp_evidence,
+                    "applied": False,
+                    **destructive_rejection,
+                    "raw_slant_retry": {
+                        **raw_slant_evidence,
+                        "rejection": raw_slant_rejection,
+                    },
+                }
+                dewarped_rectified = raw_rectified
+                row_dewarp_evidence = {
+                    **row_dewarp_evidence,
+                    "applied": False,
+                    "reason": "row_dewarp_requires_safe_slant_rejected",
+                }
+        elif row_slant_dewarp_evidence.get("applied"):
             row_slant_dewarp_evidence = {
                 **row_slant_dewarp_evidence,
-                "applied": False,
-                **destructive_rejection,
+                "source": "row_dewarped_rectified",
             }
     mark_timing("row_slant_dewarp_seconds", step_t0)
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
