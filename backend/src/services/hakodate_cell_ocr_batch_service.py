@@ -99,7 +99,7 @@ def _dark_horizontal_band_score(
             continue
         window_ratio = (window < 80).sum(axis=1).astype(np.float32) / max(1, window.shape[1])
         max_window_ratio = max(max_window_ratio, float(window_ratio.max(initial=0.0)))
-        window_thick_band_count += count_thick_bands(window_ratio, threshold=0.62)
+        window_thick_band_count += count_thick_bands(window_ratio, threshold=0.42)
     return {
         "row_count": int(roi.shape[0]),
         "max_ratio": round(float(dark_ratio.max(initial=0.0)), 4),
@@ -122,7 +122,7 @@ def _reject_destructive_row_dewarp(
     candidate_bands = int(candidate_score.get("thick_band_count") or 0)
     source_window_bands = int(source_score.get("window_thick_band_count") or 0)
     candidate_window_bands = int(candidate_score.get("window_thick_band_count") or 0)
-    if candidate_bands >= source_bands + 2 or candidate_window_bands >= source_window_bands + 4:
+    if candidate_bands >= source_bands + 2 or candidate_window_bands >= source_window_bands + 2:
         return {
             "reason": "row_dewarp_destructive_dark_band_rejected",
             "source_dark_band_score": source_score,
@@ -1169,12 +1169,6 @@ def _build_preprocess_for_ocr(
                 **row_slant_dewarp_evidence,
                 "applied": False,
                 **destructive_rejection,
-            }
-            dewarped_rectified = raw_rectified
-            row_dewarp_evidence = {
-                **row_dewarp_evidence,
-                "applied": False,
-                "reason": "row_dewarp_requires_safe_slant_rejected",
             }
     mark_timing("row_slant_dewarp_seconds", step_t0)
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
