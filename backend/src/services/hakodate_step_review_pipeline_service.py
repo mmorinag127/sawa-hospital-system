@@ -324,6 +324,150 @@ def dewarp_rectified_rows_by_bounded_slant(
     }
 
 
+def dewarp_rectified_rows_by_intersections(
+    rectified: np.ndarray,
+    *,
+    corrected_xs: list[float],
+    template_ys: list[int | float],
+    max_shift_px: float = 72.0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if len(corrected_xs) < 2 or len(template_ys) < 3:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_insufficient_axes",
+            "x_count": len(corrected_xs),
+            "template_y_count": len(template_ys),
+        }
+    target = np.array([float(value) for value in template_ys], dtype=np.float32)
+    if not np.all(np.diff(target) > 0):
+        return rectified, {"applied": False, "reason": "row_mesh_dewarp_template_not_monotonic"}
+    x_anchors = np.array(sorted(set(round(float(value), 3) for value in corrected_xs)), dtype=np.float32)
+    if x_anchors.size < 2:
+        return rectified, {"applied": False, "reason": "row_mesh_dewarp_insufficient_unique_x_anchors"}
+
+    points, detection = _detect_table_intersections_for_row_axis(
+        rectified,
+        corrected_xs=[float(value) for value in x_anchors.tolist()],
+        template_ys=[int(round(float(value))) for value in target.tolist()],
+    )
+    if not points:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_no_intersections",
+            **detection,
+        }
+
+    source_grid = np.repeat(target[None, :], x_anchors.size, axis=0).astype(np.float32)
+    matched_counts: list[int] = []
+    max_abs_offset = 0.0
+    for anchor_index, x_value in enumerate(x_anchors.tolist()):
+        column_points = [
+            point
+            for point in points
+            if abs(float(point.get("x", -9999.0)) - float(x_value)) <= 28.0
+        ]
+        matched = 0
+        for row_index, template_y in enumerate(target.tolist()):
+            candidates = [
+                float(point.get("y", 0.0))
+                for point in column_points
+                if abs(float(point.get("y", 0.0)) - float(template_y)) <= 42.0
+            ]
+            if not candidates:
+                continue
+            source_y = min(candidates, key=lambda value: abs(float(value) - float(template_y)))
+            source_grid[anchor_index, row_index] = float(source_y)
+            max_abs_offset = max(max_abs_offset, abs(float(source_y) - float(template_y)))
+            matched += 1
+        matched_counts.append(matched)
+
+    required_per_anchor = max(3, int(round(float(len(target)) * 0.28)))
+    usable_anchor_indexes = [
+        index for index, count in enumerate(matched_counts) if int(count) >= required_per_anchor
+    ]
+    if len(usable_anchor_indexes) < 2:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_insufficient_matched_anchors",
+            **detection,
+            "matched_counts": matched_counts,
+            "required_per_anchor": required_per_anchor,
+        }
+    if max_abs_offset <= 2.0:
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_offsets_within_tolerance",
+            **detection,
+            "matched_counts": matched_counts,
+            "max_abs_offset": round(max_abs_offset, 3),
+        }
+
+    height, width = rectified.shape[:2]
+    x_positions = np.arange(width, dtype=np.float32)
+    output_y = np.arange(height, dtype=np.float32)
+    usable_x = x_anchors[usable_anchor_indexes]
+    usable_grid = source_grid[usable_anchor_indexes, :]
+    map_y = np.empty((height, width), dtype=np.float32)
+    median_target_gap = float(np.median(np.diff(target))) if len(target) >= 2 else 48.0
+    head_guard = min(8.0, max(2.0, median_target_gap * 0.20))
+    tail_guard = min(48.0, max(8.0, median_target_gap * 0.45))
+    for x_index, x_value in enumerate(x_positions.tolist()):
+        source_axis = np.array(
+            [
+                np.interp(float(x_value), usable_x, usable_grid[:, row_index])
+                for row_index in range(len(target))
+            ],
+            dtype=np.float32,
+        )
+        if not np.all(np.diff(source_axis) > 1.5):
+            return rectified, {
+                "applied": False,
+                "reason": "row_mesh_dewarp_source_axis_not_monotonic",
+                **detection,
+                "x": round(float(x_value), 3),
+            }
+        source_y = np.interp(output_y, target, source_axis).astype(np.float32)
+        head_end = int(max(0, round(float(target[0]) + head_guard)))
+        if head_end > 0:
+            source_y[:head_end] = output_y[:head_end]
+        tail_start = int(min(height, max(0, round(float(target[-1]) - tail_guard))))
+        if tail_start < height:
+            source_y[tail_start:] = output_y[tail_start:]
+        map_y[:, x_index] = source_y
+    max_abs_shift = float(np.max(np.abs(map_y - output_y[:, None])))
+    if max_abs_shift > float(max_shift_px):
+        return rectified, {
+            "applied": False,
+            "reason": "row_mesh_dewarp_shift_limit_exceeded",
+            **detection,
+            "matched_counts": matched_counts,
+            "required_per_anchor": required_per_anchor,
+            "max_abs_offset": round(max_abs_offset, 3),
+            "max_abs_shift": round(max_abs_shift, 3),
+            "max_shift_px": round(float(max_shift_px), 3),
+        }
+    map_x = np.repeat(x_positions[None, :], height, axis=0)
+    dewarped = cv2.remap(
+        rectified,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return dewarped, {
+        "applied": True,
+        "method": "intersection_row_mesh_dewarp",
+        **detection,
+        "x_anchor_count": int(x_anchors.size),
+        "usable_anchor_count": len(usable_anchor_indexes),
+        "matched_counts": matched_counts,
+        "required_per_anchor": required_per_anchor,
+        "max_abs_offset": round(max_abs_offset, 3),
+        "max_abs_shift": round(max_abs_shift, 3),
+    }
+
+
 def snap_regions_x_to_local_fax_rulings(
     rectified: np.ndarray,
     regions: list[dict[str, Any]],
@@ -343,12 +487,45 @@ def snap_regions_x_to_local_fax_rulings(
     )
     if len(original_boundaries) < 2:
         return regions, {"applied": False, "reason": "insufficient_boundaries"}
-    row_boundaries = sorted(
+    raw_row_boundaries = sorted(
         {int(round(float(region["bbox"][1]))) for region in target_regions}
         | {int(round(float(region["bbox"][3]))) for region in target_regions}
     )
-    if len(row_boundaries) < 2:
+    if len(raw_row_boundaries) < 2:
         return regions, {"applied": False, "reason": "insufficient_row_boundaries"}
+
+    def clustered_boundary_keys(values: list[int], *, max_gap: int) -> tuple[list[int], dict[int, int], list[dict[str, Any]]]:
+        clusters: list[list[int]] = []
+        for value in sorted({int(item) for item in values}):
+            if clusters and int(value) - int(clusters[-1][-1]) <= max_gap:
+                clusters[-1].append(int(value))
+            else:
+                clusters.append([int(value)])
+        keys: list[int] = []
+        raw_to_key: dict[int, int] = {}
+        debug: list[dict[str, Any]] = []
+        for cluster in clusters:
+            key = int(round(float(np.median(np.array(cluster, dtype=np.float32)))))
+            keys.append(key)
+            for raw_value in cluster:
+                raw_to_key[int(raw_value)] = key
+            if len(cluster) > 1:
+                debug.append(
+                    {
+                        "key": key,
+                        "raw_min": int(cluster[0]),
+                        "raw_max": int(cluster[-1]),
+                        "raw_count": len(cluster),
+                    }
+                )
+        return keys, raw_to_key, debug
+
+    row_boundaries, raw_row_boundary_to_key, row_boundary_cluster_debug = clustered_boundary_keys(
+        raw_row_boundaries,
+        max_gap=8,
+    )
+    if len(row_boundaries) < 2:
+        return regions, {"applied": False, "reason": "insufficient_clustered_row_boundaries"}
 
     gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified
     if rectified.ndim == 3:
@@ -1227,8 +1404,10 @@ def snap_regions_x_to_local_fax_rulings(
         x0, y0, x1, y1 = [float(value) for value in box]
         left_key = int(round(x0))
         right_key = int(round(x1))
-        top_key = int(round(y0))
-        bottom_key = int(round(y1))
+        raw_top_key = int(round(y0))
+        raw_bottom_key = int(round(y1))
+        top_key = raw_row_boundary_to_key.get(raw_top_key, raw_top_key)
+        bottom_key = raw_row_boundary_to_key.get(raw_bottom_key, raw_bottom_key)
         left_index = boundary_index.get(left_key)
         right_index = boundary_index.get(right_key)
         top_snaps = row_edge_snaps.get(top_key)
@@ -1386,6 +1565,9 @@ def snap_regions_x_to_local_fax_rulings(
             "reason": "local_grid_snap_insufficient_matches",
             "original_boundaries": original_boundaries,
             "row_boundary_count": len(row_boundaries),
+            "raw_row_boundary_count": len(raw_row_boundaries),
+            "row_boundary_cluster_count": len(row_boundary_cluster_debug),
+            "row_boundary_cluster_samples": row_boundary_cluster_debug[:20],
             "row_boundary_curve_count": len(row_boundary_curves),
             "column_boundary_curve_count": len(column_boundary_curves),
             "snapped_region_count": snapped_count,
@@ -1404,6 +1586,9 @@ def snap_regions_x_to_local_fax_rulings(
         "y_snap_enabled": bool(snap_y),
         "original_boundaries": original_boundaries,
         "row_boundary_count": len(row_boundaries),
+        "raw_row_boundary_count": len(raw_row_boundaries),
+        "row_boundary_cluster_count": len(row_boundary_cluster_debug),
+        "row_boundary_cluster_samples": row_boundary_cluster_debug[:20],
         "row_boundary_curve_count": len(row_boundary_curves),
         "column_boundary_curve_count": len(column_boundary_curves),
         "outer_y_snap": {

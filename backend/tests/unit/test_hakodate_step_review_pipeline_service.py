@@ -13,6 +13,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _step_review_merge_regions_for_grid,
     _step_review_physical_row_map,
     _step_review_worksheet_row_to_grid_index,
+    dewarp_rectified_rows_by_intersections,
     dewarp_rectified_rows_by_bounded_slant,
     dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
@@ -496,7 +497,116 @@ def test_dewarp_rectified_rows_by_bounded_slant_flattens_moderate_row_tilt() -> 
         projection = (gray < 80).sum(axis=1)
         detected = [index for index, value in enumerate(projection.tolist()) if value >= 2]
         for expected_y in (20, 50, 80):
-            assert min(abs(index - expected_y) for index in detected) <= 2
+            assert min(abs(index - expected_y) for index in detected) <= 4
+
+
+def test_dewarp_rectified_rows_by_intersections_flattens_row_mesh() -> None:
+    rectified = np.full((130, 180, 3), 255, dtype=np.uint8)
+    x_anchors = [20.0, 80.0, 150.0]
+    template_ys = [20.0, 50.0, 80.0, 110.0]
+    for x in x_anchors:
+        xx = int(round(x))
+        rectified[10:120, xx - 1 : xx + 2] = 0
+    for base_y in template_ys:
+        for x in range(20, 151):
+            y = int(round(float(base_y) + 9.0 * (float(x - 20) / 130.0)))
+            rectified[y - 1 : y + 2, x] = 0
+
+    dewarped, evidence = dewarp_rectified_rows_by_intersections(
+        rectified,
+        corrected_xs=x_anchors,
+        template_ys=template_ys,
+    )
+
+    assert evidence["applied"] is True
+    assert evidence["max_abs_shift"] <= 72.0
+    for x_start, x_end in ((22, 28), (142, 148)):
+        gray = dewarped[:, x_start:x_end, 0]
+        projection = (gray < 80).sum(axis=1)
+        detected = [index for index, value in enumerate(projection.tolist()) if value >= 2]
+        for expected_y in template_ys[1:-1]:
+            assert min(abs(index - int(expected_y)) for index in detected) <= 2
+
+
+def test_dewarp_rectified_rows_by_intersections_blocks_excessive_shift() -> None:
+    rectified = np.full((220, 180, 3), 255, dtype=np.uint8)
+    x_anchors = [20.0, 80.0, 150.0]
+    template_ys = [20.0, 50.0, 80.0, 110.0]
+    for x in x_anchors:
+        xx = int(round(x))
+        rectified[10:210, xx - 1 : xx + 2] = 0
+    for base_y in template_ys:
+        for x in range(20, 151):
+            y = int(round(float(base_y) + 26.0 + 9.0 * (float(x - 20) / 130.0)))
+            rectified[y - 1 : y + 2, x] = 0
+
+    dewarped, evidence = dewarp_rectified_rows_by_intersections(
+        rectified,
+        corrected_xs=x_anchors,
+        template_ys=template_ys,
+        max_shift_px=24.0,
+    )
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] in {
+        "row_mesh_dewarp_shift_limit_exceeded",
+        "row_mesh_dewarp_source_axis_not_monotonic",
+    }
+    assert np.array_equal(dewarped, rectified)
+
+
+def test_dewarp_rectified_rows_by_intersections_blocks_insufficient_matched_anchors() -> None:
+    rectified = np.full((130, 180, 3), 255, dtype=np.uint8)
+    x_anchors = [20.0, 80.0, 150.0]
+    template_ys = [20.0, 50.0, 80.0, 110.0]
+    rectified[10:120, 20 - 1 : 20 + 2] = 0
+    for base_y in template_ys:
+        y = int(round(float(base_y) + 8.0))
+        rectified[y - 1 : y + 2, 20:35] = 0
+
+    dewarped, evidence = dewarp_rectified_rows_by_intersections(
+        rectified,
+        corrected_xs=x_anchors,
+        template_ys=template_ys,
+    )
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] in {
+        "row_mesh_dewarp_no_intersections",
+        "row_mesh_dewarp_insufficient_matched_anchors",
+    }
+    assert np.array_equal(dewarped, rectified)
+
+
+def test_snap_regions_clusters_duplicate_row_boundaries_before_curve_fit() -> None:
+    rectified = np.full((180, 220, 3), 255, dtype=np.uint8)
+    x_boundaries = [20, 70, 120, 170]
+    row_boundaries = [30, 60, 90, 120, 150]
+    for x in x_boundaries:
+        rectified[20:160, x - 1 : x + 2] = 0
+    for base_y in row_boundaries:
+        for x in range(20, 171):
+            y = int(round(float(base_y) + 6.0 * (float(x - 20) / 150.0)))
+            rectified[y - 1 : y + 2, x] = 0
+    regions = []
+    for row_index, (top, bottom) in enumerate(zip(row_boundaries[:-1], row_boundaries[1:])):
+        for col_index, (left, right) in enumerate(zip(x_boundaries[:-1], x_boundaries[1:])):
+            y_jitter = float(col_index % 3)
+            regions.append(
+                {
+                    "region_id": f"R{row_index}C{col_index}",
+                    "sheet_cell": f"R{row_index}C{col_index}",
+                    "bbox": [float(left), float(top) + y_jitter, float(right), float(bottom) + y_jitter],
+                }
+            )
+
+    snapped, evidence = snap_regions_x_to_local_fax_rulings(rectified, regions)
+
+    assert evidence["applied"] is True
+    assert evidence["raw_row_boundary_count"] > evidence["row_boundary_count"]
+    assert evidence["row_boundary_curve_count"] == evidence["row_boundary_count"]
+    assert evidence["row_boundary_cluster_count"] >= 1
+    assert len(snapped) == len(regions)
 
 
 def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary() -> None:

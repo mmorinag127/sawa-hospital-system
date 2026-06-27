@@ -40,6 +40,7 @@ from src.services.hakodate_step_review_pipeline_service import (
     _source_template_name,
     _split_line_masks,
     _write_pdf_from_pages,
+    dewarp_rectified_rows_by_intersections,
     dewarp_rectified_rows_by_bounded_slant,
     dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
@@ -1206,6 +1207,31 @@ def _build_preprocess_for_ocr(
     mark_timing("row_slant_dewarp_seconds", step_t0)
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
     working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
+    row_mesh_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_mesh_not_attempted"}
+    step_t0 = time.perf_counter()
+    row_mesh_rectified, row_mesh_dewarp_evidence = dewarp_rectified_rows_by_intersections(
+        working_rectified,
+        corrected_xs=[float(value) for value in aligned_xs],
+        template_ys=[float(value) for value in template_ys],
+    )
+    if row_mesh_dewarp_evidence.get("applied"):
+        mesh_rejection = _reject_destructive_row_dewarp(
+            source_bgr=working_rectified,
+            candidate_bgr=row_mesh_rectified,
+            xs=[float(value) for value in aligned_xs],
+            ys=[float(value) for value in template_ys],
+        )
+        if mesh_rejection:
+            row_mesh_dewarp_evidence = {
+                **row_mesh_dewarp_evidence,
+                "applied": False,
+                "reason": "row_mesh_dewarp_destructive_dark_band_rejected",
+                "mesh_rejection": mesh_rejection,
+            }
+        else:
+            working_rectified = row_mesh_rectified
+            working_ys = [float(value) for value in template_ys]
+    mark_timing("row_mesh_dewarp_seconds", step_t0)
     step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
@@ -1256,6 +1282,7 @@ def _build_preprocess_for_ocr(
             "target_local_grid_snap": target_snap_evidence,
             "row_dewarp": row_dewarp_evidence,
             "row_slant_dewarp": row_slant_dewarp_evidence,
+            "row_mesh_dewarp": row_mesh_dewarp_evidence,
             "quad_estimate": quad_estimate,
             "preprocess_timings": timings,
         },
