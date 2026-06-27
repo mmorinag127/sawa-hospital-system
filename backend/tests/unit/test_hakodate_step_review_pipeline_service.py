@@ -199,6 +199,42 @@ def test_snap_regions_smooths_noisy_row_curve_segment() -> None:
     assert bottom_right < 72.0
 
 
+def test_snap_regions_keeps_local_y_snap_after_partial_row_slant_dewarp() -> None:
+    rectified = np.full((150, 190, 3), 255, dtype=np.uint8)
+    x_edges = [30, 70, 110, 150]
+    for x in x_edges:
+        rectified[18:126, x - 1 : x + 2] = 0
+    for base_y in (30.0, 60.0, 90.0, 120.0):
+        for x in range(x_edges[0], x_edges[-1] + 1):
+            residual = 6.0 * ((x - x_edges[0]) / (x_edges[-1] - x_edges[0]))
+            y = int(round(base_y + residual))
+            rectified[y - 1 : y + 2, x] = 0
+    regions = [
+        {"region_id": "E11", "sheet_cell": "E11", "bbox": [30.0, 30.0, 70.0, 60.0]},
+        {"region_id": "F11", "sheet_cell": "F11", "bbox": [70.0, 30.0, 110.0, 60.0]},
+        {"region_id": "G11", "sheet_cell": "G11", "bbox": [110.0, 30.0, 150.0, 60.0]},
+        {"region_id": "E12", "sheet_cell": "E12", "bbox": [30.0, 60.0, 70.0, 90.0]},
+        {"region_id": "F12", "sheet_cell": "F12", "bbox": [70.0, 60.0, 110.0, 90.0]},
+        {"region_id": "G12", "sheet_cell": "G12", "bbox": [110.0, 60.0, 150.0, 90.0]},
+        {"region_id": "E13", "sheet_cell": "E13", "bbox": [30.0, 90.0, 70.0, 120.0]},
+        {"region_id": "F13", "sheet_cell": "F13", "bbox": [70.0, 90.0, 110.0, 120.0]},
+        {"region_id": "G13", "sheet_cell": "G13", "bbox": [110.0, 90.0, 150.0, 120.0]},
+    ]
+
+    snapped_without_y, evidence_without_y = snap_regions_x_to_local_fax_rulings(rectified, regions, snap_y=False)
+    snapped_with_y, evidence_with_y = snap_regions_x_to_local_fax_rulings(rectified, regions, snap_y=True)
+
+    assert evidence_without_y["applied"] is True
+    assert evidence_with_y["applied"] is True
+    without_cell = {str(region["sheet_cell"]): region for region in snapped_without_y}["G12"]
+    with_cell = {str(region["sheet_cell"]): region for region in snapped_with_y}["G12"]
+    assert without_cell["local_grid_snap"]["y_snap_enabled"] is False
+    assert with_cell["local_grid_snap"]["y_snap_enabled"] is True
+    assert with_cell["local_grid_snap"]["local_y_snap_applied"] is True
+    assert float(with_cell["bbox"][1]) > float(without_cell["bbox"][1]) + 2.0
+    assert float(with_cell["bbox"][3]) > float(without_cell["bbox"][3]) + 2.0
+
+
 def test_snap_regions_extrapolates_row_curve_when_right_ruling_is_missing() -> None:
     rectified = np.full((140, 180, 3), 255, dtype=np.uint8)
     x_edges = [30, 60, 90, 120, 150]

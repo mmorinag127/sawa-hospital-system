@@ -1202,7 +1202,7 @@ def _build_preprocess_for_ocr(
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
         working_rectified,
         target_regions,
-        snap_y=not bool(row_slant_dewarp_evidence.get("applied")),
+        snap_y=True,
     )
     mark_timing("snap_target_regions_seconds", step_t0)
     step_t0 = time.perf_counter()
