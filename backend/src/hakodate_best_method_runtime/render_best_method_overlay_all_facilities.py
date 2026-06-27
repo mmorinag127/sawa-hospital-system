@@ -860,6 +860,9 @@ def build_best_method_for_manifest_item(
     row_slant_evidence = (
         axis_evidence.get("row_slant_dewarp") if isinstance(axis_evidence.get("row_slant_dewarp"), dict) else {}
     )
+    preprocess_timings = (
+        axis_evidence.get("preprocess_timings") if isinstance(axis_evidence.get("preprocess_timings"), dict) else {}
+    )
     metrics.update(
         {
             "row_dewarp_applied": bool(row_dewarp_evidence.get("applied")),
@@ -871,6 +874,7 @@ def build_best_method_for_manifest_item(
             "row_slant_dewarp_fitted_row_count": row_slant_evidence.get("fitted_row_count"),
             "row_slant_dewarp_nonzero_slope_count": row_slant_evidence.get("nonzero_slope_count"),
             "row_slant_dewarp_max_abs_shift": row_slant_evidence.get("max_abs_shift"),
+            "preprocess_timings": preprocess_timings,
         }
     )
     quad_points = [

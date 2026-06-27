@@ -1045,26 +1045,42 @@ def _build_preprocess_for_ocr(
     page: int,
     render_width: int,
 ) -> dict[str, Any]:
+    timings: dict[str, float] = {}
+
+    def mark_timing(name: str, started_at: float) -> None:
+        timings[name] = round(float(time.perf_counter() - started_at), 4)
+
     facility_code = str(item["facility_code"])
     order_id = str(item["order_id"])
+    step_t0 = time.perf_counter()
     existing_step2 = cv2.imread(item["step2_png"])
     if existing_step2 is None:
         raise ValueError(f"step2 canvas not found: {item['step2_png']}")
+    mark_timing("load_step2_canvas_seconds", step_t0)
     canvas_height, canvas_width = existing_step2.shape[:2]
+    step_t0 = time.perf_counter()
     template = render_template_pdf_to_canvas(item["template_pdf"], width=canvas_width, height=canvas_height)
+    mark_timing("render_template_seconds", step_t0)
+    step_t0 = time.perf_counter()
     template_xs, template_ys, _all_xs, _all_ys = resolve_template_axes_from_manifest_or_image(
         item=item,
         template_image=template,
         manifest_template_bbox=item["template_bbox"],
     )
+    mark_timing("resolve_template_axes_seconds", step_t0)
     week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
+    step_t0 = time.perf_counter()
     worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
         item=item,
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
     fax_template = _fax_template_for_manifest_item(item, facility_code)
+    mark_timing("load_template_config_seconds", step_t0)
+    step_t0 = time.perf_counter()
     quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
+    mark_timing("resolve_quad_seconds", step_t0)
+    step_t0 = time.perf_counter()
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
@@ -1080,8 +1096,12 @@ def _build_preprocess_for_ocr(
         template_axes_x=template_xs,
         template_axes_y=template_ys,
     )
+    mark_timing("fixed_quad_registration_seconds", step_t0)
+    step_t0 = time.perf_counter()
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
+    mark_timing("render_fax_pdf_seconds", step_t0)
     table_bbox = registration.template_outer_grid_bbox_used
+    step_t0 = time.perf_counter()
     raw_rectified = rectify_fax_to_template_grid(
         original,
         quad_px=quad_px,
@@ -1089,6 +1109,8 @@ def _build_preprocess_for_ocr(
         canvas_width=canvas_width,
         canvas_height=canvas_height,
     )
+    mark_timing("rectify_fax_seconds", step_t0)
+    step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
     aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
         rectified_fax=raw_rectified,
@@ -1099,12 +1121,14 @@ def _build_preprocess_for_ocr(
         header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
         row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
+    mark_timing("align_axes_seconds", step_t0)
     row_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_axis_not_available"}
     row_slant_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_dewarp_not_applied"}
     row_match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
     row_source_ys = row_match.get("corrected_ys") if isinstance(row_match, dict) else None
     if not isinstance(row_source_ys, list) or len(row_source_ys) != len(template_ys):
         row_source_ys = [float(value) for value in aligned_ys]
+    step_t0 = time.perf_counter()
     dewarped_rectified, row_dewarp_evidence = dewarp_rectified_y_to_template_rows(
         raw_rectified,
         source_ys=[float(value) for value in row_source_ys],
@@ -1125,6 +1149,8 @@ def _build_preprocess_for_ocr(
                 "reason": "row_dewarp_destructive_dark_band_rejected",
                 "vertical_rejection": vertical_destructive_rejection,
             }
+    mark_timing("row_dewarp_seconds", step_t0)
+    step_t0 = time.perf_counter()
     row_slant_rectified, row_slant_dewarp_evidence = dewarp_rectified_rows_by_bounded_slant(
         dewarped_rectified,
         corrected_xs=[float(value) for value in aligned_xs],
@@ -1150,8 +1176,10 @@ def _build_preprocess_for_ocr(
                 "applied": False,
                 "reason": "row_dewarp_requires_safe_slant_rejected",
             }
+    mark_timing("row_slant_dewarp_seconds", step_t0)
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
     working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
+    step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
@@ -1160,6 +1188,8 @@ def _build_preprocess_for_ocr(
         ys=working_ys,
         horizontal_line_mask=horizontal_line_mask,
     )
+    mark_timing("draw_merge_grid_seconds", step_t0)
+    step_t0 = time.perf_counter()
     target_regions, target_evidence = _post_menu_target_regions(
         worksheet=worksheet,
         column_edges=[float(value) for value in aligned_xs],
@@ -1167,14 +1197,19 @@ def _build_preprocess_for_ocr(
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
     )
+    mark_timing("build_target_regions_seconds", step_t0)
+    step_t0 = time.perf_counter()
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
         working_rectified,
         target_regions,
         snap_y=not bool(row_slant_dewarp_evidence.get("applied")),
     )
+    mark_timing("snap_target_regions_seconds", step_t0)
+    step_t0 = time.perf_counter()
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
     target_overlay = _draw_header_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
     target_overlay = _draw_row_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
+    mark_timing("draw_target_overlay_seconds", step_t0)
     rectified_quad_points = _bbox_quad_points(table_bbox)
     return {
         "page": page,
@@ -1195,6 +1230,7 @@ def _build_preprocess_for_ocr(
             "row_dewarp": row_dewarp_evidence,
             "row_slant_dewarp": row_slant_dewarp_evidence,
             "quad_estimate": quad_estimate,
+            "preprocess_timings": timings,
         },
     }
 
