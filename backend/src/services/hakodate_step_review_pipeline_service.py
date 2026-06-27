@@ -670,13 +670,43 @@ def snap_regions_x_to_local_fax_rulings(
                     }
                 )
                 continue
+            smooth_x = collapsed_x
+            smooth_y = collapsed_y
+            smooth_method = "piecewise_linear"
+            smooth_max_residual: float | None = None
+            if len(collapsed_x) >= 3:
+                fit_x = np.array(collapsed_x, dtype=np.float64)
+                fit_y = np.array(collapsed_y, dtype=np.float64)
+                for _fit_iteration in range(3):
+                    slope, intercept = np.polyfit(fit_x, fit_y, deg=1).tolist()
+                    fitted = fit_x * float(slope) + float(intercept)
+                    residuals = fit_y - fitted
+                    residual_limit = max(5.0, median_row_height_for_boundary(float(row_boundary)) * 0.35)
+                    keep_fit = np.abs(residuals - float(np.median(residuals))) <= residual_limit
+                    if int(np.sum(keep_fit)) < 3 or int(np.sum(keep_fit)) == len(fit_x):
+                        break
+                    fit_x = fit_x[keep_fit]
+                    fit_y = fit_y[keep_fit]
+                if len(fit_x) >= 3:
+                    slope, intercept = np.polyfit(fit_x, fit_y, deg=1).tolist()
+                    smooth_y = (np.array(collapsed_x, dtype=np.float64) * float(slope) + float(intercept)).tolist()
+                    smooth_method = "robust_linear_row_curve"
+                    smooth_max_residual = float(
+                        np.max(np.abs(np.array(collapsed_y, dtype=np.float64) - np.array(smooth_y, dtype=np.float64)))
+                    )
             curves[int(row_boundary)] = {
-                "xs": collapsed_x,
-                "ys": collapsed_y,
-                "median_delta": median_delta,
+                "xs": smooth_x,
+                "ys": smooth_y,
+                "median_delta": float(np.median(np.array(smooth_y, dtype=np.float64) - float(row_boundary))),
+                "raw_xs": collapsed_x,
+                "raw_ys": collapsed_y,
+                "smooth_method": smooth_method,
             }
             span_delta = float(np.interp(float(original_boundaries[-1]), collapsed_x, collapsed_y)) - float(
                 np.interp(float(original_boundaries[0]), collapsed_x, collapsed_y)
+            )
+            smooth_span_delta = float(np.interp(float(original_boundaries[-1]), smooth_x, smooth_y)) - float(
+                np.interp(float(original_boundaries[0]), smooth_x, smooth_y)
             )
             debug.append(
                 {
@@ -686,6 +716,9 @@ def snap_regions_x_to_local_fax_rulings(
                     "kept_sample_count": len(collapsed_x),
                     "median_delta": round(median_delta, 3),
                     "span_delta": round(span_delta, 3),
+                    "smooth_method": smooth_method,
+                    "smooth_span_delta": round(smooth_span_delta, 3),
+                    "smooth_max_residual": None if smooth_max_residual is None else round(float(smooth_max_residual), 3),
                     "curve_boundary_count": len(curve_boundaries),
                     "left_curve_boundary_count": len(left_table_candidates),
                     "ordered_interval_count": ordered_interval_count,
