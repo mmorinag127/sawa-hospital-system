@@ -802,6 +802,156 @@ def snap_regions_x_to_local_fax_rulings(
             return None
         return interpolate_with_linear_edge_extrapolation(xs, ys, float(x_value))
 
+    def validate_row_curve_pair(
+        curves: dict[int, dict[str, Any]],
+        top_key: int,
+        bottom_key: int,
+        sample_xs: list[float],
+    ) -> tuple[bool, list[float]]:
+        expected_height = max(1.0, float(bottom_key) - float(top_key))
+        heights: list[float] = []
+        for x_value in sample_xs:
+            top_y = curve_y(curves, int(top_key), float(x_value))
+            bottom_y = curve_y(curves, int(bottom_key), float(x_value))
+            if top_y is None or bottom_y is None:
+                return False, heights
+            heights.append(float(bottom_y) - float(top_y))
+        if not heights:
+            return False, heights
+        min_height = min(heights)
+        max_height = max(heights)
+        valid = (
+            min_height > 8.0
+            and min_height >= expected_height * 0.50
+            and max_height <= expected_height * 1.85
+        )
+        return bool(valid), heights
+
+    def interpolated_row_curve(
+        curves: dict[int, dict[str, Any]],
+        *,
+        target_key: int,
+        upper_key: int,
+        lower_key: int,
+        sample_xs: list[float],
+    ) -> dict[str, Any] | None:
+        if int(lower_key) <= int(upper_key):
+            return None
+        ratio = (float(target_key) - float(upper_key)) / (float(lower_key) - float(upper_key))
+        ys: list[float] = []
+        for x_value in sample_xs:
+            upper_y = curve_y(curves, int(upper_key), float(x_value))
+            lower_y = curve_y(curves, int(lower_key), float(x_value))
+            if upper_y is None or lower_y is None:
+                return None
+            ys.append(float(upper_y) + (float(lower_y) - float(upper_y)) * ratio)
+        if not np.all(np.diff(np.array(ys, dtype=np.float64)) < max(120.0, float(height))):
+            return None
+        return {
+            "xs": [float(value) for value in sample_xs],
+            "ys": ys,
+            "median_delta": float(np.median(np.array(ys, dtype=np.float64) - float(target_key))),
+            "repaired_from_neighbors": [int(upper_key), int(lower_key)],
+        }
+
+    def repair_row_boundary_curves(
+        curves: dict[int, dict[str, Any]],
+        debug: list[dict[str, Any]],
+    ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        if len(curves) < 3:
+            return curves, debug, []
+        sample_xs = np.linspace(float(original_boundaries[0]), float(original_boundaries[-1]), 9).tolist()
+        repaired = dict(curves)
+        repair_debug: list[dict[str, Any]] = []
+        for _iteration in range(8):
+            invalid_pairs: list[dict[str, Any]] = []
+            for top_key, bottom_key in zip(row_boundaries[:-1], row_boundaries[1:]):
+                if int(top_key) not in repaired or int(bottom_key) not in repaired:
+                    continue
+                pair_ok, heights = validate_row_curve_pair(repaired, int(top_key), int(bottom_key), sample_xs)
+                if pair_ok:
+                    continue
+                expected_height = max(1.0, float(bottom_key) - float(top_key))
+                invalid_pairs.append(
+                    {
+                        "top_key": int(top_key),
+                        "bottom_key": int(bottom_key),
+                        "expected_height": round(expected_height, 3),
+                        "min_height": round(float(min(heights)), 3) if heights else None,
+                        "max_height": round(float(max(heights)), 3) if heights else None,
+                    }
+                )
+            if not invalid_pairs:
+                break
+            boundary_scores: dict[int, int] = {}
+            for item in invalid_pairs:
+                boundary_scores[int(item["top_key"])] = boundary_scores.get(int(item["top_key"]), 0) + 1
+                boundary_scores[int(item["bottom_key"])] = boundary_scores.get(int(item["bottom_key"]), 0) + 1
+            candidate_keys = [
+                int(key)
+                for key, _score in sorted(boundary_scores.items(), key=lambda item: (-item[1], item[0]))
+                if int(key) not in {int(row_boundaries[0]), int(row_boundaries[-1])}
+            ]
+            repaired_this_iteration = False
+            for candidate_key in candidate_keys:
+                valid_keys = sorted(key for key in repaired if int(key) != int(candidate_key))
+                upper_keys = [key for key in valid_keys if int(key) < int(candidate_key)]
+                lower_keys = [key for key in valid_keys if int(key) > int(candidate_key)]
+                if not upper_keys or not lower_keys:
+                    continue
+                upper_key = int(upper_keys[-1])
+                lower_key = int(lower_keys[0])
+                replacement = interpolated_row_curve(
+                    repaired,
+                    target_key=int(candidate_key),
+                    upper_key=upper_key,
+                    lower_key=lower_key,
+                    sample_xs=sample_xs,
+                )
+                if replacement is None:
+                    continue
+                original_curve = repaired.get(int(candidate_key), {})
+                repaired[int(candidate_key)] = replacement
+                repair_debug.append(
+                    {
+                        "row_y": int(candidate_key),
+                        "repaired": True,
+                        "reason": "adjacent_row_curve_height_inconsistent",
+                        "upper_key": upper_key,
+                        "lower_key": lower_key,
+                        "original_median_delta": round(float(original_curve.get("median_delta", 0.0)), 3),
+                        "replacement_median_delta": round(float(replacement["median_delta"]), 3),
+                        "invalid_pair_count": len(invalid_pairs),
+                    }
+                )
+                repaired_this_iteration = True
+                break
+            if not repaired_this_iteration:
+                repair_debug.append(
+                    {
+                        "repaired": False,
+                        "reason": "unable_to_repair_adjacent_row_curve_height_inconsistent",
+                        "invalid_pairs": invalid_pairs[:8],
+                    }
+                )
+                break
+        if repair_debug:
+            repaired_by_key = {int(item["row_y"]): item for item in repair_debug if item.get("repaired") and "row_y" in item}
+            updated_debug: list[dict[str, Any]] = []
+            for item in debug:
+                row_y = item.get("row_y")
+                if isinstance(row_y, int) and row_y in repaired_by_key:
+                    updated = dict(item)
+                    updated["repaired"] = True
+                    updated["repair_reason"] = str(repaired_by_key[row_y].get("reason"))
+                    updated["repair_upper_key"] = repaired_by_key[row_y].get("upper_key")
+                    updated["repair_lower_key"] = repaired_by_key[row_y].get("lower_key")
+                    updated_debug.append(updated)
+                else:
+                    updated_debug.append(item)
+            debug = updated_debug
+        return repaired, debug, repair_debug
+
     def curve_x(curves: dict[int, dict[str, Any]], boundary: int, y_value: float) -> float | None:
         curve = curves.get(int(boundary))
         if not curve:
@@ -929,6 +1079,10 @@ def snap_regions_x_to_local_fax_rulings(
         ], display_polygon, True, column_curve_applied, None
 
     row_boundary_curves, row_curve_debug = build_row_boundary_curves()
+    row_boundary_curves, row_curve_debug, row_curve_repair_debug = repair_row_boundary_curves(
+        row_boundary_curves,
+        row_curve_debug,
+    )
     column_boundary_curves, column_curve_debug = build_column_boundary_curves()
     row_edge_snaps: dict[int, list[float | None]] = {}
     row_debug: list[dict[str, Any]] = []
@@ -1207,6 +1361,7 @@ def snap_regions_x_to_local_fax_rulings(
             "required_min_snapped_region_count": required_min,
             "row_debug": row_debug,
             "row_curve_debug": row_curve_debug,
+            "row_curve_repair_debug": row_curve_repair_debug,
             "column_curve_debug": column_curve_debug,
             "row_curve_reject_samples": row_curve_reject_samples,
         }
@@ -1229,6 +1384,7 @@ def snap_regions_x_to_local_fax_rulings(
         "fallback_reason_counts": fallback_reason_counts,
         "row_debug": row_debug,
         "row_curve_debug": row_curve_debug,
+        "row_curve_repair_debug": row_curve_repair_debug,
         "column_curve_debug": column_curve_debug,
         "row_curve_reject_samples": row_curve_reject_samples,
     }
