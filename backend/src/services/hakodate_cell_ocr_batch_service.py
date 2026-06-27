@@ -1169,15 +1169,7 @@ def _build_preprocess_for_ocr(
                 corrected_xs=[float(value) for value in aligned_xs],
                 template_ys=[float(value) for value in template_ys],
             )
-            raw_slant_rejection = None
             if raw_slant_evidence.get("applied"):
-                raw_slant_rejection = _reject_destructive_row_dewarp(
-                    source_bgr=raw_rectified,
-                    candidate_bgr=raw_slant_rectified,
-                    xs=[float(value) for value in aligned_xs],
-                    ys=[float(value) for value in aligned_ys],
-                )
-            if raw_slant_evidence.get("applied") and not raw_slant_rejection:
                 row_slant_rectified = raw_slant_rectified
                 row_slant_dewarp_evidence = {
                     **raw_slant_evidence,
@@ -1198,7 +1190,6 @@ def _build_preprocess_for_ocr(
                     **destructive_rejection,
                     "raw_slant_retry": {
                         **raw_slant_evidence,
-                        "rejection": raw_slant_rejection,
                     },
                 }
                 dewarped_rectified = raw_rectified
