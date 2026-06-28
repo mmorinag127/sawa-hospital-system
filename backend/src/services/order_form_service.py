@@ -60,6 +60,25 @@ _SOURCE_WORKBOOK_UPLOAD_DIR = Path(
 )
 
 
+class WeekEntriesWriteResult(int):
+    def __new__(
+        cls,
+        written_rows: int,
+        *,
+        source_rows: int,
+        overflow_entries: list[dict[str, str]],
+    ):
+        obj = int.__new__(cls, written_rows)
+        obj.written_rows = int(written_rows)
+        obj.source_rows = int(source_rows)
+        obj.overflow_entries = overflow_entries
+        return obj
+
+    @property
+    def overflow_rows(self) -> int:
+        return len(self.overflow_entries)
+
+
 def _resolve_fax_source_template_dir() -> Path:
     configured = os.getenv("FAX_SOURCE_TEMPLATE_DIR", "").strip()
     if configured:
@@ -750,6 +769,66 @@ def _daypart_key(value: object) -> str:
     return str(value or "").strip()
 
 
+def _week_menu_daypart_key(value: object) -> str:
+    text = str(value or "").strip()
+    if text.startswith("朝"):
+        return "朝"
+    if text.startswith("昼"):
+        return "昼"
+    if text.startswith("夕"):
+        return "夕"
+    return text
+
+
+def _week_menu_daypart_capacity(value: object) -> int | None:
+    key = _week_menu_daypart_key(value)
+    if key == "朝":
+        return 2
+    if key in {"昼", "夕"}:
+        return 3
+    return None
+
+
+def _week_entry_overflow_payload(entry: dict) -> dict[str, str]:
+    menu_date = entry.get("_menu_date_obj")
+    return {
+        "date": menu_date.isoformat() if isinstance(menu_date, date) else str(entry.get("menu_date") or ""),
+        "daypart": str(entry.get("daypart") or ""),
+        "category": str(entry.get("category") or ""),
+        "name": str(entry.get("name") or ""),
+    }
+
+
+def _split_week_entries_for_order_form(week_entries: list[dict]) -> tuple[list[dict], list[dict[str, str]], int]:
+    valid_entries = [entry for entry in week_entries if isinstance(entry.get("_menu_date_obj"), date)]
+    body_capacity = _ORDER_FORM_BODY_END_ROW - _ORDER_FORM_BODY_START_ROW + 1
+    if len(valid_entries) <= body_capacity:
+        return valid_entries, [], len(valid_entries)
+
+    physical_entries: list[dict] = []
+    overflow_entries: list[dict[str, str]] = []
+    counts_by_daypart: dict[tuple[date, str], int] = {}
+    for entry in valid_entries:
+        menu_date = entry["_menu_date_obj"]
+        daypart_key = _week_menu_daypart_key(entry.get("daypart"))
+        capacity = _week_menu_daypart_capacity(entry.get("daypart"))
+        if capacity is None:
+            physical_entries.append(entry)
+            continue
+        counter_key = (menu_date, daypart_key)
+        counts_by_daypart[counter_key] = counts_by_daypart.get(counter_key, 0) + 1
+        if counts_by_daypart[counter_key] > capacity:
+            overflow_entries.append(_week_entry_overflow_payload(entry))
+            continue
+        physical_entries.append(entry)
+
+    if len(physical_entries) > body_capacity:
+        overflow_entries.extend(_week_entry_overflow_payload(entry) for entry in physical_entries[body_capacity:])
+        physical_entries = physical_entries[:body_capacity]
+
+    return physical_entries, overflow_entries, len(valid_entries)
+
+
 def _write_facility_name_in_box(worksheet, facility_name: str) -> None:
     text = str(facility_name or "").strip()
     name_length = len(text)
@@ -811,22 +890,21 @@ def _write_weekday_label_for_date_block(
     )
 
 
-def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
+def _write_week_entries(worksheet, week_entries: list[dict]) -> WeekEntriesWriteResult:
     row_idx = _ORDER_FORM_BODY_START_ROW
     current_date: date | None = None
     date_start_row = _ORDER_FORM_BODY_START_ROW
     current_daypart = ""
     written_rows = 0
+    physical_entries, overflow_entries, source_rows = _split_week_entries_for_order_form(week_entries)
 
-    for entry in week_entries:
+    for entry in physical_entries:
         menu_date = entry.get("_menu_date_obj")
         if not isinstance(menu_date, date):
             continue
         daypart = str(entry.get("daypart") or "").strip()
         category = str(entry.get("category") or "")
         menu_name = str(entry.get("name") or "")
-        if row_idx > _ORDER_FORM_BODY_END_ROW:
-            raise ValueError("weekly menu exceeds supported template rows")
 
         if current_date != menu_date:
             if current_date is not None and row_idx - 1 > date_start_row:
@@ -861,7 +939,11 @@ def _write_week_entries(worksheet, week_entries: list[dict]) -> int:
             date_end_row=row_idx - 1,
             menu_date=current_date,
         )
-    return written_rows
+    return WeekEntriesWriteResult(
+        written_rows,
+        source_rows=source_rows,
+        overflow_entries=overflow_entries,
+    )
 
 
 def _sheet_field_indexes(fields: list[Any]) -> dict[str, int]:
@@ -1091,6 +1173,7 @@ def _append_monthly_metadata_sheet(
     family_label: str,
     week_ranges: list[tuple[date, date]],
     entry_count: int,
+    week_write_results: list[WeekEntriesWriteResult] | None = None,
 ) -> None:
     if "設定" in workbook.sheetnames:
         del workbook["設定"]
@@ -1108,10 +1191,24 @@ def _append_monthly_metadata_sheet(
     meta.append(["family_label", family_label])
     meta.append(["sheet_count", len(week_ranges)])
     meta.append(["entry_count", entry_count])
+    total_overflow_rows = sum(int(result.overflow_rows) for result in (week_write_results or []))
+    meta.append(["week_menu_overflow_rows", total_overflow_rows])
     for index, (start_date, end_date) in enumerate(week_ranges, start=1):
         meta.append([f"week_{index}_sheet_name", _format_week_sheet_name(start_date, end_date)])
         meta.append([f"week_{index}_start", start_date.isoformat()])
         meta.append([f"week_{index}_end", end_date.isoformat()])
+        if week_write_results and index <= len(week_write_results):
+            result = week_write_results[index - 1]
+            meta.append([f"week_{index}_written_rows", int(result.written_rows)])
+            meta.append([f"week_{index}_source_rows", int(result.source_rows)])
+            meta.append([f"week_{index}_overflow_rows", int(result.overflow_rows)])
+            if result.overflow_rows:
+                meta.append(
+                    [
+                        f"week_{index}_overflow_entries",
+                        json.dumps(result.overflow_entries, ensure_ascii=False, sort_keys=True),
+                    ]
+                )
 
 
 def _build_monthly_fax_order_form_workbook(
@@ -1140,6 +1237,7 @@ def _build_monthly_fax_order_form_workbook(
     facility_id = str(facility.get("facility_id") or facility.get("id") or "")
     facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
     family_label = str(spec["family_label"])
+    week_write_results: list[WeekEntriesWriteResult] = []
 
     for index, (start_date, end_date) in enumerate(week_ranges):
         worksheet = workbook.worksheets[index]
@@ -1148,7 +1246,9 @@ def _build_monthly_fax_order_form_workbook(
         _clear_week_sheet_body(worksheet)
         _write_facility_name_in_box(worksheet, facility_name)
         _set_deadline_text_for_week(worksheet, start_date)
-        _write_week_entries(worksheet, _select_entries_for_range(entries, start_date, end_date))
+        week_write_results.append(
+            _write_week_entries(worksheet, _select_entries_for_range(entries, start_date, end_date))
+        )
         _apply_fax_metadata_header(
             worksheet,
             fax_template_id=fax_template_id,
@@ -1172,6 +1272,7 @@ def _build_monthly_fax_order_form_workbook(
         family_label=family_label,
         week_ranges=week_ranges,
         entry_count=len(entries),
+        week_write_results=week_write_results,
     )
     workbook.active = 0
     return workbook

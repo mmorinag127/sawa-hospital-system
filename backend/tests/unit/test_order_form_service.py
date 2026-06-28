@@ -1,6 +1,6 @@
 import pathlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -643,6 +643,44 @@ def test_write_week_entries_restores_weekday_to_template_weekday_block() -> None
 
     assert _cell_date(worksheet["A11"].value) == datetime(2026, 4, 26).date()
     assert worksheet["A16"].value == "（日）"
+
+
+def test_write_week_entries_keeps_overflow_metadata_instead_of_hard_failing() -> None:
+    source_path = order_form_service._resolve_source_workbook_path("共通　2604.xlsx")
+    workbook = load_workbook(source_path)
+    worksheet = workbook["4月26日～4月30日"]
+    start_date = datetime(2026, 7, 5).date()
+    entries = []
+    for day_offset in range(7):
+        menu_date = start_date + timedelta(days=day_offset)
+        entries.extend(
+            [
+                {"_menu_date_obj": menu_date, "daypart": "朝", "category": "副①", "name": f"朝A{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "朝", "category": "副②", "name": f"朝B{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "昼", "category": "主", "name": f"昼A{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "昼", "category": "副①", "name": f"昼B{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "昼", "category": "副②", "name": f"昼C{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "昼", "category": "副③", "name": f"昼D{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "夕", "category": "主", "name": f"夕A{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "夕", "category": "副①", "name": f"夕B{day_offset}"},
+                {"_menu_date_obj": menu_date, "daypart": "夕", "category": "副②", "name": f"夕C{day_offset}"},
+            ]
+        )
+
+    order_form_service._clear_week_sheet_body(worksheet)
+    result = order_form_service._write_week_entries(worksheet, entries)
+
+    assert result.source_rows == 63
+    assert int(result) == 56
+    assert result.overflow_rows == 7
+    assert result.overflow_entries[0] == {
+        "date": "2026-07-05",
+        "daypart": "昼",
+        "category": "副③",
+        "name": "昼D0",
+    }
+    assert worksheet["D66"].value == "夕C6"
+    assert worksheet["D67"].value is None
 
 
 def test_clear_week_sheet_body_uses_header_detected_quantity_columns_for_sibling_template() -> None:
