@@ -199,18 +199,6 @@ def _printed_zero_shape_candidate(ink: np.ndarray, component: dict[str, Any]) ->
     return _component_has_hole(component_mask)
 
 
-def _clear_printed_zero_digits(ink: np.ndarray, components: list[dict[str, Any]]) -> str:
-    zero_like = [item for item in components if _printed_zero_shape_candidate(ink, item)]
-    other_digit_like = [
-        item
-        for item in components
-        if item not in zero_like and item.get("digit_like")
-    ]
-    if len(zero_like) != 1 or other_digit_like:
-        return ""
-    return "0"
-
-
 def _preprocess_corner_component_crop_for_recognizer(
     crop_bgr: np.ndarray,
     *,
@@ -292,7 +280,6 @@ def _preprocess_corner_component_crop_for_recognizer(
             kept[labels == label] = 255
     cleaned_binary = 255 - kept
     image, stats_out = _foreground_centered(cleaned_binary, out_width=slot_width - 10, out_height=slot_height - 10)
-    fast_digits = _clear_printed_zero_digits(kept, components)
     zero_shape_candidate_count = sum(1 for item in components if _printed_zero_shape_candidate(kept, item))
     stats_out.update(
         {
@@ -303,8 +290,6 @@ def _preprocess_corner_component_crop_for_recognizer(
             "removed_component_count": sum(1 for item in components if not item["kept"]),
             "components": components[:20],
             "crop_box": list(crop_box),
-            "fast_digits": fast_digits,
-            "fast_digit_source": "clear_printed_zero_shape" if fast_digits else "",
         }
     )
     return image, stats_out
@@ -503,27 +488,6 @@ def build_recognizer_contact_sheet(
             "recognizer_ink_stats": ink_stats,
             "recognizer_candidate": is_candidate,
         }
-        fast_digits = str(ink_stats.get("fast_digits") or "").strip()
-        if fast_digits:
-            skipped_regions.append(
-                {
-                    **prepared_region,
-                    "ocr_contact_slot": [],
-                    "ocr_contact_crop_box": [],
-                    "ocr_text": fast_digits,
-                    "ocr_normalized": fast_digits,
-                    "ocr_words": [],
-                    "ocr_word_count": 0,
-                    "recognizer_raw_text": fast_digits,
-                    "recognizer_score": 1.0,
-                    "recognizer_direction": "",
-                    "recognizer_accepted": True,
-                    "recognizer_skipped": False,
-                    "recognizer_fast_path": True,
-                    "recognizer_decision_source": str(ink_stats.get("fast_digit_source") or "fast_digits"),
-                }
-            )
-            continue
         if is_candidate:
             candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
         else:

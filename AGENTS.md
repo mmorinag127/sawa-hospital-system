@@ -58,6 +58,10 @@ tests/
 - If the user says the interpretation is wrong, discard the previous interpretation immediately and restate the corrected one before further edits.
 - If the chosen canonical source, schema, facility template, or success condition is ambiguous, stop and ask instead of guessing.
 - If an upstream canonical source is unresolved or missing, block downstream sheet generation or apply/confirm instead of silently falling back to a default or legacy path.
+- Processing-speed improvements must be limited to changes that do not alter OCR/order results.
+- Do not add early exits, fast paths, candidate skipping, heuristic shortcuts, or cached substitutions that can change recognized values, selected evidence, sheet quantities, facility/week resolution, or output materialization.
+- Recognizer/OCR results are authoritative over speed-oriented image-shape heuristics. A speed optimization must never bypass the recognizer and persist a value as if it were OCR output.
+- If a performance change can alter any user-visible quantity or workflow decision, treat it as a correctness change and block it until exact before/after result parity is proven on the reported case and close sibling cases.
 - For repeated production-visible bugs, do not only patch the visible symptom. Harden the common decision point or shared canonicalization path that allowed the failure.
 - If a fallback path can still recreate the same class of user-visible corruption, keeping that fallback active counts as incomplete.
 - Facility/operator-configured canonical sources must outrank OCR inference, stale drafts, heuristics, and legacy defaults.
