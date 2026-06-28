@@ -254,6 +254,8 @@ export default function OrdersPage() {
   const [reloadToken, setReloadToken] = useState<number>(0);
   const [expandedWeekGroups, setExpandedWeekGroups] = useState<Record<string, boolean>>({});
   const [archiveBusyWeek, setArchiveBusyWeek] = useState<string>("");
+  const [bulkOcrBusyWeek, setBulkOcrBusyWeek] = useState<string>("");
+  const [bulkOcrProgress, setBulkOcrProgress] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -738,6 +740,18 @@ export default function OrdersPage() {
       .map((order) => String(order.id || "").trim())
       .filter(Boolean);
 
+  const ocrRerunnableOrdersForWeekGroup = (group: WeekGroup) =>
+    group.orders.filter((order) => {
+      if (order.is_archived) return false;
+      if (order.source_kind === "uploaded_pdf") return false;
+      return Boolean(String(order.id || "").trim());
+    });
+
+  const ocrRerunnableOrderIdsForWeekGroup = (group: WeekGroup) =>
+    ocrRerunnableOrdersForWeekGroup(group)
+      .map((order) => String(order.id || "").trim())
+      .filter(Boolean);
+
   const canArchiveWeekGroup = (group: WeekGroup) => {
     if (group.key === "unresolved") return false;
     return activeOrderIdsForWeekGroup(group).length > 0;
@@ -746,6 +760,11 @@ export default function OrdersPage() {
   const canUnarchiveWeekGroup = (group: WeekGroup) => {
     if (group.key === "unresolved") return false;
     return archivedOrderIdsForWeekGroup(group).length > 0;
+  };
+
+  const canBulkRerunOcrWeekGroup = (group: WeekGroup) => {
+    if (group.key === "unresolved") return false;
+    return ocrRerunnableOrderIdsForWeekGroup(group).length > 0;
   };
 
   const bulkArchivableWeekGroups = useMemo(
@@ -908,6 +927,85 @@ export default function OrdersPage() {
     }
   };
 
+  const apiErrorText = (err: any, fallback: string) => {
+    const detail = err?.response?.data?.detail;
+    return String(
+      detail?.message
+      || detail?.error
+      || detail
+      || err?.response?.data?.message
+      || err?.message
+      || fallback,
+    );
+  };
+
+  const workflowV2StillRunning = (payload: any) => {
+    const state = String(payload?.state || "").trim().toLowerCase();
+    const jobStatus = String(payload?.ocr_job?.status || "").trim().toLowerCase();
+    const jobStage = String(payload?.ocr_job?.processing_stage || "").trim().toLowerCase();
+    return (
+      state === "ocr_running"
+      || state === "rerun_in_progress"
+      || ["running", "pending", "queued", "awaiting_output", "recovering"].includes(jobStatus)
+      || ["queued", "ocr_slot_acquired", "ocr_pipeline", "hakodate_live_pipeline", "persist_evidence", "project_hakodate_sheet"].includes(jobStage)
+    );
+  };
+
+  const waitForWorkflowV2Ocr = async (orderId: string) => {
+    const startedAt = Date.now();
+    const timeoutMs = 20 * 60 * 1000;
+    while (Date.now() - startedAt < timeoutMs) {
+      const res = await apiClient.get(`/orders/${orderId}/workflow-v2`, { timeout: 60000 });
+      if (!workflowV2StillRunning(res.data)) return res.data;
+      await new Promise((resolve) => window.setTimeout(resolve, 5000));
+    }
+    throw new Error("OCR再実行の完了待ちがタイムアウトしました。");
+  };
+
+  const rerunOcrWeekGroup = async (group: WeekGroup) => {
+    const orderIds = ocrRerunnableOrderIdsForWeekGroup(group);
+    if (!orderIds.length) return;
+    if (
+      !window.confirm(
+        `「${group.label}」の注文 ${orderIds.length} 件をOCR再実行します。1件ずつ完了待ちしてから次へ進みます。`,
+      )
+    ) {
+      return;
+    }
+    setBulkOcrBusyWeek(group.key);
+    setBulkOcrProgress(`0 / ${orderIds.length}`);
+    setArchiveNotice("");
+    setArchiveError("");
+    const completed: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (const [index, orderId] of orderIds.entries()) {
+        setBulkOcrProgress(`${index + 1} / ${orderIds.length}: ${orderId}`);
+        try {
+          await apiClient.post(
+            `/orders/${orderId}/workflow-v2/ocr-runs`,
+            { mode: "hakodate", stale_action: "retry" },
+            { timeout: 60000 },
+          );
+          await waitForWorkflowV2Ocr(orderId);
+          completed.push(orderId);
+        } catch (err: any) {
+          failures.push(`${orderId}: ${apiErrorText(err, "OCR再実行に失敗しました。")}`);
+        }
+      }
+      if (completed.length > 0) {
+        setArchiveNotice(`「${group.label}」のOCR再実行が ${completed.length} 件完了しました。`);
+        setReloadToken((value) => value + 1);
+      }
+      if (failures.length > 0) {
+        setArchiveError(failures.join(" / "));
+      }
+    } finally {
+      setBulkOcrBusyWeek("");
+      setBulkOcrProgress("");
+    }
+  };
+
   const isWeekGroupExpanded = (groupKey: string) => expandedWeekGroups[groupKey] === true;
 
   const toggleWeekGroup = (groupKey: string) => {
@@ -1026,12 +1124,22 @@ export default function OrdersPage() {
             >
               {expanded ? "閉じる" : "開く"}
             </button>
+            {group.key !== "unresolved" && canBulkRerunOcrWeekGroup(group) ? (
+              <button
+                type="button"
+                className="week-group-action week-group-action-ocr"
+                onClick={() => rerunOcrWeekGroup(group)}
+                disabled={Boolean(bulkOcrBusyWeek)}
+              >
+                {bulkOcrBusyWeek === group.key ? `OCR再実行中 ${bulkOcrProgress}` : "OCR一括再実行"}
+              </button>
+            ) : null}
             {group.key !== "unresolved" && canArchiveWeekGroup(group) ? (
               <button
                 type="button"
                 className="week-group-action week-group-action-archive"
                 onClick={() => archiveWeekGroup(group)}
-                disabled={archiveBusyWeek === group.key}
+                disabled={archiveBusyWeek === group.key || Boolean(bulkOcrBusyWeek)}
               >
                 {archiveBusyWeek === group.key ? "処理中..." : "アーカイブ"}
               </button>
@@ -1041,7 +1149,7 @@ export default function OrdersPage() {
                 type="button"
                 className="week-group-action week-group-action-restore"
                 onClick={() => unarchiveWeekGroup(group)}
-                disabled={archiveBusyWeek === group.key}
+                disabled={archiveBusyWeek === group.key || Boolean(bulkOcrBusyWeek)}
               >
                 {archiveBusyWeek === group.key ? "処理中..." : "戻す"}
               </button>
@@ -1131,6 +1239,7 @@ export default function OrdersPage() {
         </header>
         {archiveNotice ? <p className="archive-feedback archive-feedback-success">{archiveNotice}</p> : null}
         {archiveError ? <p className="archive-feedback archive-feedback-error">{archiveError}</p> : null}
+        {bulkOcrProgress ? <p className="archive-feedback archive-feedback-progress">OCR再実行中 {bulkOcrProgress}</p> : null}
         {bulkArchivableWeekGroups.length > 0 || bulkRestorableWeekGroups.length > 0 ? (
           <div className="week-bulk-actions">
             {bulkArchivableWeekGroups.length > 0 ? (
@@ -1470,6 +1579,12 @@ export default function OrdersPage() {
 
         :global(.week-group-action-restore) {
           background: #f6f7fb;
+        }
+
+        :global(.week-group-action-ocr) {
+          background: #f0f7f6;
+          border-color: rgba(31, 96, 87, 0.2);
+          color: #1f6057;
         }
 
         :global(.week-group-toggle:hover),
