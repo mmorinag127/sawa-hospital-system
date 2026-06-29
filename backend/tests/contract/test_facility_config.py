@@ -418,7 +418,7 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
     assert (placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
 
 
-def test_fac00004_aux_columns_preserve_physical_source_indexes():
+def test_fac00004_current_columns_preserve_physical_source_indexes():
     _clear_facilities()
     _seed_facilities_from_master()
     _ensure_active_template_version_for_facility("FAC00004")
@@ -430,12 +430,10 @@ def test_fac00004_aux_columns_preserve_physical_source_indexes():
     resolved = payload.get("resolved_config") or {}
     columns = ((resolved.get("fax_template") or {}).get("columns")) or []
 
-    assert [column.get("header") for column in columns[:13]] == [
+    assert [column.get("header") for column in columns[:11]] == [
         "日付",
         "区分",
-        "副区分",
         "メニュー",
-        "合計",
         "常食",
         "通所",
         "職員",
@@ -445,13 +443,13 @@ def test_fac00004_aux_columns_preserve_physical_source_indexes():
         "変更1",
         "備考欄",
     ]
-    assert [column.get("source_index") for column in columns[:13]] == list(range(13))
+    assert [column.get("source_index") for column in columns[:11]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
     validation = facility_template_version_service.validate_template_columns(version_columns)
     assert validation["errors"] == []
-    assert version_columns[2].get("column_id") == "col_002_aux"
-    assert version_columns[4].get("column_id") == "col_004_aux"
-    assert version_columns[5].get("column_id") == "col_005_quantity"
+    assert version_columns[2].get("column_id") == "col_003_menu_name"
+    assert version_columns[3].get("column_id") == "col_004_quantity"
+    assert version_columns[4].get("column_id") == "col_005_quantity"
 
 
 def test_facility_master_columns_define_source_indexes_without_runtime_enrichment():

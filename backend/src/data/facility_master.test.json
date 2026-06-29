@@ -1828,14 +1828,22 @@
             "index": 4,
             "source_index": 5,
             "role": "quantity",
+            "header": "糖尿",
+            "diet_type": "diabetes",
+            "area_id": "X"
+          },
+          {
+            "index": 5,
+            "source_index": 6,
+            "role": "quantity",
             "header": "肉禁",
             "header_group": "禁食",
             "diet_type": "no_meat",
             "area_id": "X"
           },
           {
-            "index": 5,
-            "source_index": 6,
+            "index": 6,
+            "source_index": 7,
             "role": "quantity",
             "header": "魚禁",
             "header_group": "禁食",
@@ -1843,8 +1851,8 @@
             "area_id": "X"
           },
           {
-            "index": 6,
-            "source_index": 7,
+            "index": 7,
+            "source_index": 8,
             "role": "note",
             "header": "備考"
           }
