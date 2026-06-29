@@ -594,7 +594,7 @@ def test_fac00005_exposes_authoritative_soft_bag_forbidden_change_columns():
     ]
 
 
-def test_fac00004_template_schema_contract_preserves_aux_columns():
+def test_fac00004_template_schema_contract_uses_current_columns():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00004")
     assert resolved is not None
@@ -602,13 +602,11 @@ def test_fac00004_template_schema_contract_preserves_aux_columns():
 
     contract = template_field_schema_service.build_template_field_schema_contract(template)
 
-    assert contract["field_count"] == 13
+    assert contract["field_count"] == 11
     assert contract["fields"] == [
         "date_mmdd",
         "daypart",
-        "aux.col_2",
         "menu",
-        "aux.col_4",
         "qty.regular_x",
         "qty.daycare_x",
         "qty.staff_x",
@@ -618,7 +616,7 @@ def test_fac00004_template_schema_contract_preserves_aux_columns():
         "qty.change_1_x",
         "remarks",
     ]
-    assert contract["aux_fields"] == ["aux.col_2", "aux.col_4"]
+    assert contract["aux_fields"] == []
 
 
 def test_template_schema_uses_locked_quantity_name_as_canonical_field():
@@ -716,9 +714,7 @@ def test_fac00004_exposes_daycare_staff_and_no_fried_columns():
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
-        "aux.col_2",
         "menu",
-        "aux.col_4",
         "qty.regular_x",
         "qty.daycare_x",
         "qty.staff_x",
@@ -729,8 +725,8 @@ def test_fac00004_exposes_daycare_staff_and_no_fried_columns():
         "remarks",
     ]
     columns = template.get("columns") or []
-    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "aux", "menu_name", "aux"]
-    assert columns[5]["diet_type"] == "regular"
+    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "menu_name", "quantity", "quantity"]
+    assert columns[3]["diet_type"] == "regular"
 
 
 def test_columns_authoritative_override_ignores_stale_explicit_main_ocr_row_fields():
@@ -1271,7 +1267,7 @@ def test_reconcile_fax_template_override_prefers_authoritative_master_placeholde
     ]
 
 
-def test_fac00004_update_config_sanitizes_missing_aux_before_storage():
+def test_fac00004_update_config_preserves_current_columns_without_aux_storage():
     _clear_facilities()
     facility_service.list_facilities()
     stale_config = {
@@ -1297,20 +1293,18 @@ def test_fac00004_update_config_sanitizes_missing_aux_before_storage():
     assert stored is not None
     override = stored.get("fax_template_override") or {}
     columns = override.get("columns") or []
-    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "aux", "menu_name", "aux"]
-    assert columns[5]["diet_type"] == "regular"
-    assert columns[6]["diet_type"] == "daycare"
-    assert columns[7]["diet_type"] == "staff"
-    assert columns[8]["diet_type"] == "no_meat"
-    assert columns[9]["diet_type"] == "no_fish"
-    assert columns[10]["diet_type"] == "no_fried"
-    assert columns[11]["diet_type"] == "change_1"
+    assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "menu_name", "quantity", "quantity"]
+    assert columns[3]["diet_type"] == "regular"
+    assert columns[4]["diet_type"] == "daycare"
+    assert columns[5]["diet_type"] == "staff"
+    assert columns[6]["diet_type"] == "no_meat"
+    assert columns[7]["diet_type"] == "no_fish"
+    assert columns[8]["diet_type"] == "no_fried"
+    assert columns[9]["diet_type"] == "change_1"
     assert override.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
-        "aux.col_2",
         "menu",
-        "aux.col_4",
         "qty.regular_x",
         "qty.daycare_x",
         "qty.staff_x",
@@ -1510,6 +1504,16 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
     assert fac00013 is not None
     assert fac00013.get("fax_template_id") == "いこいの森"
     assert fac00013.get("fax_template_ids") == ["いこいの森"]
+    assert (fac00013.get("fax_template") or {}).get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.diabetes_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "remarks",
+    ]
 
     fac00014 = config_service.get_facility_config("FAC00014")
     assert fac00014 is not None
@@ -1520,6 +1524,18 @@ def test_fac00003_and_fac00013_use_explicit_layout_templates():
     assert fac00016 is not None
     assert fac00016.get("fax_template_id") == "いこいの森プラス"
     assert fac00016.get("fax_template_ids") == ["いこいの森プラス"]
+    assert (fac00016.get("fax_template") or {}).get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.diabetes_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
 
 
 def test_fac00003_fish_forbidden_columns_keep_meal_shape_fields():
