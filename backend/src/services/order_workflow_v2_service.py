@@ -1657,6 +1657,12 @@ def confirm_context(
             _delete_all_ocr_and_downstream_after_template_change(session, order.id)
         current_meta = _workflow_meta(row)
         expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
+        facility_template_version_service.ensure_active_template_version_from_resolved_config(
+            session,
+            facility_id=normalized_facility_id,
+            facility_config=facility_config,
+            created_by="workflow-v2-context-confirm",
+        )
         template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
             session,
             normalized_facility_id,

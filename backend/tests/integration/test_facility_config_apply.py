@@ -9,11 +9,13 @@ from sqlalchemy import delete
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import facility_service, config_service, order_service  # noqa: E402
+from src.services import facility_service, config_service, order_service, order_workflow_v2_service  # noqa: E402
 from src.services import hakodate_assignment_service  # noqa: E402
+from src.services import facility_template_version_service  # noqa: E402
 from src.services import template_field_schema_service  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
+from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
@@ -907,6 +909,75 @@ def test_repo_master_overrides_stale_db_override_authoritative_columns():
     ]
     assert fac00013_headers[3:5] == ["常食", "糖尿"]
     assert fac00013_columns[4]["diet_type"] == "diabetes"
+
+
+def test_confirm_context_refreshes_stale_active_template_version_from_repo_master():
+    _clear_facilities()
+    facility_service.list_facilities()
+    order_service.clear_all()
+    stale_columns = [
+        {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+        {"index": 1, "role": "daypart", "header": "区分"},
+        {"index": 2, "role": "menu_name", "header": "メニュー"},
+        {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+        {"index": 4, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+        {"index": 5, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+        {"index": 6, "role": "note", "header": "備考"},
+    ]
+    stale_digest = facility_template_version_service.template_digest(
+        template_id="fax_layout_regular_forbidden_v1",
+        columns=facility_template_version_service.normalize_template_columns(stale_columns),
+    )
+    with session_scope() as session:
+        if session.get(Facility, "FAC00013") is None:
+            session.add(Facility(id="FAC00013", name="いこいの森"))
+        session.add(
+            FacilityTemplateVersion(
+                id="FTV_STALE_FAC00013",
+                facility_id="FAC00013",
+                version="1",
+                status="active",
+                template_id="fax_layout_regular_forbidden_v1",
+                source="test-stale-active-version",
+                columns_json=stale_columns,
+                cells_json=[],
+                template_digest=stale_digest,
+                validation_json={"errors": [], "warnings": []},
+                created_by="test",
+                created_at=datetime(2026, 5, 5, 0, 0, 0),
+                activated_at=datetime(2026, 5, 5, 0, 0, 0),
+            )
+        )
+    order = order_service.create_order_from_ingest(
+        IngestEmailPayload(
+            message_id="msg-fac00013-stale-active-template",
+            pdf_uri="file://fac00013-stale-active-template.pdf",
+            received_at=datetime(2026, 7, 5, 12, 0, 0),
+            facility_hint="FAC00013",
+            week_hint="2026-07",
+        ),
+        lines=[],
+    )
+
+    workflow, error = order_workflow_v2_service.confirm_context(
+        order_id=order["id"],
+        facility_id="FAC00013",
+        week_start="2026-07-05",
+        week_end="2026-07-11",
+        template_id="いこいの森",
+    )
+
+    assert error is None
+    assert workflow is not None
+    assert workflow["template_id"] == "いこいの森"
+    assert workflow["template_version_id"] != "FTV_STALE_FAC00013"
+    with session_scope() as session:
+        active = facility_template_version_service.get_active_template_version(session, "FAC00013")
+        assert active is not None
+        assert active.id == workflow["template_version_id"]
+        assert active.template_id == "いこいの森"
+        headers = [column.get("header") for column in active.columns_json or []]
+        assert headers[3:5] == ["常食", "糖尿"]
 
 
 def test_fac00014_update_config_sanitizes_stale_override_before_storage():
