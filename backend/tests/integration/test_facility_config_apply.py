@@ -833,6 +833,82 @@ def test_fac00014_prefers_master_override_over_stale_persisted_columns():
     assert columns[9]["role"] == "note"
 
 
+def test_repo_master_overrides_stale_db_override_authoritative_columns():
+    _clear_facilities()
+    facility_service.list_facilities()
+    stale_fac00004_config = {
+        "facility_template_source": "db_override",
+        "fax_template_id": "春日苑系",
+        "fax_template_ids": ["春日苑系"],
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "aux", "header": "副区分", "name": "sub_daypart"},
+                {"index": 3, "role": "menu_name", "header": "メニュー"},
+                {"index": 4, "role": "aux", "header": "合計", "name": "raw_total"},
+                {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 6, "role": "quantity", "header": "通所", "diet_type": "commuter", "area_id": "X"},
+                {"index": 7, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
+                {"index": 8, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+                {"index": 9, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                {"index": 10, "role": "aux", "header": "その他", "name": "raw_other"},
+                {"index": 11, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+                {"index": 12, "role": "note", "header": "備考欄"},
+            ],
+        },
+    }
+    stale_fac00013_config = {
+        "facility_template_source": "db_override",
+        "fax_template_id": "いこいの森",
+        "fax_template_ids": ["いこいの森"],
+        "fax_template_override": {
+            "columns_authoritative": True,
+            "columns": [
+                {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
+                {"index": 1, "role": "daypart", "header": "区分"},
+                {"index": 2, "role": "menu_name", "header": "メニュー"},
+                {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
+                {"index": 4, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+                {"index": 5, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+                {"index": 6, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
+                {"index": 7, "role": "quantity", "header": "変更2", "diet_type": "change_2", "area_id": "X"},
+                {"index": 8, "role": "note", "header": "備考欄"},
+            ],
+        },
+    }
+    assert facility_service.update_config("FAC00004", stale_fac00004_config)
+    assert facility_service.update_config("FAC00013", stale_fac00013_config)
+
+    fac00004 = config_service.get_facility_config("FAC00004")
+    fac00013 = config_service.get_facility_config("FAC00013")
+
+    fac00004_headers = [
+        str(column.get("header") or "")
+        for column in ((fac00004 or {}).get("fax_template") or {}).get("columns") or []
+    ]
+    fac00013_columns = ((fac00013 or {}).get("fax_template") or {}).get("columns") or []
+    fac00013_headers = [str(column.get("header") or "") for column in fac00013_columns]
+    assert "副区分" not in fac00004_headers
+    assert "合計" not in fac00004_headers
+    assert fac00004_headers == [
+        "日付",
+        "区分",
+        "メニュー",
+        "常食",
+        "通所",
+        "職員",
+        "肉禁",
+        "魚禁",
+        "揚げ物禁",
+        "変更1",
+        "備考欄",
+    ]
+    assert fac00013_headers[3:5] == ["常食", "糖尿"]
+    assert fac00013_columns[4]["diet_type"] == "diabetes"
+
+
 def test_fac00014_update_config_sanitizes_stale_override_before_storage():
     _clear_facilities()
     facility_service.list_facilities()
