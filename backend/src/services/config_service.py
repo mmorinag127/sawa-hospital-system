@@ -485,7 +485,7 @@ def _facility_template_source(value: Any) -> str:
 
 
 def _facility_template_operator_override_enabled(value: Any) -> bool:
-    return _facility_template_source(value) in {"operator_override", "facility_override", "db_override"}
+    return _facility_template_source(value) in {"operator_override", "facility_override"}
 
 
 def _master_facility_template_ids(facility_master: Any) -> tuple[str | None, list[str]]:
