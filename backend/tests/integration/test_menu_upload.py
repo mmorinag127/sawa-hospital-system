@@ -1828,6 +1828,116 @@ def test_upsert_entry_exceptions_creates_facility_scoped_override_entries():
     assert base_entries[("2026-06-03", "昼食", 1)]["name"] == "鶏の照焼き"
 
 
+def test_upsert_entry_exceptions_keeps_diet_scoped_entries_independent():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(FacilityConfig).delete()
+        session.query(Facility).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+        session.add(Facility(id="FACDIET001", name="食種別施設"))
+        session.add(MonthlyMenu(id="2026-07", filename="menu.xlsx"))
+        session.add_all(
+            [
+                MonthlyMenuEntry(
+                    id="MME_DIET_REGULAR",
+                    monthly_menu_id="2026-07",
+                    menu_date=date(2026, 7, 6),
+                    daypart="昼",
+                    slot_index=1,
+                    name="常食主菜",
+                    category="主菜",
+                    diet_type="",
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DIET_SOFT",
+                    monthly_menu_id="2026-07",
+                    menu_date=date(2026, 7, 6),
+                    daypart="昼",
+                    slot_index=1,
+                    name="軟菜旧主菜",
+                    category="主菜",
+                    diet_type="soft",
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DIET_REGULAR_ONLY",
+                    monthly_menu_id="2026-07",
+                    menu_date=date(2026, 7, 7),
+                    daypart="昼",
+                    slot_index=1,
+                    name="常食のみ主菜",
+                    category="主菜",
+                    diet_type="regular",
+                ),
+            ]
+        )
+
+    soft_payload = menu_service.upsert_entry_exceptions(
+        "2026-07",
+        "MME_DIET_SOFT",
+        {
+            "facility_ids": ["FACDIET001"],
+            "name": "軟菜新主菜",
+            "category": "主菜",
+            "diet_type": "soft",
+        },
+    )
+    assert soft_payload is not None
+    assert soft_payload["entries"][0]["diet_type"] == "soft"
+
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    assert scoped_payload is not None
+    scoped_entries = {
+        (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry
+        for entry in scoped_payload["entries"]
+    }
+    assert scoped_entries[("2026-07-06", "昼食", 1, "regular")]["name"] == "常食主菜"
+    assert scoped_entries[("2026-07-06", "昼食", 1, "soft")]["name"] == "軟菜新主菜"
+
+    regular_payload = menu_service.upsert_entry_exceptions(
+        "2026-07",
+        "MME_DIET_REGULAR",
+        {
+            "facility_ids": ["FACDIET001"],
+            "name": "常食新主菜",
+            "category": "主菜",
+            "diet_type": "regular",
+        },
+    )
+    assert regular_payload is not None
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    assert scoped_payload is not None
+    scoped_entries = {
+        (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry
+        for entry in scoped_payload["entries"]
+    }
+    assert scoped_entries[("2026-07-06", "昼食", 1, "regular")]["name"] == "常食新主菜"
+    assert scoped_entries[("2026-07-06", "昼食", 1, "soft")]["name"] == "軟菜新主菜"
+
+    soft_mixer_payload = menu_service.upsert_entry_exceptions(
+        "2026-07",
+        "MME_DIET_REGULAR_ONLY",
+        {
+            "facility_ids": ["FACDIET001"],
+            "name": "軟菜ミキサー主菜",
+            "category": "主菜",
+            "diet_type": "soft_mixer",
+        },
+    )
+    assert soft_mixer_payload is not None
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    assert scoped_payload is not None
+    scoped_entries = {
+        (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry
+        for entry in scoped_payload["entries"]
+    }
+    assert scoped_entries[("2026-07-07", "昼食", 1, "regular")]["name"] == "常食のみ主菜"
+    assert scoped_entries[("2026-07-07", "昼食", 1, "soft_mixer")]["name"] == "軟菜ミキサー主菜"
+
+
 def test_monthly_menu_upload_allows_cut_units_and_reports_bagging_gap_after_upload(monkeypatch):
     with session_scope() as session:
         session.query(AuditLog).delete()

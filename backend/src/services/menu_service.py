@@ -224,6 +224,22 @@ def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str,
     )
 
 
+def _monthly_entry_override_key(entry: MonthlyMenuEntry) -> tuple[object, object, int, str]:
+    return (
+        entry.menu_date,
+        entry.daypart,
+        int(entry.slot_index) if entry.slot_index is not None else -1,
+        str(normalize_diet_type(entry.diet_type) or "regular").strip(),
+    )
+
+
+def _monthly_entry_diet_filter(column, diet_type: object):
+    normalized = normalize_diet_type(diet_type) or "regular"
+    if normalized == "regular":
+        return or_(column.is_(None), column == "", column == "regular")
+    return column == normalized
+
+
 def _menu_schema_missing_items() -> list[str]:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -2641,6 +2657,7 @@ def _find_existing_monthly_entry(
     daypart: str,
     slot_index: int | None,
     facility_override: str | None,
+    diet_type: str | None,
 ) -> MonthlyMenuEntry | None:
     query = (
         select(MonthlyMenuEntry)
@@ -2662,6 +2679,7 @@ def _find_existing_monthly_entry(
         )
     else:
         query = query.where(MonthlyMenuEntry.facility_override == scope)
+    query = query.where(_monthly_entry_diet_filter(MonthlyMenuEntry.diet_type, diet_type))
     query = query.order_by(MonthlyMenuEntry.id.desc())
     return session.execute(query).scalars().first()
 
@@ -2731,6 +2749,9 @@ def _count_monthly_entry_refs(
     month_id: str,
     name: str,
     facility_override: str | None,
+    diet_type: str | None = None,
+    daypart: str | None = None,
+    category: str | None = None,
     exclude_entry_id: str | None = None,
 ) -> int:
     query = (
@@ -2748,6 +2769,14 @@ def _count_monthly_entry_refs(
         )
     else:
         query = query.where(MonthlyMenuEntry.facility_override == scope)
+    if diet_type is not None:
+        query = query.where(_monthly_entry_diet_filter(MonthlyMenuEntry.diet_type, diet_type))
+    normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
+    if normalized_daypart:
+        query = query.where(MonthlyMenuEntry.daypart == normalized_daypart)
+    normalized_category = str(category or "").strip()
+    if normalized_category:
+        query = query.where(MonthlyMenuEntry.category == normalized_category)
     if exclude_entry_id:
         query = query.where(MonthlyMenuEntry.id != exclude_entry_id)
     return len(session.execute(query).scalars().all())
@@ -2829,6 +2858,7 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
                 daypart=str(entry.daypart or ""),
                 slot_index=entry.slot_index,
                 facility_override=facility_id,
+                diet_type=diet_type,
             )
             previous_name = str(scoped_entry.name or "").strip() if scoped_entry else ""
             if scoped_entry is None:
@@ -2873,6 +2903,9 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
                     month_id=month_id,
                     name=previous_name,
                     facility_override=facility_id,
+                    diet_type=diet_type,
+                    daypart=resolved_daypart if isinstance(resolved_daypart, str) else None,
+                    category=category if isinstance(category, str) else None,
                     exclude_entry_id=scoped_entry.id,
                 ) == 0:
                     scoped_item = reusable_item
@@ -2918,6 +2951,9 @@ def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | 
                     month_id=month_id,
                     name=previous_name,
                     facility_override=facility_id,
+                    diet_type=diet_type,
+                    daypart=resolved_daypart if isinstance(resolved_daypart, str) else None,
+                    category=category if isinstance(category, str) else None,
                     exclude_entry_id=scoped_entry.id,
                 ) == 0:
                     session.delete(previous_item)
@@ -3319,8 +3355,8 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
         scope_ids = _resolve_override_scope_ids(session, facility_id)
         rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
         base_rank = len(scope_ids)
-        base_entries_by_slot: dict[tuple[object, object, int], list[MonthlyMenuEntry]] = {}
-        scoped_entries_by_slot: dict[tuple[object, object, int], list[tuple[int, MonthlyMenuEntry]]] = {}
+        base_entries_by_key: dict[tuple[object, object, int, str], list[MonthlyMenuEntry]] = {}
+        scoped_entries_by_key: dict[tuple[object, object, int, str], list[tuple[int, MonthlyMenuEntry]]] = {}
         for entry in entries:
             scope = (entry.facility_override or "").strip()
             if scope:
@@ -3329,52 +3365,29 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> lis
                 row_rank = rank[scope]
             else:
                 row_rank = base_rank
-            key = (
-                entry.menu_date,
-                entry.daypart,
-                int(entry.slot_index) if entry.slot_index is not None else -1,
-            )
+            key = _monthly_entry_override_key(entry)
             if scope:
-                scoped_entries_by_slot.setdefault(key, []).append((row_rank, entry))
+                scoped_entries_by_key.setdefault(key, []).append((row_rank, entry))
             else:
-                base_entries_by_slot.setdefault(key, []).append(entry)
+                base_entries_by_key.setdefault(key, []).append(entry)
 
         resolved_entries: list[MonthlyMenuEntry] = []
-        all_keys = set(base_entries_by_slot) | set(scoped_entries_by_slot)
+        all_keys = set(base_entries_by_key) | set(scoped_entries_by_key)
         for key in all_keys:
-            base_entries = list(base_entries_by_slot.get(key) or [])
-            scoped_candidates = scoped_entries_by_slot.get(key) or []
+            base_entries = list(base_entries_by_key.get(key) or [])
+            scoped_candidates = scoped_entries_by_key.get(key) or []
             if not scoped_candidates:
                 resolved_entries.extend(base_entries)
                 continue
-
             best_rank = min(row_rank for row_rank, _entry in scoped_candidates)
             scoped_entries = [
                 entry
                 for row_rank, entry in scoped_candidates
                 if row_rank == best_rank
             ]
-            if len(base_entries) <= 1:
-                resolved_entries.extend(scoped_entries)
-                continue
-
-            remaining_base = list(base_entries)
-            for scoped_entry in scoped_entries:
-                match_index = next(
-                    (
-                        idx
-                        for idx, base_entry in enumerate(remaining_base)
-                        if str(base_entry.category or "").strip() == str(scoped_entry.category or "").strip()
-                        and str(base_entry.diet_type or "").strip() == str(scoped_entry.diet_type or "").strip()
-                        and str(base_entry.name or "").strip() == str(scoped_entry.name or "").strip()
-                    ),
-                    -1,
-                )
-                if match_index >= 0:
-                    remaining_base.pop(match_index)
-            resolved_entries.extend(remaining_base)
+            if len(base_entries) > 1:
+                resolved_entries.extend(base_entries)
             resolved_entries.extend(scoped_entries)
-
         resolved = [serialize_entry(entry) for entry in resolved_entries]
         resolved.sort(key=_menu_entry_sort_key)
         return resolved
