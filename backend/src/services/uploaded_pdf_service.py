@@ -17,7 +17,6 @@ from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 from src.models.user import Notification
 from src.services.ingest_policy import month_id_from_dates, parse_date_string, retry_backoff_seconds
 from src.services.manual_upload_service import ManualUploadSavedFile
-from src.services.week_candidate_service import calendar_week_ranges_for_month
 
 
 def _now() -> datetime:
@@ -278,10 +277,7 @@ def _derive_week_hint_from_filename(original_filename: object, received_at: obje
     month_id = month_id_from_dates([parsed_date], parsed_received_at)
     if not month_id:
         return None
-    for start_date, end_date in calendar_week_ranges_for_month(month_id):
-        if start_date <= parsed_date <= end_date:
-            return f"{month_id}@{start_date.isoformat()}~{end_date.isoformat()}"
-    return month_id
+    return None
 
 
 def backfill_uploaded_pdfs_from_ingest_jobs(*, limit: int | None = None) -> int:

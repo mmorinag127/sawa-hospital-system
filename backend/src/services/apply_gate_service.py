@@ -102,26 +102,6 @@ def authoritative_sheet_suppresses_stale_evidence_issues(
     base_evidence_run_id: str | None = None,
     active_evidence_run_id: str | None = None,
 ) -> bool:
-    if clean_saved_draft:
-        return True
-    if not authoritative_persisted_draft:
-        return False
-    if not has_semantic_fields:
-        return False
-    if not isinstance(rows, list) or len(rows) <= 0:
-        return False
-    normalized_source = str(source or "").strip()
-    if source_uses_saved_sheet(normalized_source):
-        return True
-    normalized_base_evidence_run_id = str(base_evidence_run_id or "").strip() or None
-    normalized_active_evidence_run_id = str(active_evidence_run_id or "").strip() or None
-    if not normalized_base_evidence_run_id:
-        return True
-    if (
-        normalized_active_evidence_run_id
-        and normalized_base_evidence_run_id != normalized_active_evidence_run_id
-    ):
-        return True
     return False
 
 
@@ -161,19 +141,7 @@ def _stale_issue_suppressions(
     position_fallback_semantics_ready: bool = False,
     stale_authoritative_sheet: bool = False,
 ) -> set[str]:
-    suppressed: set[str] = set()
-    if clean_saved_draft:
-        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
-        suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
-    if position_fallback_semantics_ready:
-        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
-        if source_uses_saved_sheet(source):
-            suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
-    if stale_authoritative_sheet:
-        suppressed |= _POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES
-        suppressed |= _POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES
-        suppressed |= _STALE_AUTHORITATIVE_SHEET_SUPPRESSED_ISSUES
-    return suppressed
+    return set()
 
 
 def filter_stale_issue_tokens(
@@ -184,16 +152,10 @@ def filter_stale_issue_tokens(
     position_fallback_semantics_ready: bool = False,
     stale_authoritative_sheet: bool = False,
 ) -> list[str]:
-    suppressed = _stale_issue_suppressions(
-        source=source,
-        clean_saved_draft=clean_saved_draft,
-        position_fallback_semantics_ready=position_fallback_semantics_ready,
-        stale_authoritative_sheet=stale_authoritative_sheet,
-    )
     filtered: list[str] = []
     for item in tokens or []:
         token = str(item or "").strip()
-        if not token or token in suppressed:
+        if not token:
             continue
         filtered.append(token)
     return _dedupe_tokens(filtered)

@@ -1143,15 +1143,6 @@ def build_position_fallback_artifacts(
     }
 
 
-def augment_payload_with_position_fallback(
-    payload: dict[str, Any] | None,
-    template: dict[str, Any] | None,
-    *,
-    template_id: str | None = None,
-) -> dict[str, Any] | None:
-    return payload
-
-
 def candidate_resolution_uses_position_fallback(candidate_resolution: dict[str, Any] | None) -> bool:
     if not isinstance(candidate_resolution, dict):
         return False

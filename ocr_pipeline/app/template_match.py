@@ -8,18 +8,6 @@ from app.rois import default_template_collection
 
 
 def _resolve_local_template_path(path: Path) -> Path:
-    if path.exists():
-        return path
-    text = path.as_posix()
-    marker = "/src/data/"
-    if marker in text:
-        suffix = text.split(marker, 1)[1]
-        local_fallback = Path(__file__).resolve().parents[1] / "src" / "data" / suffix
-        if local_fallback.exists():
-            return local_fallback
-        backend_fallback = Path(__file__).resolve().parents[2] / "backend" / "src" / "data" / suffix
-        if backend_fallback.exists():
-            return backend_fallback
     return path
 
 

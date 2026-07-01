@@ -365,9 +365,9 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     if fallback is not None:
         if not isinstance(fallback, str):
             errors.append(f"{path}.openai_ocr_fallback_provider must be a string")
-        elif fallback.strip().lower() not in {"pipeline", "none"}:
+        elif fallback.strip().lower() != "none":
             errors.append(
-                f"{path}.openai_ocr_fallback_provider must be one of pipeline|none"
+                f"{path}.openai_ocr_fallback_provider must be none"
             )
     gemini_enabled = config.get("gemini_ocr_enabled")
     if gemini_enabled is not None and not isinstance(gemini_enabled, bool):
@@ -394,9 +394,9 @@ def _validate_ocr_provider_config(config: dict, path: str, errors: list[str]) ->
     if gemini_fallback is not None:
         if not isinstance(gemini_fallback, str):
             errors.append(f"{path}.gemini_ocr_fallback_provider must be a string")
-        elif gemini_fallback.strip().lower() not in {"pipeline", "none"}:
+        elif gemini_fallback.strip().lower() != "none":
             errors.append(
-                f"{path}.gemini_ocr_fallback_provider must be one of pipeline|none"
+                f"{path}.gemini_ocr_fallback_provider must be none"
             )
     large_cell_mode = config.get("large_cell_mode")
     if large_cell_mode is not None and not isinstance(large_cell_mode, bool):

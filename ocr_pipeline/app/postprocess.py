@@ -655,29 +655,19 @@ def postprocess_and_retry(
 
     facility_name = ""
     facility_name_crop = rois.get("facility_name")
-    facility_name_alt = rois.get("facility_name_alt")
     if facility_name_crop is not None:
         metrics["ocr_calls"] += 1
         prompt = _merge_prompt(base_prompt, facility_prompt)
         primary = ocr_fn(facility_name_crop, prompt, 128)
         facility_name = _dedup_consecutive_lines(primary)
-        if not facility_name and facility_name_alt is not None:
-            metrics["ocr_calls"] += 1
-            fallback = ocr_fn(facility_name_alt, prompt, 128)
-            facility_name = _dedup_consecutive_lines(fallback)
 
     menu_band = ""
     menu_band_crop = rois.get("menu_band")
-    menu_band_alt = rois.get("menu_band_alt")
     if menu_band_crop is not None:
         metrics["ocr_calls"] += 1
         prompt = _merge_prompt(base_prompt, menu_prompt)
         primary = ocr_fn(menu_band_crop, prompt, 512)
         menu_band = _dedup_consecutive_lines(primary)
-        if not menu_band and menu_band_alt is not None:
-            metrics["ocr_calls"] += 1
-            fallback = ocr_fn(menu_band_alt, prompt, 512)
-            menu_band = _dedup_consecutive_lines(fallback)
     if (
         not disable_overlay_rows
         and min_menu_line_ratio_for_overlay > 0
@@ -691,16 +681,11 @@ def postprocess_and_retry(
 
     notes = ""
     notes_crop = rois.get("notes")
-    notes_alt = rois.get("notes_alt")
     if notes_crop is not None:
         metrics["ocr_calls"] += 1
         prompt = _merge_prompt(base_prompt, notes_prompt)
         primary = ocr_fn(notes_crop, prompt, 256)
         notes = _dedup_consecutive_lines(primary)
-        if not notes and notes_alt is not None:
-            metrics["ocr_calls"] += 1
-            fallback = ocr_fn(notes_alt, prompt, 256)
-            notes = _dedup_consecutive_lines(fallback)
 
     return {
         "template_id": tpl_cfg.get("id"),

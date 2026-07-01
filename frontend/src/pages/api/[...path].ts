@@ -3,8 +3,13 @@ import axios from "axios";
 import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 
-const getTarget = () =>
-  process.env.API_PROXY_TARGET || "https://worker-prod-avlnzjjrca-dt.a.run.app";
+const getTarget = () => {
+  const target = process.env.API_PROXY_TARGET?.trim();
+  if (!target) {
+    throw new Error("api_proxy_target_missing");
+  }
+  return target;
+};
 const PROXY_MAX_BODY_BYTES = Number(process.env.API_PROXY_MAX_BODY_BYTES || 25 * 1024 * 1024);
 const PROXY_MAX_RESPONSE_BYTES = Number(process.env.API_PROXY_MAX_RESPONSE_BYTES || 100 * 1024 * 1024);
 
@@ -70,15 +75,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(413).json({ error: "request_too_large" });
     return;
   }
-  const target = getTarget();
-  const path = Array.isArray(req.query.path) ? req.query.path.join("/") : req.query.path || "";
-  const query = req.url?.split("?")[1];
-  const url = `${target}/${path}${query ? `?${query}` : ""}`;
-
-  const headers = copyRequestHeaders(req);
-  const data = req.method && ["GET", "HEAD"].includes(req.method) ? undefined : req.pipe(limitStream(PROXY_MAX_BODY_BYTES));
-
   try {
+    const target = getTarget();
+    const path = Array.isArray(req.query.path) ? req.query.path.join("/") : req.query.path || "";
+    const query = req.url?.split("?")[1];
+    const url = `${target}/${path}${query ? `?${query}` : ""}`;
+
+    const headers = copyRequestHeaders(req);
+    const data = req.method && ["GET", "HEAD"].includes(req.method) ? undefined : req.pipe(limitStream(PROXY_MAX_BODY_BYTES));
+
     const response = await axios.request({
       url,
       method: req.method,

@@ -72,25 +72,6 @@ def _calendar_week_range_for_anchor(month_id: str, anchor_date: date) -> tuple[d
     return _clip_range_to_month(month_id, raw_start, raw_end)
 
 
-def calendar_week_ranges_for_month(month_id: str) -> list[tuple[date, date]]:
-    normalized_month = _normalize_month_id(month_id)
-    if not normalized_month:
-        return []
-    month_start, month_end = _month_bounds(normalized_month)
-    if not isinstance(month_start, date) or not isinstance(month_end, date):
-        return []
-    ranges: list[tuple[date, date]] = []
-    cursor = month_start
-    while cursor <= month_end:
-        week_start, week_end = _calendar_week_range_for_anchor(normalized_month, cursor)
-        if not isinstance(week_start, date) or not isinstance(week_end, date):
-            break
-        if not ranges or ranges[-1] != (week_start, week_end):
-            ranges.append((week_start, week_end))
-        cursor = week_end + timedelta(days=1)
-    return ranges
-
-
 def _menu_backed_week_ranges_for_month(month_id: str, facility_id: str | None) -> list[tuple[date, date]]:
     normalized_month = _normalize_month_id(month_id)
     if not normalized_month:
@@ -129,7 +110,7 @@ def build_week_option_entries(month_id: str, facility_id: str | None) -> list[di
     normalized_month = _normalize_month_id(month_id)
     if not normalized_month:
         return []
-    ranges = _menu_backed_week_ranges_for_month(normalized_month, facility_id) or calendar_week_ranges_for_month(normalized_month)
+    ranges = _menu_backed_week_ranges_for_month(normalized_month, facility_id)
     return [
         {
             "week_id": _format_week_value(normalized_month, start_date, end_date),
@@ -166,24 +147,6 @@ def resolve_current_week_selection(
     anchor_date = _normalize_anchor_date(received_at)
     if not selected_week_value and month_id and isinstance(anchor_date, date):
         option_entries = list(build_week_option_entries(month_id, facility_id))
-        seen_week_ids = {
-            str(item.get("week_id") or "").strip()
-            for item in option_entries
-            if str(item.get("week_id") or "").strip()
-        }
-        for start_date, end_date in calendar_week_ranges_for_month(month_id):
-            week_id = _format_week_value(month_id, start_date, end_date)
-            if not week_id or week_id in seen_week_ids:
-                continue
-            option_entries.append(
-                {
-                    "week_id": week_id,
-                    "label": _format_week_label(month_id, start_date, end_date),
-                    "date_from": start_date.isoformat(),
-                    "date_to": end_date.isoformat(),
-                }
-            )
-            seen_week_ids.add(week_id)
         option_entries.sort(key=lambda item: str(item.get("date_from") or "").strip())
         for item in option_entries:
             week_id = str(item.get("week_id") or "").strip()

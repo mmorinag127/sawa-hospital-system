@@ -56,7 +56,8 @@ def is_order_reparse_job(job: dict[str, Any] | None, order_id: str) -> bool:
     if not normalized_order_id:
         return False
     normalized_job_order_id = str(job.get("order_id") or "").strip()
-    if normalized_job_order_id != normalized_order_id:
+    normalized_job_id = str(job.get("id") or "").strip()
+    if normalized_job_order_id != normalized_order_id and normalized_job_id != f"OCR-{normalized_order_id}":
         return False
     return get_job_request_mode(job) in _ORDER_REPARSE_REQUEST_MODES
 

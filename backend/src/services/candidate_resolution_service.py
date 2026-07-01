@@ -251,14 +251,6 @@ def build_facility_resolution(
     }
 
 
-def position_fallback_allowed_for_facility(
-    *,
-    current_facility: str | None,
-    payload: dict[str, Any] | None,
-) -> bool:
-    return False
-
-
 def build_week_resolution(
     *,
     current_week: str | None,
@@ -298,7 +290,7 @@ def build_week_resolution(
             ]
             matched_ratio = (len(matched_dates) / len(payload_dates)) if payload_dates else 0.0
             score = 0.2
-            reason = "calendar"
+            reason = "menu_week"
             if current_value and current_value == week_value:
                 score = 1.0
                 reason = "current_order_value"
@@ -822,23 +814,6 @@ def resolve_order_candidates(
     evidence_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
     augmented_payload = evidence_payload
-    effective_facility_code = str(facility_code or "").strip() or None
-    if (
-        isinstance(evidence_payload, dict)
-        and effective_facility_code
-        and position_fallback_allowed_for_facility(
-            current_facility=effective_facility_code,
-            payload=evidence_payload,
-        )
-    ):
-        facility_config = config_service.get_facility_config(effective_facility_code) or {}
-        fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
-        if isinstance(fax_template, dict):
-            augmented_payload = position_column_mapping_service.augment_payload_with_position_fallback(
-                evidence_payload,
-                fax_template,
-                template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
-            )
     facility = build_facility_resolution(current_facility=facility_code, payload=evidence_payload)
     week = build_week_resolution(
         current_week=week_code,

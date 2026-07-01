@@ -117,7 +117,6 @@ def _build_sheet_from_payload(
         revision_sheet = ocr_sheet_revision_service.build_sheet_payload_from_revision(
             order_id=order_id,
             revision=edited_revision,
-            fallback_sheet=None,
             field_label=_field_label,
             field_value_to_str=_field_value_to_str,
         )

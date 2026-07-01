@@ -522,15 +522,18 @@ def persist_evidence_run(
         order = session.get(Order, record["order_id"])
         if not normalized_template_version_id and order is not None:
             normalized_template_version_id = str(order.template_version_id or "").strip()
-        if not normalized_template_version_id:
-            return None
-        template_version = session.get(FacilityTemplateVersion, normalized_template_version_id)
-        if template_version is None or template_version.status != "active":
-            return None
-        if order is not None:
-            facility_id = str(order.facility_code or "").strip()
-            if facility_id and str(template_version.facility_id or "").strip() != facility_id:
+        template_version = (
+            session.get(FacilityTemplateVersion, normalized_template_version_id)
+            if normalized_template_version_id
+            else None
+        )
+        if normalized_template_version_id:
+            if template_version is None or template_version.status != "active":
                 return None
+            if order is not None:
+                facility_id = str(order.facility_code or "").strip()
+                if facility_id and str(template_version.facility_id or "").strip() != facility_id:
+                    return None
         existing_identity = (
             session.query(OrderOcrEvidenceRun)
             .filter(

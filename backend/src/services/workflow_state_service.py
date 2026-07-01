@@ -14,6 +14,7 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.services.ocr_job_service import (
     describe_job_state,
     get_latest_order_job,
+    get_job as get_ocr_job,
     get_job_request_mode,
     is_order_reparse_job,
 )
@@ -84,6 +85,20 @@ def _legacy_refresh_snapshot(
         "confidence_band": update_payload.get("confidence_band"),
         "last_transition_at": last_transition_at.isoformat(),
     }
+
+
+def _get_order_reparse_job(order_id: str) -> dict[str, Any] | None:
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return None
+    candidates = [
+        get_latest_order_job(normalized_order_id),
+        get_ocr_job(f"OCR-{normalized_order_id}"),
+    ]
+    for candidate in candidates:
+        if is_order_reparse_job(candidate if isinstance(candidate, dict) else None, normalized_order_id):
+            return candidate
+    return None
 
 
 def _attach_top_level_apply_flags(
@@ -343,9 +358,7 @@ def _build_sheet_gate(
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
-    reparse_job = get_latest_order_job(order_id)
-    if not is_order_reparse_job(reparse_job if isinstance(reparse_job, dict) else None, order_id):
-        reparse_job = None
+    reparse_job = _get_order_reparse_job(order_id)
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
     return apply_gate_service.evaluate_sheet_gate(
         rows=rows if isinstance(rows, list) else None,
@@ -482,22 +495,7 @@ def _augment_workflow_evidence_run(
     payload = evidence_run.get("payload_json")
     if not isinstance(payload, dict):
         return evidence_run
-    if not candidate_resolution_service.position_fallback_allowed_for_facility(
-        current_facility=normalized_facility_code,
-        payload=payload,
-    ):
-        return evidence_run
-    facility_config = config_service.get_facility_config(normalized_facility_code) or {}
-    template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
-    if not isinstance(template, dict):
-        return evidence_run
-    augmented_payload = position_column_mapping_service.augment_payload_with_position_fallback(
-        payload,
-        template,
-        template_id=str(facility_config.get("fax_template_id") or "").strip() or None,
-    )
-    if not isinstance(augmented_payload, dict) or augmented_payload is payload:
-        return evidence_run
+    return evidence_run
     capabilities = ocr_evidence_service._build_capabilities(augmented_payload)
     capabilities["legacy_editable"] = bool(
         str(evidence_run.get("schema_version") or "").startswith("v1_legacy")
@@ -1003,24 +1001,14 @@ def _build_workflow_state_projection(
     current_sheet_week_code = (
         str((current_sheet_context or {}).get("resolved_week_id") or "").strip() or None
     )
-    current_week_code = (
-        order_week_code
-        if order_week_code and "@" in order_week_code
-        else current_sheet_week_code
-        or order_week_code
-    )
+    current_week_code = order_week_code or current_sheet_week_code
     evidence_run = ocr_evidence_service.get_latest_evidence_run(normalized_order_id)
     draft_sheet = (
         current_sheet_context.get("draft_record")
         if isinstance(current_sheet_context, dict)
         else None
     )
-    order_bound_job = get_latest_order_job(normalized_order_id)
-    reparse_job = (
-        order_bound_job
-        if is_order_reparse_job(order_bound_job if isinstance(order_bound_job, dict) else None, normalized_order_id)
-        else None
-    )
+    reparse_job = _get_order_reparse_job(normalized_order_id)
     active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
     active_evidence_run = _augment_workflow_evidence_run(
         active_evidence_run,
@@ -1062,11 +1050,14 @@ def _build_workflow_state_projection(
         )
     candidate_preview_available = bool((candidate_sheet_state or {}).get("candidate_preview_available"))
     candidate_has_meaningful_diff = bool((candidate_sheet_state or {}).get("candidate_has_meaningful_diff"))
+    rerun_candidate_evidence_run_id = _job_candidate_evidence_run_id(reparse_job if isinstance(reparse_job, dict) else None)
     has_new_candidate = bool(
         isinstance(candidate_evidence_run, dict)
         and candidate_evidence_run_id
-        and candidate_preview_available
-        and candidate_has_meaningful_diff
+        and (
+            (candidate_preview_available and candidate_has_meaningful_diff)
+            or candidate_evidence_run_id == rerun_candidate_evidence_run_id
+        )
         and _candidate_requires_prompt(
             candidate_evidence_run,
             acknowledged_candidate_decision,
@@ -1141,6 +1132,11 @@ def _build_workflow_state_projection(
         reparse_request_mode=reparse_request_mode,
         current_sheet_review_cleared=current_sheet_review_cleared,
     )
+    if has_new_candidate and candidate_evidence_run_id == rerun_candidate_evidence_run_id:
+        state = "new_evidence_available"
+        headline = "新しいOCR結果があります"
+        primary_action = "select_candidate_evidence"
+        confidence_band = "medium"
     secondary_actions = []
     if state in {"uploaded", "recovery_required"}:
         secondary_actions = ["rerun_yomitoku", "llm_reparse"]
@@ -1260,11 +1256,16 @@ def _build_workflow_state_projection(
         or None
     )
     serialized["current_sheet_revision_id"] = serialized_current_sheet_revision_id
+    candidate_sheet_revision_id = str((candidate_sheet_state or {}).get("current_sheet_revision_id") or "").strip() or None
     candidate_prompt_visible = bool(
         has_new_candidate
-        and serialized_current_sheet_revision_id
-        and serialized_current_sheet_revision_id
-        == (str((candidate_sheet_state or {}).get("current_sheet_revision_id") or "").strip() or None)
+        and (
+            candidate_evidence_run_id == rerun_candidate_evidence_run_id
+            or (
+                serialized_current_sheet_revision_id
+                and serialized_current_sheet_revision_id == candidate_sheet_revision_id
+            )
+        )
     )
     serialized["candidate_sheet_state"] = {
         "current_sheet_revision_id": serialized["current_sheet_revision_id"],

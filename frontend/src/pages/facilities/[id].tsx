@@ -117,11 +117,11 @@ export default function FacilityConfigPage() {
   const [openaiOcrEnabled, setOpenaiOcrEnabled] = useState<boolean>(false);
   const [openaiOcrModel, setOpenaiOcrModel] = useState<string>("");
   const [openaiOcrPrompt, setOpenaiOcrPrompt] = useState<string>("");
-  const [openaiFallbackProvider, setOpenaiFallbackProvider] = useState<string>("pipeline");
+  const [openaiFallbackProvider, setOpenaiFallbackProvider] = useState<string>("none");
   const [geminiOcrEnabled, setGeminiOcrEnabled] = useState<boolean>(false);
   const [geminiOcrModel, setGeminiOcrModel] = useState<string>("");
   const [geminiOcrPrompt, setGeminiOcrPrompt] = useState<string>("");
-  const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("pipeline");
+  const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("none");
   const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<string>("hakodate");
   const [hakodateHeaderRows, setHakodateHeaderRows] = useState<string>("");
   const [hakodateOcrResolution, setHakodateOcrResolution] = useState<string>("");
@@ -164,7 +164,7 @@ export default function FacilityConfigPage() {
       setOpenaiOcrPrompt(typeof prompt === "string" ? prompt : "");
       const fallback = configRecord.openai_ocr_fallback_provider;
       setOpenaiFallbackProvider(
-        typeof fallback === "string" && fallback.trim() ? fallback.trim().toLowerCase() : "pipeline"
+        typeof fallback === "string" && fallback.trim() ? fallback.trim().toLowerCase() : "none"
       );
       setGeminiOcrEnabled(parseBoolean(configRecord.gemini_ocr_enabled));
       const geminiModel = configRecord.gemini_ocr_model;
@@ -175,7 +175,7 @@ export default function FacilityConfigPage() {
       setGeminiFallbackProvider(
         typeof geminiFallback === "string" && geminiFallback.trim()
           ? geminiFallback.trim().toLowerCase()
-          : "pipeline"
+          : "none"
       );
       setQuantityAssignmentStrategy("hakodate");
       setHakodateHeaderRows(parseConfigNumberText(configRecord.hakodate_header_rows));
@@ -532,7 +532,6 @@ export default function FacilityConfigPage() {
                   value={openaiFallbackProvider}
                   onChange={(e) => setOpenaiFallbackProvider(e.target.value)}
                 >
-                  <option value="pipeline">pipeline</option>
                   <option value="none">none</option>
                 </select>
               </label>
@@ -570,7 +569,6 @@ export default function FacilityConfigPage() {
                   value={geminiFallbackProvider}
                   onChange={(e) => setGeminiFallbackProvider(e.target.value)}
                 >
-                  <option value="pipeline">pipeline</option>
                   <option value="none">none</option>
                 </select>
               </label>

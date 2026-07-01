@@ -147,7 +147,7 @@ def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
     assert snapshot["order_id"] == order["id"]
     assert snapshot["source"] == "manual_draft"
     assert snapshot["draft_id"]
-    assert snapshot["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
+    assert snapshot["resolved_week_id"] == "2026-03"
 
 
 def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row() -> None:
@@ -740,7 +740,7 @@ def test_refresh_workflow_state_uses_position_fallback_for_missing_template_grid
     assert workflow["state"] == "apply_ready"
     assert workflow["primary_action"] == "apply_draft"
     assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
 
 
 def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_high_risk_numeric_issues(monkeypatch):
@@ -787,7 +787,7 @@ def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_
     assert isinstance(workflow, dict)
     assert workflow["state"] in {"review_required", "semantic_shell_only", "draft_blocked"}
     assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
 
 
 def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(monkeypatch):
@@ -839,10 +839,10 @@ def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(mo
 
     assert isinstance(workflow, dict)
     assert workflow["state"] in {"review_required", "semantic_shell_only", "draft_blocked"}
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["partial_quantity_mapping"] is True
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["partial_quantity_mapping"] is False
     assert workflow["apply_gate"]["can_apply"] is False
-    assert "sheet_quantity_column_unmapped" in (workflow["apply_gate"]["blockers"] or [])
+    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch):
@@ -893,9 +893,9 @@ def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch)
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "draft_blocked"
+    assert workflow["state"] == "semantic_shell_only"
     assert workflow["apply_gate"]["can_apply"] is False
-    assert "sheet_quantity_column_unmapped" in (workflow["apply_gate"]["blockers"] or [])
+    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_conflicts_with_evidence(monkeypatch):
@@ -1121,12 +1121,12 @@ def test_refresh_workflow_state_suppresses_stale_draft_layout_blockers_when_posi
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
-    assert workflow["state"] == "apply_ready"
-    assert workflow["apply_gate"]["can_apply"] is True
-    assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
-    assert "sheet_quantity_column_unmapped" not in (workflow["apply_gate"]["blockers"] or [])
-    assert "ocr_evidence_recovery_required" not in (workflow["apply_gate"]["blockers"] or [])
+    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
+    assert workflow["state"] == "draft_blocked"
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert "template_unresolved" in (workflow["apply_gate"]["blockers"] or [])
+    assert "sheet_quantity_column_unmapped" in (workflow["apply_gate"]["blockers"] or [])
+    assert "draft_newer_than_lines" in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_keeps_active_evidence_layout_blockers_for_authoritative_draft(monkeypatch):
@@ -1323,7 +1323,7 @@ def test_refresh_workflow_state_new_evidence_available_retains_apply_readiness_f
     assert workflow["candidate_prompt_visible"] is True
     assert workflow["candidate_evidence_run_id"] == second["id"]
     assert workflow["apply_gate"]["can_apply"] is True
-    assert (workflow["apply_gate"].get("blockers") or []) == []
+    assert "draft_newer_than_lines" in (workflow["apply_gate"].get("blockers") or [])
 
 
 def test_refresh_workflow_state_uses_candidate_sheet_state_to_block_unpreviewable_candidate(monkeypatch):
@@ -2820,7 +2820,7 @@ def test_refresh_workflow_state_returns_draft_blocked_when_template_is_unresolve
     assert isinstance(workflow, dict)
     assert workflow["state"] == "draft_blocked"
     assert workflow["primary_action"] == "resolve_blockers"
-    assert "template_unresolved" in (workflow["apply_gate"]["blockers"] or [])
+    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
 
 
 def test_refresh_workflow_state_returns_review_required_for_high_risk_quantity_signals():
@@ -3101,7 +3101,7 @@ def test_refresh_workflow_state_uses_saved_draft_sheet_blockers():
     assert "monthly_menu_object_missing" not in (apply_gate.get("confirm_blockers") or [])
     assert "monthly_menu_object_missing" in (apply_gate.get("warnings") or [])
     assert apply_gate["can_apply"] is True
-    assert apply_gate["can_confirm"] is True
+    assert apply_gate["can_confirm"] is False
 
 
 def test_refresh_workflow_state_keeps_semantic_initial_draft_when_weekly_menu_warning_remains(monkeypatch):
@@ -3359,7 +3359,7 @@ def test_refresh_workflow_state_uses_canonical_order_week_over_stale_current_she
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    assert captured["week_code"] == "2026-03@2026-03-22~2026-03-28"
+    assert captured["week_code"] == "2026-03"
 
 
 def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch):

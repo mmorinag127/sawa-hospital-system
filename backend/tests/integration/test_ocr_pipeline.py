@@ -162,7 +162,7 @@ def test_reparse_order_records_explicit_failed_llm_reparse_when_no_lines_survive
     assert debug.get("reject_reasons") == ["lines_empty"]
 
 
-def test_reparse_order_preserves_detailed_gemini_http_failure_without_cached_fallback(monkeypatch, tmp_path):
+def test_reparse_order_blocks_llm_reparse_without_first_pass_context(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-gemini-http-failure.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -217,21 +217,19 @@ def test_reparse_order_preserves_detailed_gemini_http_failure_without_cached_fal
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
 
-    expected_error = f"main_ocr_failed:gemini:{detailed_error}"
     assert updated is None
-    assert error == expected_error
+    assert error == "llm_full_table_baseline_missing"
     assert cached_probe["called"] is False
     job = get_job(f"OCR-{order['id']}")
     assert job is not None
     assert job.get("status") == "failed"
-    assert job.get("error_message") == expected_error
+    assert job.get("error_message") == "llm_full_table_baseline_missing"
     metrics = job.get("metrics") or {}
     assert metrics.get("request_mode") == "llm_reparse"
     assert metrics.get("requested_provider") == "gemini"
-    assert metrics.get("processing_stage") == "inference"
+    assert metrics.get("processing_stage") == "baseline_missing"
     assert metrics.get("result_state") == "hard_failed"
-    assert metrics.get("error") == expected_error
-    assert metrics.get("upstream_error_detail") == detailed_error
+    assert metrics.get("error") == "llm_full_table_baseline_missing"
 
 
 def test_load_existing_first_pass_payload_for_reparse_rejects_stale_aux_schema(monkeypatch):
@@ -795,22 +793,14 @@ def test_reparse_order_quantity_only_rows_merge_without_provider_flag(monkeypatc
     monkeypatch.setenv("OCR_REPARSE_ENABLE_PIPELINE_QUANTITY_MERGE", "1")
 
     updated, error = order_service.reparse_order(order["id"], ocr_provider="gemini", llm_assist=True)
-    assert error is None
-    assert updated is not None
-    assert updated.get("week") == "2026-02"
-    assert updated["lines"]
-    first = updated["lines"][0]
-    assert first.get("menu_name") == canonical_menu
-    assert first.get("daypart") == canonical_daypart
-    assert first.get("date") == canonical_date
+    assert updated is None
+    assert error == "first_pass_ocr_missing"
 
     job = get_job(f"OCR-{order['id']}")
     assert job is not None
-    assert job.get("status") == "done"
+    assert job.get("status") == "failed"
     metrics = job.get("metrics") or {}
-    merge_stats = metrics.get("llm_quantity_only_merge")
-    assert isinstance(merge_stats, dict)
-    assert int(merge_stats.get("quantity_cells_updated") or 0) > 0
+    assert metrics.get("error") == "first_pass_ocr_missing"
 
 
 def test_reparse_order_resolves_week_from_ocr_payload_when_existing_week_has_no_menu(
@@ -5553,7 +5543,7 @@ def test_reparse_order_llm_final_audit_failure_retries_with_evaluator_feedback(m
     assert any(prompt.strip() for prompt in extract_prompts)
 
 
-def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecified(monkeypatch, tmp_path):
+def test_reparse_order_with_llm_assist_does_not_auto_select_provider(monkeypatch, tmp_path):
     order_service.clear_all()
     pdf_path = tmp_path / "sample-explicit-reparse-defaults-to-gemini.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
@@ -5629,14 +5619,13 @@ def test_reparse_order_with_llm_assist_defaults_to_gemini_when_provider_unspecif
 
     updated, error = order_service.reparse_order(order["id"], llm_assist=True)
 
-    assert error is None
-    assert updated is not None
-    assert provider_calls
-    assert provider_calls[0] == "gemini"
+    assert updated is None
+    assert error == "first_pass_ocr_missing"
+    assert provider_calls == []
     job = get_job(f"OCR-{order['id']}")
     assert job is not None
     metrics = job.get("metrics") or {}
-    assert metrics.get("provider") == "gemini"
+    assert metrics.get("error") == "first_pass_ocr_missing"
 
 
 def test_reparse_order_llm_assist_rejects_sparse_quantity_only_rows_when_full_table_anchor_required(

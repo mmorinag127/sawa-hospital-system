@@ -69,15 +69,6 @@ def _should_disable_llm_provider_fallback(template: dict) -> bool:
     return bool(str(template.get("_force_main_ocr_provider") or "").strip())
 
 
-def _resolve_provider_fallback(template: dict, key: str) -> str:
-    configured = str(template.get(key) or "").strip().lower()
-    if configured:
-        return configured
-    if _should_disable_llm_provider_fallback(template):
-        return "none"
-    return "pipeline"
-
-
 def _crop_to_bbox(image, bbox: list[float]):
     width, height = image.size
     x0 = int(max(bbox[0] * width, 0))
@@ -2727,7 +2718,6 @@ def extract_fax_data(
     if provider == "openai":
         from src.services.openai_ocr_service import run_openai_ocr
 
-        fallback_provider = _resolve_provider_fallback(template, "openai_ocr_fallback_provider")
         try:
             output = run_openai_ocr(
                 pdf_bytes=pdf_bytes,
@@ -2758,54 +2748,12 @@ def extract_fax_data(
                 raw_text=raw_text,
                 provider_debug=provider_debug,
             )
-        except Exception as exc:  # noqa: BLE001
-            if fallback_provider != "pipeline":
-                raise
-            logger.warning("OpenAI OCR failed; fallback to pipeline: {}", str(exc))
-            output = run_ocr_pipeline(
-                pdf_bytes=pdf_bytes,
-                job_id=f"MAIN-{uuid.uuid4().hex[:8]}",
-                facility_id=facility_id,
-                input_reference=None,
-                preferred_template_id=preferred_template_id,
-            )
-            rows = _rows_from_pipeline_payload(output, template) or []
-            facility_name = None
-            date_strings = []
-            raw_text = None
-            provider_debug: dict = {
-                "provider": "openai_fallback_pipeline",
-                "failed_provider": "openai",
-                "fallback_reason": str(exc),
-            }
-            if isinstance(output, dict):
-                raw_name = output.get("facility_name")
-                if isinstance(raw_name, str):
-                    facility_name = raw_name.strip() or None
-                raw_dates = output.get("date_strings")
-                if isinstance(raw_dates, list):
-                    date_strings = [str(item) for item in raw_dates if str(item).strip()]
-                table_raw = output.get("table_raw")
-                if isinstance(table_raw, str) and table_raw.strip():
-                    raw_text = table_raw.strip()
-                template_id = output.get("template_id")
-                if isinstance(template_id, str) and template_id.strip():
-                    provider_debug["fallback_template_id"] = template_id.strip()
-            return FaxExtractedData(
-                facility_name=facility_name,
-                date_strings=date_strings,
-                table_rows=rows,
-                tokens=[],
-                grid=grid,
-                ocr_provider="openai_fallback_pipeline",
-                raw_text=raw_text,
-                provider_debug=provider_debug,
-            )
+        except Exception:
+            raise
 
     if provider == "gemini":
         from src.services.gemini_ocr_service import run_gemini_ocr
 
-        fallback_provider = _resolve_provider_fallback(template, "gemini_ocr_fallback_provider")
         try:
             output = run_gemini_ocr(
                 pdf_bytes=pdf_bytes,
@@ -2836,48 +2784,7 @@ def extract_fax_data(
                 raw_text=raw_text,
                 provider_debug=provider_debug,
             )
-        except Exception as exc:  # noqa: BLE001
-            if fallback_provider != "pipeline":
-                raise
-            logger.warning("Gemini OCR failed; fallback to pipeline: {}", str(exc))
-            output = run_ocr_pipeline(
-                pdf_bytes=pdf_bytes,
-                job_id=f"MAIN-{uuid.uuid4().hex[:8]}",
-                facility_id=facility_id,
-                input_reference=None,
-                preferred_template_id=preferred_template_id,
-            )
-            rows = _rows_from_pipeline_payload(output, template) or []
-            facility_name = None
-            date_strings = []
-            raw_text = None
-            provider_debug: dict = {
-                "provider": "gemini_fallback_pipeline",
-                "failed_provider": "gemini",
-                "fallback_reason": str(exc),
-            }
-            if isinstance(output, dict):
-                raw_name = output.get("facility_name")
-                if isinstance(raw_name, str):
-                    facility_name = raw_name.strip() or None
-                raw_dates = output.get("date_strings")
-                if isinstance(raw_dates, list):
-                    date_strings = [str(item) for item in raw_dates if str(item).strip()]
-                table_raw = output.get("table_raw")
-                if isinstance(table_raw, str) and table_raw.strip():
-                    raw_text = table_raw.strip()
-                template_id = output.get("template_id")
-                if isinstance(template_id, str) and template_id.strip():
-                    provider_debug["fallback_template_id"] = template_id.strip()
-            return FaxExtractedData(
-                facility_name=facility_name,
-                date_strings=date_strings,
-                table_rows=rows,
-                tokens=[],
-                grid=grid,
-                ocr_provider="gemini_fallback_pipeline",
-                raw_text=raw_text,
-                provider_debug=provider_debug,
-            )
+        except Exception:
+            raise
 
     raise RuntimeError(f"OCR provider '{provider}' is not supported")

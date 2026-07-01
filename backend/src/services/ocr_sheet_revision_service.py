@@ -225,7 +225,6 @@ def build_sheet_payload_from_revision(
     *,
     order_id: str,
     revision: dict[str, Any],
-    fallback_sheet: dict[str, Any] | None = None,
     field_label: FieldLabeler,
     field_value_to_str: FieldValueFormatter,
 ) -> dict[str, Any] | None:
@@ -239,76 +238,12 @@ def build_sheet_payload_from_revision(
     )
     if not snapshot["rows"]:
         return None
-    payload = dict(fallback_sheet) if isinstance(fallback_sheet, dict) else {"order_id": order_id}
+    payload = {"order_id": order_id}
     payload["order_id"] = order_id
-    if isinstance(fallback_sheet, dict):
-        base_snapshot = normalize_sheet_revision_snapshot(
-            fields=fallback_sheet.get("fields"),
-            header=fallback_sheet.get("header"),
-            rows_payload=fallback_sheet.get("rows"),
-            row_ids=fallback_sheet.get("row_ids"),
-            field_label=field_label,
-            field_value_to_str=field_value_to_str,
-        )
-        if base_snapshot["rows"]:
-            if _is_applied_reparse_revision(revision):
-                overlaid_snapshot = _overlay_applied_reparse_quantity_cells(
-                    base_snapshot=base_snapshot,
-                    revision_snapshot=snapshot,
-                )
-                if isinstance(overlaid_snapshot, dict):
-                    payload["fields"] = overlaid_snapshot["fields"]
-                    payload["header"] = overlaid_snapshot["header"]
-                    payload["rows"] = overlaid_snapshot["rows"]
-                    payload["row_ids"] = overlaid_snapshot["row_ids"]
-                    if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
-                        payload["source"] = "edited_sheet"
-                    return payload
-            if (
-                snapshot["fields"] == base_snapshot["fields"]
-                and snapshot["header"] == base_snapshot["header"]
-            ):
-                payload["fields"] = snapshot["fields"]
-                payload["header"] = snapshot["header"]
-                payload["rows"] = snapshot["rows"]
-                payload["row_ids"] = snapshot["row_ids"]
-                if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
-                    payload["source"] = "edited_sheet"
-                return payload
-            revision_rows_by_id = {
-                row_id: snapshot["rows"][idx]
-                for idx, row_id in enumerate(snapshot["row_ids"])
-                if row_id and idx < len(snapshot["rows"])
-            }
-            rebased_rows: list[list[str]] = []
-            for row_idx, base_row in enumerate(base_snapshot["rows"]):
-                base_row_id = (
-                    base_snapshot["row_ids"][row_idx]
-                    if row_idx < len(base_snapshot["row_ids"])
-                    else ""
-                )
-                revision_row = revision_rows_by_id.get(base_row_id)
-                if revision_row is None and row_idx < len(snapshot["rows"]):
-                    revision_row = snapshot["rows"][row_idx]
-                merged_row = list(base_row)
-                if revision_row is not None:
-                    for col_idx in range(min(len(merged_row), len(revision_row))):
-                        merged_row[col_idx] = revision_row[col_idx]
-                rebased_rows.append(merged_row)
-            payload["fields"] = base_snapshot["fields"]
-            payload["header"] = base_snapshot["header"]
-            payload["rows"] = rebased_rows
-            payload["row_ids"] = base_snapshot["row_ids"][: len(rebased_rows)]
-        else:
-            payload["fields"] = snapshot["fields"]
-            payload["header"] = snapshot["header"]
-            payload["rows"] = snapshot["rows"]
-            payload["row_ids"] = snapshot["row_ids"]
-    else:
-        payload["fields"] = snapshot["fields"]
-        payload["header"] = snapshot["header"]
-        payload["rows"] = snapshot["rows"]
-        payload["row_ids"] = snapshot["row_ids"]
+    payload["fields"] = snapshot["fields"]
+    payload["header"] = snapshot["header"]
+    payload["rows"] = snapshot["rows"]
+    payload["row_ids"] = snapshot["row_ids"]
     if not isinstance(payload.get("source"), str) or not str(payload.get("source")).strip():
         payload["source"] = "edited_sheet"
     return payload
