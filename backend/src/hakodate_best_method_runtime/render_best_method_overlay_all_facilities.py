@@ -796,7 +796,7 @@ def build_best_method_for_manifest_item(
     order_id = str(item.get("order_id") or "")
     total_t0 = time.perf_counter()
     preprocess_t0 = time.perf_counter()
-    pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width)
+    pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width, draft_sheet=draft_sheet)
     preprocess_seconds = time.perf_counter() - preprocess_t0
     eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)

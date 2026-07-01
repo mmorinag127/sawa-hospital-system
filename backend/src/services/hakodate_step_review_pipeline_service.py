@@ -2528,6 +2528,49 @@ def _step_review_physical_row_map(worksheet: Any, *, row_count: int) -> dict[int
     return rows
 
 
+def _step_review_draft_sheet_row_map(draft_sheet: dict[str, Any] | None, *, row_count: int) -> dict[int, dict[str, Any]]:
+    if not isinstance(draft_sheet, dict):
+        return {}
+    fields = [str(field or "").strip() for field in (draft_sheet.get("fields") or [])]
+    rows = [row for row in (draft_sheet.get("rows") or []) if isinstance(row, list)]
+    if not fields or not rows:
+        return {}
+    field_index = {field: idx for idx, field in enumerate(fields) if field}
+    date_idx = field_index.get("date_mmdd", field_index.get("date"))
+    daypart_idx = field_index.get("daypart")
+    menu_idx = field_index.get("menu", field_index.get("menu_name"))
+    if date_idx is None or daypart_idx is None or menu_idx is None:
+        return {}
+    mapped: dict[int, dict[str, Any]] = {}
+    last_date = ""
+    for payload_row_index, row in enumerate(rows):
+        row_index = STEP_REVIEW_HEADER_BANDS + payload_row_index
+        if row_index >= row_count:
+            break
+        worksheet_row = STEP_REVIEW_BODY_START_ROW + payload_row_index
+
+        def _cell(index: int | None) -> str:
+            if index is None or index >= len(row):
+                return ""
+            return hakodate_assignment_service._normalize_slot_text(row[index])  # noqa: SLF001
+
+        date_text = _cell(date_idx)
+        if date_text and not hakodate_assignment_service._is_weekday_only(date_text):  # noqa: SLF001
+            last_date = date_text
+        menu_name = _cell(menu_idx)
+        mapped[row_index] = {
+            "worksheet_row": worksheet_row,
+            "row_index": row_index,
+            "date": date_text,
+            "effective_date": last_date or date_text,
+            "daypart": _cell(daypart_idx),
+            "aux": "",
+            "menu_name": menu_name,
+            "menu_key": hakodate_assignment_service._normalize_menu_key(menu_name),  # noqa: SLF001
+        }
+    return mapped
+
+
 def _step_review_merged_or_single_cell_bbox(
     *,
     row_index: int,
@@ -3312,6 +3355,7 @@ def _post_menu_target_regions(
     row_edges: list[float],
     fax_template: dict[str, Any] | None = None,
     horizontal_line_mask: np.ndarray | None = None,
+    draft_sheet: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     col_count = min(int(worksheet.max_column or 0), len(column_edges) - 1)
     slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
@@ -3335,7 +3379,8 @@ def _post_menu_target_regions(
     # the menu column must stay visible to OCR.  Downstream sheet/materialization
     # logic decides how totals, notes, and helper columns aggregate.
     target_cols = list(range(menu_col + 1, col_count + 1))
-    physical_row_map = _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
+    draft_row_map = _step_review_draft_sheet_row_map(draft_sheet, row_count=len(row_edges) - 1)
+    physical_row_map = draft_row_map or _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}
     blank_menu_row_count = 0
@@ -3416,6 +3461,7 @@ def _post_menu_target_regions(
         "canonical_target_worksheet_cols": canonical_target_cols,
         "template_column_restricted": False,
         "target_selection_mode": "all_physical_columns_right_of_menu",
+        "row_source": "draft_sheet" if draft_row_map else "worksheet",
         "blank_menu_row_count": blank_menu_row_count,
         "region_count": len(regions),
         "logical_target_count": sum(len(region.get("logical_targets") or []) for region in regions),

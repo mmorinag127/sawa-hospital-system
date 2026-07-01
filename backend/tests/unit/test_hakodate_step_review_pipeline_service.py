@@ -873,6 +873,39 @@ def test_step_review_target_regions_include_57th_body_row() -> None:
     assert all(f"{col}67" in target_cells for col in ("E", "F", "G", "H", "I", "J", "K"))
 
 
+def test_step_review_target_regions_use_draft_sheet_row_count_when_available() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D7"] = "献立"
+    for row in range(11, 68):
+        worksheet.cell(row=row, column=4, value=f"テンプレート行{row}")
+    for col, header in zip(("E", "F", "G", "H", "I", "J", "K"), ("常食", "糖尿", "備考欄", "肉禁", "魚禁", "軟菜", "袋分け")):
+        worksheet[f"{col}7"] = header
+    row_edges = [float(index * 10) for index in range(66)]
+    column_edges = [float(index * 10) for index in range(12)]
+    draft_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f", "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f", "remarks"],
+        "rows": [
+            [f"07/{12 + (index // 9):02d}", "朝", f"月次メニュー{index + 1}", "", "", "", "", "", "", ""]
+            for index in range(63)
+        ],
+    }
+
+    regions, evidence = _post_menu_target_regions(
+        worksheet=worksheet,
+        column_edges=column_edges,
+        row_edges=row_edges,
+        draft_sheet=draft_sheet,
+    )
+
+    assert evidence["row_source"] == "draft_sheet"
+    assert evidence["logical_target_count"] == 63 * 7
+    assert max(int(region["worksheet_row"]) for region in regions) == 73
+    last_row_regions = [region for region in regions if int(region["worksheet_row"]) == 73]
+    assert [region["sheet_cell"] for region in last_row_regions] == ["E73", "F73", "G73", "H73", "I73", "J73", "K73"]
+    assert {region["logical_targets"][0]["menu_name"] for region in last_row_regions} == {"月次メニュー63"}
+
+
 def test_step_review_target_regions_skip_blank_menu_rows() -> None:
     workbook = Workbook()
     worksheet = workbook.active

@@ -28,6 +28,7 @@ from src.services.hakodate_fixed_quad_registration_service import (
 )
 from src.services.hakodate_step_review_pipeline_service import (
     TARGET_RULE,
+    STEP_REVIEW_HEADER_BANDS,
     WEEK_SHEET_NAME,
     _align_axes,
     _bbox_quad_points,
@@ -1040,11 +1041,56 @@ def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) ->
     return fax_template if isinstance(fax_template, dict) else None
 
 
+def _draft_sheet_body_row_count(draft_sheet: dict[str, Any] | None) -> int:
+    if not isinstance(draft_sheet, dict):
+        return 0
+    rows = draft_sheet.get("rows")
+    if not isinstance(rows, list):
+        return 0
+    return sum(1 for row in rows if isinstance(row, list))
+
+
+def _row_edges_for_draft_sheet_rows(row_edges: list[float], draft_sheet: dict[str, Any] | None) -> tuple[list[float], dict[str, Any]]:
+    body_row_count = _draft_sheet_body_row_count(draft_sheet)
+    if body_row_count <= 0:
+        return row_edges, {"applied": False, "reason": "draft_sheet_rows_missing"}
+    if len(row_edges) <= STEP_REVIEW_HEADER_BANDS + 1:
+        return row_edges, {"applied": False, "reason": "row_edges_too_short", "draft_body_row_count": body_row_count}
+    current_body_row_count = len(row_edges) - 1 - STEP_REVIEW_HEADER_BANDS
+    if current_body_row_count == body_row_count:
+        return row_edges, {
+            "applied": False,
+            "reason": "row_count_already_matches_draft_sheet",
+            "draft_body_row_count": body_row_count,
+            "current_body_row_count": current_body_row_count,
+        }
+    header_edges = [float(value) for value in row_edges[: STEP_REVIEW_HEADER_BANDS + 1]]
+    body_top = header_edges[-1]
+    body_bottom = float(row_edges[-1])
+    if body_bottom <= body_top:
+        return row_edges, {
+            "applied": False,
+            "reason": "invalid_body_bounds",
+            "draft_body_row_count": body_row_count,
+            "current_body_row_count": current_body_row_count,
+        }
+    body_edges = np.linspace(body_top, body_bottom, body_row_count + 1, dtype=np.float64).tolist()
+    adjusted = header_edges[:-1] + [float(value) for value in body_edges]
+    return adjusted, {
+        "applied": True,
+        "reason": "draft_sheet_body_row_count",
+        "draft_body_row_count": body_row_count,
+        "current_body_row_count": current_body_row_count,
+        "row_edge_count": len(adjusted),
+    }
+
+
 def _build_preprocess_for_ocr(
     *,
     item: dict[str, Any],
     page: int,
     render_width: int,
+    draft_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     timings: dict[str, float] = {}
 
@@ -1232,6 +1278,7 @@ def _build_preprocess_for_ocr(
             working_rectified = row_mesh_rectified
             working_ys = [float(value) for value in template_ys]
     mark_timing("row_mesh_dewarp_seconds", step_t0)
+    working_ys, draft_row_edge_evidence = _row_edges_for_draft_sheet_rows(working_ys, draft_sheet)
     step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
@@ -1249,6 +1296,7 @@ def _build_preprocess_for_ocr(
         row_edges=working_ys,
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
+        draft_sheet=draft_sheet,
     )
     mark_timing("build_target_regions_seconds", step_t0)
     step_t0 = time.perf_counter()
@@ -1283,6 +1331,7 @@ def _build_preprocess_for_ocr(
             "row_dewarp": row_dewarp_evidence,
             "row_slant_dewarp": row_slant_dewarp_evidence,
             "row_mesh_dewarp": row_mesh_dewarp_evidence,
+            "draft_sheet_row_edges": draft_row_edge_evidence,
             "quad_estimate": quad_estimate,
             "preprocess_timings": timings,
         },
