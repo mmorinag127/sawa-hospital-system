@@ -1047,6 +1047,19 @@ def _draft_sheet_body_row_count(draft_sheet: dict[str, Any] | None) -> int:
     rows = draft_sheet.get("rows")
     if not isinstance(rows, list):
         return 0
+    row_ids = [str(row_id or "").strip() for row_id in (draft_sheet.get("row_ids") or [])]
+    row_id_keys: set[tuple[str, str, str]] = set()
+    for row_id in row_ids:
+        parts = row_id.split("__")
+        if len(parts) < 3:
+            continue
+        date_value = parts[0].strip()
+        daypart_value = parts[1].strip()
+        slot_value = parts[2].strip()
+        if date_value and daypart_value and slot_value:
+            row_id_keys.add((date_value, daypart_value, slot_value))
+    if row_id_keys:
+        return len(row_id_keys)
     fields = [str(field or "").strip() for field in (draft_sheet.get("fields") or [])]
     field_index = {field: index for index, field in enumerate(fields)}
     date_idx = field_index.get("date_mmdd", field_index.get("date"))

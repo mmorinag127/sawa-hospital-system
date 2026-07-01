@@ -60,6 +60,40 @@ def test_row_axis_for_draft_sheet_rows_counts_physical_fax_rows_not_diet_overrid
     assert len(row_axis) == 59
 
 
+def test_row_axis_for_draft_sheet_rows_counts_physical_rows_from_row_ids() -> None:
+    template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
+    rows: list[list[object]] = []
+    row_ids: list[str] = []
+    row_index = 0
+    for day in range(12, 19):
+        for daypart, count in (("breakfast", 2), ("lunch", 3), ("dinner", 3)):
+            for slot in range(count):
+                rows.append([f"7/{day}", daypart, f"menu-{day}-{daypart}-{slot}"])
+                row_ids.append(f"2026-07-{day:02d}__{daypart}__{slot}__{row_index}")
+                row_index += 1
+    for date_value, daypart, slot in (
+        ("2026-07-14", "breakfast", 0),
+        ("2026-07-14", "lunch", 2),
+        ("2026-07-16", "dinner", 0),
+        ("2026-07-17", "lunch", 1),
+        ("2026-07-18", "dinner", 2),
+        ("2026-07-18", "breakfast", 1),
+        ("2026-07-15", "dinner", 1),
+    ):
+        rows.append([date_value, daypart, "soft mixer override"])
+        row_ids.append(f"{date_value}__{daypart}__{slot}__{row_index}")
+        row_index += 1
+    draft_sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": rows, "row_ids": row_ids}
+
+    row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+
+    assert evidence["applied"] is True
+    assert evidence["row_axis_source"] == "draft_sheet"
+    assert evidence["draft_body_row_count"] == 56
+    assert evidence["row_edge_count"] == 59
+    assert len(row_axis) == 59
+
+
 def test_row_axis_for_draft_sheet_rows_keeps_template_when_counts_match() -> None:
     template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
     draft_sheet = {"rows": [[{"value": ""}] for _ in range(57)]}
