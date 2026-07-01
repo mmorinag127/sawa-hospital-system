@@ -114,7 +114,7 @@ if [[ "${RUN_LOCAL_REGRESSION}" == "1" ]]; then
       tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_completed_preserves_context_and_does_not_select_result \
       tests/unit/test_order_workflow_v2_service.py::test_sheet_source_uses_only_selected_ocr_payload \
       tests/unit/test_order_workflow_v2_service.py::test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection \
-      tests/unit/test_order_workflow_v2_service.py::test_facility_template_columns_save_clears_stale_ocr_and_downstream \
+      tests/unit/test_order_workflow_v2_service.py::test_facility_template_columns_save_is_disabled_and_keeps_downstream \
       tests/unit/test_order_workflow_v2_service.py::test_selecting_ocr_result_clears_downstream_sheet \
       tests/unit/test_order_workflow_v2_service.py::test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1_context \
       tests/unit/test_order_workflow_v2_service.py::test_workflow_v2_does_not_use_order_lines_as_sheet_source \
