@@ -410,6 +410,29 @@ def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
         assert row.blockers_json == []
 
 
+def test_ensure_ocr_prerequisites_blocks_when_weekly_menu_base_sheet_missing(monkeypatch) -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    monkeypatch.setattr(
+        order_workflow_v2_service,
+        "_hakodate_weekly_menu_base_sheet_error",
+        lambda _order_id: "monthly_menu_object_missing",
+    )
+
+    workflow, error = order_workflow_v2_service.ensure_ocr_prerequisites(order_id)
+
+    assert error == "monthly_menu_object_missing"
+    assert workflow is not None
+    assert workflow["state"] == "ocr_blocked"
+    assert workflow["blockers"] == ["monthly_menu_object_missing"]
+
+
 def test_select_ocr_result_requires_confirmed_context() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 

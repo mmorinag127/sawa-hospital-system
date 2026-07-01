@@ -335,6 +335,65 @@ def test_ingest_upload_creates_order_and_blocks_duplicate(monkeypatch):
     assert enqueued_uploaded_pdf_ids == ["UPL-1"]
 
 
+def test_ingest_upload_persists_split_pdf_total_page_count(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    client = TestClient(app)
+    saved_files = [
+        ManualUploadSavedFile(
+            message_id="upload:sha256:page-1:split:group:1of2",
+            pdf_uri="gs://bucket/page-1.pdf",
+            content_sha256="sha-page-1",
+            original_filename="order__page-01-of-02.pdf",
+            received_at=ingest_api._parse_optional_datetime(None),
+            page_number=1,
+            total_pages=2,
+            split_group_id="group",
+        ),
+        ManualUploadSavedFile(
+            message_id="upload:sha256:page-2:split:group:2of2",
+            pdf_uri="gs://bucket/page-2.pdf",
+            content_sha256="sha-page-2",
+            original_filename="order__page-02-of-02.pdf",
+            received_at=ingest_api._parse_optional_datetime(None),
+            page_number=2,
+            total_pages=2,
+            split_group_id="group",
+        ),
+    ]
+    observed_page_counts: list[int | None] = []
+
+    def fake_create_uploaded_pdf_from_upload(**kwargs):
+        observed_page_counts.append(kwargs.get("page_count"))
+        return (
+            {
+                "id": f"UPL-{len(observed_page_counts)}",
+                "message_id": kwargs["saved"].message_id,
+                "status": "pending",
+                "current_stage": "uploaded",
+            },
+            False,
+        )
+
+    monkeypatch.setattr(ingest_api, "save_uploaded_pdf", lambda **kwargs: saved_files)
+    monkeypatch.setattr(ingest_api, "create_uploaded_pdf_from_upload", fake_create_uploaded_pdf_from_upload)
+    monkeypatch.setattr(ingest_api, "create_ingest_job", lambda payload, force=False: (payload["message_id"], True))
+    monkeypatch.setattr(ingest_api, "enqueue_uploaded_pdf_async", lambda uploaded_pdf_id: None)
+    monkeypatch.setattr(ingest_api, "_find_latest_order_id_by_message_id", lambda message_id: None)
+
+    res = client.post(
+        "/ingest/upload",
+        files={"pdf_file": ("order.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n", "application/pdf")},
+        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
+        headers=_basic_header("operator", "secret"),
+    )
+
+    assert res.status_code == 202
+    assert observed_page_counts == [2, 2]
+    assert res.json()["count"] == 2
+
+
 def test_ingest_upload_exposes_existing_order_preview_for_facility_week_match(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("OPERATOR_USER", "operator")

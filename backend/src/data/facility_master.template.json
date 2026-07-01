@@ -584,61 +584,61 @@
             "index": 3,
             "source_index": 4,
             "role": "quantity",
-            "header": "花",
+            "header": "常食2F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "2F",
-            "delivery_header": "常食 花"
+            "delivery_header": "常食2F"
           },
           {
             "index": 4,
             "source_index": 5,
             "role": "quantity",
-            "header": "月",
+            "header": "常食3F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "3F",
-            "delivery_header": "常食 月"
+            "delivery_header": "常食3F"
           },
           {
             "index": 5,
             "source_index": 6,
             "role": "quantity",
-            "header": "花",
+            "header": "軟菜2F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "2F",
-            "delivery_header": "軟菜 花"
+            "delivery_header": "軟菜2F"
           },
           {
             "index": 6,
             "source_index": 7,
             "role": "quantity",
-            "header": "月",
+            "header": "軟菜3F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "3F",
-            "delivery_header": "軟菜 月"
+            "delivery_header": "軟菜3F"
           },
           {
             "index": 7,
             "source_index": 8,
             "role": "quantity",
-            "header": "花",
+            "header": "ミキサー2F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "2F",
-            "delivery_header": "ミキサー 花"
+            "delivery_header": "ミキサー2F"
           },
           {
             "index": 8,
             "source_index": 9,
             "role": "quantity",
-            "header": "月",
+            "header": "ミキサー3F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "3F",
-            "delivery_header": "ミキサー 月"
+            "delivery_header": "ミキサー3F"
           },
           {
             "index": 9,
@@ -646,13 +646,13 @@
             "role": "quantity",
             "name": "qty.no_fish_regular_2f",
             "name_locked": true,
-            "header": "花",
+            "header": "魚禁2F",
             "header_super_group": "禁食、魚",
             "header_group": "常食",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "禁食、魚 常食 花"
+            "delivery_header": "禁食、魚 2F"
           },
           {
             "index": 10,
@@ -660,13 +660,13 @@
             "role": "quantity",
             "name": "qty.no_fish_regular_3f",
             "name_locked": true,
-            "header": "月",
+            "header": "魚禁3F",
             "header_super_group": "禁食、魚",
             "header_group": "常食",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "禁食、魚 常食 月"
+            "delivery_header": "禁食、魚 3F"
           },
           {
             "index": 11,
@@ -674,13 +674,13 @@
             "role": "quantity",
             "name": "qty.no_fish_soft_2f",
             "name_locked": true,
-            "header": "花",
+            "header": "魚禁2F",
             "header_super_group": "禁食、魚",
             "header_group": "軟菜",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "禁食、魚 軟菜 花"
+            "delivery_header": "禁食、魚 2F"
           },
           {
             "index": 12,
@@ -688,13 +688,13 @@
             "role": "quantity",
             "name": "qty.no_fish_soft_3f",
             "name_locked": true,
-            "header": "月",
+            "header": "魚禁3F",
             "header_super_group": "禁食、魚",
             "header_group": "軟菜",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "禁食、魚 軟菜 月"
+            "delivery_header": "禁食、魚 3F"
           },
           {
             "index": 13,
@@ -702,13 +702,13 @@
             "role": "quantity",
             "name": "qty.no_fish_mixer_2f",
             "name_locked": true,
-            "header": "花",
+            "header": "魚禁2F",
             "header_super_group": "禁食、魚",
             "header_group": "ミキサー",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "2F",
-            "delivery_header": "禁食、魚 ミキサー 花"
+            "delivery_header": "禁食、魚 2F"
           },
           {
             "index": 14,
@@ -716,13 +716,13 @@
             "role": "quantity",
             "name": "qty.no_fish_mixer_3f",
             "name_locked": true,
-            "header": "月",
+            "header": "魚禁3F",
             "header_super_group": "禁食、魚",
             "header_group": "ミキサー",
             "diet_type": "no_fish",
             "diet_type_locked": true,
             "area_id": "3F",
-            "delivery_header": "禁食、魚 ミキサー 月"
+            "delivery_header": "禁食、魚 3F"
           },
           {
             "index": 15,
@@ -1799,7 +1799,7 @@
             "index": 3,
             "source_index": 4,
             "role": "quantity",
-            "header": "花",
+            "header": "常食2F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "2F"
@@ -1808,7 +1808,7 @@
             "index": 4,
             "source_index": 5,
             "role": "quantity",
-            "header": "月",
+            "header": "常食3F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "3F"
@@ -1817,7 +1817,7 @@
             "index": 5,
             "source_index": 6,
             "role": "quantity",
-            "header": "花",
+            "header": "軟菜2F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "2F"
@@ -1826,7 +1826,7 @@
             "index": 6,
             "source_index": 7,
             "role": "quantity",
-            "header": "月",
+            "header": "軟菜3F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "3F"
@@ -1835,7 +1835,7 @@
             "index": 7,
             "source_index": 8,
             "role": "quantity",
-            "header": "花",
+            "header": "ミキサー2F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "2F",
@@ -1845,7 +1845,7 @@
             "index": 8,
             "source_index": 9,
             "role": "quantity",
-            "header": "月",
+            "header": "ミキサー3F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "3F",
@@ -1975,7 +1975,7 @@
             "index": 3,
             "source_index": 4,
             "role": "quantity",
-            "header": "花",
+            "header": "常食2F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "2F",
@@ -1985,7 +1985,7 @@
             "index": 4,
             "source_index": 5,
             "role": "quantity",
-            "header": "月",
+            "header": "常食3F",
             "header_group": "常食",
             "diet_type": "regular",
             "area_id": "3F"
@@ -1994,7 +1994,7 @@
             "index": 5,
             "source_index": 6,
             "role": "quantity",
-            "header": "花",
+            "header": "軟菜2F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "2F"
@@ -2003,7 +2003,7 @@
             "index": 6,
             "source_index": 7,
             "role": "quantity",
-            "header": "月",
+            "header": "軟菜3F",
             "header_group": "軟菜",
             "diet_type": "soft",
             "area_id": "3F"
@@ -2012,7 +2012,7 @@
             "index": 7,
             "source_index": 8,
             "role": "quantity",
-            "header": "花",
+            "header": "ミキサー2F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "2F",
@@ -2022,7 +2022,7 @@
             "index": 8,
             "source_index": 9,
             "role": "quantity",
-            "header": "月",
+            "header": "ミキサー3F",
             "header_group": "ミキサー",
             "diet_type": "mixer",
             "area_id": "3F",

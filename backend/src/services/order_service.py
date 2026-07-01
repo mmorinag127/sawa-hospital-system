@@ -29936,6 +29936,10 @@ def _build_hakodate_weekly_menu_base_sheet(order_id: str) -> tuple[dict[str, Any
     if field_error:
         return None, field_error
     header = _sheet_header_from_template(fields, template)
+    menu_diagnostics = _build_monthly_menu_diagnostics(week_id=week_id, facility_id=facility_id)
+    menu_blocker = _canonical_menu_diagnostic_code(menu_diagnostics)
+    if menu_blocker:
+        return None, menu_blocker
     entries = _build_position_menu_entries_safe(week_id, facility_id)
     if not entries:
         return None, "menu_entries_missing"

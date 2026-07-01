@@ -210,7 +210,7 @@ def _handle_uploaded_pdf_bytes(
             skip_ocr=skip_ocr_value,
             source_kind="manual_upload",
             force=force_value,
-            page_count=1,
+            page_count=saved.total_pages or saved.page_number or 1,
         )
         job_id, enqueued = create_ingest_job(payload, force=force_value)
         if not duplicate_blocked:
