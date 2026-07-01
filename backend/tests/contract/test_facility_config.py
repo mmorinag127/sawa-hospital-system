@@ -181,7 +181,7 @@ def test_facility_master_save_materializes_facility_config(monkeypatch, tmp_path
     with session_scope() as session:
         config = session.get(FacilityConfig, "FAC99993")
         assert config is not None
-        assert config.config_json["facility_template_source"] == "db_override"
+        assert "facility_template_source" not in config.config_json
 
 
 def test_facility_get_does_not_create_template_version_from_resolved_config():
@@ -196,7 +196,7 @@ def test_facility_get_does_not_create_template_version_from_resolved_config():
 
     assert fetched.status_code == 200
     resolved = fetched.json().get("resolved_config") or {}
-    assert resolved.get("fax_template_id") == "fax_layout_regular_forbidden_v1"
+    assert "fax_template_id" not in resolved
     assert resolved.get("facility_template_version") is None
     with session_scope() as session:
         versions = (
@@ -525,23 +525,32 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
         "日付",
         "区分",
         "メニュー",
-        "花",
-        "月",
-        "花",
-        "月",
-        "花",
-        "月",
-        "花",
-        "月",
-        "花",
-        "月",
-        "花",
-        "月",
+        "常食2F",
+        "常食3F",
+        "軟菜2F",
+        "軟菜3F",
+        "ミキサー2F",
+        "ミキサー3F",
+        "魚禁2F",
+        "魚禁3F",
+        "魚禁2F",
+        "魚禁3F",
+        "魚禁2F",
+        "魚禁3F",
         "備考",
     ]
     assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    assert [
-        column.get("header_super_group")
-        for column in columns
-        if column.get("role") == "quantity" and column.get("diet_type") == "no_fish"
-    ] == ["禁食、魚"] * 6
+    assert [column.get("name") for column in columns[3:15]] == [
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "qty.no_fish_regular_2f",
+        "qty.no_fish_regular_3f",
+        "qty.no_fish_soft_2f",
+        "qty.no_fish_soft_3f",
+        "qty.no_fish_mixer_2f",
+        "qty.no_fish_mixer_3f",
+    ]

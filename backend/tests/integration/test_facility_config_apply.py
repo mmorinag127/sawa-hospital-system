@@ -65,8 +65,6 @@ def test_fac00002_template_columns_preserve_area_schema_without_duplicates():
     assert "qty.mixer_x" not in fields
     assert "qty.change_1_x" in fields
     assert "qty.change_2_x" in fields
-    assert ((template.get("postprocess") or {}).get("qty_ocr_engine")) == "disabled"
-    assert ((template.get("postprocess") or {}).get("qty_max_value")) == 50
 
 
 def test_fac00010_uses_floor_2f3f_fax_template():
@@ -176,7 +174,7 @@ def test_master_facility_template_wins_over_stale_db_config_without_operator_sou
         assert facility_service.update_config("FAC00016", previous_config)
 
 
-def test_operator_facility_template_source_allows_explicit_override():
+def test_operator_facility_template_source_is_ignored_in_favor_of_master():
     _clear_facilities()
     facility_service.list_facilities()
     previous_config = facility_service.get_facility_config("FAC00016") or {}
@@ -210,6 +208,10 @@ def test_operator_facility_template_source_allows_explicit_override():
             "menu",
             "qty.regular_x",
             "qty.diabetes_x",
+            "qty.no_meat_x",
+            "qty.no_fish_x",
+            "qty.change_1_x",
+            "qty.change_2_x",
             "remarks",
         ]
     finally:
@@ -358,7 +360,7 @@ def test_hakodate_assignment_accepts_legacy_unknown_spacer_target_field():
     assert "hakodate_target_field_unmapped" not in assignment["blockers"]
 
 
-def test_explicit_quantity_diet_type_wins_over_unrecognized_japanese_header():
+def test_explicit_quantity_diet_type_db_override_is_not_used_as_facility_template():
     _clear_facilities()
     fac = facility_service.create_facility("Diet Override Facility", [])
     config = {
@@ -392,23 +394,12 @@ def test_explicit_quantity_diet_type_wins_over_unrecognized_japanese_header():
     template = resolved.get("fax_template") or {}
     columns = template.get("columns") or []
 
-    assert columns[3]["header"] == "糖尿"
-    assert columns[3]["diet_type"] == "diabetes"
-    assert columns[3]["name"] == "qty.diabetes_x"
-    assert columns[4]["header"] == "ゴマアレルギー"
-    assert columns[4]["diet_type"] == "sesame_allergy"
-    assert columns[4]["name"] == "qty.sesame_allergy_x"
-    assert template.get("main_ocr_row_fields") == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-        "qty.diabetes_x",
-        "qty.sesame_allergy_x",
-        "remarks",
-    ]
+    assert not any(column.get("header") == "糖尿" for column in columns)
+    assert not any(column.get("diet_type") == "sesame_allergy" for column in columns)
+    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
 
 
-def test_placeholder_and_custom_quantity_tokens_are_preserved():
+def test_placeholder_and_custom_quantity_tokens_db_override_is_stripped():
     _clear_facilities()
     fac = facility_service.create_facility("Custom Quantity Facility", [])
     config = {
@@ -432,14 +423,8 @@ def test_placeholder_and_custom_quantity_tokens_are_preserved():
     template = resolved.get("fax_template") or {}
     columns = template.get("columns") or []
 
-    assert columns[3]["diet_type"] == "placeholder"
-    assert columns[3]["name"] == "qty.placeholder_x"
-    assert columns[4]["diet_type"] == "tea"
-    assert columns[4]["name"] == "qty.tea_x"
-    assert columns[5]["diet_type"] == "business"
-    assert columns[5]["name"] == "qty.business_x"
-    assert columns[6]["diet_type"] == "pregnancy"
-    assert columns[6]["name"] == "qty.pregnancy_x"
+    assert not any(column.get("diet_type") in {"placeholder", "tea", "business", "pregnancy"} for column in columns)
+    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
 
 
 def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
@@ -448,7 +433,6 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
     assert resolved is not None
     assert resolved.get("fax_template_id") == "藍TERRACE"
     assert resolved.get("fax_template_ids") == ["藍TERRACE"]
-    assert ((resolved.get("fax_template") or {}).get("postprocess") or {}).get("qty_ocr_engine") == "disabled"
     template = resolved.get("fax_template") or {}
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
@@ -724,7 +708,7 @@ def test_fac00004_exposes_daycare_staff_and_no_fried_columns():
     assert columns[3]["diet_type"] == "regular"
 
 
-def test_columns_authoritative_override_ignores_stale_explicit_main_ocr_row_fields():
+def test_columns_authoritative_db_override_does_not_replace_master_fields():
     _clear_facilities()
     fac = facility_service.create_facility("Columns Authoritative Aux Facility", [])
     config = {
@@ -756,12 +740,16 @@ def test_columns_authoritative_override_ignores_stale_explicit_main_ocr_row_fiel
     assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
-        "aux.col_2",
         "menu",
-        "aux.col_4",
-        "qty.regular_x",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
         "remarks",
     ]
+    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
 
 
 def test_fac00014_exposes_staff_sesame_and_change_columns():
@@ -973,7 +961,7 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
         assert headers[3:5] == ["常食", "糖尿"]
 
 
-def test_fac00014_update_config_sanitizes_stale_override_before_storage():
+def test_fac00014_update_config_strips_stale_override_before_storage():
     _clear_facilities()
     facility_service.list_facilities()
     stale_config = {
@@ -996,8 +984,11 @@ def test_fac00014_update_config_sanitizes_stale_override_before_storage():
 
     stored = facility_service.get_facility_config("FAC00014")
     assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    columns = override.get("columns") or []
+    assert "fax_template_override" not in stored
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+    columns = template.get("columns") or []
     assert [columns[idx]["role"] for idx in range(3)] == ["date", "daypart", "menu_name"]
     assert columns[3]["diet_type"] == "regular"
     assert columns[4]["diet_type"] == "staff"
@@ -1005,7 +996,7 @@ def test_fac00014_update_config_sanitizes_stale_override_before_storage():
     assert columns[6]["diet_type"] == "no_fish"
     assert columns[7]["diet_type"] == "sesame_allergy"
     assert columns[8]["diet_type"] == "change_1"
-    assert override.get("main_ocr_row_fields") == [
+    assert template.get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
         "menu",
@@ -1129,11 +1120,11 @@ def test_generic_update_config_preserves_master_authoritative_columns_for_fac000
 
     stored = facility_service.get_facility_config("FAC00014")
     assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    assert override.get("columns_authoritative") is True
-    assert override.get("grid_line_scale_horizontal") == 18
-    stored_columns = override.get("columns") or []
-    assert [column.get("diet_type") for column in stored_columns if column.get("role") == "quantity"] == [
+    assert "fax_template_override" not in stored
+    resolved = config_service.get_facility_config("FAC00014")
+    assert resolved is not None
+    resolved_columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    assert [column.get("diet_type") for column in resolved_columns if column.get("role") == "quantity"] == [
         "regular",
         "staff",
         "no_meat",
@@ -1141,7 +1132,7 @@ def test_generic_update_config_preserves_master_authoritative_columns_for_fac000
         "sesame_allergy",
         "change_1",
     ]
-    assert not any(str(column.get("diet_type") or "").strip() == "forbidden_other" for column in stored_columns)
+    assert not any(str(column.get("diet_type") or "").strip() == "forbidden_other" for column in resolved_columns)
 
 
 def test_generic_update_config_keeps_order_authored_authoritative_columns():
@@ -1277,7 +1268,7 @@ def test_fac00016_non_authoritative_stale_subset_reconciles_to_master_columns():
         assert facility_service.update_config("FAC00016", previous_config)
 
 
-def test_authoritative_facility_override_is_not_reconciled_back_to_master():
+def test_authoritative_facility_override_is_stripped_from_generic_facility_config():
     _clear_facilities()
     fac = facility_service.create_facility("Authoritative Override Facility", [])
     authored_config = {
@@ -1298,40 +1289,12 @@ def test_authoritative_facility_override_is_not_reconciled_back_to_master():
 
     stored = facility_service.get_facility_config(fac["id"])
     assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    assert override.get("columns_authoritative") is True
-    stored_columns = override.get("columns") or []
-    assert [column.get("role") for column in stored_columns] == [
-        "date",
-        "daypart",
-        "menu_name",
-        "quantity",
-        "quantity",
-        "note",
-    ]
-    assert [column.get("header") for column in stored_columns[3:5]] == ["常食特別", "職員特別"]
-    assert override.get("main_ocr_row_fields") == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-        "qty.regular_x",
-        "qty.staff_x",
-        "remarks",
-    ]
+    assert "fax_template_override" not in stored
 
     resolved = config_service.get_facility_config(fac["id"])
     assert resolved is not None
     template = resolved.get("fax_template") or {}
-    assert template.get("main_ocr_row_fields") == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-        "qty.regular_x",
-        "qty.staff_x",
-        "remarks",
-    ]
-    resolved_columns = template.get("columns") or []
-    assert [column.get("header") for column in resolved_columns[3:5]] == ["常食特別", "職員特別"]
+    assert "qty.staff_x" not in (template.get("main_ocr_row_fields") or [])
 
 
 def test_reconcile_fax_template_override_prefers_authoritative_master_placeholder_columns():
@@ -1407,7 +1370,7 @@ def test_reconcile_fax_template_override_prefers_authoritative_master_placeholde
     ]
 
 
-def test_fac00004_update_config_preserves_current_columns_without_aux_storage():
+def test_fac00004_update_config_strips_template_override_and_uses_master_columns():
     _clear_facilities()
     facility_service.list_facilities()
     stale_config = {
@@ -1431,8 +1394,10 @@ def test_fac00004_update_config_preserves_current_columns_without_aux_storage():
 
     stored = facility_service.get_facility_config("FAC00004")
     assert stored is not None
-    override = stored.get("fax_template_override") or {}
-    columns = override.get("columns") or []
+    assert "fax_template_override" not in stored
+    resolved = config_service.get_facility_config("FAC00004")
+    assert resolved is not None
+    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
     assert [columns[idx]["role"] for idx in range(5)] == ["date", "daypart", "menu_name", "quantity", "quantity"]
     assert columns[3]["diet_type"] == "regular"
     assert columns[4]["diet_type"] == "daycare"
@@ -1441,7 +1406,7 @@ def test_fac00004_update_config_preserves_current_columns_without_aux_storage():
     assert columns[7]["diet_type"] == "no_fish"
     assert columns[8]["diet_type"] == "no_fried"
     assert columns[9]["diet_type"] == "change_1"
-    assert override.get("main_ocr_row_fields") == [
+    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
         "date_mmdd",
         "daypart",
         "menu",
