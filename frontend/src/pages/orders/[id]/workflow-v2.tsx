@@ -1156,7 +1156,9 @@ const anomalyReviewWithoutWarning = (
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = useMemo(() => {
-    if (typeof router.query.id === "string" && router.query.id) return router.query.id;
+    if (typeof router.query.id === "string" && router.query.id && router.query.id !== "[id]") {
+      return router.query.id;
+    }
     if (typeof window !== "undefined") {
       const fromLocation = orderIdFromWorkflowPath(window.location.pathname);
       if (fromLocation && fromLocation !== "[id]") return fromLocation;
