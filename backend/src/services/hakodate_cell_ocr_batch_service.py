@@ -1047,10 +1047,174 @@ def _draft_sheet_body_row_count(draft_sheet: dict[str, Any] | None) -> int:
     rows = draft_sheet.get("rows")
     if not isinstance(rows, list):
         return 0
+    fields = [str(field or "").strip() for field in (draft_sheet.get("fields") or [])]
+    field_index = {field: index for index, field in enumerate(fields)}
+    date_idx = field_index.get("date_mmdd", field_index.get("date"))
+    daypart_idx = field_index.get("daypart")
+    slot_idx = field_index.get("slot_index")
+    if date_idx is not None and daypart_idx is not None and slot_idx is not None:
+        physical_keys: set[tuple[str, str, str]] = set()
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            date_value = str(row[date_idx] if date_idx < len(row) else "").strip()
+            daypart_value = str(row[daypart_idx] if daypart_idx < len(row) else "").strip()
+            slot_value = str(row[slot_idx] if slot_idx < len(row) else "").strip()
+            if date_value and daypart_value and slot_value:
+                physical_keys.add((date_value, daypart_value, slot_value))
+        if physical_keys:
+            return len(physical_keys)
     return sum(1 for row in rows if isinstance(row, list))
 
 
-def _row_edges_for_draft_sheet_rows(row_edges: list[float], draft_sheet: dict[str, Any] | None) -> tuple[list[float], dict[str, Any]]:
+def _row_axis_for_draft_sheet_rows(
+    template_ys: list[int | float],
+    draft_sheet: dict[str, Any] | None,
+) -> tuple[list[float], dict[str, Any]]:
+    body_row_count = _draft_sheet_body_row_count(draft_sheet)
+    if body_row_count <= 0:
+        return [float(value) for value in template_ys], {
+            "applied": False,
+            "reason": "draft_sheet_rows_missing",
+            "row_axis_source": "template",
+            "template_row_edge_count": len(template_ys),
+        }
+    if len(template_ys) <= STEP_REVIEW_HEADER_BANDS + 1:
+        return [float(value) for value in template_ys], {
+            "applied": False,
+            "reason": "template_row_edges_too_short",
+            "row_axis_source": "template",
+            "draft_body_row_count": body_row_count,
+            "template_row_edge_count": len(template_ys),
+        }
+    current_body_row_count = len(template_ys) - 1 - STEP_REVIEW_HEADER_BANDS
+    if current_body_row_count == body_row_count:
+        return [float(value) for value in template_ys], {
+            "applied": False,
+            "reason": "draft_sheet_body_row_count_matches_template",
+            "row_axis_source": "template",
+            "draft_body_row_count": body_row_count,
+            "template_body_row_count": current_body_row_count,
+            "row_edge_count": len(template_ys),
+        }
+    header_edges = [float(value) for value in template_ys[: STEP_REVIEW_HEADER_BANDS + 1]]
+    body_top = header_edges[-1]
+    body_bottom = float(template_ys[-1])
+    if body_bottom <= body_top:
+        return [float(value) for value in template_ys], {
+            "applied": False,
+            "reason": "invalid_template_body_span",
+            "row_axis_source": "template",
+            "draft_body_row_count": body_row_count,
+            "template_body_row_count": current_body_row_count,
+            "body_top": round(float(body_top), 3),
+            "body_bottom": round(float(body_bottom), 3),
+        }
+    body_edges = np.linspace(body_top, body_bottom, body_row_count + 1, dtype=np.float64).tolist()
+    adjusted = header_edges[:-1] + [float(value) for value in body_edges]
+    return adjusted, {
+        "applied": True,
+        "reason": "draft_sheet_body_row_count",
+        "row_axis_source": "draft_sheet",
+        "draft_body_row_count": body_row_count,
+        "template_body_row_count": current_body_row_count,
+        "template_row_edge_count": len(template_ys),
+        "row_edge_count": len(adjusted),
+    }
+
+
+def _snap_draft_body_edges_to_fax_rulings(
+    *,
+    body_edges: list[float],
+    horizontal_line_mask: np.ndarray | None,
+    x0: float,
+    x1: float,
+    search_px: int = 18,
+    min_line_ratio: float = 0.18,
+) -> tuple[list[float], dict[str, Any]]:
+    if horizontal_line_mask is None or len(body_edges) < 2:
+        return body_edges, {"applied": False, "reason": "horizontal_line_mask_missing"}
+    x_start = max(0, int(round(float(x0))))
+    x_end = min(horizontal_line_mask.shape[1], int(round(float(x1))))
+    if x_end <= x_start:
+        return body_edges, {"applied": False, "reason": "invalid_table_x_span"}
+    width = max(1.0, float(x_end - x_start))
+    snapped: list[float] = []
+    hits: list[dict[str, Any]] = []
+    misses: list[dict[str, Any]] = []
+    for index, expected in enumerate(body_edges):
+        expected_y = int(round(float(expected)))
+        best_y = expected_y
+        best_ratio = 0.0
+        start_y = max(0, expected_y - int(search_px))
+        end_y = min(horizontal_line_mask.shape[0], expected_y + int(search_px) + 1)
+        for y in range(start_y, end_y):
+            row = horizontal_line_mask[y : y + 1, x_start:x_end]
+            if row.size == 0:
+                continue
+            ratio = float(row.sum() / 255.0) / width
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_y = y
+        if best_ratio >= min_line_ratio:
+            snapped.append(float(best_y))
+            hits.append(
+                {
+                    "edge_index": index,
+                    "expected_y": round(float(expected), 3),
+                    "detected_y": int(best_y),
+                    "line_ratio": round(float(best_ratio), 4),
+                }
+            )
+        else:
+            snapped.append(float(expected))
+            misses.append(
+                {
+                    "edge_index": index,
+                    "expected_y": round(float(expected), 3),
+                    "best_y": int(best_y),
+                    "best_ratio": round(float(best_ratio), 4),
+                }
+            )
+    if not all((snapped[index + 1] - snapped[index]) > 1.5 for index in range(len(snapped) - 1)):
+        return body_edges, {
+            "applied": False,
+            "reason": "snapped_edges_not_monotonic",
+            "hit_count": len(hits),
+            "miss_count": len(misses),
+            "hits": hits[:20],
+            "misses": misses[:20],
+        }
+    required_hits = max(2, len(body_edges) - 2)
+    if len(hits) < required_hits:
+        return body_edges, {
+            "applied": False,
+            "reason": "insufficient_fax_ruling_hits",
+            "hit_count": len(hits),
+            "required_hit_count": required_hits,
+            "miss_count": len(misses),
+            "hits": hits[:20],
+            "misses": misses[:20],
+        }
+    return snapped, {
+        "applied": True,
+        "reason": "fax_horizontal_rulings",
+        "hit_count": len(hits),
+        "miss_count": len(misses),
+        "search_px": int(search_px),
+        "min_line_ratio": round(float(min_line_ratio), 4),
+        "hits": hits[:20],
+        "misses": misses[:20],
+    }
+
+
+def _row_edges_for_draft_sheet_rows(
+    row_edges: list[float],
+    draft_sheet: dict[str, Any] | None,
+    *,
+    horizontal_line_mask: np.ndarray | None = None,
+    column_edges: list[float] | None = None,
+) -> tuple[list[float], dict[str, Any]]:
     body_row_count = _draft_sheet_body_row_count(draft_sheet)
     if body_row_count <= 0:
         return row_edges, {"applied": False, "reason": "draft_sheet_rows_missing"}
@@ -1075,13 +1239,26 @@ def _row_edges_for_draft_sheet_rows(row_edges: list[float], draft_sheet: dict[st
             "current_body_row_count": current_body_row_count,
         }
     body_edges = np.linspace(body_top, body_bottom, body_row_count + 1, dtype=np.float64).tolist()
+    snap_evidence: dict[str, Any] = {"applied": False, "reason": "column_edges_missing"}
+    if isinstance(column_edges, list) and len(column_edges) >= 2:
+        body_edges, snap_evidence = _snap_draft_body_edges_to_fax_rulings(
+            body_edges=[float(value) for value in body_edges],
+            horizontal_line_mask=horizontal_line_mask,
+            x0=float(column_edges[0]),
+            x1=float(column_edges[-1]),
+        )
     adjusted = header_edges[:-1] + [float(value) for value in body_edges]
     return adjusted, {
         "applied": True,
-        "reason": "draft_sheet_body_row_count",
+        "reason": (
+            "draft_sheet_body_row_count_from_fax_rulings"
+            if bool(snap_evidence.get("applied"))
+            else "draft_sheet_body_row_count_pending_target_snap"
+        ),
         "draft_body_row_count": body_row_count,
         "current_body_row_count": current_body_row_count,
         "row_edge_count": len(adjusted),
+        "snap": snap_evidence,
     }
 
 
@@ -1114,6 +1291,7 @@ def _build_preprocess_for_ocr(
         template_image=template,
         manifest_template_bbox=item["template_bbox"],
     )
+    row_axis_ys, row_axis_evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
     mark_timing("resolve_template_axes_seconds", step_t0)
     week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
     step_t0 = time.perf_counter()
@@ -1162,7 +1340,7 @@ def _build_preprocess_for_ocr(
     aligned_xs, aligned_ys, axis_evidence, _axis_match_image = _align_axes(
         rectified_fax=raw_rectified,
         template_xs=template_xs,
-        template_ys=template_ys,
+        template_ys=[int(round(float(value))) for value in row_axis_ys],
         worksheet=worksheet,
         fax_template=fax_template,
         header_axis_override=item.get("header_axis_override") if isinstance(item.get("header_axis_override"), dict) else None,
@@ -1173,13 +1351,13 @@ def _build_preprocess_for_ocr(
     row_slant_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_dewarp_not_applied"}
     row_match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
     row_source_ys = row_match.get("corrected_ys") if isinstance(row_match, dict) else None
-    if not isinstance(row_source_ys, list) or len(row_source_ys) != len(template_ys):
+    if not isinstance(row_source_ys, list) or len(row_source_ys) != len(row_axis_ys):
         row_source_ys = [float(value) for value in aligned_ys]
     step_t0 = time.perf_counter()
     dewarped_rectified, row_dewarp_evidence = dewarp_rectified_y_to_template_rows(
         raw_rectified,
         source_ys=[float(value) for value in row_source_ys],
-        template_ys=[float(value) for value in template_ys],
+        template_ys=[float(value) for value in row_axis_ys],
     )
     if row_dewarp_evidence.get("applied"):
         vertical_destructive_rejection = _reject_destructive_row_dewarp(
@@ -1201,20 +1379,20 @@ def _build_preprocess_for_ocr(
     row_slant_rectified, row_slant_dewarp_evidence = dewarp_rectified_rows_by_bounded_slant(
         dewarped_rectified,
         corrected_xs=[float(value) for value in aligned_xs],
-        template_ys=[float(value) for value in template_ys],
+        template_ys=[float(value) for value in row_axis_ys],
     )
     if row_slant_dewarp_evidence.get("applied"):
         destructive_rejection = _reject_destructive_row_dewarp(
             source_bgr=dewarped_rectified,
             candidate_bgr=row_slant_rectified,
             xs=[float(value) for value in aligned_xs],
-            ys=[float(value) for value in template_ys],
+            ys=[float(value) for value in row_axis_ys],
         )
         if destructive_rejection:
             raw_slant_rectified, raw_slant_evidence = dewarp_rectified_rows_by_bounded_slant(
                 raw_rectified,
                 corrected_xs=[float(value) for value in aligned_xs],
-                template_ys=[float(value) for value in template_ys],
+                template_ys=[float(value) for value in row_axis_ys],
             )
             if raw_slant_evidence.get("applied"):
                 row_slant_rectified = raw_slant_rectified
@@ -1252,20 +1430,20 @@ def _build_preprocess_for_ocr(
             }
     mark_timing("row_slant_dewarp_seconds", step_t0)
     working_rectified = row_slant_rectified if row_slant_dewarp_evidence.get("applied") else dewarped_rectified
-    working_ys = [float(value) for value in template_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
+    working_ys = [float(value) for value in row_axis_ys] if row_dewarp_evidence.get("applied") else [float(value) for value in aligned_ys]
     row_mesh_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_mesh_not_attempted"}
     step_t0 = time.perf_counter()
     row_mesh_rectified, row_mesh_dewarp_evidence = dewarp_rectified_rows_by_intersections(
         working_rectified,
         corrected_xs=[float(value) for value in aligned_xs],
-        template_ys=[float(value) for value in template_ys],
+        template_ys=[float(value) for value in row_axis_ys],
     )
     if row_mesh_dewarp_evidence.get("applied"):
         mesh_rejection = _reject_destructive_row_dewarp(
             source_bgr=working_rectified,
             candidate_bgr=row_mesh_rectified,
             xs=[float(value) for value in aligned_xs],
-            ys=[float(value) for value in template_ys],
+            ys=[float(value) for value in row_axis_ys],
         )
         if mesh_rejection:
             row_mesh_dewarp_evidence = {
@@ -1276,11 +1454,16 @@ def _build_preprocess_for_ocr(
             }
         else:
             working_rectified = row_mesh_rectified
-            working_ys = [float(value) for value in template_ys]
+            working_ys = [float(value) for value in row_axis_ys]
     mark_timing("row_mesh_dewarp_seconds", step_t0)
-    working_ys, draft_row_edge_evidence = _row_edges_for_draft_sheet_rows(working_ys, draft_sheet)
-    step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(working_rectified)
+    working_ys, draft_row_edge_evidence = _row_edges_for_draft_sheet_rows(
+        working_ys,
+        draft_sheet,
+        horizontal_line_mask=horizontal_line_mask,
+        column_edges=[float(value) for value in aligned_xs],
+    )
+    step_t0 = time.perf_counter()
     grid_overlay, merge_evidence = _draw_merge_aware_grid(
         worksheet=worksheet,
         rectified_fax=working_rectified,
@@ -1331,6 +1514,7 @@ def _build_preprocess_for_ocr(
             "row_dewarp": row_dewarp_evidence,
             "row_slant_dewarp": row_slant_dewarp_evidence,
             "row_mesh_dewarp": row_mesh_dewarp_evidence,
+            "row_axis": row_axis_evidence,
             "draft_sheet_row_edges": draft_row_edge_evidence,
             "quad_estimate": quad_estimate,
             "preprocess_timings": timings,

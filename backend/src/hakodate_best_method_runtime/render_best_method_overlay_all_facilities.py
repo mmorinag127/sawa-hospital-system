@@ -862,6 +862,7 @@ def build_best_method_for_manifest_item(
     row_slant_evidence = (
         axis_evidence.get("row_slant_dewarp") if isinstance(axis_evidence.get("row_slant_dewarp"), dict) else {}
     )
+    row_axis_evidence = axis_evidence.get("row_axis") if isinstance(axis_evidence.get("row_axis"), dict) else {}
     draft_row_edges_evidence = (
         axis_evidence.get("draft_sheet_row_edges")
         if isinstance(axis_evidence.get("draft_sheet_row_edges"), dict)
@@ -873,6 +874,13 @@ def build_best_method_for_manifest_item(
     )
     metrics.update(
         {
+            "row_axis_source": row_axis_evidence.get("row_axis_source"),
+            "row_axis_applied": bool(row_axis_evidence.get("applied")),
+            "row_axis_reason": row_axis_evidence.get("reason"),
+            "row_axis_draft_body_row_count": row_axis_evidence.get("draft_body_row_count"),
+            "row_axis_template_body_row_count": row_axis_evidence.get("template_body_row_count"),
+            "row_axis_row_edge_count": row_axis_evidence.get("row_edge_count"),
+            "row_axis": row_axis_evidence,
             "draft_sheet_body_row_count": draft_row_edges_evidence.get("draft_body_row_count"),
             "draft_sheet_row_edges_applied": bool(draft_row_edges_evidence.get("applied")),
             "draft_sheet_row_edges_reason": draft_row_edges_evidence.get("reason"),

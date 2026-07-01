@@ -162,6 +162,17 @@ def dewarp_rectified_y_to_template_rows(
             "reason": "row_dewarp_offsets_within_tolerance",
             "max_abs_offset": round(max_abs_offset, 3),
         }
+    source_height_quality = _row_height_outlier_evidence([float(value) for value in source.tolist()])
+    if source_height_quality.get("manual_review_required"):
+        return rectified, {
+            "applied": False,
+            "reason": "row_dewarp_source_height_outlier_rejected",
+            "source_count": len(source_ys),
+            "template_count": len(template_ys),
+            "max_abs_offset": round(max_abs_offset, 3),
+            "mean_abs_offset": round(float(np.mean(np.abs(offsets))), 3),
+            "source_height_quality": source_height_quality,
+        }
 
     height, width = rectified.shape[:2]
     output_y = np.arange(height, dtype=np.float32)
@@ -187,7 +198,7 @@ def dewarp_rectified_y_to_template_rows(
         "template_count": len(template_ys),
         "max_abs_offset": round(max_abs_offset, 3),
         "mean_abs_offset": round(float(np.mean(np.abs(offsets))), 3),
-        "source_height_quality": _row_height_outlier_evidence([float(value) for value in source.tolist()]),
+        "source_height_quality": source_height_quality,
     }
 
 

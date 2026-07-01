@@ -8,6 +8,7 @@ from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
     _accepted_header_intersection_points,
     _analysis_to_yomitoku_words,
+    _row_axis_for_draft_sheet_rows,
     _reject_destructive_row_dewarp,
     assign_yomitoku_words_to_contact_regions,
     build_cell_contact_sheet,
@@ -15,6 +16,60 @@ from src.services.hakodate_cell_ocr_batch_service import (
     sheet_value_grid_from_assignments,
     validate_cell_ocr_mapping,
 )
+
+
+def test_row_axis_for_draft_sheet_rows_replaces_fixed_template_body_count() -> None:
+    template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
+    draft_sheet = {"rows": [[{"value": ""}] for _ in range(56)]}
+
+    row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+
+    assert evidence["applied"] is True
+    assert evidence["row_axis_source"] == "draft_sheet"
+    assert evidence["draft_body_row_count"] == 56
+    assert evidence["template_body_row_count"] == 57
+    assert evidence["row_edge_count"] == 59
+    assert len(row_axis) == 59
+    assert row_axis[:3] == [10.0, 30.0, 50.0]
+    assert row_axis[-1] == 620.0
+
+
+def test_row_axis_for_draft_sheet_rows_counts_physical_fax_rows_not_diet_overrides() -> None:
+    template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
+    rows: list[list[object]] = []
+    for day in range(12, 19):
+        date_value = f"7/{day}"
+        for daypart, count in (("朝", 2), ("昼", 3), ("夕", 3)):
+            for slot in range(1, count + 1):
+                rows.append([date_value, daypart, slot, "regular", f"menu-{day}-{daypart}-{slot}"])
+    rows.extend(
+        [
+            ["7/14", "朝", 1, "soft_mixer", "soft override"],
+            ["7/14", "昼", 3, "soft_mixer", "soft override"],
+            ["7/16", "夕", 1, "soft_mixer", "soft override"],
+        ]
+    )
+    draft_sheet = {"fields": ["date_mmdd", "daypart", "slot_index", "diet_type", "menu"], "rows": rows}
+
+    row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+
+    assert evidence["applied"] is True
+    assert evidence["row_axis_source"] == "draft_sheet"
+    assert evidence["draft_body_row_count"] == 56
+    assert evidence["row_edge_count"] == 59
+    assert len(row_axis) == 59
+
+
+def test_row_axis_for_draft_sheet_rows_keeps_template_when_counts_match() -> None:
+    template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
+    draft_sheet = {"rows": [[{"value": ""}] for _ in range(57)]}
+
+    row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "draft_sheet_body_row_count_matches_template"
+    assert evidence["row_axis_source"] == "template"
+    assert row_axis == [float(value) for value in template_ys]
 
 
 def test_reject_destructive_row_dewarp_detects_added_dark_bands() -> None:
