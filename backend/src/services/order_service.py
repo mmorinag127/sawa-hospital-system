@@ -12692,22 +12692,15 @@ def _resolve_current_sheet_context_week_id(
     draft_payload: dict[str, Any] | None,
     facility_id: str | None,
 ) -> str | None:
-    canonical_order_week_id = (
+    order_week_candidate = (
         str((order_payload or {}).get("persisted_week_value") or "").strip()
         or str((order_payload or {}).get("week_value") or "").strip()
         or str((order_payload or {}).get("week") or "").strip()
         or None
     )
-    if canonical_order_week_id:
+    canonical_order_week_id = _normalize_sheet_week_value(order_week_candidate)
+    if canonical_order_week_id and "@" in canonical_order_week_id:
         return canonical_order_week_id
-
-    draft_week_id = (
-        str((draft_payload or {}).get("resolved_week_id") or "").strip()
-        or str((draft_payload or {}).get("week_id") or "").strip()
-        or None
-    )
-    if draft_week_id:
-        return draft_week_id
 
     received_at = _parse_iso_datetime_value((order_payload or {}).get("received_at")) or datetime.utcnow()
     week_resolution_lines = _load_sheet_order_lines(order_id)
@@ -12729,8 +12722,49 @@ def _resolve_current_sheet_context_week_id(
             continue
         week_resolution_lines.append({"date": item})
 
+    observed_dates = {
+        line.get("date")
+        for line in week_resolution_lines
+        if isinstance(line, dict) and isinstance(line.get("date"), date)
+    }
+    for item in sorted(observed_dates):
+        menu_backed_week = sheet_week_service.build_calendar_week_value(item)
+        menu_backed_month_id = _to_sheet_month_id(menu_backed_week)
+        order_month_id = _to_sheet_month_id(canonical_order_week_id or order_week_candidate)
+        if order_month_id and menu_backed_month_id != order_month_id:
+            continue
+        if menu_backed_week and _build_position_menu_entries_safe(menu_backed_week, facility_id):
+            return menu_backed_week
+
+    observed_week_candidates = [
+        str(sheet_week_service.build_calendar_week_value(item) or "").strip()
+        for item in sorted(observed_dates)
+    ]
+    observed_week_candidates = [item for item in observed_week_candidates if item]
+    if observed_week_candidates:
+        first_observed_week = observed_week_candidates[0]
+        if all(item == first_observed_week for item in observed_week_candidates):
+            observed_month_id = _to_sheet_month_id(first_observed_week)
+            order_month_id = _to_sheet_month_id(canonical_order_week_id or order_week_candidate)
+            if not order_month_id or observed_month_id == order_month_id:
+                return first_observed_week
+
+    draft_week_id = _normalize_sheet_week_value(
+        str((draft_payload or {}).get("resolved_week_id") or "").strip()
+        or str((draft_payload or {}).get("week_id") or "").strip()
+        or None
+    )
+    if draft_week_id and "@" in draft_week_id:
+        _draft_month_id, draft_start, draft_end = _parse_sheet_week_value(draft_week_id)
+        if (
+            isinstance(draft_start, date)
+            and isinstance(draft_end, date)
+            and all(draft_start <= item <= draft_end for item in observed_dates)
+        ):
+            return draft_week_id
+
     return _resolve_sheet_week_id(
-        current_week_id=None,
+        current_week_id=canonical_order_week_id,
         received_at=received_at,
         order_lines=week_resolution_lines,
         ocr_payload=None,
