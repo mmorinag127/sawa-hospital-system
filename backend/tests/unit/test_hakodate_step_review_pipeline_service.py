@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from openpyxl import Workbook
 
 from src.services.hakodate_step_review_pipeline_service import (
@@ -904,6 +905,28 @@ def test_step_review_target_regions_use_draft_sheet_row_count_when_available() -
     last_row_regions = [region for region in regions if int(region["worksheet_row"]) == 73]
     assert [region["sheet_cell"] for region in last_row_regions] == ["E73", "F73", "G73", "H73", "I73", "J73", "K73"]
     assert {region["logical_targets"][0]["menu_name"] for region in last_row_regions} == {"月次メニュー63"}
+
+
+def test_step_review_target_regions_block_unresolved_draft_sheet_map() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["D11"] = "テンプレート行"
+    row_edges = [float(index * 10) for index in range(12)]
+    column_edges = [float(index * 10) for index in range(8)]
+    draft_sheet = {
+        "fields": ["date_mmdd", "menu"],
+        "rows": [["07/12", "月次メニュー1"]],
+    }
+
+    with pytest.raises(ValueError, match="hakodate_draft_sheet_row_map_unresolved"):
+        _post_menu_target_regions(
+            worksheet=worksheet,
+            column_edges=column_edges,
+            row_edges=row_edges,
+            draft_sheet=draft_sheet,
+        )
 
 
 def test_step_review_target_regions_skip_blank_menu_rows() -> None:

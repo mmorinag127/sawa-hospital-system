@@ -3380,6 +3380,8 @@ def _post_menu_target_regions(
     # logic decides how totals, notes, and helper columns aggregate.
     target_cols = list(range(menu_col + 1, col_count + 1))
     draft_row_map = _step_review_draft_sheet_row_map(draft_sheet, row_count=len(row_edges) - 1)
+    if draft_sheet is not None and not draft_row_map:
+        raise ValueError("hakodate_draft_sheet_row_map_unresolved")
     physical_row_map = draft_row_map or _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}

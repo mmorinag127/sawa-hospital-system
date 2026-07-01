@@ -794,6 +794,9 @@ def build_best_method_for_manifest_item(
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
     order_id = str(item.get("order_id") or "")
+    draft_rows = draft_sheet.get("rows") if isinstance(draft_sheet, dict) else None
+    if not isinstance(draft_rows, list) or not any(isinstance(row, list) for row in draft_rows):
+        raise ValueError("hakodate_draft_sheet_rows_missing")
     total_t0 = time.perf_counter()
     preprocess_t0 = time.perf_counter()
     pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width, draft_sheet=draft_sheet)
