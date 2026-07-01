@@ -859,11 +859,22 @@ def build_best_method_for_manifest_item(
     row_slant_evidence = (
         axis_evidence.get("row_slant_dewarp") if isinstance(axis_evidence.get("row_slant_dewarp"), dict) else {}
     )
+    draft_row_edges_evidence = (
+        axis_evidence.get("draft_sheet_row_edges")
+        if isinstance(axis_evidence.get("draft_sheet_row_edges"), dict)
+        else {}
+    )
+    target_evidence = axis_evidence.get("target") if isinstance(axis_evidence.get("target"), dict) else {}
     preprocess_timings = (
         axis_evidence.get("preprocess_timings") if isinstance(axis_evidence.get("preprocess_timings"), dict) else {}
     )
     metrics.update(
         {
+            "draft_sheet_body_row_count": draft_row_edges_evidence.get("draft_body_row_count"),
+            "draft_sheet_row_edges_applied": bool(draft_row_edges_evidence.get("applied")),
+            "draft_sheet_row_edges_reason": draft_row_edges_evidence.get("reason"),
+            "draft_sheet_row_edges": draft_row_edges_evidence,
+            "target_row_source": target_evidence.get("row_source"),
             "row_dewarp_applied": bool(row_dewarp_evidence.get("applied")),
             "row_dewarp_reason": row_dewarp_evidence.get("reason"),
             "row_dewarp_method": row_dewarp_evidence.get("method"),
