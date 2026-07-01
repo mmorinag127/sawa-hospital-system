@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
-from app.rois import _load_template_config_from_registry, _load_template_registry, default_template_collection
+from app.rois import default_template_collection
 
 
 def _resolve_local_template_path(path: Path) -> Path:
@@ -24,19 +24,7 @@ def _resolve_local_template_path(path: Path) -> Path:
 
 
 def _template_sources_from_registry(template_ids: list[str] | None) -> list[tuple[str, dict]]:
-    sources: list[tuple[str, dict]] = []
-    if template_ids:
-        ids = [template_id for template_id in template_ids if template_id]
-        for template_id in ids:
-            cfg = _load_template_config_from_registry(template_id)
-            if isinstance(cfg, dict):
-                sources.append((template_id, cfg))
-        return sources
-    for template_id, cfg in _load_template_registry().items():
-        if not isinstance(cfg, dict):
-            continue
-        sources.append((str(template_id), dict(cfg)))
-    return sources
+    return []
 
 
 def _template_sources(db, collection: str, template_ids: list[str] | None) -> list[tuple[str, dict]]:
@@ -55,11 +43,6 @@ def _template_sources(db, collection: str, template_ids: list[str] | None) -> li
         cfg = doc.to_dict() or {}
         template_id = str(getattr(doc, "id", "") or cfg.get("id") or "").strip()
         if not template_id or template_id in seen:
-            continue
-        sources.append((template_id, cfg))
-        seen.add(template_id)
-    for template_id, cfg in _template_sources_from_registry(template_ids):
-        if template_id in seen:
             continue
         sources.append((template_id, cfg))
         seen.add(template_id)

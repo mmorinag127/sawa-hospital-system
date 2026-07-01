@@ -3034,10 +3034,6 @@ def _resolve_payload_template(payload: dict[str, Any], template: dict[str, Any] 
         return resolved
     if isinstance(resolved, dict) and resolved.get("template_id") == template_id:
         return resolved
-    registry = config_service.load_fax_template_registry()
-    matched = registry.get(template_id)
-    if isinstance(matched, dict) and matched:
-        return matched
     return resolved
 
 

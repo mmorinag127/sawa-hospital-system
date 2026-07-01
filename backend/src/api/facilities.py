@@ -22,33 +22,6 @@ class FacilityFaxTemplateUpdateBody(BaseModel):
     fax_template_ids: list[str] | None = None
 
 
-def _template_option_payload(template_id: str, template: dict) -> dict:
-    columns = template.get("columns")
-    columns = columns if isinstance(columns, list) else []
-    quantity_headers = [
-        str(column.get("header") or column.get("name") or "").strip()
-        for column in columns
-        if isinstance(column, dict) and str(column.get("role") or "").strip() == "quantity"
-    ]
-    return {
-        "template_id": template_id,
-        "label": str(template.get("description") or template.get("template_family") or template_id),
-        "description": template.get("description"),
-        "template_family": template.get("template_family"),
-        "template_version": template.get("template_version"),
-        "quantity_headers": [item for item in quantity_headers if item],
-    }
-
-
-def _normalize_template_ids(primary_template_id: str, template_ids: list[str] | None) -> list[str]:
-    normalized: list[str] = []
-    for item in [primary_template_id, *(template_ids or [])]:
-        token = str(item or "").strip()
-        if token and token not in normalized:
-            normalized.append(token)
-    return normalized
-
-
 _TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
 
 
@@ -77,12 +50,7 @@ def list_facilities():
 
 @router.get("/fax-template-options", dependencies=[Depends(require_role("operator"))])
 def list_fax_template_options():
-    registry = config_service.load_fax_template_registry()
-    templates = [
-        _template_option_payload(template_id, template)
-        for template_id, template in sorted(registry.items())
-        if isinstance(template_id, str) and isinstance(template, dict)
-    ]
+    templates: list[dict] = []
     return {"templates": templates}
 
 
@@ -132,38 +100,13 @@ def update_facility_fax_template(facility_id: str, body: FacilityFaxTemplateUpda
     facility = facility_service.get_facility(facility_id)
     if not facility:
         raise HTTPException(status_code=404, detail="not found")
-    registry = config_service.load_fax_template_registry()
-    primary_template_id = str(body.fax_template_id or "").strip()
-    if not primary_template_id:
-        raise HTTPException(status_code=400, detail="fax_template_id_required")
-    template_ids = _normalize_template_ids(primary_template_id, body.fax_template_ids)
-    missing_template_ids = [template_id for template_id in template_ids if template_id not in registry]
-    if missing_template_ids:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "fax_template_not_found",
-                "template_ids": missing_template_ids,
-            },
-        )
-
-    with session_scope() as session:
-        result, error = facility_template_version_service.save_template_registration_for_facility(
-            session,
-            facility_id=facility_id,
-            fax_template_id=primary_template_id,
-            fax_template_ids=template_ids,
-            actor="facility-fax-template-registration",
-        )
-    if error == "fax_template_not_found":
-        raise HTTPException(status_code=400, detail=result or {"error": error})
-    if error == "facility_not_found":
-        raise HTTPException(status_code=404, detail="not found")
-    if error == "validation_error":
-        raise HTTPException(status_code=400, detail=result or {"error": error})
-    if error:
-        raise HTTPException(status_code=400, detail=error)
-    return result
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "legacy_fax_template_registry_disabled",
+            "message": "施設テンプレートはfacility_master.template.jsonを正本とし、旧YAML registryによる登録は使用できません。",
+        },
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_role("admin"))])

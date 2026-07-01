@@ -605,61 +605,7 @@ def _infer_fax_template_id_from_facility(facility: dict) -> str | None:
     explicit = str(facility.get("fax_template_id") or "").strip()
     if explicit:
         return explicit
-
-    facility_text = " ".join(
-        [
-            str(facility.get("facility_name") or ""),
-            *[str(item or "") for item in (facility.get("aliases") or [])],
-        ]
-    )
-    if "ふれあい" in facility_text:
-        return "fax_layout_regular_staff_daycare_other_forbidden_v1"
-    if "池袋病院" in facility_text:
-        return "fax_layout_soft_packaging_forbidden_v1"
-
-    columns = (
-        ((facility.get("fax_template_override") or {}).get("columns") or [])
-        or ((facility.get("invoice_template") or {}).get("columns") or [])
-    )
-    headers: list[str] = []
-    diet_types: set[str] = set()
-    area_ids: set[str] = set()
-    for column in columns:
-        if not isinstance(column, dict):
-            continue
-        header = str(column.get("header") or column.get("name") or "").strip()
-        if header:
-            headers.append(header)
-        diet_type = str(column.get("diet_type") or "").strip()
-        if diet_type:
-            diet_types.add(diet_type)
-        area_id = str(column.get("area_id") or "").strip()
-        if area_id:
-            area_ids.add(area_id.lower())
-
-    header_blob = " ".join(headers)
-    if "糖尿" in header_blob or "diabetes" in diet_types or "糖尿" in diet_types:
-        return "fax_layout_regular_diabetes_v1"
-    if "池袋病院" in facility_text or (
-        "軟菜" in header_blob
-        and ("袋分け" in header_blob or "袋分" in header_blob)
-        and "常食" not in header_blob
-    ):
-        return "fax_layout_soft_packaging_forbidden_v1"
-    if "ふれあい" in facility_text or "通所" in header_blob or "その他" in header_blob:
-        return "fax_layout_regular_staff_daycare_other_forbidden_v1"
-    if {"2f", "3f"} & area_ids or "2F" in header_blob or "3F" in header_blob:
-        return "fax_layout_floor_2f3f_v1"
-    if (
-        ("regular_bag" in diet_types or "袋分け" in header_blob or "袋分" in header_blob)
-        and {"soft", "mixer"} & diet_types
-    ):
-        return "fax_layout_regular_soft_mixer_forbidden_v1"
-    if {"staff", "daycare"} & diet_types or "職員" in header_blob or "通所" in header_blob:
-        return "fax_layout_regular_staff_daycare_v1"
-    if {"no_meat", "no_fish", "change_1", "change_2"} & diet_types or "禁食" in header_blob:
-        return "fax_layout_regular_forbidden_v1"
-    return "fax_layout_regular_forbidden_v1"
+    return None
 
 
 def _parse_menu_date(value: object) -> date | None:

@@ -751,15 +751,7 @@ def save_template_registration_for_facility(
         return None, "facility_id_required"
     if not primary_template_id:
         return None, "fax_template_id_required"
-    registry = config_service.load_fax_template_registry()
-    template_ids: list[str] = []
-    for item in [primary_template_id, *(fax_template_ids or [])]:
-        token = str(item or "").strip()
-        if token and token not in template_ids:
-            template_ids.append(token)
-    missing_template_ids = [template_id for template_id in template_ids if template_id not in registry]
-    if missing_template_ids:
-        return {"error": "fax_template_not_found", "template_ids": missing_template_ids}, "fax_template_not_found"
+    return {"error": "legacy_fax_template_registry_disabled"}, "legacy_fax_template_registry_disabled"
 
     facility = facility_service.ensure_facility_materialized(session, normalized_facility_id)
     if facility is None:

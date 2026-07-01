@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 
@@ -17,48 +15,10 @@ def default_template_collection() -> str:
 
 def load_template_config(db, template_id: str, collection: str | None = None) -> dict:
     target_collection = collection or default_template_collection()
-    cfg = _load_template_config_from_registry(template_id)
-    if cfg:
-        return cfg
     doc = db.collection(target_collection).document(template_id).get()
     if not doc.exists:
         raise RuntimeError(f"Template not found: {template_id}")
     cfg = doc.to_dict() or {}
-    cfg["id"] = template_id
-    return cfg
-
-
-def _default_registry_path() -> Path:
-    local_path = Path(__file__).resolve().parents[1] / "src" / "data" / "fax_templates.yaml"
-    if local_path.exists():
-        return local_path
-    return Path(__file__).resolve().parents[2] / "backend" / "src" / "data" / "fax_templates.yaml"
-
-
-@lru_cache(maxsize=1)
-def _load_template_registry() -> dict[str, Any]:
-    path = Path(os.getenv("OCR_TEMPLATE_REGISTRY_PATH") or _default_registry_path())
-    if not path.exists():
-        return {}
-    try:
-        import yaml
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("pyyaml is required for OCR template registry") from exc
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    templates = data.get("templates") if isinstance(data, dict) else None
-    if isinstance(templates, dict):
-        return templates
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
-def _load_template_config_from_registry(template_id: str) -> dict[str, Any] | None:
-    registry = _load_template_registry()
-    raw = registry.get(template_id)
-    if not isinstance(raw, dict):
-        return None
-    cfg = dict(raw)
     cfg["id"] = template_id
     return cfg
 

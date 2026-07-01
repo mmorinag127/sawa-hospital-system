@@ -54,8 +54,7 @@ class TemplateCollectionConfigTest(unittest.TestCase):
         os.environ["OCR_TEMPLATE_COLLECTION"] = "templates-stg"
         db = _DB()
 
-        with patch("app.rois._load_template_config_from_registry", return_value=None):
-            cfg = load_template_config(db, "tpl-1")
+        cfg = load_template_config(db, "tpl-1")
 
         self.assertEqual(cfg["id"], "tpl-1")
         self.assertEqual(db.collections, ["templates-stg"])

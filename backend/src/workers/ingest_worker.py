@@ -899,14 +899,6 @@ def _process_ingest_inline(**kwargs):
                             reason=auto_match.get("reason"),
                             score=auto_match.get("score"),
                         )
-                if not payload.facility_hint:
-                    facilities = master.get("facilities", [])
-                    if len(facilities) == 1:
-                        fallback = facilities[0]
-                        payload.facility_hint = fallback.get("facility_id")
-                        if not payload.facility_name:
-                            payload.facility_name = fallback.get("facility_name")
-                        logger.info("Facility fallback applied", facility_id=payload.facility_hint)
                 if not payload.week_hint and payload.date_hints:
                     payload.week_hint = month_id_from_dates(payload.date_hints, payload.received_at, policy)
                 if payload.facility_hint:

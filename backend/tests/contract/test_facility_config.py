@@ -248,16 +248,12 @@ def test_facility_template_registration_materializes_master_facility():
         json={"fax_template_id": "fax_layout_regular_forbidden_v1"},
     )
 
-    assert update.status_code == 200
-    payload = update.json()
-    assert payload["config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
-    assert payload["resolved_config"]["facility_id"] == "FAC00002"
-    assert payload["template_version"]["id"]
+    assert update.status_code == 410
+    assert update.json()["detail"]["error"] == "legacy_fax_template_registry_disabled"
     with session_scope() as session:
         facility = session.get(Facility, "FAC00002")
-        assert facility is not None
-        assert facility.name == "シルバーホームなごみ"
-        assert session.query(FacilityTemplateVersion).count() == 1
+        assert facility is None
+        assert session.query(FacilityTemplateVersion).count() == 0
 
 
 def test_active_template_version_import_does_not_sync_master_for_missing_facility():
@@ -285,20 +281,14 @@ def test_facility_scoped_fax_template_registration_contract():
 
     options = client.get("/facilities/fax-template-options")
     assert options.status_code == 200
-    option_ids = {item["template_id"] for item in options.json().get("templates", [])}
-    assert "fax_layout_regular_forbidden_v1" in option_ids
+    assert options.json().get("templates") == []
 
     update = client.put(
         f"/facilities/{facility_id}/fax-template",
         json={"fax_template_id": "fax_layout_regular_forbidden_v1"},
     )
-    assert update.status_code == 200
-    update_payload = update.json()
-    assert update_payload["config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
-    assert update_payload["config"]["fax_template_ids"] == ["fax_layout_regular_forbidden_v1"]
-    assert update_payload["resolved_config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
-    assert update_payload["template_version"]["id"]
-    assert update_payload["resolved_config"]["facility_template_version_id"] == update_payload["template_version"]["id"]
+    assert update.status_code == 410
+    assert update.json()["detail"]["error"] == "legacy_fax_template_registry_disabled"
 
     direct_template_update = client.put(
         f"/facilities/{facility_id}/config",
@@ -313,15 +303,14 @@ def test_facility_scoped_fax_template_registration_contract():
     fetched = client.get(f"/facilities/{facility_id}")
     assert fetched.status_code == 200
     payload = fetched.json()
-    assert payload["config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
-    assert payload["resolved_config"]["fax_template_id"] == "fax_layout_regular_forbidden_v1"
+    assert payload["config"] == {}
 
     missing = client.put(
         f"/facilities/{facility_id}/fax-template",
         json={"fax_template_id": "not_registered_template"},
     )
-    assert missing.status_code == 400
-    assert missing.json()["detail"]["error"] == "fax_template_not_found"
+    assert missing.status_code == 410
+    assert missing.json()["detail"]["error"] == "legacy_fax_template_registry_disabled"
 
 
 def test_fac00005_facility_contract_exposes_official_current_sheet_schema():

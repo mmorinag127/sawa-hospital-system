@@ -256,22 +256,6 @@ def position_fallback_allowed_for_facility(
     current_facility: str | None,
     payload: dict[str, Any] | None,
 ) -> bool:
-    current_value = str(current_facility or "").strip()
-    if not current_value:
-        return False
-    normalized_candidates = _normalize_facility_candidates(payload)
-    if not normalized_candidates:
-        return True
-    top_candidate = normalized_candidates[0]
-    top_value = str(top_candidate.get("value") or "").strip()
-    if not top_value or top_value == current_value:
-        return True
-    top_score = float(top_candidate.get("score") or 0.0)
-    second_score = float(normalized_candidates[1].get("score") or 0.0) if len(normalized_candidates) > 1 else None
-    if top_score < 0.85:
-        return True
-    if second_score is not None and (top_score - second_score) < 0.15:
-        return True
     return False
 
 

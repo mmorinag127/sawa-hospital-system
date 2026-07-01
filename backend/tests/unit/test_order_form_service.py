@@ -794,7 +794,7 @@ def test_build_order_form_excel_supports_all_fax_families(tmp_path, monkeypatch,
     assert str(workbook[workbook.sheetnames[0]]["B1"].value).startswith("発注書作成: ")
 
 
-def test_infer_fax_template_id_from_facility_falls_back_from_invoice_columns() -> None:
+def test_infer_fax_template_id_from_facility_requires_explicit_template_id() -> None:
     assert (
         order_form_service._infer_fax_template_id_from_facility(
             {
@@ -807,7 +807,7 @@ def test_infer_fax_template_id_from_facility_falls_back_from_invoice_columns() -
                 },
             }
         )
-        == "fax_layout_regular_forbidden_v1"
+        is None
     )
     assert (
         order_form_service._infer_fax_template_id_from_facility(
@@ -822,7 +822,13 @@ def test_infer_fax_template_id_from_facility_falls_back_from_invoice_columns() -
                 },
             }
         )
-        == "fax_layout_floor_2f3f_v1"
+        is None
+    )
+    assert (
+        order_form_service._infer_fax_template_id_from_facility(
+            {"facility_name": "佐古", "fax_template_id": "山城"}
+        )
+        == "山城"
     )
 
 

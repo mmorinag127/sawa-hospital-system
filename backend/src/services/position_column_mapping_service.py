@@ -1149,64 +1149,7 @@ def augment_payload_with_position_fallback(
     *,
     template_id: str | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return payload
-    artifacts = build_position_fallback_artifacts(
-        payload,
-        template,
-        template_id=template_id,
-    )
-    if not isinstance(artifacts, dict):
-        if not _payload_has_position_fallback_resolution(payload):
-            return payload
-        if _position_fallback_matches_template_contract(payload, template):
-            return payload
-        augmented = copy.deepcopy(payload)
-        augmented["column_mapping_resolution"] = _invalidated_position_fallback_resolution(payload)
-        augmented["column_mapping_candidates"] = []
-        augmented["quantity_subgrid_passes"] = None
-        return augmented
-
-    augmented = copy.deepcopy(payload)
-    existing_template_resolution = augmented.get("template_resolution")
-    existing_column_mapping_resolution = augmented.get("column_mapping_resolution")
-    replace_position_fallback_fields = bool(
-        isinstance(existing_column_mapping_resolution, dict)
-        and str(existing_column_mapping_resolution.get("decision_source") or "").strip() == _POSITION_FALLBACK_SOURCE
-    )
-    if (
-        not isinstance(existing_template_resolution, dict)
-        or (
-            isinstance(existing_template_resolution, dict)
-            and str(existing_template_resolution.get("decision_source") or "").strip() == _POSITION_FALLBACK_SOURCE
-        )
-    ):
-        augmented["template_resolution"] = copy.deepcopy(artifacts["template_resolution"])
-    if not isinstance(existing_column_mapping_resolution, dict) or replace_position_fallback_fields:
-        augmented["column_mapping_resolution"] = copy.deepcopy(artifacts["column_mapping_resolution"])
-    if not isinstance(augmented.get("column_mapping_candidates"), list) or replace_position_fallback_fields:
-        augmented["column_mapping_candidates"] = copy.deepcopy(artifacts["column_mapping_candidates"])
-    if (
-        (not isinstance(augmented.get("table_box"), list) or replace_position_fallback_fields)
-        and isinstance(artifacts.get("table_box"), list)
-    ):
-        augmented["table_box"] = copy.deepcopy(artifacts["table_box"])
-    if (
-        (not isinstance(augmented.get("grid_column_edges"), list) or replace_position_fallback_fields)
-        and isinstance(artifacts.get("grid_column_edges"), list)
-    ):
-        augmented["grid_column_edges"] = copy.deepcopy(artifacts["grid_column_edges"])
-    if (
-        (not isinstance(augmented.get("grid_row_edges"), list) or replace_position_fallback_fields)
-        and isinstance(artifacts.get("grid_row_edges"), list)
-    ):
-        augmented["grid_row_edges"] = copy.deepcopy(artifacts["grid_row_edges"])
-    if (
-        (not isinstance(augmented.get("quantity_subgrid_passes"), list) or replace_position_fallback_fields)
-        and isinstance(artifacts.get("quantity_subgrid_passes"), list)
-    ):
-        augmented["quantity_subgrid_passes"] = copy.deepcopy(artifacts["quantity_subgrid_passes"])
-    return augmented
+    return payload
 
 
 def candidate_resolution_uses_position_fallback(candidate_resolution: dict[str, Any] | None) -> bool:
@@ -1248,66 +1191,15 @@ def payload_uses_ready_position_fallback(
     *,
     template: dict[str, Any] | None = None,
 ) -> bool:
-    if not _position_fallback_already_ready(payload, template=template):
-        return False
-    resolution = payload.get("template_resolution") if isinstance(payload, dict) else None
-    if not isinstance(resolution, dict):
-        return True
-    resolved_template_id = str(
-        resolution.get("resolved_template_id") or resolution.get("template_id") or ""
-    ).strip()
-    blocked = bool(
-        resolution.get("blocked")
-        or any(str(item or "").strip() for item in (resolution.get("blocked_reasons") or []))
-    )
-    if blocked and not resolved_template_id:
-        return False
-    return True
+    return False
 
 
 def payload_uses_partial_position_fallback(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    resolution = payload.get("column_mapping_resolution")
-    if not isinstance(resolution, dict):
-        return False
-    if str(resolution.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
-        return False
-    if not bool(resolution.get("partial_quantity_mapping")):
-        return False
-    return bool(
-        str(resolution.get("resolved_value") or resolution.get("resolved_column_mapping_id") or "").strip()
-    )
+    return False
 
 
 def payload_position_fallback_requires_choice(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    resolution = payload.get("column_mapping_resolution")
-    if not isinstance(resolution, dict):
-        return False
-    if str(resolution.get("decision_source") or "").strip() != _POSITION_FALLBACK_SOURCE:
-        return False
-    blocked_reasons = {
-        str(item or "").strip()
-        for item in (resolution.get("blocked_reasons") or [])
-        if str(item or "").strip()
-    }
-    resolved_value = str(
-        resolution.get("resolved_value")
-        or resolution.get("resolved_column_mapping_id")
-        or ""
-    ).strip() or None
-    candidates = _normalize_position_candidates(
-        resolution.get("candidates")
-        if isinstance(resolution.get("candidates"), list)
-        else payload.get("column_mapping_candidates")
-    )
-    return _position_fallback_choice_required(
-        resolved_value=resolved_value,
-        candidates=candidates,
-        explicit=bool(resolution.get("requires_user_choice")) or "column_mapping_choice_required" in blocked_reasons,
-    )
+    return False
 
 
 def stable_mapping_signature(value: object) -> str:

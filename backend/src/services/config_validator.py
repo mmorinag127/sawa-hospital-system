@@ -511,7 +511,6 @@ def validate_facility_config(config: Any) -> dict:
     _validate_bag_types(config_dict.get("bag_types"), errors, warnings)
     return {"errors": errors, "warnings": warnings}
 
-
 def validate_facility_master(master: Any) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
@@ -608,29 +607,4 @@ def validate_facility_master(master: Any) -> dict:
         _validate_label_profile(fac.get("label_profile_override"), errors)
         _validate_invoice_template(fac.get("invoice_template"), errors, warnings)
         _validate_bag_types(fac.get("bag_types"), errors, warnings)
-    return {"errors": errors, "warnings": warnings}
-
-
-def validate_fax_template_registry(registry: Any) -> dict:
-    errors: list[str] = []
-    warnings: list[str] = []
-    registry_dict = _ensure_dict(registry, "fax_template_registry", errors)
-    templates = registry_dict.get("templates")
-    if templates is None:
-        templates = registry_dict
-    templates_dict = _ensure_dict(templates, "fax_template_registry.templates", errors)
-    for key, template in templates_dict.items():
-        if not isinstance(template, dict):
-            errors.append(f"fax_template_registry.templates.{key} must be an object")
-            continue
-        if not template.get("template_id"):
-            errors.append(f"fax_template_registry.templates.{key}.template_id is required")
-        _validate_template_match(template.get("match"), f"fax_template_registry.templates.{key}.match", errors)
-        _validate_template_warp(template.get("warp"), f"fax_template_registry.templates.{key}.warp", errors)
-        _validate_template_rois(template.get("rois"), f"fax_template_registry.templates.{key}.rois", errors)
-        _validate_template_postprocess(
-            template.get("postprocess"),
-            f"fax_template_registry.templates.{key}.postprocess",
-            errors,
-        )
     return {"errors": errors, "warnings": warnings}

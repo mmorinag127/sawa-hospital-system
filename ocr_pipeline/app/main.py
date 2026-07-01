@@ -487,6 +487,8 @@ def _run_template_classification(
             warped_alt = preferred_warped_alt
             diagnostics = preferred_diagnostics
             classification_mode = "preferred_primary"
+    if matched_template_id is None and prefer_requested:
+        raise RuntimeError(f"requested template did not match: {requested_template_id}")
     if matched_template_id is None:
         matched_template_id, warped_match, warped_ocr, warped_alt, diagnostics = choose_template_and_warp(
             db,
@@ -495,8 +497,6 @@ def _run_template_classification(
             img_alt_bgr=img_alt_bgr,
             template_ids=template_ids,
         )
-        if prefer_requested:
-            classification_mode = "preferred_fallback"
     confidence = _classification_score(diagnostics, matched_template_id)
     classification = {
         "requested_template_id": requested_template_id,

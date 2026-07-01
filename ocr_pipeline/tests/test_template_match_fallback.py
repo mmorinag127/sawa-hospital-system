@@ -33,25 +33,19 @@ class _EmptyDB:
 
 
 class TemplateMatchFallbackTest(unittest.TestCase):
-    def test_choose_template_uses_local_registry_when_firestore_is_empty(self):
+    def test_choose_template_does_not_use_local_registry_when_firestore_is_empty(self):
         root = Path(__file__).resolve().parents[1]
         image_path = root / "src" / "data" / "templates" / "fax_layout_floor_2f3f_v1.png"
         image = cv2.imread(str(image_path))
         self.assertIsNotNone(image)
 
-        matched_template_id, warped_match, warped_ocr, warped_alt, diagnostics = choose_template_and_warp(
-            _EmptyDB(),
-            image,
-            image,
-            template_ids=["fax_layout_floor_2f3f_v1"],
-        )
-
-        self.assertEqual(matched_template_id, "fax_layout_floor_2f3f_v1")
-        self.assertIsNotNone(warped_match)
-        self.assertIsNotNone(warped_ocr)
-        self.assertIsNone(warped_alt)
-        candidates = diagnostics.get("candidates") or []
-        self.assertTrue(any(candidate.get("status") == "matched" for candidate in candidates))
+        with self.assertRaisesRegex(RuntimeError, "No templates registered"):
+            choose_template_and_warp(
+                _EmptyDB(),
+                image,
+                image,
+                template_ids=["fax_layout_floor_2f3f_v1"],
+            )
 
 
 if __name__ == "__main__":

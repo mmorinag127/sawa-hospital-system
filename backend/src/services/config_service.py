@@ -18,9 +18,6 @@ FACILITY_MASTER_PATH = Path(
     os.getenv("FACILITY_MASTER_PATH", DATA_DIR / "facility_master.template.json")
 )
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
-FAX_TEMPLATE_REGISTRY_PATH = Path(
-    os.getenv("FAX_TEMPLATE_REGISTRY_PATH", DATA_DIR / "fax_templates.yaml")
-)
 
 _NAME_TRANSLATION = str.maketrans(
     "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ",
@@ -82,40 +79,6 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _load_yaml(path: Path) -> dict:
-    try:
-        import yaml
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("pyyaml is required for fax template registry") from exc
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-
-def _default_fax_template_id_for_facility(
-    facility_id: str | None,
-    registry: dict[str, Any],
-) -> str | None:
-    if not facility_id or not isinstance(registry, dict) or not registry:
-        return None
-    normalized = re.sub(r"[^a-z0-9]+", "", str(facility_id).lower())
-    if not normalized:
-        return None
-    matcher = re.compile(rf"^fax_{re.escape(normalized)}(?:_v(\d+))?$", re.IGNORECASE)
-    candidates: list[tuple[int, str]] = []
-    for template_id in registry.keys():
-        key = str(template_id or "").strip()
-        if not key:
-            continue
-        hit = matcher.match(key)
-        if not hit:
-            continue
-        version = int(hit.group(1) or 0)
-        candidates.append((version, key))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return candidates[0][1]
-
-
 def _normalize_fax_template_ids(value: Any) -> list[str]:
     if value is None:
         return []
@@ -141,23 +104,9 @@ def load_ingest_policy() -> dict:
     return _load_json(INGEST_POLICY_PATH)
 
 
-@lru_cache(maxsize=1)
-def load_fax_template_registry() -> dict:
-    if not FAX_TEMPLATE_REGISTRY_PATH.exists():
-        return {}
-    data = _load_yaml(FAX_TEMPLATE_REGISTRY_PATH)
-    templates = data.get("templates") if isinstance(data, dict) else None
-    if isinstance(templates, dict):
-        return templates
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
 def reload_configs() -> None:
     load_facility_master.cache_clear()
     load_ingest_policy.cache_clear()
-    load_fax_template_registry.cache_clear()
 
 
 def _merge_template(base: Optional[dict], override: Optional[dict]) -> dict:
@@ -1221,21 +1170,13 @@ def _build_facility_config(
     master = load_facility_master()
     fax_template_override = facility.get("fax_template_override")
     fax_template = None
-    registry = load_fax_template_registry()
     template_ids = _normalize_fax_template_ids(facility.get("fax_template_ids"))
     template_id = selected_template_id if isinstance(selected_template_id, str) else facility.get("fax_template_id")
     if isinstance(template_id, str):
         template_id = template_id.strip() or None
-    if not template_id:
-        template_id = _default_fax_template_id_for_facility(facility_id, registry)
     if template_id and template_id not in template_ids:
         template_ids.insert(0, template_id)
-    if not template_id and template_ids:
-        template_id = template_ids[0]
-    if template_id:
-        fax_template = registry.get(template_id)
-    if not fax_template:
-        fax_template = facility.get("fax_template")
+    fax_template = facility.get("fax_template")
     fax_template = _merge_template(master.get("fax_template_base"), fax_template)
     fax_template = _merge_template(fax_template, fax_template_override)
     fax_template = _normalize_fax_template_columns_schema(fax_template)

@@ -177,13 +177,6 @@ def _resolve_payload_template(
         return resolved
     if resolved.get("template_id") == template_id:
         return resolved
-    try:
-        registry = config_service.load_fax_template_registry()
-    except Exception:
-        return resolved
-    matched = registry.get(template_id)
-    if isinstance(matched, dict) and matched:
-        return matched
     return resolved
 
 

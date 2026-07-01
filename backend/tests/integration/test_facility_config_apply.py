@@ -492,13 +492,6 @@ def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
         "qty.no_meat_x",
         "qty.no_fish_x",
     ]
-    registry = config_service.load_fax_template_registry()
-    assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_ocr_engine"] == "disabled"
-    assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_ocr_engine"] == "disabled"
-    assert registry["fax_layout_regular_staff_daycare_v1"]["postprocess"]["qty_max_value"] == 50
-    assert registry["fax_layout_regular_soft_mixer_forbidden_v1"]["postprocess"]["qty_max_value"] == 50
-
-
 def test_fac00012_preserves_placeholder_spacer_and_source_indexes_from_master():
     config_service.reload_configs()
     resolved = config_service.get_facility_config("FAC00012")
@@ -1608,35 +1601,6 @@ def test_fac00014_15_16_expose_custom_quantity_columns():
         "qty.change_2_x",
         "remarks",
     ]
-
-
-def test_layout_templates_qty_regex_match_digit_cells():
-    config_service.reload_configs()
-    registry = config_service.load_fax_template_registry()
-    for facility_id in (
-        "FAC00001",
-        "FAC00002",
-        "FAC00003",
-        "FAC00006",
-        "FAC00007",
-        "FAC00008",
-        "FAC00009",
-        "FAC00010",
-        "FAC00011",
-        "FAC00012",
-        "FAC00013",
-        "FAC00014",
-        "FAC00015",
-        "FAC00016",
-    ):
-        resolved = config_service.get_facility_config(facility_id)
-        assert resolved is not None
-        template_ids = [resolved.get("fax_template_id")] + list(resolved.get("fax_template_ids") or [])
-        for template_id in {template_id for template_id in template_ids if template_id}:
-            template = registry.get(template_id) or {}
-            pattern = ((template or {}).get("postprocess") or {}).get("qty_regex")
-            assert pattern
-            assert re.compile(pattern).match("23"), template_id
 
 
 def test_fac00003_and_fac00013_use_explicit_layout_templates():

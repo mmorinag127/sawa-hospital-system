@@ -3,9 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from src.services import config_service
-
-
 def _read_float_env(name: str, default: float) -> float:
     raw = str(os.environ.get(name, "") or "").strip()
     if not raw:
@@ -108,30 +105,6 @@ def resolve_effective_grid_metadata(
     if not candidate_ids:
         return None
 
-    registry = config_service.load_fax_template_registry()
-    if not isinstance(registry, dict) or not registry:
-        return None
-
-    for template_id in candidate_ids:
-        template = registry.get(template_id)
-        if not isinstance(template, dict):
-            continue
-        table_box = _normalize_grid_table_box(
-            template.get("grid_table_box") or template.get("table_box")
-        )
-        column_edges = _normalize_grid_edges(template.get("grid_column_edges")) or _synthesize_grid_column_edges(
-            table_box,
-            template,
-        )
-        row_edges = _normalize_grid_edges(template.get("grid_row_edges"))
-        if table_box and column_edges:
-            return {
-                "source": "template_registry",
-                "template_id": template_id,
-                "table_box": table_box,
-                "grid_column_edges": column_edges,
-                "grid_row_edges": row_edges,
-            }
     return None
 
 

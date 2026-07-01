@@ -446,16 +446,7 @@ def _load_facility_config_with_master_fallback(
         logger.warning(log_context, facility_id=normalized_facility_id, error=str(exc))
     if isinstance(facility_config, dict):
         return facility_config
-    master = config_service.load_facility_master()
-    fallback = next(
-        (
-            fac
-            for fac in master.get("facilities", [])
-            if fac.get("facility_id") == normalized_facility_id
-        ),
-        None,
-    )
-    return fallback if isinstance(fallback, dict) else None
+    return None
 
 
 def _materialize_facility_template_for_template_id(
@@ -465,13 +456,21 @@ def _materialize_facility_template_for_template_id(
     if not isinstance(facility_config, dict):
         return None
     normalized_template_id = str(template_id or "").strip() or None
-    if not normalized_template_id:
-        template = facility_config.get("fax_template")
-        return dict(template) if isinstance(template, dict) else None
-    registry = config_service.load_fax_template_registry()
-    registry_template = registry.get(normalized_template_id) if isinstance(registry, dict) else None
+    configured_template_ids = {
+        str(item or "").strip()
+        for item in (facility_config.get("fax_template_ids") or [])
+        if str(item or "").strip()
+    }
+    configured_template_id = str(facility_config.get("fax_template_id") or "").strip()
+    if configured_template_id:
+        configured_template_ids.add(configured_template_id)
+    if normalized_template_id and configured_template_ids and normalized_template_id not in configured_template_ids:
+        return None
+    template = facility_config.get("fax_template")
+    if not isinstance(template, dict):
+        return None
     master = config_service.load_facility_master()
-    fax_template = config_service._merge_template(master.get("fax_template_base"), registry_template)
+    fax_template = config_service._merge_template(master.get("fax_template_base"), template)
     fax_template = config_service._merge_template(
         fax_template,
         facility_config.get("fax_template_override"),
@@ -20292,13 +20291,6 @@ def get_ocr_output(
     parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
     parsed = _attach_facility_candidates(parsed)
     output_template = facility_template if isinstance(facility_template, dict) else None
-    if not output_template and isinstance(parsed, dict):
-        template_id = str(parsed.get("template_id") or "").strip()
-        if template_id:
-            registry = config_service.load_fax_template_registry()
-            resolved_template = registry.get(template_id)
-            if isinstance(resolved_template, dict):
-                output_template = dict(resolved_template)
     if isinstance(parsed, dict) and isinstance(output_template, dict):
         if allow_legacy_fallback and candidate_resolution_service.position_fallback_allowed_for_facility(
             current_facility=facility_id,
@@ -21051,11 +21043,6 @@ def get_ocr_pages(
             fac_config = None
         if fac_config:
             template = fac_config.get("fax_template") or {}
-    if not template:
-        template_id = parsed.get("template_id")
-        if isinstance(template_id, str) and template_id:
-            registry = config_service.load_fax_template_registry()
-            template = registry.get(template_id) or {}
     if isinstance(template, dict):
         table_box, table_units, grid_column_edges, grid_row_edges = _resolve_ocr_pages_grid_metadata(
             template=template,
@@ -23651,13 +23638,6 @@ def _resolve_payload_sheet_template(
         return resolved
     if resolved.get("template_id") == template_id:
         return resolved
-    try:
-        registry = config_service.load_fax_template_registry()
-    except Exception:
-        return resolved
-    matched = registry.get(template_id)
-    if isinstance(matched, dict) and matched:
-        return matched
     return resolved
 
 
@@ -30444,10 +30424,6 @@ def detect_order_grid(
         parsed = _load_order_ocr_cache(order_id)
         if not parsed and message_id:
             parsed = _load_order_ocr_cache(message_id)
-        template_id = parsed.get("template_id") if isinstance(parsed, dict) else None
-        if isinstance(template_id, str) and template_id:
-            registry = config_service.load_fax_template_registry()
-            template = registry.get(template_id) or {}
     if not template:
         master = config_service.load_facility_master()
         template = master.get("fax_template_base") or {}
