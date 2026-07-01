@@ -60,6 +60,7 @@ from src.services import (
     daily_output_override_service,
     week_candidate_service,
 )
+from src.services import hakodate_physical_menu_row_service
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services import ocr_llm_review_service, ocr_sheet_revision_service
 from src.services import ocr_revision_store
@@ -21385,14 +21386,7 @@ def _build_rows_from_menu_entries(
             for col_idx in slot_label_columns:
                 if 0 <= col_idx < len(values):
                     values[col_idx] = slot_label
-        row_id = "__".join(
-            [
-                menu_date.isoformat() if isinstance(menu_date, date) else "",
-                str(daypart or ""),
-                str(entry.get("slot_index") if entry.get("slot_index") is not None else idx),
-                str(idx),
-            ]
-        )
+        row_id = hakodate_physical_menu_row_service.physical_row_id_from_entry(entry, idx)
         rows.append(
             {
                 "row_id": row_id,
@@ -29998,6 +29992,10 @@ def _build_hakodate_weekly_menu_base_sheet(order_id: str) -> tuple[dict[str, Any
     ]
     if not rows:
         return None, "menu_entries_missing"
+    physical_row_ids = hakodate_physical_menu_row_service.physical_row_ids_from_entries(entries)
+    physical_row_count = len(physical_row_ids)
+    if physical_row_count <= 0:
+        return None, "physical_menu_rows_unresolved"
     return {
         "order_id": order_id,
         "facility_id": facility_id,
@@ -30011,6 +30009,8 @@ def _build_hakodate_weekly_menu_base_sheet(order_id: str) -> tuple[dict[str, Any
             for idx, item in enumerate(row_items)
             if isinstance(item, dict) and isinstance(item.get("values"), list)
         ][: len(rows)],
+        "physical_menu_row_ids": physical_row_ids,
+        "physical_menu_row_count": physical_row_count,
         "source": f"hakodate_{source}_template",
         "warnings": [],
         "blockers": [],

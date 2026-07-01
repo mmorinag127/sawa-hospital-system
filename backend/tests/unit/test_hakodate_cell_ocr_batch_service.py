@@ -20,13 +20,14 @@ from src.services.hakodate_cell_ocr_batch_service import (
 
 def test_row_axis_for_draft_sheet_rows_replaces_fixed_template_body_count() -> None:
     template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
-    draft_sheet = {"rows": [[{"value": ""}] for _ in range(56)]}
+    draft_sheet = {"rows": [[{"value": ""}] for _ in range(63)], "physical_menu_row_count": 56}
 
     row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
 
     assert evidence["applied"] is True
     assert evidence["row_axis_source"] == "draft_sheet"
     assert evidence["draft_body_row_count"] == 56
+    assert evidence["draft_body_row_count_source"] == "physical_menu_row_count"
     assert evidence["template_body_row_count"] == 57
     assert evidence["row_edge_count"] == 59
     assert len(row_axis) == 59
@@ -49,13 +50,23 @@ def test_row_axis_for_draft_sheet_rows_counts_physical_fax_rows_not_diet_overrid
             ["7/16", "夕", 1, "soft_mixer", "soft override"],
         ]
     )
-    draft_sheet = {"fields": ["date_mmdd", "daypart", "slot_index", "diet_type", "menu"], "rows": rows}
+    physical_row_ids = []
+    for day in range(12, 19):
+        for daypart, count in (("朝", 2), ("昼", 3), ("夕", 3)):
+            for slot in range(1, count + 1):
+                physical_row_ids.append(f"2026-07-{day:02d}__{daypart}__{slot}")
+    draft_sheet = {
+        "fields": ["date_mmdd", "daypart", "slot_index", "diet_type", "menu"],
+        "rows": rows,
+        "physical_menu_row_ids": physical_row_ids,
+    }
 
     row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
 
     assert evidence["applied"] is True
     assert evidence["row_axis_source"] == "draft_sheet"
     assert evidence["draft_body_row_count"] == 56
+    assert evidence["draft_body_row_count_source"] == "physical_menu_row_ids"
     assert evidence["row_edge_count"] == 59
     assert len(row_axis) == 59
 
@@ -83,26 +94,44 @@ def test_row_axis_for_draft_sheet_rows_counts_physical_rows_from_row_ids() -> No
         rows.append([date_value, daypart, "soft mixer override"])
         row_ids.append(f"{date_value}__{daypart}__{slot}__{row_index}")
         row_index += 1
-    draft_sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": rows, "row_ids": row_ids}
+    draft_sheet = {
+        "fields": ["date_mmdd", "daypart", "menu"],
+        "rows": rows,
+        "row_ids": row_ids,
+        "physical_menu_row_count": 56,
+    }
 
     row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
 
     assert evidence["applied"] is True
     assert evidence["row_axis_source"] == "draft_sheet"
     assert evidence["draft_body_row_count"] == 56
+    assert evidence["draft_body_row_count_source"] == "physical_menu_row_count"
     assert evidence["row_edge_count"] == 59
     assert len(row_axis) == 59
 
 
 def test_row_axis_for_draft_sheet_rows_keeps_template_when_counts_match() -> None:
     template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
-    draft_sheet = {"rows": [[{"value": ""}] for _ in range(57)]}
+    draft_sheet = {"rows": [[{"value": ""}] for _ in range(57)], "physical_menu_row_count": 57}
 
     row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
 
     assert evidence["applied"] is False
     assert evidence["reason"] == "draft_sheet_body_row_count_matches_template"
     assert evidence["row_axis_source"] == "template"
+    assert row_axis == [float(value) for value in template_ys]
+
+
+def test_row_axis_for_draft_sheet_rows_blocks_when_physical_rows_unresolved() -> None:
+    template_ys = [10.0, 30.0, 50.0] + np.linspace(50.0, 620.0, 58, dtype=np.float64).tolist()[1:]
+    draft_sheet = {"rows": [[{"value": ""}] for _ in range(63)]}
+
+    row_axis, evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "physical_menu_rows_unresolved"
+    assert evidence["row_axis_source"] == "blocked"
     assert row_axis == [float(value) for value in template_ys]
 
 

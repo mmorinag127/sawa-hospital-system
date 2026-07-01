@@ -16,7 +16,7 @@ import numpy as np
 from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import config_service, hakodate_assignment_service
+from src.services import config_service, hakodate_assignment_service, hakodate_physical_menu_row_service
 from src.services.storage_service import load_bytes_from_uri
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
@@ -1042,42 +1042,13 @@ def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) ->
 
 
 def _draft_sheet_body_row_count(draft_sheet: dict[str, Any] | None) -> int:
-    if not isinstance(draft_sheet, dict):
-        return 0
-    rows = draft_sheet.get("rows")
-    if not isinstance(rows, list):
-        return 0
-    row_ids = [str(row_id or "").strip() for row_id in (draft_sheet.get("row_ids") or [])]
-    row_id_keys: set[tuple[str, str, str]] = set()
-    for row_id in row_ids:
-        parts = row_id.split("__")
-        if len(parts) < 3:
-            continue
-        date_value = parts[0].strip()
-        daypart_value = parts[1].strip()
-        slot_value = parts[2].strip()
-        if date_value and daypart_value and slot_value:
-            row_id_keys.add((date_value, daypart_value, slot_value))
-    if row_id_keys:
-        return len(row_id_keys)
-    fields = [str(field or "").strip() for field in (draft_sheet.get("fields") or [])]
-    field_index = {field: index for index, field in enumerate(fields)}
-    date_idx = field_index.get("date_mmdd", field_index.get("date"))
-    daypart_idx = field_index.get("daypart")
-    slot_idx = field_index.get("slot_index")
-    if date_idx is not None and daypart_idx is not None and slot_idx is not None:
-        physical_keys: set[tuple[str, str, str]] = set()
-        for row in rows:
-            if not isinstance(row, list):
-                continue
-            date_value = str(row[date_idx] if date_idx < len(row) else "").strip()
-            daypart_value = str(row[daypart_idx] if daypart_idx < len(row) else "").strip()
-            slot_value = str(row[slot_idx] if slot_idx < len(row) else "").strip()
-            if date_value and daypart_value and slot_value:
-                physical_keys.add((date_value, daypart_value, slot_value))
-        if physical_keys:
-            return len(physical_keys)
-    return sum(1 for row in rows if isinstance(row, list))
+    count, _source = hakodate_physical_menu_row_service.physical_row_count_from_sheet(draft_sheet)
+    return count
+
+
+def _draft_sheet_body_row_count_source(draft_sheet: dict[str, Any] | None) -> str:
+    _count, source = hakodate_physical_menu_row_service.physical_row_count_from_sheet(draft_sheet)
+    return source
 
 
 def _row_axis_for_draft_sheet_rows(
@@ -1085,11 +1056,12 @@ def _row_axis_for_draft_sheet_rows(
     draft_sheet: dict[str, Any] | None,
 ) -> tuple[list[float], dict[str, Any]]:
     body_row_count = _draft_sheet_body_row_count(draft_sheet)
+    body_row_count_source = _draft_sheet_body_row_count_source(draft_sheet)
     if body_row_count <= 0:
         return [float(value) for value in template_ys], {
             "applied": False,
-            "reason": "draft_sheet_rows_missing",
-            "row_axis_source": "template",
+            "reason": body_row_count_source,
+            "row_axis_source": "blocked",
             "template_row_edge_count": len(template_ys),
         }
     if len(template_ys) <= STEP_REVIEW_HEADER_BANDS + 1:
@@ -1098,6 +1070,7 @@ def _row_axis_for_draft_sheet_rows(
             "reason": "template_row_edges_too_short",
             "row_axis_source": "template",
             "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
             "template_row_edge_count": len(template_ys),
         }
     current_body_row_count = len(template_ys) - 1 - STEP_REVIEW_HEADER_BANDS
@@ -1107,6 +1080,7 @@ def _row_axis_for_draft_sheet_rows(
             "reason": "draft_sheet_body_row_count_matches_template",
             "row_axis_source": "template",
             "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
             "template_body_row_count": current_body_row_count,
             "row_edge_count": len(template_ys),
         }
@@ -1119,6 +1093,7 @@ def _row_axis_for_draft_sheet_rows(
             "reason": "invalid_template_body_span",
             "row_axis_source": "template",
             "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
             "template_body_row_count": current_body_row_count,
             "body_top": round(float(body_top), 3),
             "body_bottom": round(float(body_bottom), 3),
@@ -1130,6 +1105,7 @@ def _row_axis_for_draft_sheet_rows(
         "reason": "draft_sheet_body_row_count",
         "row_axis_source": "draft_sheet",
         "draft_body_row_count": body_row_count,
+        "draft_body_row_count_source": body_row_count_source,
         "template_body_row_count": current_body_row_count,
         "template_row_edge_count": len(template_ys),
         "row_edge_count": len(adjusted),
@@ -1229,16 +1205,23 @@ def _row_edges_for_draft_sheet_rows(
     column_edges: list[float] | None = None,
 ) -> tuple[list[float], dict[str, Any]]:
     body_row_count = _draft_sheet_body_row_count(draft_sheet)
+    body_row_count_source = _draft_sheet_body_row_count_source(draft_sheet)
     if body_row_count <= 0:
-        return row_edges, {"applied": False, "reason": "draft_sheet_rows_missing"}
+        return row_edges, {"applied": False, "reason": body_row_count_source}
     if len(row_edges) <= STEP_REVIEW_HEADER_BANDS + 1:
-        return row_edges, {"applied": False, "reason": "row_edges_too_short", "draft_body_row_count": body_row_count}
+        return row_edges, {
+            "applied": False,
+            "reason": "row_edges_too_short",
+            "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
+        }
     current_body_row_count = len(row_edges) - 1 - STEP_REVIEW_HEADER_BANDS
     if current_body_row_count == body_row_count:
         return row_edges, {
             "applied": False,
             "reason": "row_count_already_matches_draft_sheet",
             "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
             "current_body_row_count": current_body_row_count,
         }
     header_edges = [float(value) for value in row_edges[: STEP_REVIEW_HEADER_BANDS + 1]]
@@ -1249,6 +1232,7 @@ def _row_edges_for_draft_sheet_rows(
             "applied": False,
             "reason": "invalid_body_bounds",
             "draft_body_row_count": body_row_count,
+            "draft_body_row_count_source": body_row_count_source,
             "current_body_row_count": current_body_row_count,
         }
     body_edges = np.linspace(body_top, body_bottom, body_row_count + 1, dtype=np.float64).tolist()
@@ -1269,6 +1253,7 @@ def _row_edges_for_draft_sheet_rows(
             else "draft_sheet_body_row_count_pending_target_snap"
         ),
         "draft_body_row_count": body_row_count,
+        "draft_body_row_count_source": body_row_count_source,
         "current_body_row_count": current_body_row_count,
         "row_edge_count": len(adjusted),
         "snap": snap_evidence,
@@ -1305,6 +1290,8 @@ def _build_preprocess_for_ocr(
         manifest_template_bbox=item["template_bbox"],
     )
     row_axis_ys, row_axis_evidence = _row_axis_for_draft_sheet_rows(template_ys, draft_sheet)
+    if str(row_axis_evidence.get("row_axis_source") or "").strip() == "blocked":
+        raise ValueError(str(row_axis_evidence.get("reason") or "physical_menu_rows_unresolved"))
     mark_timing("resolve_template_axes_seconds", step_t0)
     week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
     step_t0 = time.perf_counter()
