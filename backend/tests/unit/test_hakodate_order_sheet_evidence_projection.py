@@ -758,6 +758,9 @@ def test_hakodate_projection_applies_expanded_cell_same_daypart_copy_when_enable
                 "worksheet_row": 11,
                 "worksheet_col": 5,
                 "semantic_field": "qty.regular_x",
+                "date": "2026-04-26",
+                "daypart": "朝",
+                "menu_name": "献立A",
                 "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
             }
         ],
@@ -768,6 +771,9 @@ def test_hakodate_projection_applies_expanded_cell_same_daypart_copy_when_enable
                     "worksheet_row": 11,
                     "worksheet_col": 5,
                     "semantic_field": "qty.regular_x",
+                    "date": "2026-04-26",
+                    "daypart": "朝",
+                    "menu_name": "献立A",
                     "value_normalized": "44",
                     "assignment_confidence": 0.9,
                     "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
@@ -813,19 +819,25 @@ def test_hakodate_projection_limits_expanded_cell_copy_to_body_merge_policy_colu
         "target_cells": [
             {
                 "sheet_cell": "D11",
-                "worksheet_row": 11,
-                "worksheet_col": 4,
-                "semantic_field": "qty.regular_x",
-                "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
-            },
-            {
+                    "worksheet_row": 11,
+                    "worksheet_col": 4,
+                    "semantic_field": "qty.regular_x",
+                    "date": "2026-04-26",
+                    "daypart": "朝",
+                    "menu_name": "献立A",
+                    "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
+                },
+                {
                 "sheet_cell": "E11",
-                "worksheet_row": 11,
-                "worksheet_col": 5,
-                "semantic_field": "qty.diabetes_x",
-                "metadata": {"truth": {"row_index": 0, "field": "qty.diabetes_x"}},
-            },
-        ],
+                    "worksheet_row": 11,
+                    "worksheet_col": 5,
+                    "semantic_field": "qty.diabetes_x",
+                    "date": "2026-04-26",
+                    "daypart": "朝",
+                    "menu_name": "献立A",
+                    "metadata": {"truth": {"row_index": 0, "field": "qty.diabetes_x"}},
+                },
+            ],
         "sheet_output": {
             "cells": {
                 "D11": {
@@ -833,6 +845,9 @@ def test_hakodate_projection_limits_expanded_cell_copy_to_body_merge_policy_colu
                     "worksheet_row": 11,
                     "worksheet_col": 4,
                     "semantic_field": "qty.regular_x",
+                    "date": "2026-04-26",
+                    "daypart": "朝",
+                    "menu_name": "献立A",
                     "value_normalized": "44",
                     "assignment_confidence": 0.9,
                     "metadata": {"truth": {"row_index": 0, "field": "qty.regular_x"}},
@@ -842,6 +857,9 @@ def test_hakodate_projection_limits_expanded_cell_copy_to_body_merge_policy_colu
                     "worksheet_row": 11,
                     "worksheet_col": 5,
                     "semantic_field": "qty.diabetes_x",
+                    "date": "2026-04-26",
+                    "daypart": "朝",
+                    "menu_name": "献立A",
                     "value_normalized": "5",
                     "assignment_confidence": 0.9,
                     "metadata": {"truth": {"row_index": 0, "field": "qty.diabetes_x"}},
@@ -936,7 +954,7 @@ def test_hakodate_projection_clears_legacy_quantities_when_evidence_missing() ->
     assert projected["hakodate_evidence_projection"]["metrics"]["cleared_legacy_cell_count"] == 1
 
 
-def test_hakodate_projection_uses_worksheet_grid_when_cell_identity_is_absent() -> None:
+def test_hakodate_projection_rejects_worksheet_grid_when_cell_identity_is_absent() -> None:
     assignment = {
         "status": "auto_assignable",
         "assignment_mode": "ocr_evidence",
@@ -979,10 +997,10 @@ def test_hakodate_projection_uses_worksheet_grid_when_cell_identity_is_absent() 
         assignment=assignment,
     )
 
-    assert projected["rows"] == [["04/26", "朝", "献立A", "12", ""], ["04/26", "朝", "献立B", "", "7"]]
-    assert projected["blockers"] == []
-    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 2
-    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 0
+    assert projected["rows"] == [["04/26", "朝", "献立A", "", ""], ["04/26", "朝", "献立B", "", ""]]
+    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
+    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 2
 
 
 def test_hakodate_projection_defers_low_confidence_ocr_to_sheet_overlay() -> None:
@@ -1072,7 +1090,7 @@ def test_hakodate_projection_defers_low_confidence_ocr_to_sheet_overlay() -> Non
     assert projected["hakodate_evidence_projection"]["metrics"]["deferred_count"] == 2
 
 
-def test_hakodate_evidence_projection_ignores_stale_row_identity_and_uses_sheet_cell() -> None:
+def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet_cell_fallback() -> None:
     assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
@@ -1109,13 +1127,65 @@ def test_hakodate_evidence_projection_ignores_stale_row_identity_and_uses_sheet_
         assignment=assignment,
     )
 
-    assert projected["rows"] == [["4/26", "朝", "献立A", "5"]]
+    assert projected["rows"] == [["4/26", "朝", "献立A", ""]]
+    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
+    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 1
+    assert projected["hakodate_evidence_projection"]["skipped"][0]["skip_reason"] == "logical_row_identity_not_found"
+
+
+def test_hakodate_evidence_projection_uses_logical_identity_when_physical_rows_have_extra_line() -> None:
+    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+        order_id="ORD_TEST",
+        facility_id="FAC_TEST",
+        template_id="tpl-1",
+        payload={
+            "hakodate_preprocessing": {
+                "target_cell_map": [
+                    {
+                        "target_cell_id": "E12",
+                        "sheet_cell": "E12",
+                        "worksheet_row": 12,
+                        "worksheet_col": 5,
+                        "semantic_field": "qty.regular_x",
+                        "date": "2026-04-27",
+                        "daypart": "朝",
+                        "menu_name": "献立B",
+                        "bbox": [10, 10, 30, 30],
+                    }
+                ]
+            },
+            "hakodate_ocr_evidence_records": [{"text": "5", "center": [20, 20]}],
+        },
+    )
+    base_sheet = {
+        "fields": ["date", "daypart", "menu_name", "qty.regular_x"],
+        "rows": [
+            ["4/26", "朝", "献立A", ""],
+            ["4/27", "朝", "余計なOCR物理行ではない", ""],
+            ["4/27", "朝", "献立B", ""],
+        ],
+        "row_ids": ["row-a", "row-extra", "row-b"],
+        "warnings": [],
+        "blockers": [],
+    }
+
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+        base_sheet=base_sheet,
+        assignment=assignment,
+    )
+
+    assert projected["rows"] == [
+        ["4/26", "朝", "献立A", ""],
+        ["4/27", "朝", "余計なOCR物理行ではない", ""],
+        ["4/27", "朝", "献立B", "5"],
+    ]
     assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
     assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 1
     assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 0
 
 
-def test_hakodate_evidence_projection_uses_sheet_cell_even_without_target_cells() -> None:
+def test_hakodate_evidence_projection_requires_logical_identity_even_without_target_cells() -> None:
     assignment = {
         "status": "review_required",
         "blockers": [],
@@ -1149,13 +1219,13 @@ def test_hakodate_evidence_projection_uses_sheet_cell_even_without_target_cells(
         assignment=assignment,
     )
 
-    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 0
-    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 1
+    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 1
+    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
     assert projected["hakodate_evidence_projection"]["metrics"]["deferred_count"] == 0
     assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
 
 
-def test_hakodate_evidence_projection_rejects_worksheet_position_without_cell_id() -> None:
+def test_hakodate_evidence_projection_uses_logical_identity_without_cell_id() -> None:
     assignment = {
         "status": "review_required",
         "blockers": [],
@@ -1189,14 +1259,13 @@ def test_hakodate_evidence_projection_rejects_worksheet_position_without_cell_id
         assignment=assignment,
     )
 
-    assert projected["rows"] == [["4/26", "朝", "献立A", ""]]
-    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
-    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 1
-    assert projected["hakodate_evidence_projection"]["skipped"][0]["skip_reason"] == "field_not_found"
-    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    assert projected["rows"] == [["4/26", "朝", "献立A", "7"]]
+    assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 1
+    assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 0
+    assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
 
 
-def test_hakodate_evidence_projection_ignores_outside_active_sheet_rows() -> None:
+def test_hakodate_evidence_projection_blocks_quantity_without_logical_identity() -> None:
     assignment = {
         "status": "review_required",
         "blockers": [],
@@ -1234,10 +1303,10 @@ def test_hakodate_evidence_projection_ignores_outside_active_sheet_rows() -> Non
     projection = projected["hakodate_evidence_projection"]
     assert projected["rows"] == [["4/26", "朝", "献立A", ""]]
     assert projection["metrics"]["applied_count"] == 0
-    assert projection["metrics"]["skipped_count"] == 0
-    assert projection["metrics"]["ignored_count"] == 1
-    assert projection["ignored"][0]["sheet_cell"] == "E12"
-    assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
+    assert projection["metrics"]["skipped_count"] == 1
+    assert projection["metrics"]["ignored_count"] == 0
+    assert projection["skipped"][0]["skip_reason"] == "logical_row_identity_missing"
+    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
 
 
 def test_operator_quad_override_requires_live_render_coordinate_space() -> None:

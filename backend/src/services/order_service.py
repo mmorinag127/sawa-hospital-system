@@ -24624,7 +24624,7 @@ def _hakodate_ocr_confidence_tier(confidence: object) -> str:
         score = float(confidence)
     except Exception:
         return "high"
-    if score >= 0.45:
+    if score >= 0.90:
         return "high"
     if score >= 0.15:
         return "medium"
@@ -29518,6 +29518,67 @@ def _hakodate_projection_row_from_sheet_cell(
     return row_index, True
 
 
+def _hakodate_base_row_identity_index(
+    *,
+    fields: list[str],
+    rows: list[list[Any]],
+) -> tuple[dict[tuple[str, str, str], int], dict[tuple[str, str], int | None]]:
+    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields) if str(field or "").strip()}
+    date_idx = field_index.get("date_mmdd", field_index.get("date"))
+    daypart_idx = field_index.get("daypart")
+    menu_idx = field_index.get("menu_name", field_index.get("menu"))
+    if date_idx is None or daypart_idx is None or menu_idx is None:
+        return {}, {}
+    result: dict[tuple[str, str, str], int] = {}
+    partial: dict[tuple[str, str], int | None] = {}
+    for row_index, row in enumerate(rows):
+        identity = _hakodate_sheet_identity(
+            row[date_idx] if date_idx < len(row) else "",
+            row[daypart_idx] if daypart_idx < len(row) else "",
+            row[menu_idx] if menu_idx < len(row) else "",
+        )
+        if all(identity) and identity not in result:
+            result[identity] = row_index
+            partial_key = (identity[0], identity[2])
+            if partial_key in partial:
+                partial[partial_key] = None
+            else:
+                partial[partial_key] = row_index
+    return result, partial
+
+
+def _hakodate_projection_row_from_logical_identity(
+    cell: dict[str, Any],
+    *,
+    row_identity_index: dict[tuple[str, str, str], int],
+    partial_row_identity_index: dict[tuple[str, str], int | None],
+) -> tuple[int | None, bool]:
+    candidates: list[dict[str, Any]] = [cell]
+    metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
+    logical_targets = metadata.get("logical_targets") if isinstance(metadata.get("logical_targets"), list) else []
+    candidates.extend(item for item in logical_targets if isinstance(item, dict))
+    saw_partial_identity = False
+    for candidate in candidates:
+        identity = _hakodate_sheet_identity(
+            candidate.get("date"),
+            candidate.get("daypart"),
+            candidate.get("menu_name"),
+        )
+        if not any(identity):
+            continue
+        if identity[0] and identity[2] and not identity[1]:
+            partial_match = partial_row_identity_index.get((identity[0], identity[2]))
+            if partial_match is not None:
+                return partial_match, True
+            saw_partial_identity = True
+            continue
+        if not all(identity):
+            saw_partial_identity = True
+            continue
+        return row_identity_index.get(identity), True
+    return None, saw_partial_identity
+
+
 def _hakodate_target_field_label(cell: dict[str, Any], field: str) -> str:
     metadata = cell.get("metadata") if isinstance(cell.get("metadata"), dict) else {}
     for source in (cell, metadata):
@@ -29646,6 +29707,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         for _ in range(len(rows))
     ]
     field_index = {field: idx for idx, field in enumerate(fields) if field}
+    row_identity_index, partial_row_identity_index = _hakodate_base_row_identity_index(fields=fields, rows=rows)
     sheet_output = assignment.get("sheet_output") if isinstance(assignment.get("sheet_output"), dict) else {}
     cells = sheet_output.get("cells") if isinstance(sheet_output, dict) else {}
     target_cells = assignment.get("target_cells") if isinstance(assignment.get("target_cells"), list) else []
@@ -29708,16 +29770,6 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             continue
         cell = dict(cell)
         cell.setdefault("sheet_cell", sheet_cell)
-        row_from_sheet_cell, has_canonical_sheet_cell = _hakodate_projection_row_from_sheet_cell(
-            cell.get("sheet_cell") or sheet_cell,
-            row_count=len(rows),
-        )
-        if not has_canonical_sheet_cell:
-            skipped.append({**cell, "skip_reason": "field_not_found", "value": str(cell.get("value_normalized") or cell.get("value_text") or "").strip()})
-            continue
-        if row_from_sheet_cell is None:
-            ignored.append({**cell, "ignore_reason": "outside_active_sheet_rows"})
-            continue
         source_target = target_by_sheet_cell.get(str(sheet_cell or "").strip())
         if isinstance(source_target, dict):
             merged_cell = dict(cell)
@@ -29726,9 +29778,20 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                 if not str(merged_cell.get(key) or "").strip() and source_target.get(key) is not None:
                     merged_cell[key] = source_target.get(key)
             if isinstance(source_target.get("metadata"), dict) and not isinstance(merged_cell.get("metadata"), dict):
-                merged_cell["metadata"] = dict(source_target.get("metadata") or {})
+                    merged_cell["metadata"] = dict(source_target.get("metadata") or {})
             cell = merged_cell
         value = str(cell.get("value_normalized") or cell.get("value_text") or "").strip()
+        logical_row_index, has_logical_identity = _hakodate_projection_row_from_logical_identity(
+            cell,
+            row_identity_index=row_identity_index,
+            partial_row_identity_index=partial_row_identity_index,
+        )
+        if not has_logical_identity:
+            skipped.append({**cell, "skip_reason": "logical_row_identity_missing", "value": value})
+            continue
+        if logical_row_index is None:
+            skipped.append({**cell, "skip_reason": "logical_row_identity_not_found", "value": value})
+            continue
         field = _hakodate_projection_field_for_cell(
             cell,
             field_index=field_index,
@@ -29737,13 +29800,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         if col_index is None:
             skipped.append({**cell, "skip_reason": "field_not_found", "value": value})
             continue
-        row_index = _hakodate_projection_row_for_cell(
-            cell,
-            row_count=len(rows),
-        )
-        if row_index is None:
-            skipped.append({**cell, "skip_reason": "row_identity_not_found", "value": value})
-            continue
+        row_index = logical_row_index
         while len(rows[row_index]) < len(fields):
             rows[row_index].append("")
         while len(cell_confidence_rows) <= row_index:
