@@ -85,6 +85,41 @@ def test_fax_template_registry_loader_is_removed() -> None:
     assert not hasattr(config_service, "load_fax_template_registry")
 
 
+def test_facility_config_storage_strips_db_template_override() -> None:
+    sanitized = config_service.sanitize_facility_config_for_storage(
+        "FAC00010",
+        {
+            "fax_template_id": "legacy-db-template",
+            "fax_template_ids": ["legacy-db-template"],
+            "facility_template_source": "operator_override",
+            "fax_template_override": {
+                "columns": [
+                    {
+                        "index": 0,
+                        "role": "quantity",
+                        "header": "legacy",
+                        "diet_type": "regular",
+                        "area_id": "X",
+                    }
+                ],
+                "columns_authoritative": True,
+            },
+            "bagging_exceptions": [{"date": "2026-07-12"}],
+        },
+        current_config={
+            "fax_template_id": "legacy-current-template",
+            "facility_template_source": "operator_override",
+        },
+        allow_authoritative_column_changes=True,
+    )
+
+    assert sanitized["fax_template_id"] == "山城"
+    assert sanitized["fax_template_ids"] == ["山城"]
+    assert sanitized.get("facility_template_source") is None
+    assert "fax_template_override" not in sanitized
+    assert sanitized["bagging_exceptions"] == [{"date": "2026-07-12"}]
+
+
 def test_position_fallback_is_not_allowed() -> None:
     assert (
         candidate_resolution_service.position_fallback_allowed_for_facility(

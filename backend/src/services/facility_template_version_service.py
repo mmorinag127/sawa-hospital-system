@@ -600,6 +600,8 @@ def save_columns_for_order(
     columns: list[dict[str, Any]] | None,
     actor: str = "workflow-v2-facility-template-columns",
 ) -> tuple[dict[str, Any] | None, str | None]:
+    return {"error": "legacy_facility_template_column_override_disabled"}, "legacy_facility_template_column_override_disabled"
+
     if not isinstance(columns, list) or not columns:
         return None, "columns_invalid"
     facility_id = str(order.facility_code or "").strip()
@@ -659,7 +661,6 @@ def save_columns_for_order(
     override["columns_authoritative"] = True
     override["main_ocr_row_fields"] = derive_row_fields_from_columns(normalized_columns)
     next_config["fax_template_override"] = override
-    next_config["facility_template_source"] = "operator_override"
 
     validation = validate_facility_config(next_config)
     validation = {
@@ -761,7 +762,6 @@ def save_template_registration_for_facility(
     next_config = deepcopy(current_config)
     next_config["fax_template_id"] = primary_template_id
     next_config["fax_template_ids"] = template_ids
-    next_config["facility_template_source"] = "operator_override"
     validation = validate_facility_config(next_config)
     if validation["errors"]:
         return {"validation": validation}, "validation_error"

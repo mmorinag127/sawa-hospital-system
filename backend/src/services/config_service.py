@@ -423,18 +423,26 @@ def _fax_override_columns_are_authoritative(value: Any) -> bool:
     return bool(value.get("columns_authoritative"))
 
 
-def _facility_template_source(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    return str(
-        value.get("facility_template_source")
-        or value.get("fax_template_source")
-        or ""
-    ).strip().lower()
+_FACILITY_TEMPLATE_STORAGE_KEYS = {
+    "fax_template",
+    "fax_template_id",
+    "fax_template_ids",
+    "fax_template_override",
+    "facility_template_id",
+    "facility_template_name",
+    "facility_template_source",
+    "fax_template_source",
+}
 
 
-def _facility_template_operator_override_enabled(value: Any) -> bool:
-    return _facility_template_source(value) in {"operator_override", "facility_override"}
+def _strip_facility_template_storage_keys(config: Any) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    return {
+        key: deepcopy(value)
+        for key, value in config.items()
+        if key not in _FACILITY_TEMPLATE_STORAGE_KEYS
+    }
 
 
 def _master_facility_template_ids(facility_master: Any) -> tuple[str | None, list[str]]:
@@ -658,7 +666,7 @@ def sanitize_facility_config_for_storage(
     current_config: dict[str, Any] | None = None,
     allow_authoritative_column_changes: bool = False,
 ) -> dict[str, Any]:
-    sanitized = deepcopy(config)
+    sanitized = _strip_facility_template_storage_keys(config)
     master_override = None
     master_template_id = None
     master_template_ids: list[str] = []
@@ -669,15 +677,8 @@ def sanitize_facility_config_for_storage(
             master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
             break
 
-    current_override = (current_config or {}).get("fax_template_override")
-    operator_template_source = _facility_template_operator_override_enabled(
-        sanitized,
-    ) or _facility_template_operator_override_enabled(current_config)
-    if operator_template_source and not _facility_template_source(sanitized):
-        source = _facility_template_source(current_config)
-        if source:
-            sanitized["facility_template_source"] = source
-    if not operator_template_source and master_template_id:
+    current_override = None
+    if master_template_id:
         sanitized["fax_template_id"] = master_template_id
         sanitized["fax_template_ids"] = master_template_ids or [master_template_id]
     fax_override = _preserve_authoritative_fax_override(
@@ -694,7 +695,7 @@ def sanitize_facility_config_for_storage(
         fax_override,
         master_override,
         drop_redundant=True,
-        prefer_master=bool(master_override) and not operator_template_source,
+        prefer_master=bool(master_override),
     )
     if reconciled is None:
         sanitized.pop("fax_template_override", None)
@@ -1122,28 +1123,25 @@ def get_facility_by_id(facility_id: str) -> Optional[dict]:
                 ],
             }
             if config:
-                facility.update(config)
+                facility.update(_strip_facility_template_storage_keys(config))
             master = load_facility_master()
             for fac_master in master.get("facilities", []):
                 if fac_master.get("facility_id") == facility_id:
-                    operator_template_source = _facility_template_operator_override_enabled(facility)
-                    prefer_master_template = not operator_template_source
-                    if prefer_master_template:
-                        master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
-                        if master_template_id:
-                            facility["fax_template_id"] = master_template_id
-                            facility["fax_template_ids"] = master_template_ids or [master_template_id]
-                        for key in ("fax_template_override",):
-                            value = fac_master.get(key)
-                            if value not in (None, [], {}):
-                                facility[key] = deepcopy(value)
+                    master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
+                    if master_template_id:
+                        facility["fax_template_id"] = master_template_id
+                        facility["fax_template_ids"] = master_template_ids or [master_template_id]
+                    for key in ("fax_template_override",):
+                        value = fac_master.get(key)
+                        if value not in (None, [], {}):
+                            facility[key] = deepcopy(value)
                     master_override = fac_master.get("fax_template_override")
                     current_override = facility.get("fax_template_override")
                     reconciled_override = _reconcile_fax_template_override(
                         current_override,
                         master_override,
                         drop_redundant=False,
-                        prefer_master=prefer_master_template and bool(master_override),
+                        prefer_master=bool(master_override),
                     )
                     if reconciled_override is None:
                         facility.pop("fax_template_override", None)

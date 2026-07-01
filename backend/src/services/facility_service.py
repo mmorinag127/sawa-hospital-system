@@ -272,14 +272,11 @@ def sync_facility_names_from_master() -> int:
 
 
 def _facility_config_from_master_entry(entry: dict) -> dict:
-    config = {
+    return {
         key: value
         for key, value in entry.items()
         if key not in {"facility_id", "facility_name", "name", "areas"}
     }
-    if config:
-        config.setdefault("facility_template_source", "db_override")
-    return config
 
 
 def upsert_facilities_and_configs_from_master(session, master: dict) -> None:
