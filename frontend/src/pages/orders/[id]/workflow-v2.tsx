@@ -1157,6 +1157,10 @@ export default function OrderWorkflowV2Page() {
   const router = useRouter();
   const orderId = useMemo(() => {
     if (typeof router.query.id === "string" && router.query.id) return router.query.id;
+    if (typeof window !== "undefined") {
+      const fromLocation = orderIdFromWorkflowPath(window.location.pathname);
+      if (fromLocation && fromLocation !== "[id]") return fromLocation;
+    }
     return orderIdFromWorkflowPath(router.asPath || "");
   }, [router.asPath, router.query.id]);
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
