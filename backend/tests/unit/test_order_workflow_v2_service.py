@@ -1194,6 +1194,40 @@ def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
     assert source["sheet"]["rows"][0][2] == "70"
 
 
+def test_sheet_source_blocks_monthly_menu_missing_before_projection(monkeypatch) -> None:
+    order_id, evidence_id_1, _ = _create_order_with_evidence()
+    order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id="FAC00001",
+        week_start="2026-04-26",
+        week_end="2026-04-30",
+        template_id="template-fac00001",
+    )
+    _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+
+    def fake_assignment(**_kwargs):
+        return {"metrics": {}, "blockers": [], "warnings": [], "sheet_output": {"cells": {}}}
+
+    def fake_base_sheet(_order_id):
+        return None, "weekly_menu_missing"
+
+    def fail_apply(**_kwargs):
+        raise AssertionError("OCR quantities must not be projected without canonical monthly menu rows")
+
+    fake_order_service = SimpleNamespace(
+        _build_hakodate_evidence_assignment_from_payload=fake_assignment,
+        _build_hakodate_weekly_menu_base_sheet=fake_base_sheet,
+        _apply_hakodate_sheet_output_to_sheet_payload=fail_apply,
+    )
+    monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
+
+    source, error = order_workflow_v2_service.build_sheet_from_selected_ocr(order_id)
+
+    assert source is None
+    assert error == "weekly_menu_missing"
+
+
 def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     with session_scope() as session:
