@@ -435,21 +435,21 @@ def test_set_facility_keeps_saved_sheet_until_operator_resolves_context_change()
     assert repair_error is None
     assert isinstance(repaired, dict)
     repaired_payload = repaired["draft_sheet_json"]
-    assert repaired_payload["header"][3] == "施設常食"
-    assert repaired_payload["fields"][3] == "qty.regular_x"
+    assert repaired_payload["header"][3] == "常食2F"
+    assert repaired_payload["fields"][3] == "qty.regular_2f"
     assert repaired_payload["rows"][0][3] == "8"
 
     current = order_service.get_current_sheet_context(order["id"])
     sheet, error = order_service.get_ocr_sheet(order["id"])
 
     assert current is not None
-    assert current["header"][3] == "施設常食"
-    assert current["fields"][3] == "qty.regular_x"
+    assert current["header"][3] == "常食2F"
+    assert current["fields"][3] == "qty.regular_2f"
     assert current["rows"][0][3] == "8"
     assert error is None
     assert sheet is not None
-    assert sheet["header"][3] == "施設常食"
-    assert sheet["fields"][3] == "qty.regular_x"
+    assert sheet["header"][3] == "常食2F"
+    assert sheet["fields"][3] == "qty.regular_2f"
     assert sheet["rows"][0][3] == "8"
 
 

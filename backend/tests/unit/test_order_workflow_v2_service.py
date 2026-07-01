@@ -1420,7 +1420,7 @@ def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypa
     assert captured["facility_config"]["expanded_cell_same_daypart_copy_enabled"] is True
 
 
-def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypatch) -> None:
+def test_facility_template_columns_save_is_disabled_and_keeps_downstream(monkeypatch) -> None:
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
     _install_active_template_version("FAC00016", "template-fac00016")
     order_workflow_v2_service.confirm_context(
@@ -1461,23 +1461,12 @@ def test_facility_template_columns_save_clears_stale_ocr_and_downstream(monkeypa
 
     result, error = order_workflow_v2_service.save_facility_template_columns(order_id, columns)
 
-    assert error is None
-    assert result["workflow"]["state"] == "context_confirmed"
-    assert result["workflow"]["selected_ocr_result_id"] is None
-    assert result["workflow"]["saved_sheet_id"] is None
-    assert result["workflow"]["template_version_id"]
-    assert result["ocr_results_cleared"] == 2
-    resolved_columns = ((result["resolved_config"] or {}).get("fax_template") or {}).get("columns") or []
-    regular_column = next(item for item in resolved_columns if item.get("header") == "常食")
-    assert regular_column["column_id"]
-    assert regular_column["source_index"] == 4
-    assert regular_column["semantic"]["diet_type"] == "regular"
-    assert regular_column["semantic"]["aggregation_role"] == "include"
+    assert result == {"error": "legacy_facility_template_column_override_disabled"}
+    assert error == "legacy_facility_template_column_override_disabled"
     with session_scope() as session:
-        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is None
-        assert session.get(OrderOcrEvidenceRun, evidence_id_2) is None
-        assert session.get(OrderSheetDraft, saved_sheet_id) is None
-        assert session.get(FacilityTemplateVersion, result["workflow"]["template_version_id"]) is not None
+        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is not None
+        assert session.get(OrderOcrEvidenceRun, evidence_id_2) is not None
+        assert session.get(OrderSheetDraft, saved_sheet_id) is not None
 
 
 def test_facility_template_columns_save_on_confirmed_order_clears_snapshot_reference(monkeypatch) -> None:
