@@ -1775,11 +1775,11 @@ export default function OrderWorkflowV2Page() {
   };
 
   useEffect(() => {
-    if (!router.isReady || !orderId) return;
+    if (!orderId) return;
     refreshAll().catch((err) => {
       setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
-  }, [router.isReady, orderId]);
+  }, [orderId]);
 
   useEffect(() => {
     sheetPayloadRef.current = sheetPayload;
@@ -1808,14 +1808,14 @@ export default function OrderWorkflowV2Page() {
   }, []);
 
   useEffect(() => {
-    if (!router.isReady || !orderId || workflow?.state !== "ocr_running") return undefined;
+    if (!orderId || workflow?.state !== "ocr_running") return undefined;
     const timer = window.setInterval(() => {
       refreshAll().catch((err) => {
         setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
       });
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [router.isReady, orderId, workflow?.state]);
+  }, [orderId, workflow?.state]);
 
   useEffect(() => {
     if (!router.isReady || !orderId || visibleStep !== 1.5) return;
