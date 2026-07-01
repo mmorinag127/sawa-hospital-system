@@ -12,6 +12,17 @@ import {
   normalizeWeekValue,
 } from "../../../features/orders/orderDetailUtils";
 
+const orderIdFromWorkflowPath = (asPath: string): string => {
+  const pathname = (asPath || "").split("?")[0]?.split("#")[0] || "";
+  const match = pathname.match(/^\/orders\/([^/]+)\/workflow-v2\/?$/);
+  if (!match?.[1]) return "";
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+};
+
 type WorkflowV2 = {
   order_id: string;
   state: string;
@@ -1144,7 +1155,10 @@ const anomalyReviewWithoutWarning = (
 
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
-  const orderId = typeof router.query.id === "string" ? router.query.id : "";
+  const orderId = useMemo(() => {
+    if (typeof router.query.id === "string" && router.query.id) return router.query.id;
+    return orderIdFromWorkflowPath(router.asPath || "");
+  }, [router.asPath, router.query.id]);
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
