@@ -14,6 +14,14 @@ from src.services import (
 _DATE_RE = re.compile(r"(?:(20\d{2})[/-])?(\d{1,2})[/-](\d{1,2})")
 
 
+def position_fallback_allowed_for_facility(
+    *,
+    current_facility: str | None,
+    payload: dict[str, Any] | None,
+) -> bool:
+    return False
+
+
 def _dedupe_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
@@ -649,18 +657,11 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         or _first_candidate_metadata(candidates, "decision_source")
         or "ocr_evidence"
     ).strip() or "ocr_evidence"
-    if (
-        decision_source == "position_fallback"
-        and len(candidates) >= 2
-        and _should_require_choice(
-            resolved_value=None,
-            candidates=candidates,
-            score=score,
-            explicit=explicit_requires_user_choice,
-        )
-    ):
-        explicit_requires_user_choice = True
+    if decision_source == "position_fallback":
         resolved_value = None
+        explicit_requires_user_choice = True
+        if "position_fallback_removed" not in blocked_reasons:
+            blocked_reasons.append("position_fallback_removed")
     requires_user_choice = _should_require_choice(
         resolved_value=resolved_value,
         candidates=candidates,

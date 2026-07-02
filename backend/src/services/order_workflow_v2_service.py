@@ -280,6 +280,31 @@ def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
     return f"{start_date.strftime('%Y-%m')}@{start_date.isoformat()}~{end_date.isoformat()}"
 
 
+def _effective_facility_config_date_from_meta(meta: dict[str, Any], order: Order | None = None) -> date | None:
+    for value in (
+        meta.get("week_start"),
+        meta.get("effective_facility_config_date"),
+        getattr(order, "week_code", None),
+        getattr(order, "received_at", None),
+    ):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if "@" in text:
+            _month_id, start_date, _end_date = sheet_week_service.parse_sheet_week_value(text)
+            if isinstance(start_date, date):
+                return start_date
+        try:
+            return date.fromisoformat(text[:10])
+        except Exception:
+            continue
+    return None
+
+
 def _week_range_from_week_code(week_code: object) -> tuple[str | None, str | None]:
     _month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_code)
     if isinstance(start_date, date) and isinstance(end_date, date):
@@ -736,6 +761,12 @@ def _require_workflow_template_version_from_context(
             return None, "template_version_mismatch"
         if facility_id and _normalize_id(version.facility_id) != facility_id:
             return None, "template_version_mismatch"
+        effective_date = _effective_facility_config_date_from_meta(meta, order)
+        if effective_date is not None and not facility_template_version_service.template_version_applies_on(
+            version,
+            effective_date,
+        ):
+            return None, "template_version_mismatch"
         columns = list(version.columns_json or [])
         validation = facility_template_version_service.validate_template_columns(columns)
         if validation.get("errors"):
@@ -748,9 +779,11 @@ def _require_workflow_template_version_from_context(
     facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
     if not facility_id:
         return None, "facility_missing"
+    effective_date = _effective_facility_config_date_from_meta(meta, order)
     template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
         session,
         facility_id,
+        effective_date=effective_date,
     )
     if template_error:
         return None, template_error
@@ -1660,6 +1693,7 @@ def confirm_context(
         active_before, active_before_error = facility_template_version_service.resolve_single_active_template_version(
             session,
             normalized_facility_id,
+            effective_date=normalized_week_start,
         )
         active_source = str(getattr(active_before, "source", "") or "").strip()
         active_template_id = _normalize_id(getattr(active_before, "template_id", None))
@@ -1681,6 +1715,7 @@ def confirm_context(
         template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
             session,
             normalized_facility_id,
+            effective_date=normalized_week_start,
         )
         if template_error:
             row.state = "facility_template_unresolved"
@@ -1704,6 +1739,7 @@ def confirm_context(
                     "week_start": normalized_week_start,
                     "week_end": normalized_week_end,
                     "week_code": normalized_week_code,
+                    "effective_facility_config_date": normalized_week_start,
                     "template_id": None,
                     "template_version_id": None,
                     "template_source": None,
@@ -1731,6 +1767,7 @@ def confirm_context(
                     "week_start": normalized_week_start,
                     "week_end": normalized_week_end,
                     "week_code": normalized_week_code,
+                    "effective_facility_config_date": normalized_week_start,
                     "template_id": requested_template_id or None,
                     "template_version_id": None,
                     "template_source": None,
@@ -1759,6 +1796,7 @@ def confirm_context(
                 "week_start": normalized_week_start,
                 "week_end": normalized_week_end,
                 "week_code": normalized_week_code,
+                "effective_facility_config_date": normalized_week_start,
                 "template_id": _normalize_id(template_version.template_id) or normalized_template_id or None,
                 "template_version_id": template_version.id,
                 "template_version_digest": template_version.template_digest,

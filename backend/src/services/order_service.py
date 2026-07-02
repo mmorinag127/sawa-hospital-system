@@ -14810,18 +14810,11 @@ def _sheet_payload_mapping_block_reason(
     position_fallback_current_sheet_ready = (
         position_fallback_semantics_ready or position_fallback_partial
     )
-    column_mapping_gate_state = candidate_resolution_service.get_resolution_gate_state(
-        column_mapping_resolution if isinstance(column_mapping_resolution, dict) else None
-    )
-    resolved_position_fallback_mapping = bool(column_mapping_gate_state.get("status") == "resolved")
-    structured_table_count = len(fax_extractor._collect_structured_tables(ocr_payload)) if isinstance(ocr_payload, dict) else 0
-    position_fallback_multi_table_ambiguous = bool(
-        structured_table_count > 1
-        and isinstance(column_mapping_resolution, dict)
+    position_fallback_decision_source = bool(
+        isinstance(column_mapping_resolution, dict)
         and str(column_mapping_resolution.get("decision_source") or "").strip() == "position_fallback"
-        and not resolved_position_fallback_mapping
     )
-    if position_fallback_requires_choice or position_fallback_multi_table_ambiguous:
+    if position_fallback_requires_choice or position_fallback_decision_source:
         return "unresolved_template"
     if any(str(item or "").strip() for item in (template_blockers or [])):
         return "unresolved_template"
@@ -23176,9 +23169,7 @@ def _extract_sheet_rows_from_resolved_column_mapping(
         and str(position_fallback_resolution.get("decision_source") or "").strip() == "position_fallback"
     )
     if uses_position_fallback:
-        fragmented_rows = _extract_fragmented_quantity_rows_from_structured_payload(payload, template)
-        if fragmented_rows:
-            return fragmented_rows
+        return []
     field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields)}
     date_idx = next(
         (idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("date")),
@@ -23260,11 +23251,6 @@ def _extract_sheet_rows_from_resolved_column_mapping(
         )
         resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
         mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
-        if not isinstance(mapping_meta, dict) and uses_position_fallback:
-            mapping_meta = position_column_mapping_service._fallback_structured_table_mapping(
-                matrix,
-                template,
-            )
         if not isinstance(mapping_meta, dict):
             continue
         mapped_indexes = mapping_meta.get("mapped_indexes")
@@ -23295,21 +23281,6 @@ def _extract_sheet_rows_from_resolved_column_mapping(
                     if source_col_index not in explicit_source_indexes and dest_idx not in explicit_dest_indexes
                 }
                 final_mapped_indexes.update(explicit_mapped_indexes)
-        if uses_position_fallback:
-            quantity_subgrid = position_column_mapping_service._infer_quantity_subgrid(table_payload)
-            if isinstance(quantity_subgrid, dict):
-                menu_dest_idx = next(
-                    (
-                        idx
-                        for idx, field in enumerate(fields)
-                        if str(field or "").strip() in {"menu", "menu_name"}
-                    ),
-                    None,
-                )
-                if menu_dest_idx is not None:
-                    inferred_menu_source_index = int(quantity_subgrid["menu_col_index"])
-                    if menu_dest_idx not in explicit_dest_indexes:
-                        final_mapped_indexes[inferred_menu_source_index] = int(menu_dest_idx)
         for source_col_index, field in explicit_quantity_pairs:
             dest_idx = field_index.get(str(field or "").strip())
             if dest_idx is None:
@@ -34946,57 +34917,6 @@ def reparse_order(
         pdf_bytes=llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
     ) if not preparse_validation_error else []
     parsed_output_for_debug = pipeline_output_payload if isinstance(pipeline_output_payload, dict) else None
-    if not lines and not preparse_validation_error:
-        try:
-            parsed_output = pipeline_output_payload if isinstance(pipeline_output_payload, dict) else None
-            output_ref = pipeline_output_ref
-            if not isinstance(parsed_output, dict):
-                if not output_ref:
-                    job = get_ocr_job(ocr_job_id)
-                    output_ref = job.get("output_reference") if job else None
-                parsed_output = _load_pipeline_output_with_retry(output_ref)
-            if not isinstance(parsed_output, dict):
-                cached_payload, _ = _get_ocr_output_without_legacy_edits(order_id)
-                if isinstance(cached_payload, dict):
-                    parsed_output = cached_payload
-            if parsed_output:
-                parsed_output_for_debug = parsed_output
-                fallback_default_date = default_date
-                if fallback_default_date is None:
-                    date_candidates = _collect_sheet_dates_from_payload(parsed_output, received_at)
-                    if date_candidates:
-                        fallback_default_date = min(date_candidates)
-                table_raw = parsed_output.get("table_raw")
-                if isinstance(table_raw, str) and table_raw.strip():
-                    fallback_rows = rows_from_markdown(table_raw, template_to_use) or []
-                    if fallback_rows:
-                        lines = parse_order_lines(
-                            fallback_rows,
-                            template_to_use,
-                            received_at,
-                            reparse_quantity_rules,
-                            default_date=fallback_default_date,
-                            tokens=[],
-                            grid=None,
-                            pdf_bytes=llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
-                        )
-                    logger.info(
-                        "Reparse fallback markdown rows={} parsed_lines={}",
-                        len(fallback_rows),
-                        len(lines),
-                    )
-                if not lines:
-                    lines = _build_sheet_lines_from_ocr_payload(
-                        payload=parsed_output,
-                        template=template_to_use,
-                        received_at=received_at,
-                        week_id=existing_week_code,
-                        facility_id=facility_id,
-                        quantity_rules=reparse_quantity_rules,
-                    )
-                    logger.info("Reparse fallback sheet lines={}", len(lines))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Fallback OCR markdown parse failed", error=str(exc))
     if (
         not lines
         and not preparse_validation_error

@@ -1,7 +1,6 @@
 import os
 import re
 from datetime import date, datetime
-from io import BytesIO
 from typing import Any, Optional
 
 from src.services.ingest_policy import parse_date_string
@@ -489,89 +488,6 @@ def _columns_from_row_fields(template: dict) -> list[dict]:
     return columns
 
 
-def _should_fallback_ocr(cell_text: str, col: dict) -> bool:
-    if cell_text.strip():
-        return False
-    return col.get("role") in {"quantity", "quantity_change"}
-
-
-def _apply_ocr_fallback(
-    rows: list[list[str]],
-    row_bounds: list[tuple[float, float]],
-    columns: list[dict],
-    template: dict,
-    pdf_bytes: bytes | None,
-) -> list[list[str]]:
-    if not pdf_bytes:
-        return rows
-    if not template.get("token_fallback_ocr"):
-        return rows
-    try:
-        import pdfplumber
-    except Exception:
-        return rows
-    try:
-        from src.services.ocr_fallback import ocr_digits
-    except Exception:
-        return rows
-
-    page_index = max(int(template.get("page", 1)) - 1, 0)
-    resolution = int(template.get("token_ocr_resolution", 300))
-    row_padding = float(template.get("token_row_padding", 0.006))
-
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        if not pdf.pages:
-            return rows
-        page = pdf.pages[page_index] if page_index < len(pdf.pages) else pdf.pages[0]
-        image = page.to_image(resolution=resolution).original
-        width, height = image.size
-
-    ink_threshold = int(template.get("token_ocr_ink_threshold", 200))
-    ink_ratio = float(template.get("token_ocr_ink_ratio", 0.01))
-
-    def _cell_has_ink(crop) -> bool:
-        try:
-            import numpy as np
-        except Exception:
-            return True
-        gray = crop.convert("L")
-        arr = np.array(gray)
-        if arr.size == 0:
-            return False
-        dark = (arr < ink_threshold).mean()
-        return dark >= ink_ratio
-
-    updated = [list(row) for row in rows]
-    for row_idx, (y_min, y_max) in enumerate(row_bounds):
-        if y_min == y_max:
-            continue
-        top = int(max((y_min - row_padding) * height, 0))
-        bottom = int(min((y_max + row_padding) * height, height))
-        for col_idx, col in enumerate(columns):
-            if col_idx >= len(updated[row_idx]):
-                continue
-            if not _should_fallback_ocr(updated[row_idx][col_idx], col):
-                continue
-            x_range = col.get("x_range")
-            if not x_range or len(x_range) != 2:
-                continue
-            left = int(max(x_range[0] * width, 0))
-            right = int(min(x_range[1] * width, width))
-            if right <= left or bottom <= top:
-                continue
-            crop = image.crop((left, top, right, bottom))
-            if not _cell_has_ink(crop):
-                continue
-            try:
-                text = ocr_digits(crop, template)
-            except Exception:
-                continue
-            cleaned = text.strip()
-            if cleaned:
-                updated[row_idx][col_idx] = cleaned
-    return updated
-
-
 def parse_order_lines(
     rows: list[list[str]],
     template: dict,
@@ -661,7 +577,6 @@ def parse_order_lines(
             row_bounds = _row_bounds_from_grouped_tokens(
                 grouped_rows, float(template.get("token_row_padding", 0.006))
             )
-        rows = _apply_ocr_fallback(rows, row_bounds, columns, template, pdf_bytes)
     if not columns:
         columns = _columns_from_row_fields(template)
     effective_header_rows = 0 if rows_are_body_only else header_rows

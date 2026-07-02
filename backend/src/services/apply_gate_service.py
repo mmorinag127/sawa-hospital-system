@@ -105,35 +105,6 @@ def authoritative_sheet_suppresses_stale_evidence_issues(
     return False
 
 
-def _sheet_has_materialized_quantity_values(
-    *,
-    fields: list[Any] | None,
-    rows: list[Any] | None,
-) -> bool:
-    normalized_fields = [
-        str(field or "").strip()
-        for field in (fields or [])
-        if str(field or "").strip()
-    ]
-    if not normalized_fields or not isinstance(rows, list) or not rows:
-        return False
-    quantity_indexes = [
-        idx for idx, field in enumerate(normalized_fields) if field.startswith("qty.")
-    ]
-    if not quantity_indexes:
-        return False
-    for row in rows:
-        if not isinstance(row, list):
-            continue
-        for idx in quantity_indexes:
-            if idx >= len(row):
-                continue
-            value = str(row[idx] or "").strip()
-            if value and re.fullmatch(r"-?\d+(?:\.\d+)?", value):
-                return True
-    return False
-
-
 def _stale_issue_suppressions(
     *,
     source: str | None,
@@ -583,12 +554,8 @@ def evaluate_apply_gate(
         base_evidence_run_id=base_evidence_run_id,
         active_evidence_run_id=active_evidence_run_id,
     )
-    current_sheet_has_quantities = _sheet_has_materialized_quantity_values(
-        fields=fields,
-        rows=rows,
-    )
     effective_position_fallback_semantics_ready = bool(
-        (position_fallback_semantics_ready or current_sheet_has_quantities)
+        position_fallback_semantics_ready
         and not authoritative_persisted_draft
     )
     position_fallback_clears_numeric_warning = bool(
@@ -662,7 +629,6 @@ def evaluate_apply_gate(
             and column_mapping.get("partial_quantity_mapping")
             and not clean_saved_draft
             and not authoritative_persisted_draft
-            and not current_sheet_has_quantities
         ):
             apply_blockers.append("sheet_quantity_column_unmapped")
             confirm_blockers.append("sheet_quantity_column_unmapped")

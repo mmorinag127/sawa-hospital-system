@@ -27,9 +27,11 @@ from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregat
 from src.models.order_output_artifact import OrderBaggingResult
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.facility_template_version import FacilityTemplateVersion
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
     config_service,
+    facility_template_version_service,
     menu_service,
     menu_rule_service,
     order_service,
@@ -259,6 +261,64 @@ def _coerce_to_date(value: Any) -> dt_date | None:
         return pd.to_datetime(value).date()
     except Exception:
         return None
+
+
+def _effective_facility_config_date_from_order(order: dict | None) -> dt_date | None:
+    if not isinstance(order, dict):
+        return None
+    for value in (
+        order.get("stored_week_value"),
+        order.get("week_value"),
+        order.get("persisted_week_value"),
+        order.get("week"),
+        order.get("week_code"),
+        order.get("received_at"),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if "@" in text and "~" in text:
+            start_text = text.split("@", 1)[1].split("~", 1)[0].strip()
+            parsed = _coerce_to_date(start_text)
+            if parsed is not None:
+                return parsed
+        parsed = _coerce_to_date(text[:10])
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _resolve_facility_config_for_order(order: dict | None) -> dict | None:
+    if not isinstance(order, dict):
+        return None
+    facility_id = str(order.get("facility") or "").strip()
+    if not facility_id:
+        return None
+    template_version_id = str(order.get("template_version_id") or "").strip()
+    if template_version_id:
+        effective_date = _effective_facility_config_date_from_order(order)
+        if effective_date is None:
+            raise ValueError("facility_template_effective_date_missing")
+        with session_scope() as session:
+            version = session.get(FacilityTemplateVersion, template_version_id)
+            if version is None or str(version.facility_id or "").strip() != facility_id:
+                raise ValueError("facility_template_version_unresolved")
+            if not facility_template_version_service.template_version_applies_on(
+                version,
+                effective_date,
+            ):
+                raise ValueError("facility_template_version_date_mismatch")
+            resolved_config, _version, error = facility_template_version_service.resolve_facility_config_for_date(
+                session,
+                facility_id=facility_id,
+                effective_date=effective_date,
+            )
+            if error or not isinstance(resolved_config, dict):
+                raise ValueError(error or "facility_template_config_unresolved")
+            if str((resolved_config.get("facility_template_version") or {}).get("id") or "").strip() != template_version_id:
+                raise ValueError("facility_template_version_selection_mismatch")
+            return resolved_config
+    return config_service.get_facility_config(facility_id)
 
 
 def _add_months(base_date: dt_date, months: int) -> dt_date:
@@ -1657,7 +1717,7 @@ def build_order_lines_for_outputs(
         or str(order.get("week_code") or "").strip()
     )
     facility_config_started = time.perf_counter()
-    facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    facility_config = _resolve_facility_config_for_order(order)
     if timings is not None:
         timings["build_order_lines_facility_config_ms"] = round(
             (time.perf_counter() - facility_config_started) * 1000,
@@ -2294,7 +2354,7 @@ def build_bag_rows_for_outputs(
     facility_id = order.get("facility")
     resolved_facility_config = facility_config
     if not resolved_facility_config and facility_id:
-        resolved_facility_config = config_service.get_facility_config(facility_id)
+        resolved_facility_config = _resolve_facility_config_for_order(order)
     if not resolved_facility_config:
         logger.warning("Facility config missing", facility_id=facility_id)
         resolved_facility_config = {}
@@ -6177,7 +6237,7 @@ def _prepare_output_context(
 
     facility_id = order.get("facility")
     facility_started = time.perf_counter()
-    facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    facility_config = _resolve_facility_config_for_order(order)
     if timings is not None:
         timings["prepare_facility_config_ms"] = round((time.perf_counter() - facility_started) * 1000, 1)
     if not facility_config:
@@ -6522,7 +6582,7 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
         raise ValueError("order not found")
 
     facility_id = order.get("facility")
-    facility_config = config_service.get_facility_config(facility_id) if facility_id else None
+    facility_config = _resolve_facility_config_for_order(order)
     if not facility_config:
         logger.warning("Facility config missing", facility_id=facility_id)
         facility_config = {}

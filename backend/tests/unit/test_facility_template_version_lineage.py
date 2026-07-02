@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import uuid4
+
+from sqlalchemy import inspect, text
 
 from src.db import Base, engine, session_scope
 from src.models.facility import Facility
@@ -13,10 +15,32 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import facility_template_version_service, order_service
+from src.services import facility_template_version_service, order_service, output_builder
 
 
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_facility_template_version_test_columns() -> None:
+    inspector = inspect(engine)
+    if "facility_template_versions" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("facility_template_versions")}
+    statements = []
+    if "config_json" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN config_json JSON")
+    if "valid_from" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_from DATE")
+    if "valid_to" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_to DATE")
+    if not statements:
+        return
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
+_ensure_facility_template_version_test_columns()
 
 
 def _id(prefix: str) -> str:
@@ -164,6 +188,149 @@ def test_multiple_active_template_versions_are_blocker() -> None:
 
     assert active is None
     assert error == "facility_template_ambiguous"
+
+
+def test_effective_date_resolves_one_active_template_version() -> None:
+    facility_id = _id("FAC")
+    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Effective Date Facility"))
+        for index, (valid_from, valid_to) in enumerate(
+            (
+                (date(2026, 7, 1), date(2026, 7, 10)),
+                (date(2026, 7, 11), None),
+            )
+        ):
+            session.add(
+                FacilityTemplateVersion(
+                    id=_id("FTV"),
+                    facility_id=facility_id,
+                    version=str(index + 1),
+                    status="active",
+                    template_id=f"template-{index + 1}",
+                    source="test",
+                    config_json={"facility_name": f"effective-{index + 1}"},
+                    columns_json=columns,
+                    cells_json=[],
+                    template_digest=f"digest-effective-{index}",
+                    validation_json={"errors": [], "warnings": []},
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    created_at=datetime.utcnow(),
+                    activated_at=datetime.utcnow(),
+                )
+            )
+
+    with session_scope() as session:
+        first, first_error = facility_template_version_service.resolve_single_active_template_version(
+            session,
+            facility_id,
+            effective_date=date(2026, 7, 5),
+        )
+        second, second_error = facility_template_version_service.resolve_single_active_template_version(
+            session,
+            facility_id,
+            effective_date=date(2026, 7, 12),
+        )
+        first_template_id = first.template_id if first is not None else None
+        second_template_id = second.template_id if second is not None else None
+
+    assert first_error is None
+    assert first_template_id == "template-1"
+    assert second_error is None
+    assert second_template_id == "template-2"
+
+    with session_scope() as session:
+        resolved_config, resolved_version, resolved_error = facility_template_version_service.resolve_facility_config_for_date(
+            session,
+            facility_id=facility_id,
+            effective_date=date(2026, 7, 12),
+        )
+        resolved_template_id = resolved_version.template_id if resolved_version is not None else None
+        resolved_version_id = resolved_version.id if resolved_version is not None else None
+
+    assert resolved_error is None
+    assert resolved_template_id == "template-2"
+    assert resolved_config["facility_name"] == "effective-2"
+    assert resolved_config["facility_template_version_id"] == resolved_version_id
+
+
+def test_effective_date_overlapping_active_template_versions_are_blocker() -> None:
+    facility_id = _id("FAC")
+    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Overlapping Effective Facility"))
+        for index in range(2):
+            session.add(
+                FacilityTemplateVersion(
+                    id=_id("FTV"),
+                    facility_id=facility_id,
+                    version=str(index + 1),
+                    status="active",
+                    template_id=f"template-overlap-{index + 1}",
+                    source="test",
+                    config_json={},
+                    columns_json=columns,
+                    cells_json=[],
+                    template_digest=f"digest-overlap-{index}",
+                    validation_json={"errors": [], "warnings": []},
+                    valid_from=date(2026, 7, 1 + index),
+                    valid_to=date(2026, 7, 20),
+                    created_at=datetime.utcnow(),
+                    activated_at=datetime.utcnow(),
+                )
+            )
+
+    with session_scope() as session:
+        active, error = facility_template_version_service.resolve_single_active_template_version(
+            session,
+            facility_id,
+            effective_date=date(2026, 7, 10),
+        )
+
+    assert active is None
+    assert error == "facility_template_ambiguous"
+
+
+def test_output_builder_blocks_template_version_date_mismatch() -> None:
+    facility_id = _id("FAC")
+    version_id = _id("FTV")
+    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name="Output Effective Date Facility"))
+        session.add(
+            FacilityTemplateVersion(
+                id=version_id,
+                facility_id=facility_id,
+                version="1",
+                status="active",
+                template_id="template-output",
+                source="test",
+                config_json={"facility_name": "output-effective"},
+                columns_json=columns,
+                cells_json=[],
+                template_digest="digest-output",
+                validation_json={"errors": [], "warnings": []},
+                valid_from=date(2026, 7, 1),
+                valid_to=date(2026, 7, 10),
+                created_at=datetime.utcnow(),
+                activated_at=datetime.utcnow(),
+            )
+        )
+
+    order = {
+        "id": _id("ORD"),
+        "facility": facility_id,
+        "week_code": "2026-07@2026-07-12~2026-07-18",
+        "template_version_id": version_id,
+    }
+
+    try:
+        output_builder._resolve_facility_config_for_order(order)  # noqa: SLF001
+    except ValueError as exc:
+        assert str(exc) == "facility_template_version_date_mismatch"
+    else:
+        raise AssertionError("facility_template_version_date_mismatch was not raised")
 
 
 def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:

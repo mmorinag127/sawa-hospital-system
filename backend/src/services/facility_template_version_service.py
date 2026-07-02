@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -236,23 +236,117 @@ def _next_version_label(session: Any, facility_id: str) -> str:
     return str(count + 1)
 
 
-def get_active_template_versions(session: Any, facility_id: str) -> list[FacilityTemplateVersion]:
+def _normalize_effective_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except Exception:
+        pass
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
+def _date_range_contains(row: FacilityTemplateVersion, effective_date: date) -> bool:
+    valid_from = _normalize_effective_date(row.valid_from)
+    valid_to = _normalize_effective_date(row.valid_to)
+    if valid_from is not None and effective_date < valid_from:
+        return False
+    if valid_to is not None and effective_date > valid_to:
+        return False
+    return True
+
+
+def template_version_applies_on(row: FacilityTemplateVersion | None, effective_date: object | None) -> bool:
+    normalized_effective_date = _normalize_effective_date(effective_date)
+    if row is None or normalized_effective_date is None:
+        return False
+    return _date_range_contains(row, normalized_effective_date)
+
+
+def _date_ranges_overlap(
+    left_from: date | None,
+    left_to: date | None,
+    right_from: date | None,
+    right_to: date | None,
+) -> bool:
+    if left_to is not None and right_from is not None and left_to < right_from:
+        return False
+    if right_to is not None and left_from is not None and right_to < left_from:
+        return False
+    return True
+
+
+def _active_template_range_conflicts(
+    session: Any,
+    *,
+    facility_id: str,
+    valid_from: date | None,
+    valid_to: date | None,
+    exclude_version_id: str | None = None,
+) -> list[FacilityTemplateVersion]:
+    query = session.query(FacilityTemplateVersion).filter(
+        FacilityTemplateVersion.facility_id == facility_id,
+        FacilityTemplateVersion.status == "active",
+    )
+    conflicts: list[FacilityTemplateVersion] = []
+    for row in query.all():
+        if exclude_version_id and row.id == exclude_version_id:
+            continue
+        if _date_ranges_overlap(
+            valid_from,
+            valid_to,
+            _normalize_effective_date(row.valid_from),
+            _normalize_effective_date(row.valid_to),
+        ):
+            conflicts.append(row)
+    return conflicts
+
+
+def get_active_template_versions(
+    session: Any,
+    facility_id: str,
+    *,
+    effective_date: object | None = None,
+) -> list[FacilityTemplateVersion]:
     normalized_facility_id = str(facility_id or "").strip()
     if not normalized_facility_id:
         return []
-    return list(
+    rows = list(
         session.query(FacilityTemplateVersion)
         .filter(
             FacilityTemplateVersion.facility_id == normalized_facility_id,
             FacilityTemplateVersion.status == "active",
         )
-        .order_by(FacilityTemplateVersion.activated_at.desc(), FacilityTemplateVersion.created_at.desc())
+        .order_by(
+            FacilityTemplateVersion.valid_from.desc().nullslast(),
+            FacilityTemplateVersion.activated_at.desc(),
+            FacilityTemplateVersion.created_at.desc(),
+        )
         .all()
     )
+    normalized_effective_date = _normalize_effective_date(effective_date)
+    if normalized_effective_date is None:
+        return rows
+    return [row for row in rows if _date_range_contains(row, normalized_effective_date)]
 
 
-def get_active_template_version(session: Any, facility_id: str) -> FacilityTemplateVersion | None:
-    active_versions = get_active_template_versions(session, facility_id)
+def get_active_template_version(
+    session: Any,
+    facility_id: str,
+    *,
+    effective_date: object | None = None,
+) -> FacilityTemplateVersion | None:
+    active_versions = get_active_template_versions(session, facility_id, effective_date=effective_date)
     if len(active_versions) != 1:
         return None
     return active_versions[0]
@@ -261,8 +355,10 @@ def get_active_template_version(session: Any, facility_id: str) -> FacilityTempl
 def resolve_single_active_template_version(
     session: Any,
     facility_id: str,
+    *,
+    effective_date: object | None = None,
 ) -> tuple[FacilityTemplateVersion | None, str | None]:
-    active_versions = get_active_template_versions(session, facility_id)
+    active_versions = get_active_template_versions(session, facility_id, effective_date=effective_date)
     if not active_versions:
         return None, "facility_template_unresolved"
     if len(active_versions) > 1:
@@ -287,10 +383,13 @@ def serialize_template_version(row: FacilityTemplateVersion | None) -> dict[str,
         "status": row.status,
         "template_id": row.template_id,
         "source": row.source,
+        "config": deepcopy(row.config_json) if isinstance(row.config_json, dict) else None,
         "columns": list(row.columns_json or []),
         "cells": list(row.cells_json or []),
         "template_digest": row.template_digest,
         "validation": dict(row.validation_json or {}),
+        "valid_from": row.valid_from.isoformat() if isinstance(row.valid_from, date) else None,
+        "valid_to": row.valid_to.isoformat() if isinstance(row.valid_to, date) else None,
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
         "activated_at": row.activated_at.isoformat() if isinstance(row.activated_at, datetime) else None,
@@ -506,7 +605,8 @@ def _resolved_config_from_parts(
     columns: list[dict[str, Any]],
     version: FacilityTemplateVersion,
 ) -> dict[str, Any]:
-    facility_payload = {"facility_id": facility_id, "facility_name": facility_name, **deepcopy(config)}
+    effective_config = deepcopy(version.config_json) if isinstance(version.config_json, dict) else deepcopy(config)
+    facility_payload = {"facility_id": facility_id, "facility_name": facility_name, **effective_config}
     try:
         resolved = config_service._build_facility_config(  # noqa: SLF001
             facility_id=facility_id,
@@ -514,11 +614,11 @@ def _resolved_config_from_parts(
             selected_template_id=template_id,
         )
     except Exception:
-        resolved = deepcopy(config)
+        resolved = deepcopy(effective_config)
     resolved["facility_id"] = facility_id
-    if facility_name:
+    if facility_name and not str(resolved.get("facility_name") or "").strip():
         resolved["facility_name"] = facility_name
-    facility_template_id = str(facility_name or facility_id or "").strip()
+    facility_template_id = str(resolved.get("facility_name") or facility_name or facility_id or "").strip()
     if facility_template_id:
         resolved["facility_template_id"] = facility_template_id
         resolved["facility_template_name"] = facility_template_id
@@ -580,6 +680,7 @@ def ensure_active_template_version_from_resolved_config(
         status="active",
         template_id=template_id,
         source=created_by,
+        config_json=deepcopy(config),
         columns_json=columns,
         cells_json=[],
         template_digest=digest,
@@ -591,6 +692,46 @@ def ensure_active_template_version_from_resolved_config(
     session.add(version)
     session.flush()
     return version
+
+
+def resolve_facility_config_for_date(
+    session: Any,
+    *,
+    facility_id: str,
+    effective_date: object | None,
+) -> tuple[dict[str, Any] | None, FacilityTemplateVersion | None, str | None]:
+    normalized_facility_id = str(facility_id or "").strip()
+    if not normalized_facility_id:
+        return None, None, "facility_id_required"
+    version, error = resolve_single_active_template_version(
+        session,
+        normalized_facility_id,
+        effective_date=effective_date,
+    )
+    if error:
+        return None, None, error
+    facility = session.get(Facility, normalized_facility_id)
+    if facility is None:
+        return None, None, "facility_not_found"
+    base_config = (
+        deepcopy(facility.config.config_json)
+        if facility.config and isinstance(facility.config.config_json, dict)
+        else {}
+    )
+    resolved = _resolved_config_from_parts(
+        facility_id=normalized_facility_id,
+        facility_name=getattr(facility, "name", None),
+        config=base_config,
+        template_id=str(version.template_id or "").strip() or None,
+        columns=list(version.columns_json or []),
+        version=version,
+    )
+    resolved["effective_date"] = (
+        _normalize_effective_date(effective_date).isoformat()
+        if _normalize_effective_date(effective_date) is not None
+        else None
+    )
+    return resolved, version, None
 
 
 def save_columns_for_order(
@@ -706,6 +847,7 @@ def save_columns_for_order(
         status="active",
         template_id=template_id,
         source=actor,
+        config_json=deepcopy(sanitized),
         columns_json=normalized_columns,
         cells_json=[],
         template_digest=digest,
@@ -810,6 +952,7 @@ def save_template_registration_for_facility(
         status="active",
         template_id=primary_template_id,
         source=actor,
+        config_json=deepcopy(sanitized),
         columns_json=columns,
         cells_json=[],
         template_digest=digest,
