@@ -7,8 +7,9 @@ from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, inspect, text
 
+from src.db import engine
 from src.models.facility import Facility, FacilityConfig
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.ocr_job import OcrJob
@@ -24,6 +25,7 @@ from src.services.template_field_schema_service import derive_row_fields_from_co
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 VALID_TEMPLATE_VERSION_STATUSES = {"draft", "active", "archived", "invalid", "repair_blocked"}
+_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = False
 
 
 def _now() -> datetime:
@@ -32,6 +34,39 @@ def _now() -> datetime:
 
 def _new_template_version_id() -> str:
     return f"FTV{uuid4().hex[:16]}"
+
+
+def ensure_facility_template_version_schema() -> None:
+    global _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED
+    if _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED:
+        return
+    inspector = inspect(engine)
+    if "facility_template_versions" not in set(inspector.get_table_names()):
+        _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = True
+        return
+    columns = {
+        str(column.get("name") or "")
+        for column in inspector.get_columns("facility_template_versions")
+    }
+    statements: list[str] = []
+    if "config_json" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN config_json JSON")
+    if "valid_from" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_from DATE")
+    if "valid_to" not in columns:
+        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_to DATE")
+    if engine.dialect.name == "postgresql":
+        statements.extend(
+            (
+                "CREATE INDEX IF NOT EXISTS ix_facility_template_versions_valid_from ON facility_template_versions (valid_from)",
+                "CREATE INDEX IF NOT EXISTS ix_facility_template_versions_valid_to ON facility_template_versions (valid_to)",
+            )
+        )
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = True
 
 
 def _normalize_token(value: object) -> str:
