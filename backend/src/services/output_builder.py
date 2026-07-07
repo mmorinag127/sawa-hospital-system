@@ -1316,7 +1316,13 @@ def _build_monthly_entry_physical_rows(
             else:
                 physical_diet_key = "regular"
             key = (menu_date, daypart, slot_index, physical_diet_key)
-            grouped.setdefault(key, []).append(entry)
+            grouped.setdefault(key, []).append(
+                {
+                    **entry,
+                    "_physical_row_diet_key": physical_diet_key,
+                    "_physical_row_split_diet_rows": split_diet_rows,
+                }
+            )
             if physical_diet_key == "regular":
                 regular_entries_by_slot.setdefault((menu_date, daypart, slot_index), []).append(entry)
         split_slots = {
@@ -1327,15 +1333,16 @@ def _build_monthly_entry_physical_rows(
         for menu_date, daypart, slot_index, physical_diet_key in list(grouped):
             if physical_diet_key == "regular" and (menu_date, daypart, slot_index) in split_slots:
                 grouped[(menu_date, daypart, slot_index, physical_diet_key)] = [
-                    {**entry, "_block_soft_mixer_line_match": True}
+                    {**entry, "_block_soft_mixer_line_match": True, "_physical_row_split_slot": True}
                     for entry in grouped[(menu_date, daypart, slot_index, physical_diet_key)]
                 ]
                 continue
             if physical_diet_key == "regular":
                 continue
-            regular_entries = regular_entries_by_slot.get((menu_date, daypart, slot_index)) or []
-            if regular_entries:
-                grouped[(menu_date, daypart, slot_index, physical_diet_key)].extend(regular_entries)
+            grouped[(menu_date, daypart, slot_index, physical_diet_key)] = [
+                {**entry, "_physical_row_split_slot": True}
+                for entry in grouped[(menu_date, daypart, slot_index, physical_diet_key)]
+            ]
         return list(grouped.values())
 
     rows = build_rows(scoped_only=True, split_diet_rows=False)
@@ -1370,6 +1377,8 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
         if _monthly_entry_diet_matches_line(entry, _monthly_entry_line_diet(line))
     ]
     if not candidates:
+        if any(entry.get("_physical_row_split_slot") for entry in physical_rows[source_row_index]):
+            return {"_exclude_from_outputs": True}
         raise ValueError("monthly_entry_source_row_unresolved")
     line_diet = _monthly_entry_line_diet(line)
     return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line_diet))
@@ -1422,6 +1431,12 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         daypart = _normalize_output_daypart(line.get("daypart"))
         line_diet_key = _monthly_entry_line_diet(line)
         entry = _resolve_monthly_entry_by_source_row(line, physical_rows)
+        if isinstance(entry, dict) and entry.get("_exclude_from_outputs"):
+            updated = dict(line)
+            updated["_exclude_from_outputs"] = True
+            updated["_monthly_entry_override_applied"] = True
+            enriched.append(updated)
+            continue
         if date_key and daypart and menu_name_key:
             if entry is None:
                 entry = by_exact.get((date_key, daypart, menu_name_key, line_diet_key))
@@ -2378,6 +2393,8 @@ def _build_bags(order: dict, packaging_policy: dict, quantity_rules: dict) -> li
 
     grouped: dict[tuple, dict] = {}
     for line in order.get("lines", []):
+        if line.get("_exclude_from_outputs"):
+            continue
         line_date = _ensure_date(line.get("date"))
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:

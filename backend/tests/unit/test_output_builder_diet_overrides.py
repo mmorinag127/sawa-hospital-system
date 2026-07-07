@@ -1505,17 +1505,26 @@ def test_monthly_entry_physical_rows_keep_diet_specific_rows_with_global_source_
     assert output_builder._resolve_monthly_entry_by_source_row(lines[1], physical_rows)["name"] == "チキン南蛮　添）ｷｬﾍﾞﾂ"
     assert output_builder._resolve_monthly_entry_by_source_row(lines[2], physical_rows)["name"] == "豆腐の煮物"
     assert output_builder._resolve_monthly_entry_by_source_row(lines[3], physical_rows)["name"] == "ブロッコリーｺﾞﾏﾄﾞﾚ和え"
-    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
-        output_builder._resolve_monthly_entry_by_source_row(
-            {
-                "date": "2026-07-13",
-                "daypart": "夕",
-                "menu_name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
-                "diet_type": "soft",
-                "source_row_index": 14,
-            },
-            physical_rows,
-        )
+    assert output_builder._resolve_monthly_entry_by_source_row(
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "焼きチキン南蛮　添）ｷｬﾍﾞﾂ",
+            "diet_type": "regular",
+            "source_row_index": 13,
+        },
+        physical_rows,
+    ) == {"_exclude_from_outputs": True}
+    assert output_builder._resolve_monthly_entry_by_source_row(
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
+            "diet_type": "soft",
+            "source_row_index": 14,
+        },
+        physical_rows,
+    ) == {"_exclude_from_outputs": True}
 
 
 def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch):
