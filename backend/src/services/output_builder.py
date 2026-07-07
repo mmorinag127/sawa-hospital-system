@@ -1200,12 +1200,19 @@ def _is_specific_delivery_category(value: object) -> bool:
 
 
 def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> bool:
-    entry_key = _normalize_diet_key(entry_diet)
+    if isinstance(entry_diet, dict):
+        entry_key = _normalize_diet_key(entry_diet.get("diet_type"))
+        block_soft_mixer = bool(entry_diet.get("_block_soft_mixer_line_match"))
+    else:
+        entry_key = _normalize_diet_key(entry_diet)
+        block_soft_mixer = False
     if not entry_key:
         return True
     line_key = _normalize_diet_key(line_diet) or "regular"
     if entry_key == line_key:
         return True
+    if block_soft_mixer and line_key in {"soft", "mixer", "soft_mixer"}:
+        return False
     if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
         return True
     if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
@@ -1312,7 +1319,18 @@ def _build_monthly_entry_physical_rows(
             grouped.setdefault(key, []).append(entry)
             if physical_diet_key == "regular":
                 regular_entries_by_slot.setdefault((menu_date, daypart, slot_index), []).append(entry)
+        split_slots = {
+            (menu_date, daypart, slot_index)
+            for menu_date, daypart, slot_index, physical_diet_key in grouped
+            if physical_diet_key != "regular"
+        }
         for menu_date, daypart, slot_index, physical_diet_key in list(grouped):
+            if physical_diet_key == "regular" and (menu_date, daypart, slot_index) in split_slots:
+                grouped[(menu_date, daypart, slot_index, physical_diet_key)] = [
+                    {**entry, "_block_soft_mixer_line_match": True}
+                    for entry in grouped[(menu_date, daypart, slot_index, physical_diet_key)]
+                ]
+                continue
             if physical_diet_key == "regular":
                 continue
             regular_entries = regular_entries_by_slot.get((menu_date, daypart, slot_index)) or []
@@ -1349,7 +1367,7 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
     candidates = [
         entry
         for entry in physical_rows[source_row_index]
-        if _monthly_entry_diet_matches_line(entry.get("diet_type"), _monthly_entry_line_diet(line))
+        if _monthly_entry_diet_matches_line(entry, _monthly_entry_line_diet(line))
     ]
     if not candidates:
         raise ValueError("monthly_entry_source_row_unresolved")
