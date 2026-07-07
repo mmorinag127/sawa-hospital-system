@@ -1393,6 +1393,120 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
         )
 
 
+def test_monthly_entry_physical_rows_keep_diet_specific_rows_with_global_source_indexes():
+    entries = [
+        {
+            "menu_date": "2026-07-12",
+            "daypart": "夕食",
+            "slot_index": idx,
+            "name": f"前日{idx}",
+            "category": "副菜",
+            "diet_type": "regular",
+        }
+        for idx in range(8)
+    ]
+    entries.extend(
+        [
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "朝食",
+                "slot_index": idx,
+                "name": f"朝{idx}",
+                "category": "副菜",
+                "diet_type": "regular",
+            }
+            for idx in range(2)
+        ]
+    )
+    entries.extend(
+        [
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "昼食",
+                "slot_index": idx,
+                "name": f"昼{idx}",
+                "category": "副菜",
+                "diet_type": "regular",
+            }
+            for idx in range(3)
+        ]
+    )
+    entries.extend(
+        [
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 1,
+                "name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
+                "category": "主菜",
+                "diet_type": "regular",
+            },
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 1,
+                "name": "焼きチキン南蛮　添）ｷｬﾍﾞﾂ",
+                "category": "主菜",
+                "diet_type": "soft_mixer",
+                "facility_override": "FAC00009",
+            },
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 2,
+                "name": "豆腐の煮物",
+                "category": "副菜",
+                "diet_type": "regular",
+            },
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 3,
+                "name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
+                "category": "副菜",
+                "diet_type": "regular",
+            },
+        ]
+    )
+    lines = [
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "焼きチキン南蛮　添）ｷｬﾍﾞﾂ",
+            "diet_type": "soft",
+            "source_row_index": 13,
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
+            "diet_type": "regular",
+            "source_row_index": 14,
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "豆腐の煮物",
+            "diet_type": "regular",
+            "source_row_index": 15,
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
+            "diet_type": "regular",
+            "source_row_index": 16,
+        },
+    ]
+
+    physical_rows = output_builder._build_monthly_entry_physical_rows(entries, lines)
+
+    assert output_builder._resolve_monthly_entry_by_source_row(lines[0], physical_rows)["name"] == "焼きチキン南蛮　添）ｷｬﾍﾞﾂ"
+    assert output_builder._resolve_monthly_entry_by_source_row(lines[1], physical_rows)["name"] == "チキン南蛮　添）ｷｬﾍﾞﾂ"
+    assert output_builder._resolve_monthly_entry_by_source_row(lines[2], physical_rows)["name"] == "豆腐の煮物"
+    assert output_builder._resolve_monthly_entry_by_source_row(lines[3], physical_rows)["name"] == "ブロッコリーｺﾞﾏﾄﾞﾚ和え"
+
+
 def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch):
     monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)

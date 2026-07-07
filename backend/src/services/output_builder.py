@@ -1242,6 +1242,30 @@ def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
     return 99
 
 
+def _monthly_entry_physical_sort_key(entry: dict, order_index: int) -> tuple[str, int, int, int, int, str]:
+    menu_date = str(entry.get("menu_date") or "").strip()
+    daypart = _normalize_output_daypart(entry.get("daypart"))
+    try:
+        slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else order_index
+    except Exception:
+        slot_index = order_index
+    diet_key = _normalize_diet_key(entry.get("diet_type")) or "regular"
+    if diet_key in {"soft", "mixer", "soft_mixer"}:
+        diet_order = 0
+    elif diet_key == "regular":
+        diet_order = 1
+    else:
+        diet_order = 2
+    return (
+        menu_date,
+        {"朝": 0, "昼": 1, "夕": 2}.get(daypart, 99),
+        slot_index,
+        diet_order,
+        order_index,
+        str(entry.get("id") or ""),
+    )
+
+
 def _build_monthly_entry_physical_rows(
     menu_entries: list[dict],
     lines: list[dict] | None = None,
@@ -1261,21 +1285,55 @@ def _build_monthly_entry_physical_rows(
             scoped_date_dayparts.add((line_date.isoformat(), daypart))
     if has_source_row_index and not scoped_date_dayparts:
         raise ValueError("monthly_entry_source_row_unresolved")
-    grouped: dict[tuple[str, str, int], list[dict]] = {}
-    for idx, entry in enumerate(menu_entries):
-        menu_date = str(entry.get("menu_date") or "").strip()
-        daypart = _normalize_output_daypart(entry.get("daypart"))
-        if not menu_date:
-            continue
-        if scoped_date_dayparts and (menu_date, daypart) not in scoped_date_dayparts:
-            continue
+    sorted_entries = sorted(
+        enumerate(menu_entries),
+        key=lambda item: _monthly_entry_physical_sort_key(item[1], item[0]),
+    )
+    def build_rows(scoped_only: bool, split_diet_rows: bool) -> list[list[dict]]:
+        grouped: dict[tuple[str, str, int, str], list[dict]] = {}
+        regular_entries_by_slot: dict[tuple[str, str, int], list[dict]] = {}
+        for idx, entry in sorted_entries:
+            menu_date = str(entry.get("menu_date") or "").strip()
+            daypart = _normalize_output_daypart(entry.get("daypart"))
+            if not menu_date:
+                continue
+            if scoped_only and scoped_date_dayparts and (menu_date, daypart) not in scoped_date_dayparts:
+                continue
+            try:
+                slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else idx
+            except Exception:
+                slot_index = idx
+            diet_key = _normalize_diet_key(entry.get("diet_type")) or "regular"
+            if split_diet_rows and diet_key in {"soft", "mixer", "soft_mixer"}:
+                physical_diet_key = diet_key
+            else:
+                physical_diet_key = "regular"
+            key = (menu_date, daypart, slot_index, physical_diet_key)
+            grouped.setdefault(key, []).append(entry)
+            if physical_diet_key == "regular":
+                regular_entries_by_slot.setdefault((menu_date, daypart, slot_index), []).append(entry)
+        for menu_date, daypart, slot_index, physical_diet_key in list(grouped):
+            if physical_diet_key == "regular":
+                continue
+            regular_entries = regular_entries_by_slot.get((menu_date, daypart, slot_index)) or []
+            if regular_entries:
+                grouped[(menu_date, daypart, slot_index, physical_diet_key)].extend(regular_entries)
+        return list(grouped.values())
+
+    rows = build_rows(scoped_only=True, split_diet_rows=False)
+    source_row_indexes: list[int] = []
+    for line in lines or []:
         try:
-            slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else idx
+            if line.get("source_row_index") is not None:
+                source_row_indexes.append(int(line.get("source_row_index")))
         except Exception:
-            slot_index = idx
-        key = (menu_date, daypart, slot_index)
-        grouped.setdefault(key, []).append(entry)
-    return list(grouped.values())
+            continue
+    if source_row_indexes and rows and max(source_row_indexes) >= len(rows):
+        split_scoped_rows = build_rows(scoped_only=True, split_diet_rows=True)
+        if max(source_row_indexes) < len(split_scoped_rows):
+            return split_scoped_rows
+        return build_rows(scoped_only=False, split_diet_rows=True)
+    return rows
 
 
 def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[dict]]) -> dict | None:
