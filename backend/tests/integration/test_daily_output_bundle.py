@@ -2269,6 +2269,41 @@ def test_saved_sheet_materialization_ignores_excluded_diet_columns_without_overw
     assert all(line["menu_name"] == "サワラの幽庵焼き 添)ｻﾂﾏ芋" for line in lines)
 
 
+def test_saved_sheet_materialization_keeps_date_for_menu_name_field():
+    fields = [
+        "date",
+        "daypart",
+        "menu_name",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "remarks",
+    ]
+    rows = [["2026-07-13", "夕", "チキン南蛮　添）ｷｬﾍﾞﾂ", "4", "5", "3", "3", "2", "2", ""]]
+
+    lines = order_service._build_materialization_lines_from_sheet_rows(  # noqa: SLF001
+        fields=fields,
+        rows_payload=rows,
+        received_at=datetime(2026, 7, 7, 9, 0, 0),
+    )
+
+    assert len(lines) == 6
+    assert {line["date"].isoformat() for line in lines} == {"2026-07-13"}
+    assert {line["source_row_index"] for line in lines} == {0}
+    assert {line["source_field"] for line in lines} == {
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+    }
+    assert all(line["menu_name"] == "チキン南蛮　添）ｷｬﾍﾞﾂ" for line in lines)
+
+
 def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
     template_path = tmp_path / "delivery_template.xlsx"
     workbook = Workbook()

@@ -1419,7 +1419,7 @@ def _build_position_menu_entries_from_ocr_payload(
         (
             idx
             for idx, field in enumerate(fields)
-            if _normalize_sheet_text(field).lower() in {"menu", "menuname"}
+            if _normalize_sheet_text(field).lower() in {"menu", "menuname", "menu_name"}
         ),
         None,
     )
@@ -30853,7 +30853,7 @@ def _resolve_structural_row_field_indexes(
         (
             idx
             for idx, field in enumerate(normalized_fields)
-            if _normalize_sheet_text(field).lower() in {"menu", "menuname"}
+            if _normalize_sheet_text(field).lower() in {"menu", "menuname", "menu_name"}
         ),
         None,
     )
