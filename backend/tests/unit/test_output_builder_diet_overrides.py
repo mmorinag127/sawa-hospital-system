@@ -1101,7 +1101,28 @@ def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch):
 
 
 def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypatch):
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
+    monkeypatch.setattr(
+        output_builder.config_service,
+        "get_facility_config",
+        lambda _facility_id: {
+            "fax_template_override": {
+                "columns": [
+                    {
+                        "role": "quantity",
+                        "diet_type": "soft",
+                        "area_id": "2F",
+                        "output_diet_type": "regular",
+                    },
+                    {
+                        "role": "quantity",
+                        "diet_type": "mixer",
+                        "area_id": "3F",
+                        "output_diet_type": "regular",
+                    },
+                ]
+            }
+        },
+    )
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
@@ -1231,10 +1252,14 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
     assert lines[1]["menu_category"] == "主菜"
     assert lines[1]["menu_unit_type"] == "count"
     assert lines[1]["menu_qty_per_serving"] == 2
+    assert lines[1]["diet_type"] == "regular"
+    assert lines[1]["source_diet_type"] == "soft"
     assert lines[2]["menu_name"] == "焼きチキン南蛮"
     assert lines[2]["menu_category"] == "主菜"
     assert lines[2]["menu_unit_type"] == "count"
     assert lines[2]["menu_qty_per_serving"] == 2
+    assert lines[2]["diet_type"] == "regular"
+    assert lines[2]["source_diet_type"] == "mixer"
     assert lines[3]["menu_name"] == "豆腐の煮物"
     assert lines[3]["menu_category"] == "副菜1"
 

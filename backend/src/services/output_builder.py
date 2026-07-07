@@ -964,7 +964,9 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] |
     item_category = _normalize_delivery_category_label(item.get("category"))
     line_category = _normalize_delivery_category_label(line.get("menu_category"))
     item_diet = _normalize_diet_key(item.get("diet_type")) or ""
-    line_diet = _normalize_diet_key(line.get("diet_type") or line.get("menu_diet_type")) or ""
+    line_diet = _normalize_diet_key(
+        line.get("source_diet_type") or line.get("diet_type") or line.get("menu_diet_type")
+    ) or ""
     score = 0
     specificity = 0
     if item_daypart:
@@ -1211,6 +1213,10 @@ def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> b
     return False
 
 
+def _monthly_entry_line_diet(line: dict) -> str:
+    return _normalize_diet_key(line.get("source_diet_type") or line.get("diet_type")) or "regular"
+
+
 def _canonical_monthly_entry_menu_name(entry: dict, line: dict) -> str | None:
     if str(line.get("menu_category") or "").strip() == "添え":
         return None
@@ -1259,11 +1265,12 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
     candidates = [
         entry
         for entry in physical_rows[source_row_index]
-        if _monthly_entry_diet_matches_line(entry.get("diet_type"), line.get("diet_type"))
+        if _monthly_entry_diet_matches_line(entry.get("diet_type"), _monthly_entry_line_diet(line))
     ]
     if not candidates:
         return None
-    return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line.get("diet_type")))
+    line_diet = _monthly_entry_line_diet(line)
+    return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line_diet))
 
 
 def _build_menu_entry_indexes(
@@ -1311,7 +1318,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         line_date = _ensure_date(line.get("date"))
         date_key = line_date.isoformat() if line_date else ""
         daypart = _normalize_output_daypart(line.get("daypart"))
-        line_diet_key = _normalize_diet_key(line.get("diet_type")) or "regular"
+        line_diet_key = _monthly_entry_line_diet(line)
         entry = _resolve_monthly_entry_by_source_row(line, physical_rows)
         if date_key and daypart and menu_name_key:
             if entry is None:
@@ -1326,7 +1333,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
                 entry = by_date_name.get((date_key, menu_name_key, "soft_mixer"))
             if entry is None:
                 entry = by_date_name.get((date_key, menu_name_key, ""))
-        if entry is not None and not _monthly_entry_diet_matches_line(entry.get("diet_type"), line.get("diet_type")):
+        if entry is not None and not _monthly_entry_diet_matches_line(entry.get("diet_type"), line_diet_key):
             entry = None
         if not entry:
             enriched.append(line)
