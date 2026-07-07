@@ -1238,12 +1238,25 @@ def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
     return 99
 
 
-def _build_monthly_entry_physical_rows(menu_entries: list[dict]) -> list[list[dict]]:
+def _build_monthly_entry_physical_rows(
+    menu_entries: list[dict],
+    lines: list[dict] | None = None,
+) -> list[list[dict]]:
+    scoped_date_dayparts: set[tuple[str, str]] = set()
+    for line in lines or []:
+        line_date = _ensure_date(line.get("date")) if isinstance(line, dict) else None
+        if not line_date:
+            continue
+        daypart = _normalize_output_daypart(line.get("daypart"))
+        if daypart:
+            scoped_date_dayparts.add((line_date.isoformat(), daypart))
     grouped: dict[tuple[str, str, int], list[dict]] = {}
     for idx, entry in enumerate(menu_entries):
         menu_date = str(entry.get("menu_date") or "").strip()
         daypart = _normalize_output_daypart(entry.get("daypart"))
         if not menu_date:
+            continue
+        if scoped_date_dayparts and (menu_date, daypart) not in scoped_date_dayparts:
             continue
         try:
             slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else idx
@@ -1260,15 +1273,17 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
         source_row_index = int(source_row_raw) if source_row_raw is not None else None
     except Exception:
         source_row_index = None
-    if source_row_index is None or source_row_index < 0 or source_row_index >= len(physical_rows):
+    if source_row_index is None:
         return None
+    if source_row_index < 0 or source_row_index >= len(physical_rows):
+        raise ValueError("monthly_entry_source_row_unresolved")
     candidates = [
         entry
         for entry in physical_rows[source_row_index]
         if _monthly_entry_diet_matches_line(entry.get("diet_type"), _monthly_entry_line_diet(line))
     ]
     if not candidates:
-        return None
+        raise ValueError("monthly_entry_source_row_unresolved")
     line_diet = _monthly_entry_line_diet(line)
     return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line_diet))
 
@@ -1309,7 +1324,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
     if not menu_entries:
         return lines
     by_exact, by_date_name = _build_menu_entry_indexes(menu_entries)
-    physical_rows = _build_monthly_entry_physical_rows(menu_entries)
+    physical_rows = _build_monthly_entry_physical_rows(menu_entries, lines)
     if not by_exact and not by_date_name and not physical_rows:
         return lines
     enriched: list[dict] = []

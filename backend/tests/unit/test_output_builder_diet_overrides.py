@@ -1,3 +1,5 @@
+import pytest
+
 from src.services import order_service, output_builder
 
 
@@ -1134,6 +1136,14 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
         "_collect_menu_entries_for_week",
         lambda *_args, **_kwargs: [
             {
+                "menu_date": "2026-07-12",
+                "daypart": "夕食",
+                "slot_index": 0,
+                "name": "前日主菜",
+                "category": "主菜",
+                "diet_type": "regular",
+            },
+            {
                 "menu_date": "2026-07-13",
                 "daypart": "夕食",
                 "slot_index": 0,
@@ -1155,6 +1165,14 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                 "daypart": "夕食",
                 "slot_index": 1,
                 "name": "豆腐の煮物",
+                "category": "副菜",
+                "diet_type": "regular",
+            },
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 2,
+                "name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
                 "category": "副菜",
                 "diet_type": "regular",
             },
@@ -1240,6 +1258,16 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "quantity_original": 4,
                     "source_row_index": 1,
                 },
+                {
+                    "date": "2026-07-13",
+                    "daypart": "夕",
+                    "menu_name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
+                    "menu_category": "副菜",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 4,
+                    "source_row_index": 2,
+                },
             ],
         }
     )
@@ -1262,6 +1290,85 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
     assert lines[2]["source_diet_type"] == "mixer"
     assert lines[3]["menu_name"] == "豆腐の煮物"
     assert lines[3]["menu_category"] == "副菜1"
+    assert lines[4]["menu_name"] == "ブロッコリーｺﾞﾏﾄﾞﾚ和え"
+    assert lines[4]["menu_category"] == "副菜2"
+
+    bags = output_builder.build_bag_rows_for_outputs(
+        {
+            "id": "ORD-test",
+            "facility": "FAC00009",
+            "week_value": "2026-07@2026-07-12~2026-07-18",
+        },
+        order_lines=lines,
+        facility_config={"fax_template_override": {"columns": []}},
+    )
+    labels, _fields, label_format = output_builder._build_label_rows(bags, {}, None)
+    assert label_format == "jp"
+
+    chikin_labels = [row for row in labels if row["商品名１"] in {"チキン南蛮", "焼きチキン南蛮"}]
+    assert all(row["メニュー"].startswith("主菜") for row in chikin_labels)
+    assert all(row["内容詳細"] == "2個" for row in chikin_labels)
+    assert any(row["商品名１"] == "チキン南蛮" and row["メニュー"] == "主菜" for row in chikin_labels)
+    assert any(
+        row["商品名１"] == "焼きチキン南蛮" and row["メニュー"] == "主菜（軟菜）"
+        for row in chikin_labels
+    )
+    assert any(
+        row["商品名１"] == "焼きチキン南蛮" and row["メニュー"] == "主菜（ミキサー）"
+        for row in chikin_labels
+    )
+    assert not any(row["商品名１"] == "チキン南蛮" and row["メニュー"].startswith("副菜") for row in labels)
+
+    tofu_label = next(row for row in labels if row["商品名１"] == "豆腐の煮物")
+    assert tofu_label["メニュー"] == "副菜①"
+    broccoli_label = next(row for row in labels if row["商品名１"] == "ブロッコリーｺﾞﾏﾄﾞﾚ和え")
+    assert broccoli_label["メニュー"] == "副菜②"
+
+
+def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
+    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
+    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
+    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
+    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
+    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
+    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "_collect_menu_entries_for_week",
+        lambda *_args, **_kwargs: [
+            {
+                "menu_date": "2026-07-13",
+                "daypart": "夕食",
+                "slot_index": 0,
+                "name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
+                "category": "主菜",
+                "diet_type": "regular",
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder.build_order_lines_for_outputs(
+            {
+                "id": "ORD-test",
+                "facility": "FAC00009",
+                "week_value": "2026-07@2026-07-12~2026-07-18",
+                "lines": [
+                    {
+                        "date": "2026-07-13",
+                        "daypart": "夕",
+                        "menu_name": "チキン南蛮",
+                        "menu_category": "主菜",
+                        "diet_type": "soft",
+                        "area_id": "2F",
+                        "quantity_original": 3,
+                        "source_row_index": 99,
+                    }
+                ],
+            }
+        )
 
 
 def test_position_menu_entries_collapse_diet_specific_rows_to_physical_menu_rows(monkeypatch):
