@@ -380,7 +380,7 @@ def _normalize_unit_type(unit_type: str | None) -> str | None:
         return "g"
     if "切" in raw or "枚" in raw or lowered in {"cut", "slice", "slices"}:
         return "切"
-    if "個" in raw or lowered in {"count", "piece", "pieces"}:
+    if "個" in raw or lowered in {"count", "counts", "piece", "pieces"}:
         return "個"
     return raw
 
@@ -401,6 +401,13 @@ def _normalize_diet_key(value: str | None) -> str | None:
         return "regular_bag"
     if "常食" in raw or "通常" in raw or lowered in {"regular", "standard"}:
         return "regular"
+    if (
+        "軟菜/ミキサ" in raw
+        or "軟菜・ミキサ" in raw
+        or "軟菜＋ミキサ" in raw
+        or lowered in {"soft_mixer", "soft-mixer", "soft/mixer"}
+    ):
+        return "soft_mixer"
     if "軟菜" in raw or "やわ" in raw or "ﾔﾜ" in raw or "ヤワ" in raw or lowered in {"soft"}:
         return "soft"
     if "ミキサ" in raw or "ﾐｷｻ" in raw or lowered in {"mixer"}:
@@ -956,8 +963,8 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] |
     line_daypart = _normalize_delivery_daypart(line.get("daypart"))
     item_category = _normalize_delivery_category_label(item.get("category"))
     line_category = _normalize_delivery_category_label(line.get("menu_category"))
-    item_diet = str(item.get("diet_type") or "").strip()
-    line_diet = str(line.get("diet_type") or line.get("menu_diet_type") or "").strip()
+    item_diet = _normalize_diet_key(item.get("diet_type")) or ""
+    line_diet = _normalize_diet_key(line.get("diet_type") or line.get("menu_diet_type")) or ""
     score = 0
     specificity = 0
     if item_daypart:
@@ -976,6 +983,10 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] |
         specificity += 1
         if line_diet and item_diet == line_diet:
             score += 20
+        elif item_diet == "soft_mixer" and line_diet in {"soft", "mixer", "soft_mixer"}:
+            score += 18
+        elif line_diet == "soft_mixer" and item_diet in {"soft", "mixer", "soft_mixer"}:
+            score += 18
         elif line_diet and item_diet not in {"regular", "常食", "普通食"}:
             return None
         elif line_diet:
@@ -1186,13 +1197,85 @@ def _is_specific_delivery_category(value: object) -> bool:
     return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "主菜"}
 
 
-def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str, str, str], dict], dict[tuple[str, str], dict]]:
-    by_exact: dict[tuple[str, str, str], dict] = {}
-    by_date_name: dict[tuple[str, str], dict | None] = {}
+def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> bool:
+    entry_key = _normalize_diet_key(entry_diet)
+    if not entry_key:
+        return True
+    line_key = _normalize_diet_key(line_diet) or "regular"
+    if entry_key == line_key:
+        return True
+    if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
+        return True
+    if line_key == "soft_mixer" and entry_key in {"soft", "mixer", "soft_mixer"}:
+        return True
+    return False
+
+
+def _canonical_monthly_entry_menu_name(entry: dict, line: dict) -> str | None:
+    if str(line.get("menu_category") or "").strip() == "添え":
+        return None
+    base_name, _garnish_name = _split_garnish_name(entry.get("name"))
+    return base_name or str(entry.get("name") or "").strip() or None
+
+
+def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
+    entry_key = _normalize_diet_key(entry.get("diet_type")) or ""
+    line_key = _normalize_diet_key(line_diet) or "regular"
+    if entry_key == line_key:
+        return 0
+    if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
+        return 1
+    if entry_key == "" and line_key == "regular":
+        return 2
+    if entry_key == "":
+        return 3
+    return 99
+
+
+def _build_monthly_entry_physical_rows(menu_entries: list[dict]) -> list[list[dict]]:
+    grouped: dict[tuple[str, str, int], list[dict]] = {}
+    for idx, entry in enumerate(menu_entries):
+        menu_date = str(entry.get("menu_date") or "").strip()
+        daypart = _normalize_output_daypart(entry.get("daypart"))
+        if not menu_date:
+            continue
+        try:
+            slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else idx
+        except Exception:
+            slot_index = idx
+        key = (menu_date, daypart, slot_index)
+        grouped.setdefault(key, []).append(entry)
+    return list(grouped.values())
+
+
+def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[dict]]) -> dict | None:
+    source_row_raw = line.get("source_row_index")
+    try:
+        source_row_index = int(source_row_raw) if source_row_raw is not None else None
+    except Exception:
+        source_row_index = None
+    if source_row_index is None or source_row_index < 0 or source_row_index >= len(physical_rows):
+        return None
+    candidates = [
+        entry
+        for entry in physical_rows[source_row_index]
+        if _monthly_entry_diet_matches_line(entry.get("diet_type"), line.get("diet_type"))
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line.get("diet_type")))
+
+
+def _build_menu_entry_indexes(
+    menu_entries: list[dict],
+) -> tuple[dict[tuple[str, str, str, str], dict], dict[tuple[str, str, str], dict]]:
+    by_exact: dict[tuple[str, str, str, str], dict] = {}
+    by_date_name: dict[tuple[str, str, str], dict | None] = {}
     for entry in menu_entries:
         menu_date = str(entry.get("menu_date") or "").strip()
         menu_name = str(entry.get("name") or "").strip()
         daypart = _normalize_output_daypart(entry.get("daypart"))
+        diet_key = _normalize_diet_key(entry.get("diet_type")) or ""
         if not menu_date or not menu_name:
             continue
         for alias in _build_menu_name_aliases(menu_name):
@@ -1200,8 +1283,8 @@ def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str,
             if not alias_key:
                 continue
             if daypart:
-                by_exact[(menu_date, daypart, alias_key)] = entry
-            date_name_key = (menu_date, alias_key)
+                by_exact[(menu_date, daypart, alias_key, diet_key)] = entry
+            date_name_key = (menu_date, alias_key, diet_key)
             existing = by_date_name.get(date_name_key)
             if existing is None:
                 by_date_name[date_name_key] = entry
@@ -1219,7 +1302,8 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
     if not menu_entries:
         return lines
     by_exact, by_date_name = _build_menu_entry_indexes(menu_entries)
-    if not by_exact and not by_date_name:
+    physical_rows = _build_monthly_entry_physical_rows(menu_entries)
+    if not by_exact and not by_date_name and not physical_rows:
         return lines
     enriched: list[dict] = []
     for line in lines:
@@ -1227,17 +1311,32 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         line_date = _ensure_date(line.get("date"))
         date_key = line_date.isoformat() if line_date else ""
         daypart = _normalize_output_daypart(line.get("daypart"))
-        entry = None
+        line_diet_key = _normalize_diet_key(line.get("diet_type")) or "regular"
+        entry = _resolve_monthly_entry_by_source_row(line, physical_rows)
         if date_key and daypart and menu_name_key:
-            entry = by_exact.get((date_key, daypart, menu_name_key))
+            if entry is None:
+                entry = by_exact.get((date_key, daypart, menu_name_key, line_diet_key))
+            if entry is None and line_diet_key in {"soft", "mixer"}:
+                entry = by_exact.get((date_key, daypart, menu_name_key, "soft_mixer"))
+            if entry is None:
+                entry = by_exact.get((date_key, daypart, menu_name_key, ""))
         if entry is None and date_key and menu_name_key:
-            entry = by_date_name.get((date_key, menu_name_key))
+            entry = by_date_name.get((date_key, menu_name_key, line_diet_key))
+            if entry is None and line_diet_key in {"soft", "mixer"}:
+                entry = by_date_name.get((date_key, menu_name_key, "soft_mixer"))
+            if entry is None:
+                entry = by_date_name.get((date_key, menu_name_key, ""))
+        if entry is not None and not _monthly_entry_diet_matches_line(entry.get("diet_type"), line.get("diet_type")):
+            entry = None
         if not entry:
             enriched.append(line)
             continue
         updated = dict(line)
         if entry.get("daypart") and not daypart:
             updated["daypart"] = _normalize_output_daypart(entry.get("daypart"))
+        entry_menu_name = _canonical_monthly_entry_menu_name(entry, updated)
+        if entry_menu_name:
+            updated["menu_name"] = entry_menu_name
         entry_category = _menu_entry_category_label(entry)
         if entry_category:
             updated["menu_category"] = entry_category
@@ -1356,8 +1455,8 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
         slot_sequence = _label_meal_slot_sequence(daypart)
         if not slot_sequence:
             continue
-        menu_slot_by_name: dict[str, str] = {}
-        menu_names: list[str] = []
+        menu_slot_by_physical_key: dict[str, str] = {}
+        physical_keys: list[str] = []
         for line in sorted(daypart_lines, key=_line_order_key):
             category = _normalize_delivery_category_label(line.get("menu_category"))
             if _is_daily_label_garnish_category(category):
@@ -1365,13 +1464,15 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
             menu_name = str(line.get("menu_name") or "").strip()
             if not menu_name:
                 continue
-            if menu_name not in menu_slot_by_name:
-                menu_names.append(menu_name)
-                if len(menu_names) <= len(slot_sequence):
-                    menu_slot_by_name[menu_name] = slot_sequence[len(menu_names) - 1]
+            source_row_index = line.get("source_row_index")
+            physical_key = f"source:{source_row_index}" if source_row_index is not None else f"name:{menu_name}"
+            if physical_key not in menu_slot_by_physical_key:
+                physical_keys.append(physical_key)
+                if len(physical_keys) <= len(slot_sequence):
+                    menu_slot_by_physical_key[physical_key] = slot_sequence[len(physical_keys) - 1]
                 else:
-                    menu_slot_by_name[menu_name] = category
-            slot = menu_slot_by_name.get(menu_name)
+                    menu_slot_by_physical_key[physical_key] = category
+            slot = menu_slot_by_physical_key.get(physical_key)
             if slot:
                 slot_by_id[id(line)] = slot
 
@@ -1833,6 +1934,8 @@ def build_order_lines_for_outputs(
     order_lines = _apply_output_diet_type_overrides(order_lines, facility_config)
     # Current monthly/menu-master settings must win over stale confirmed snapshots.
     order_lines = _apply_menu_overrides(order_lines, menu_items)
+    order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
+    order_lines = _apply_menu_overrides(order_lines, menu_items)
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id)
     order_lines = _apply_garnish_defaults(order_lines)
@@ -2108,9 +2211,12 @@ def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
             matches,
             key=lambda rule: type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0),
         )
+        if selected.get("rule_type") == "global" and line.get("menu_qty_per_serving") is not None:
+            enriched.append(line)
+            continue
         updated = dict(line)
         if selected.get("unit_type"):
-            updated["menu_unit_type"] = selected.get("unit_type")
+            updated["menu_unit_type"] = _normalize_unit_type(selected.get("unit_type")) or selected.get("unit_type")
         if selected.get("qty_per_serving") is not None:
             updated["menu_qty_per_serving"] = selected.get("qty_per_serving")
         enriched.append(updated)

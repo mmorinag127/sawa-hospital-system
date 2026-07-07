@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import menu_service
+from src.services import order_service
 from src.services import output_builder
 from src.db import session_scope
 from src.models.menu import MonthlyMenu, MonthlyMenuItem, MonthlyMenuEntry, MenuMaster, MenuFacilityOverride
@@ -762,6 +763,70 @@ def test_get_menu_for_facility_resolves_tag_and_entry_scope():
     assert payload is not None
     names = [entry["name"] for entry in payload["entries"]]
     assert names == ["タグ主菜", "共通副菜"]
+
+
+def test_facility_menu_entries_keep_diet_scoped_rows_for_same_physical_slot():
+    with session_scope() as session:
+        session.query(AuditLog).delete()
+        session.query(FacilityConfig).delete()
+        session.query(Facility).delete()
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
+        session.query(MenuFacilityOverride).delete()
+        session.query(MenuMaster).delete()
+        session.query(MonthlyMenu).delete()
+
+        session.add(Facility(id="FACDIET01", name="Diet Facility"))
+        session.add(MonthlyMenu(id="2099-07", month_start=date(2099, 7, 1), filename="diet.xlsx"))
+        session.add_all(
+            [
+                MonthlyMenuEntry(
+                    id="MME_DIET_REGULAR",
+                    monthly_menu_id="2099-07",
+                    menu_date=date(2099, 7, 13),
+                    daypart="夕食",
+                    name="チキン南蛮　添）ｷｬﾍﾞﾂ",
+                    category="主菜",
+                    diet_type="regular",
+                    slot_index=0,
+                    facility_override=None,
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DIET_SOFT_MIXER",
+                    monthly_menu_id="2099-07",
+                    menu_date=date(2099, 7, 13),
+                    daypart="夕食",
+                    name="焼きチキン南蛮　添）ｷｬﾍﾞﾂ",
+                    category="主菜",
+                    diet_type="soft_mixer",
+                    slot_index=0,
+                    facility_override="FACDIET01",
+                ),
+                MonthlyMenuEntry(
+                    id="MME_DIET_SIDE",
+                    monthly_menu_id="2099-07",
+                    menu_date=date(2099, 7, 13),
+                    daypart="夕食",
+                    name="豆腐の煮物",
+                    category="副菜",
+                    diet_type="regular",
+                    slot_index=1,
+                    facility_override=None,
+                ),
+            ]
+        )
+
+    resolved = menu_service.get_menu_entries_for_facility("2099-07", "FACDIET01")
+    resolved_key = {(entry["slot_index"], entry["diet_type"], entry["name"]) for entry in resolved}
+    assert (0, "regular", "チキン南蛮　添）ｷｬﾍﾞﾂ") in resolved_key
+    assert (0, "soft_mixer", "焼きチキン南蛮　添）ｷｬﾍﾞﾂ") in resolved_key
+    assert (1, "regular", "豆腐の煮物") in resolved_key
+
+    collected = order_service._collect_menu_entries_for_week("2099-07@2099-07-12~2099-07-18", "FACDIET01")
+    collected_key = {(entry["slot_index"], entry["diet_type"], entry["name"]) for entry in collected}
+    assert (0, "regular", "チキン南蛮　添）ｷｬﾍﾞﾂ") in collected_key
+    assert (0, "soft_mixer", "焼きチキン南蛮　添）ｷｬﾍﾞﾂ") in collected_key
+    assert (1, "regular", "豆腐の煮物") in collected_key
 
 
 def test_get_menu_for_facility_preserves_multiple_base_entries_in_same_slot():

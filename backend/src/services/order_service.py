@@ -1078,7 +1078,7 @@ def _collect_menu_entries_for_week(
     facility_id: str | None = None,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, int]] = set()
+    seen: set[tuple[str, str, str, int, str]] = set()
     for month_id in _sheet_week_month_ids(week_id):
         raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id)
         for entry in raw_entries:
@@ -1092,7 +1092,8 @@ def _collect_menu_entries_for_week(
                 slot_index = int(slot_index_raw) if slot_index_raw is not None else -1
             except Exception:
                 slot_index = -1
-            dedupe_key = (menu_date, daypart, _normalize_menu_text(menu_name), slot_index)
+            diet_type = str(entry.get("diet_type") or "").strip()
+            dedupe_key = (menu_date, daypart, _normalize_menu_text(menu_name), slot_index, diet_type)
             if not menu_name or dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -1112,8 +1113,7 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
     month_ids = _sheet_week_month_ids(week_id)
     if not month_ids:
         return []
-    entries: list[dict] = []
-    seen: set[tuple[str, str, int, str]] = set()
+    selected_by_physical_slot: dict[tuple[str, str, int], tuple[int, int, dict]] = {}
     order_index = 0
     for _month_id, menu in _load_menu_payloads_for_week(week_id, facility_id):
         raw_entries = menu.get("entries")
@@ -1132,26 +1132,26 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
                 slot_index = int(slot_index_raw) if slot_index_raw is not None else idx
             except Exception:
                 slot_index = idx
-            dedupe_key = (
+            physical_key = (
                 menu_date.isoformat() if isinstance(menu_date, date) else "",
                 daypart_key,
                 slot_index,
-                _normalize_menu_text(menu_name),
             )
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            entries.append(
-                {
-                    "menu_name": menu_name,
-                    "menu_date": menu_date,
-                    "daypart_key": daypart_key,
-                    "category": str(raw.get("category") or "").strip() or None,
-                    "slot_index": slot_index,
-                    "order": order_index,
-                }
-            )
+            diet_key = _normalize_sheet_diet(raw.get("diet_type")) or ""
+            row_priority = 0 if diet_key in {"", "regular"} else 1
+            payload = {
+                "menu_name": menu_name,
+                "menu_date": menu_date,
+                "daypart_key": daypart_key,
+                "category": str(raw.get("category") or "").strip() or None,
+                "slot_index": slot_index,
+                "order": order_index,
+            }
+            current = selected_by_physical_slot.get(physical_key)
+            if current is None or (row_priority, order_index) < (current[0], current[1]):
+                selected_by_physical_slot[physical_key] = (row_priority, order_index, payload)
             order_index += 1
+    entries = [payload for _priority, _order_index, payload in selected_by_physical_slot.values()]
     entries.sort(
         key=lambda item: (
             item.get("menu_date") or date.min,
