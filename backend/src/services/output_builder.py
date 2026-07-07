@@ -1206,6 +1206,8 @@ def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> b
     line_key = _normalize_diet_key(line_diet) or "regular"
     if entry_key == line_key:
         return True
+    if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
+        return True
     if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
         return True
     if line_key == "soft_mixer" and entry_key in {"soft", "mixer", "soft_mixer"}:
@@ -1235,6 +1237,8 @@ def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
         return 2
     if entry_key == "":
         return 3
+    if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
+        return 4
     return 99
 
 
@@ -1272,7 +1276,7 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
     try:
         source_row_index = int(source_row_raw) if source_row_raw is not None else None
     except Exception:
-        source_row_index = None
+        raise ValueError("monthly_entry_source_row_unresolved") from None
     if source_row_index is None:
         return None
     if source_row_index < 0 or source_row_index >= len(physical_rows):
