@@ -1464,6 +1464,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         entry_category = _menu_entry_category_label(entry)
         if entry_category:
             updated["menu_category"] = entry_category
+        updated["_monthly_entry_raw_category"] = _normalize_delivery_category_label(entry.get("category"))
         updated["_monthly_entry_override_applied"] = True
         enriched.append(updated)
     return enriched
@@ -1579,11 +1580,32 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
         slot_sequence = _label_meal_slot_sequence(daypart)
         if not slot_sequence:
             continue
+        has_explicit_main = any(
+            not line.get("_exclude_from_outputs")
+            and line.get("_monthly_entry_override_applied")
+            and line.get("_monthly_entry_raw_category") == "主菜"
+            and _normalize_delivery_category_label(line.get("menu_category")) == "主菜"
+            for line in daypart_lines
+        )
+        generic_slot_sequence = (
+            [slot for slot in slot_sequence if slot != "主菜"]
+            if has_explicit_main
+            else slot_sequence
+        )
         menu_slot_by_physical_key: dict[str, str] = {}
         physical_keys: list[str] = []
         for line in sorted(daypart_lines, key=_line_order_key):
+            if line.get("_exclude_from_outputs"):
+                continue
             category = _normalize_delivery_category_label(line.get("menu_category"))
             if _is_daily_label_garnish_category(category):
+                continue
+            if (
+                line.get("_monthly_entry_override_applied")
+                and line.get("_monthly_entry_raw_category") == "主菜"
+                and category == "主菜"
+            ):
+                slot_by_id[id(line)] = category
                 continue
             menu_name = str(line.get("menu_name") or "").strip()
             if not menu_name:
@@ -1592,8 +1614,8 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
             physical_key = f"source:{source_row_index}" if source_row_index is not None else f"name:{menu_name}"
             if physical_key not in menu_slot_by_physical_key:
                 physical_keys.append(physical_key)
-                if len(physical_keys) <= len(slot_sequence):
-                    menu_slot_by_physical_key[physical_key] = slot_sequence[len(physical_keys) - 1]
+                if len(physical_keys) <= len(generic_slot_sequence):
+                    menu_slot_by_physical_key[physical_key] = generic_slot_sequence[len(physical_keys) - 1]
                 else:
                     menu_slot_by_physical_key[physical_key] = category
             slot = menu_slot_by_physical_key.get(physical_key)

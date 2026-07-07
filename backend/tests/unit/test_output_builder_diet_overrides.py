@@ -1527,6 +1527,76 @@ def test_monthly_entry_physical_rows_keep_diet_specific_rows_with_global_source_
     ) == {"_exclude_from_outputs": True}
 
 
+def test_label_slot_categories_ignore_excluded_split_monthly_lines():
+    lines = [
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "焼きチキン南蛮",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 13,
+            "_exclude_from_outputs": True,
+            "_monthly_entry_override_applied": True,
+            "_monthly_entry_raw_category": "主菜",
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "焼きチキン南蛮",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "source_row_index": 13,
+            "_monthly_entry_override_applied": True,
+            "_monthly_entry_raw_category": "主菜",
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "チキン南蛮",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 14,
+            "_monthly_entry_override_applied": True,
+            "_monthly_entry_raw_category": "主菜",
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "チキン南蛮",
+            "menu_category": "主菜",
+            "diet_type": "soft",
+            "source_row_index": 14,
+            "_exclude_from_outputs": True,
+            "_monthly_entry_override_applied": True,
+            "_monthly_entry_raw_category": "主菜",
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "豆腐の煮物",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 15,
+        },
+        {
+            "date": "2026-07-13",
+            "daypart": "夕",
+            "menu_name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 16,
+        },
+    ]
+
+    enriched = output_builder._apply_label_meal_slot_categories(lines)
+
+    assert enriched[1]["menu_category"] == "主菜"
+    assert enriched[2]["menu_category"] == "主菜"
+    assert enriched[4]["menu_category"] == "副菜1"
+    assert enriched[5]["menu_category"] == "副菜2"
+
+
 def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch):
     monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
