@@ -1247,13 +1247,20 @@ def _build_monthly_entry_physical_rows(
     lines: list[dict] | None = None,
 ) -> list[list[dict]]:
     scoped_date_dayparts: set[tuple[str, str]] = set()
+    has_source_row_index = False
     for line in lines or []:
-        line_date = _ensure_date(line.get("date")) if isinstance(line, dict) else None
+        if not isinstance(line, dict):
+            continue
+        if line.get("source_row_index") is not None:
+            has_source_row_index = True
+        line_date = _ensure_date(line.get("date"))
         if not line_date:
             continue
         daypart = _normalize_output_daypart(line.get("daypart"))
         if daypart:
             scoped_date_dayparts.add((line_date.isoformat(), daypart))
+    if has_source_row_index and not scoped_date_dayparts:
+        raise ValueError("monthly_entry_source_row_unresolved")
     grouped: dict[tuple[str, str, int], list[dict]] = {}
     for idx, entry in enumerate(menu_entries):
         menu_date = str(entry.get("menu_date") or "").strip()

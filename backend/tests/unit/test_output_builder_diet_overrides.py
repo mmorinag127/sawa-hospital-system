@@ -1373,6 +1373,24 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
                 ],
             }
         )
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder.build_order_lines_for_outputs(
+            {
+                **base_order,
+                "lines": [
+                    {
+                        "date": None,
+                        "daypart": "夕",
+                        "menu_name": "チキン南蛮",
+                        "menu_category": "主菜",
+                        "diet_type": "soft",
+                        "area_id": "2F",
+                        "quantity_original": 3,
+                        "source_row_index": 0,
+                    }
+                ],
+            }
+        )
 
 
 def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch):
