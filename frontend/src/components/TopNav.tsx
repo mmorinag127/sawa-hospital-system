@@ -26,6 +26,18 @@ export default function TopNav() {
   const roleRank = role === "admin" ? 2 : 1;
 
   const navGroups: NavGroup[] = [
+    ...(process.env.NEXT_PUBLIC_SHIFT_WEB_URL
+      ? [{
+          id: "common",
+          label: "共通機能",
+          description: "ほかの業務システム",
+          items: [{
+            href: "/shift-launch",
+            label: "シフト管理",
+            isActive: (path: string) => path.startsWith("/shift-launch"),
+          }],
+        }]
+      : []),
     {
       id: "orders",
       label: "注文系",

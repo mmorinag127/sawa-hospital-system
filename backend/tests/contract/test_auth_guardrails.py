@@ -119,7 +119,7 @@ def test_admin_token_is_not_accepted_as_static_bearer(monkeypatch):
     assert res.status_code == 401
 
 
-def test_google_admin_requires_registered_role_or_admin_allowlist(monkeypatch):
+def test_google_admin_requires_active_registered_admin_role(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
     monkeypatch.delenv("ADMIN_EMAILS", raising=False)
@@ -133,7 +133,7 @@ def test_google_admin_requires_registered_role_or_admin_allowlist(monkeypatch):
     assert res.status_code == 403
 
 
-def test_google_operator_requires_registered_role_or_operator_allowlist(monkeypatch):
+def test_google_operator_requires_active_registered_role(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
     monkeypatch.delenv("ADMIN_EMAILS", raising=False)
@@ -147,18 +147,20 @@ def test_google_operator_requires_registered_role_or_operator_allowlist(monkeypa
     assert res.status_code == 403
 
 
-def test_allowed_email_does_not_grant_google_admin(monkeypatch):
+def test_legacy_email_allowlists_do_not_bypass_common_user_database(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ALLOWED_EMAILS", "user@example.com")
-    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("ADMIN_EMAILS", "user@example.com")
     importlib.reload(auth_module)
     importlib.reload(auth_config_module)
     monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
     monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
-    res = client.get("/users", headers=_bearer_header())
-    assert res.status_code == 403
+    admin_res = client.get("/users", headers=_bearer_header())
+    operator_res = client.get("/orders", headers=_bearer_header())
+    assert admin_res.status_code == 403
+    assert operator_res.status_code == 403
 
 
 def test_google_role_lookup_failure_blocks_admin_and_operator(monkeypatch):

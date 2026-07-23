@@ -32,8 +32,6 @@ def _parse_emails(env_key: str) -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
-ALLOWED_EMAILS = _parse_emails("ALLOWED_EMAILS")
-ADMIN_EMAILS = _parse_emails("ADMIN_EMAILS")
 ADMIN_SERVICE_ACCOUNTS = _parse_emails("ADMIN_SERVICE_ACCOUNTS")
 _USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
 _USER_ROLE_CACHE_LOCK = threading.Lock()
@@ -201,8 +199,6 @@ def get_current_admin(request: Request) -> UserContext:
             return UserContext(role="admin")
         if registered_role in {"operator"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        if google_email in ADMIN_EMAILS:
-            return UserContext(role="admin")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
     admin_user = os.getenv("ADMIN_USER")
@@ -232,8 +228,6 @@ def get_current_operator(request: Request) -> UserContext:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role in {"admin", "operator"}:
-            return UserContext(role="operator")
-        if google_email in ALLOWED_EMAILS:
             return UserContext(role="operator")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
