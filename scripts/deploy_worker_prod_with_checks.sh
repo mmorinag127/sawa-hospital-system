@@ -26,6 +26,7 @@ WORKER_TIMEOUT="${WORKER_TIMEOUT:-1800}"
 WORKER_CONCURRENCY="${WORKER_CONCURRENCY:-2}"
 SERVICE_ENV_SUFFIX="${SERVICE##*-}"
 TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-${PROJECT_ID}-${SERVICE_ENV_SUFFIX}-templates}"
+WORKER_EXTRA_ENV_VARS="${WORKER_EXTRA_ENV_VARS:-}"
 PREDEPLOY_SCRIPT="${PREDEPLOY_SCRIPT:-$SCRIPT_DIR/predeploy_env_checks.sh}"
 ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh}"
 
@@ -135,13 +136,17 @@ echo "current revision=${CURRENT_REVISION:-unknown}"
 echo "current image=${CURRENT_IMAGE:-unknown}"
 
 echo "[2/9] deploy ${SERVICE}"
+WORKER_ENV_ARGS=("--update-env-vars=TEMPLATE_BUCKET=${TEMPLATE_BUCKET}")
+if [[ -n "${WORKER_EXTRA_ENV_VARS}" ]]; then
+  WORKER_ENV_ARGS+=("--update-env-vars=${WORKER_EXTRA_ENV_VARS}")
+fi
 set +e
 DEPLOY_OUTPUT="$(
   gcloud run deploy "${SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${IMAGE}" \
-  --update-env-vars="TEMPLATE_BUCKET=${TEMPLATE_BUCKET}" \
+  "${WORKER_ENV_ARGS[@]}" \
   --memory="${WORKER_MEMORY}" \
   --cpu="${WORKER_CPU}" \
   --timeout="${WORKER_TIMEOUT}" \

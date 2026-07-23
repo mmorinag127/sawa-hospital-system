@@ -80,7 +80,23 @@ def test_auth_me_returns_admin_for_basic_admin(monkeypatch):
     assert res.json()["role"] == "admin"
 
 
-def test_operator_basic_cannot_access_admin_route(monkeypatch):
+def test_portal_mode_rejects_local_basic_auth(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("AUTH_PROVIDER", "portal")
+    monkeypatch.setenv("PORTAL_AUTH_ME_URL", "https://portal.example/api/auth/me")
+    monkeypatch.setenv("ADMIN_USER", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "secret")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "operator-secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    assert client.get("/auth/me", headers=_basic_header("admin", "secret")).status_code == 401
+    assert client.get("/orders", headers=_basic_header("operator", "operator-secret")).status_code == 401
+
+
+def test_common_users_route_is_not_exposed_by_hospital(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-secret")
@@ -91,7 +107,7 @@ def test_operator_basic_cannot_access_admin_route(monkeypatch):
 
     client = TestClient(app)
     res = client.get("/users", headers=_basic_header("operator", "operator-secret"))
-    assert res.status_code == 403
+    assert res.status_code == 404
 
 
 def test_auth_ignores_legacy_auth_header_cookie(monkeypatch):
@@ -115,7 +131,7 @@ def test_admin_token_is_not_accepted_as_static_bearer(monkeypatch):
     importlib.reload(auth_config_module)
 
     client = TestClient(app)
-    res = client.get("/users", headers=_bearer_header("static-admin-token"))
+    res = client.get("/auth/me", headers=_bearer_header("static-admin-token"))
     assert res.status_code == 401
 
 
@@ -129,7 +145,7 @@ def test_google_admin_requires_active_registered_admin_role(monkeypatch):
     monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
-    res = client.get("/users", headers=_bearer_header())
+    res = client.get("/auth/me", headers=_bearer_header())
     assert res.status_code == 403
 
 
@@ -157,7 +173,7 @@ def test_legacy_email_allowlists_do_not_bypass_common_user_database(monkeypatch)
     monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
-    admin_res = client.get("/users", headers=_bearer_header())
+    admin_res = client.get("/auth/me", headers=_bearer_header())
     operator_res = client.get("/orders", headers=_bearer_header())
     assert admin_res.status_code == 403
     assert operator_res.status_code == 403
@@ -177,7 +193,7 @@ def test_google_role_lookup_failure_blocks_admin_and_operator(monkeypatch):
     monkeypatch.setattr(auth_module, "_load_active_user_roles", raise_lookup_failure)
 
     client = TestClient(app)
-    admin_res = client.get("/users", headers=_bearer_header())
+    admin_res = client.get("/auth/me", headers=_bearer_header())
     operator_res = client.get("/orders", headers=_bearer_header())
     assert admin_res.status_code == 503
     assert operator_res.status_code == 503

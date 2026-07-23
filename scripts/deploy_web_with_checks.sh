@@ -178,7 +178,11 @@ else
 fi
 
 echo "[3/7] deploy ${WEB_SERVICE}"
-gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" --quiet
+WEB_PUBLIC_ARGS=()
+if [[ "${ALLOW_UNAUTHENTICATED_WEB:-0}" == "1" ]]; then
+  WEB_PUBLIC_ARGS+=(--allow-unauthenticated)
+fi
+gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" --quiet
 gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
 
 LATEST_READY_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)' || true)"

@@ -28,6 +28,11 @@ export default function LoginPage() {
   const [message, setMessage] = useState("");
   const [configMessage, setConfigMessage] = useState("");
 
+  useEffect(() => {
+    const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
+    if (portalUrl) window.location.replace(portalUrl);
+  }, []);
+
   const redirectAfterLogin = () => {
     const next = window.sessionStorage.getItem("auth_next") || "/";
     window.sessionStorage.removeItem("auth_next");

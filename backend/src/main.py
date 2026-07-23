@@ -21,7 +21,6 @@ from src.api import (
     totals,
     base_menus,
     system,
-    users,
 )
 from src.services import facility_service, facility_template_version_service, menu_service
 from src.services.read_only_request_guard_service import read_only_request_guard
@@ -68,7 +67,6 @@ app.include_router(facility_master.router, prefix="")
 app.include_router(ocr_registry.router, prefix="")
 app.include_router(base_menus.router, prefix="")
 app.include_router(system.router, prefix="")
-app.include_router(users.router, prefix="")
 
 
 @app.on_event("startup")

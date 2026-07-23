@@ -3,7 +3,8 @@ import type { AppProps } from "next/app";
 import { useRouter } from "next/router";
 import { getStoredAuthHeader } from "../services/apiClient";
 
-const PUBLIC_ROUTES = new Set(["/login", "/about", "/privacy", "/terms"]);
+const PUBLIC_ROUTES = new Set(["/login", "/auth/handoff", "/about", "/privacy", "/terms"]);
+const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 
 export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter();
@@ -19,7 +20,7 @@ export default function App({ Component, pageProps }: AppProps) {
     if (!header && typeof window !== "undefined") {
       const nextPath = router.asPath || "/";
       window.sessionStorage.setItem("auth_next", nextPath);
-      window.location.href = "/login";
+      window.location.href = portalUrl || "/login";
     }
   }, [router.isReady, router.pathname, router.asPath]);
 

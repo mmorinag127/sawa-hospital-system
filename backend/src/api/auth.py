@@ -2,6 +2,9 @@ import base64
 import os
 import threading
 import time
+import json
+import urllib.error
+import urllib.request
 
 from fastapi import Depends, HTTPException, status, Request
 from google.auth.transport import requests as google_requests
@@ -23,6 +26,8 @@ GOOGLE_OAUTH_CLIENT_IDS = [
     for item in os.getenv("GOOGLE_OAUTH_CLIENT_IDS", GOOGLE_OAUTH_CLIENT_ID).split(",")
     if item.strip()
 ]
+AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "local").strip().lower()
+PORTAL_AUTH_ME_URL = os.getenv("PORTAL_AUTH_ME_URL", "").strip()
 
 
 def _parse_emails(env_key: str) -> set[str]:
@@ -136,6 +141,33 @@ def _get_bearer_token(request: Request) -> str | None:
     return auth.removeprefix("Bearer ").strip()
 
 
+def _portal_role(request: Request) -> str | None:
+    if AUTH_PROVIDER != "portal":
+        return None
+    authorization = _auth_header(request)
+    if not authorization.startswith("Bearer "):
+        _raise_unauthorized()
+    if not PORTAL_AUTH_ME_URL:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Portal authentication unavailable")
+    separator = "&" if "?" in PORTAL_AUTH_ME_URL else "?"
+    upstream = urllib.request.Request(
+        f"{PORTAL_AUTH_ME_URL}{separator}system=hospital",
+        headers={"Authorization": authorization, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(upstream, timeout=5) as response:  # noqa: S310
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        code = status.HTTP_403_FORBIDDEN if exc.code == 403 else status.HTTP_401_UNAUTHORIZED
+        raise HTTPException(status_code=code, detail="Portal authentication rejected") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Portal authentication unavailable") from exc
+    role = str(payload.get("role") or "").lower()
+    if role not in {"admin", "operator"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return role
+
+
 def _audience_candidates(request: Request) -> list[str]:
     candidates: list[str] = []
     if GOOGLE_OAUTH_CLIENT_IDS:
@@ -186,6 +218,11 @@ def _google_email_or_none(request: Request) -> str | None:
 def get_current_admin(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="admin")
+    portal_role = _portal_role(request)
+    if portal_role:
+        if portal_role != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        return UserContext(role="admin")
     google_email = _google_email_or_none(request)
     if google_email:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
@@ -217,6 +254,9 @@ def get_current_admin(request: Request) -> UserContext:
 
 def get_current_operator(request: Request) -> UserContext:
     if is_auth_disabled():
+        return UserContext(role="operator")
+    portal_role = _portal_role(request)
+    if portal_role:
         return UserContext(role="operator")
     google_email = _google_email_or_none(request)
     if google_email:
