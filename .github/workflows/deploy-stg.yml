@@ -20,10 +20,10 @@ concurrency:
 env:
   PROJECT_ID: sawahospitalsystem
   REGION: asia-northeast2
-  WEB_SERVICE: hospital-orders-web-stg
+  WEB_SERVICE: web-stg
   WORKER_SERVICE: worker-stg
-  WEB_URL: https://hospital-orders-web-stg-avlnzjjrca-dt.a.run.app
-  PORTAL_URL: https://web-stg-avlnzjjrca-dt.a.run.app
+  WEB_URL: https://web-stg-avlnzjjrca-dt.a.run.app
+  SHIFT_WEB_URL: https://shift-web-stg-avlnzjjrca-dt.a.run.app
   WORKER_URL: https://worker-stg-avlnzjjrca-dt.a.run.app
   BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260612-080320
   BACKEND_BASE_FINGERPRINT: 25dfbf2145a30df3fc4e702be5b08e1f7126a52737e717af3d4f939f3d3637b4
@@ -31,8 +31,8 @@ env:
   OPERATOR_USER: admin
   STRICT_OCR_QUALITY: "0"
   STRICT_OCR_SHEET_GATE: "0"
-  CHECK_WEB_PROXY: "0"
-  WORKFLOW_V2_DEPLOY_CHECK: "0"
+  CHECK_WEB_PROXY: "1"
+  WORKFLOW_V2_DEPLOY_CHECK: "1"
   ALLOW_BASIC_ONLY_AUTH: "1"
 
 jobs:
@@ -187,12 +187,12 @@ jobs:
           deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build \
-            --build-arg "NEXT_PUBLIC_API_BASE_URL=/api" \
+            --build-arg "NEXT_PUBLIC_API_BASE_URL=/api/hospital" \
             --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
+            --build-arg "SHIFT_WEB_PROXY_TARGET=${SHIFT_WEB_URL}" \
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=" \
             --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
-            --build-arg "NEXT_PUBLIC_PORTAL_URL=${PORTAL_URL}" \
             -t "$image" \
             "$deploy_dir"
           docker push "$image"
@@ -225,7 +225,7 @@ jobs:
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \
           RUN_LOCAL_REGRESSION=0 STRICT_OCR_SHEET_GATE="$STRICT_OCR_SHEET_GATE" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
           CHECK_WEB_PROXY="$CHECK_WEB_PROXY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" ALLOW_BASIC_ONLY_AUTH="$ALLOW_BASIC_ONLY_AUTH" \
-          WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=portal,PORTAL_AUTH_ME_URL=${PORTAL_URL}/api/auth/me" \
+          WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=local" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
 

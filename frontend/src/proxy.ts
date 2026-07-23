@@ -16,6 +16,31 @@ export function proxy(request: NextRequest) {
     url.port = "";
     return NextResponse.redirect(url, 308);
   }
+  const pathname = request.nextUrl.pathname;
+  if (pathname === "/hospital") {
+    const url = request.nextUrl.clone();
+    url.pathname = "/hospital-dashboard";
+    return NextResponse.rewrite(url);
+  }
+  if (pathname.startsWith("/hospital/")) {
+    const url = request.nextUrl.clone();
+    url.pathname = pathname.slice("/hospital".length) || "/";
+    return NextResponse.rewrite(url);
+  }
+  const hospitalRoots = new Set([
+    "orders", "weekly-orders", "pdf-upload", "daily-delivery-notes", "totals",
+    "facilities", "facility-master", "facility-orders", "menus", "base-menus",
+    "menu-masters", "menu-rules", "shipping", "shipping-history", "order-forms",
+    "weekly-weight-output", "ocr-facilities", "ocr-queue", "ocr-results",
+    "ocr-templates", "ocr-training-data", "system-process-logs", "system-status",
+    "manual-library",
+  ]);
+  const root = pathname.split("/")[1] || "";
+  if (hospitalRoots.has(root)) {
+    const url = request.nextUrl.clone();
+    url.pathname = `/hospital${pathname}`;
+    return NextResponse.redirect(url, 308);
+  }
   return NextResponse.next();
 }
 

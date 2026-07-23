@@ -29,8 +29,23 @@ const nextConfig = {
   },
   async rewrites() {
     const target = process.env.API_PROXY_TARGET;
-    if (!target) return [];
+    const shiftTarget = process.env.SHIFT_WEB_PROXY_TARGET;
+    const routes = [];
+    if (shiftTarget) {
+      routes.push(
+        { source: "/shift-assets/:path*", destination: `${shiftTarget}/_next/:path*` },
+        { source: "/shift-manual/:path*", destination: `${shiftTarget}/manual/:path*` },
+        { source: "/shift/api/:path*", destination: `${shiftTarget}/api/:path*` },
+        { source: "/shift/:path*", destination: `${shiftTarget}/shift/:path*` },
+      );
+    }
+    if (!target) return routes;
     return [
+      ...routes,
+      {
+        source: "/api/hospital/:path*",
+        destination: `${target}/:path*`,
+      },
       {
         source: "/api/:path*",
         destination: `${target}/:path*`,

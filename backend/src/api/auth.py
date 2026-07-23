@@ -16,8 +16,9 @@ from src.models.user import User
 
 
 class UserContext:
-    def __init__(self, role: str):
+    def __init__(self, role: str, account: str | None = None):
         self.role = role
+        self.account = account
 
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
@@ -226,14 +227,14 @@ def get_current_admin(request: Request) -> UserContext:
     google_email = _google_email_or_none(request)
     if google_email:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
-            return UserContext(role="admin")
+            return UserContext(role="admin", account=google_email)
         try:
             active_roles = _load_active_user_roles()
         except UserRoleLookupError:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role == "admin":
-            return UserContext(role="admin")
+            return UserContext(role="admin", account=google_email)
         if registered_role in {"operator"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -261,14 +262,14 @@ def get_current_operator(request: Request) -> UserContext:
     google_email = _google_email_or_none(request)
     if google_email:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
-            return UserContext(role="operator")
+            return UserContext(role="operator", account=google_email)
         try:
             active_roles = _load_active_user_roles()
         except UserRoleLookupError:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role in {"admin", "operator"}:
-            return UserContext(role="operator")
+            return UserContext(role="operator", account=google_email)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     username, password = _basic_credentials(request)
     admin_user = os.getenv("ADMIN_USER")

@@ -17,7 +17,13 @@ type NavGroup = {
   items: NavItem[];
 };
 
-const normalizePath = (path: string) => path.split("?")[0]?.split("#")[0] ?? path;
+const normalizePath = (path: string) => {
+  const pathname = path.split("?")[0]?.split("#")[0] ?? path;
+  if (pathname === "/hospital") return "/";
+  return pathname.startsWith("/hospital/") ? pathname.slice("/hospital".length) : pathname;
+};
+
+const hospitalHref = (href: string) => (href === "/" ? "/hospital" : `/hospital${href}`);
 
 export default function TopNav() {
   const router = useRouter();
@@ -177,7 +183,7 @@ export default function TopNav() {
             <div className="top-nav-group__description">全体状況の確認と入口</div>
           </div>
           <Link
-            href="/"
+            href="/hospital"
             className={`dashboard-link${currentPath === "/" ? " active" : ""}`}
             aria-current={currentPath === "/" ? "page" : undefined}
           >
@@ -196,7 +202,7 @@ export default function TopNav() {
                 return (
                   <Link
                     key={item.href}
-                    href={item.href}
+                    href={hospitalHref(item.href)}
                     className={`top-link${active ? " active" : ""}`}
                     aria-current={active ? "page" : undefined}
                   >

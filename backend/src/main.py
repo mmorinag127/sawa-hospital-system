@@ -21,6 +21,7 @@ from src.api import (
     totals,
     base_menus,
     system,
+    portal,
 )
 from src.services import facility_service, facility_template_version_service, menu_service
 from src.services.read_only_request_guard_service import read_only_request_guard
@@ -67,10 +68,12 @@ app.include_router(facility_master.router, prefix="")
 app.include_router(ocr_registry.router, prefix="")
 app.include_router(base_menus.router, prefix="")
 app.include_router(system.router, prefix="")
+app.include_router(portal.router, prefix="")
 
 
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
+    portal.ensure_portal_schema()
     menu_service.ensure_menu_schema()
     facility_template_version_service.ensure_facility_template_version_schema()
     facility_service.sync_facility_names_from_master()
