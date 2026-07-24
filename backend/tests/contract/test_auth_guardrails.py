@@ -4,12 +4,14 @@ import pathlib
 import sys
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 import src.api.auth as auth_module  # noqa: E402
 import src.api.auth_config as auth_config_module  # noqa: E402
+from src.db import engine  # noqa: E402
 from src.main import app  # noqa: E402
 
 
@@ -108,6 +110,94 @@ def test_common_users_route_is_not_exposed_by_hospital(monkeypatch):
     client = TestClient(app)
     res = client.get("/users", headers=_basic_header("operator", "operator-secret"))
     assert res.status_code == 404
+
+
+def test_portal_user_management_rejects_operator_for_list_create_and_update(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("OPERATOR_USER", "operator")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "operator-secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    headers = _basic_header("operator", "operator-secret")
+    body = {
+        "account": "new-user@example.com",
+        "role": "operator",
+        "status": "active",
+        "systems": ["hospital"],
+    }
+
+    assert client.get("/portal/users", headers=headers).status_code == 403
+    assert client.post("/portal/users", json=body, headers=headers).status_code == 403
+    assert client.put("/portal/users/user-id", json=body, headers=headers).status_code == 403
+
+
+def test_portal_user_management_allows_admin_list_create_and_update(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    user_id = "portal-admin-contract-user"
+    account = "portal-admin-contract@example.invalid"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """CREATE TABLE IF NOT EXISTS user_system_access (
+                user_id VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                system_key VARCHAR NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                PRIMARY KEY(user_id, system_key)
+                )"""
+            )
+        )
+        connection.execute(text("DELETE FROM user_system_access WHERE user_id = :id"), {"id": user_id})
+        connection.execute(
+            text("DELETE FROM users WHERE id = :id OR lower(account) = :account"),
+            {"id": user_id, "account": account},
+        )
+
+    client = TestClient(app)
+    create_body = {
+        "account": account,
+        "role": "operator",
+        "status": "active",
+        "systems": ["hospital"],
+    }
+
+    try:
+        create_res = client.post("/portal/users", json=create_body)
+        assert create_res.status_code == 200
+        created = create_res.json()["user"]
+        user_id = created["id"]
+        assert created == {"id": user_id, **create_body}
+
+        list_res = client.get("/portal/users")
+        assert list_res.status_code == 200
+        listed = next(item for item in list_res.json()["items"] if item["id"] == user_id)
+        assert listed == created
+
+        update_body = {
+            "account": account,
+            "role": "admin",
+            "status": "inactive",
+            "systems": ["school-lunch", "shift"],
+        }
+        update_res = client.put(f"/portal/users/{user_id}", json=update_body)
+        assert update_res.status_code == 200
+        assert update_res.json()["user"] == {"id": user_id, **update_body}
+
+        updated_list_res = client.get("/portal/users")
+        assert updated_list_res.status_code == 200
+        updated = next(item for item in updated_list_res.json()["items"] if item["id"] == user_id)
+        assert updated == {"id": user_id, **update_body}
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM user_system_access WHERE user_id = :id"), {"id": user_id})
+            connection.execute(
+                text("DELETE FROM users WHERE id = :id OR lower(account) = :account"),
+                {"id": user_id, "account": account},
+            )
 
 
 def test_auth_ignores_legacy_auth_header_cookie(monkeypatch):
