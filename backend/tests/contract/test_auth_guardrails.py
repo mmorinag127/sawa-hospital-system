@@ -82,6 +82,29 @@ def test_auth_me_returns_admin_for_basic_admin(monkeypatch):
     assert res.json()["role"] == "admin"
 
 
+def test_shared_basic_credentials_prefer_admin_role(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setenv("ADMIN_USER", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "secret")
+    monkeypatch.setenv("OPERATOR_USER", "admin")
+    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    importlib.reload(auth_module)
+    importlib.reload(auth_config_module)
+
+    client = TestClient(app)
+    res = client.get("/auth/me", headers=_basic_header("admin", "secret"))
+    assert res.status_code == 200
+    assert res.json()["role"] == "admin"
+
+
+def test_staging_deploy_configures_basic_admin_credentials():
+    workflow = (ROOT.parent / ".github" / "workflows" / "deploy-stg.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "ADMIN_USER=${OPERATOR_USER}" in workflow
+    assert "ADMIN_PASSWORD=${OPERATOR_PASSWORD}" in workflow
+
+
 def test_portal_mode_rejects_local_basic_auth(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("AUTH_PROVIDER", "portal")
