@@ -54,6 +54,7 @@ jobs:
             tests/integration/test_menu_edits_output.py \
             tests/integration/test_menu_override.py \
             tests/contract/test_facility_config.py \
+            tests/contract/test_auth_guardrails.py \
             tests/integration/test_facility_config_apply.py \
             --junitxml=.logs/pytest-junit.xml \
             -vv 2>&1 | tee .logs/pytest.log
