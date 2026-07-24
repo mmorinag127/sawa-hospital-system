@@ -130,6 +130,25 @@ def test_ingest_week_options_returns_upload_week_choices(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("OPERATOR_USER", "operator")
     monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
+    expected_options = [
+        {
+            "week_id": "2026-02@2026-02-01~2026-02-07",
+            "label": "2026-02 (02/01-02/07)",
+            "date_from": "2026-02-01",
+            "date_to": "2026-02-07",
+        }
+    ]
+    calls = []
+
+    def build_week_options(month_id, facility_id):
+        calls.append((month_id, facility_id))
+        return expected_options
+
+    monkeypatch.setattr(
+        ingest_api.week_candidate_service,
+        "build_week_option_entries",
+        build_week_options,
+    )
     client = TestClient(app)
 
     res = client.get(
@@ -138,10 +157,8 @@ def test_ingest_week_options_returns_upload_week_choices(monkeypatch):
     )
 
     assert res.status_code == 200
-    options = res.json()["options"]
-    assert options
-    assert all(option["week_id"].startswith("2026-02@") for option in options)
-    assert all(option["label"] for option in options)
+    assert res.json()["options"] == expected_options
+    assert calls == [("2026-02", "FAC001")]
 
 
 def test_ingest_upload_splits_two_page_pdf_into_two_items(monkeypatch):
