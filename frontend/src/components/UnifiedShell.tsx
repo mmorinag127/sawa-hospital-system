@@ -32,7 +32,7 @@ export default function UnifiedShell({ children, gitSha, deployedAt, publicPage 
           <span className="unified-current">{currentSystem}</span>
           {!publicPage ? (
             <nav className="unified-system-nav" aria-label="システム切替">
-              <a href="/" className={path === "/" ? "active" : ""}>システム選択</a>
+              <a href="/" className={path === "/" ? "active" : ""}>統合トップに戻る</a>
               <a href="/hospital" className={path.startsWith("/hospital") ? "active" : ""}>病院注文</a>
               <a href="/shift" className={path.startsWith("/shift") ? "active" : ""}>シフト管理</a>
               <a href="/school-lunch" className={path.startsWith("/school-lunch") ? "active" : ""}>学校給食</a>
