@@ -33,7 +33,7 @@ const nextConfig = {
     const routes = [];
     if (shiftTarget) {
       routes.push(
-        { source: "/shift-assets/:path*", destination: `${shiftTarget}/_next/:path*` },
+        { source: "/shift-assets/:path*", destination: `${shiftTarget}/:path*` },
         { source: "/shift-manual/:path*", destination: `${shiftTarget}/manual/:path*` },
         { source: "/shift/api/:path*", destination: `${shiftTarget}/api/:path*` },
         { source: "/shift/:path*", destination: `${shiftTarget}/shift/:path*` },
