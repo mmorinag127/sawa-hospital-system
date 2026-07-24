@@ -30,6 +30,7 @@ const nextConfig = {
   async rewrites() {
     const target = process.env.API_PROXY_TARGET;
     const shiftTarget = process.env.SHIFT_WEB_PROXY_TARGET;
+    const schoolLunchTarget = process.env.SCHOOL_LUNCH_WEB_PROXY_TARGET;
     const routes = [];
     if (shiftTarget) {
       routes.push(
@@ -37,6 +38,13 @@ const nextConfig = {
         { source: "/shift-manual/:path*", destination: `${shiftTarget}/manual/:path*` },
         { source: "/shift/api/:path*", destination: `${shiftTarget}/api/:path*` },
         { source: "/shift/:path*", destination: `${shiftTarget}/shift/:path*` },
+      );
+    }
+    if (schoolLunchTarget) {
+      routes.push(
+        { source: "/school-lunch-assets/:path*", destination: `${schoolLunchTarget}/:path*` },
+        { source: "/school-lunch/api/:path*", destination: `${schoolLunchTarget}/api/:path*` },
+        { source: "/school-lunch/:path*", destination: `${schoolLunchTarget}/school-lunch/:path*` },
       );
     }
     if (!target) return routes;

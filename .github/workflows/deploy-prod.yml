@@ -29,6 +29,7 @@ env:
   WORKER_SERVICE: worker-prod
   WEB_URL: https://web-prod-avlnzjjrca-dt.a.run.app
   SHIFT_WEB_URL: https://shift-web-prod-avlnzjjrca-dt.a.run.app
+  SCHOOL_LUNCH_WEB_URL: https://price-web-prod-avlnzjjrca-dt.a.run.app
   WORKER_URL: https://worker-prod-avlnzjjrca-dt.a.run.app
   BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260612-080320
   BACKEND_BASE_FINGERPRINT: 25dfbf2145a30df3fc4e702be5b08e1f7126a52737e717af3d4f939f3d3637b4
@@ -178,6 +179,7 @@ jobs:
             --build-arg "NEXT_PUBLIC_API_BASE_URL=/api/hospital" \
             --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
             --build-arg "SHIFT_WEB_PROXY_TARGET=${SHIFT_WEB_URL}" \
+            --build-arg "SCHOOL_LUNCH_WEB_PROXY_TARGET=${SCHOOL_LUNCH_WEB_URL}" \
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com" \
             --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
