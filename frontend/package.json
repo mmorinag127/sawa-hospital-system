@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -p $PORT -H 0.0.0.0",
     "lint": "eslint .",
-    "test": "npm run lint",
+    "test": "npm run lint && npm run test:config",
+    "test:config": "node --test tests/config/*.test.js",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui"
   },

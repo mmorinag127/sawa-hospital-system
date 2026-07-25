@@ -34,6 +34,7 @@ const nextConfig = {
     const routes = [];
     if (shiftTarget) {
       routes.push(
+        { source: "/shift", destination: `${shiftTarget}/shift` },
         { source: "/shift-assets/:path*", destination: `${shiftTarget}/:path*` },
         { source: "/shift-manual/:path*", destination: `${shiftTarget}/manual/:path*` },
         { source: "/shift/api/:path*", destination: `${shiftTarget}/api/:path*` },
@@ -42,23 +43,29 @@ const nextConfig = {
     }
     if (schoolLunchTarget) {
       routes.push(
+        { source: "/school-lunch", destination: `${schoolLunchTarget}/school-lunch` },
         { source: "/school-lunch-assets/:path*", destination: `${schoolLunchTarget}/:path*` },
         { source: "/school-lunch/api/:path*", destination: `${schoolLunchTarget}/api/:path*` },
         { source: "/school-lunch/:path*", destination: `${schoolLunchTarget}/school-lunch/:path*` },
       );
     }
-    if (!target) return routes;
-    return [
-      ...routes,
-      {
-        source: "/api/hospital/:path*",
-        destination: `${target}/:path*`,
-      },
-      {
-        source: "/api/:path*",
-        destination: `${target}/:path*`,
-      },
-    ];
+    if (target) {
+      routes.push(
+        {
+          source: "/api/hospital/:path*",
+          destination: `${target}/:path*`,
+        },
+        {
+          source: "/api/:path*",
+          destination: `${target}/:path*`,
+        },
+      );
+    }
+    return {
+      beforeFiles: routes,
+      afterFiles: [],
+      fallback: [],
+    };
   },
 };
 

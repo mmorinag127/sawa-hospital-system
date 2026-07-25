@@ -96,6 +96,9 @@ jobs:
           set -euo pipefail
           mkdir -p .logs
           npm run lint 2>&1 | tee .logs/lint.log
+      - name: Frontend route contract tests
+        working-directory: frontend
+        run: npm run test:config
       - name: Frontend typecheck
         working-directory: frontend
         run: |

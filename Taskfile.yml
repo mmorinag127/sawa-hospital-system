@@ -256,6 +256,7 @@ tasks:
     deps:
       - frontend_setup
     cmds:
+      - 'npm run test:config'
       - 'npx playwright install'
       - 'npm run test:e2e'
 
