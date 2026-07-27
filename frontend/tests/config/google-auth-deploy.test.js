@@ -27,3 +27,10 @@ test("frontend and deploy script do not silently fall back to production Google 
     /GOOGLE_CLIENT_ID is required when Basic-only authentication is disabled/,
   );
 });
+
+test("login pages allow the Google popup to return credentials", () => {
+  const nextConfig = read("frontend/next.config.js");
+
+  assert.match(nextConfig, /key: "Cross-Origin-Opener-Policy"/);
+  assert.match(nextConfig, /value: "same-origin-allow-popups"/);
+});

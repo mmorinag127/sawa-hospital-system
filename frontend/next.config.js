@@ -23,6 +23,10 @@ const nextConfig = {
             key: "Expires",
             value: "0",
           },
+          {
+            key: "Cross-Origin-Opener-Policy",
+            value: "same-origin-allow-popups",
+          },
         ],
       },
     ];
